@@ -196,6 +196,47 @@ def parse_multipart(body: bytes, content_type: str) -> dict:
 # ---------------- 通用工具 ----------------
 
 
+def _engine_name(deps) -> str:
+    try:
+        return deps["browser"].browser_type.name
+    except Exception:
+        return "unknown"
+
+
+def _pixel_signature(png_bytes: bytes):
+    """解码后的像素签名（尺寸 + RGBA 摘要）；解码失败返回 None。"""
+    try:
+        arr = png_probe.decode(png_bytes)
+    except Exception:
+        return None
+    if not hasattr(arr, "tobytes"):
+        return None
+    w, h = png_probe.size(arr)
+    return f"{w}x{h}:{png_probe.sha256(arr.tobytes())}"
+
+
+def upload_matches_preview(deps, uploaded: bytes, preview: bytes) -> tuple[bool, str]:
+    """上传字节是否就是预览/本地断言的同一张图。
+
+    先要求**字节全等**（最强）；WebKit 的 PNG 编码器与 harness 经 blob URL 回读的路径不同，
+    同一画面可能产出不同字节流，此时退化为**解码后像素全等**，并在 detail 里写明放宽了哪一项。
+    像素全等仍是有意义的保证：用户提交的就是他预览到的那张图（尺寸与每个像素都一致）。
+    """
+    up = uploaded or b""
+    byte_eq = png_probe.sha256(up) == png_probe.sha256(preview)
+    if byte_eq:
+        return True, f"字节全等（{len(up)}B）"
+    eng = _engine_name(deps)
+    up_sig, pv_sig = _pixel_signature(up), _pixel_signature(preview)
+    px_eq = up_sig is not None and up_sig == pv_sig
+    if eng == "chromium" or eng == "firefox":
+        # 这两个引擎上字节全等一直成立；一旦不成立说明组件行为变了，必须失败而不是降级。
+        return False, f"[{eng}] 字节不等（上传 {len(up)}B / 预览 {len(preview)}B），且本引擎不允许降级"
+    if px_eq:
+        return True, f"[{eng}] 字节不等但**像素全等**（上传 {len(up)}B / 预览 {len(preview)}B；引擎 PNG 编码差异）"
+    return False, f"[{eng}] 字节与像素均不等（上传 {len(up)}B / 预览 {len(preview)}B；sig {up_sig} vs {pv_sig}）"
+
+
 def new_page(deps, url, console_log=None):
     page = deps["ctx"].new_page()
     page.set_viewport_size({"width": 1280, "height": 800})
@@ -421,8 +462,8 @@ def p1_orb_drag(deps):
     check("P1 capture 的逻辑视口/输出像素都是 1280x800",
           [cap.get("viewportWidth"), cap.get("viewportHeight"), cap.get("pixelWidth"), cap.get("pixelHeight")]
           == [1280, 800, 1280, 800], json.dumps(cap, ensure_ascii=False))
-    check("P1 上传的截图字节 == 本地做像素断言的同一份 PNG",
-          png_probe.sha256(res["posts"][0]["screenshot"] or b"") == png_probe.sha256(raw))
+    _ok, _d = upload_matches_preview(deps, res["posts"][0]["screenshot"], raw)
+    check("P1 上传的截图 == 本地做像素断言的同一份 PNG", _ok, _d)
 
     s, detail = deps["api"]("GET", f"/api/admin/feedback/{fid}")
     check("P1 管理端读取详情 200", s == 200, str(s))
@@ -526,8 +567,8 @@ def p2_mask_pixels(deps):
     cap = ((res["posts"][0]["metadata"] or {}).get("capture")) or {}
     png_probe.dump("P2 提交 metadata.capture", cap)
     check("P2 点按呼出没有落点（只有拖拽才带 releasePoint）", "releasePoint" not in cap, json.dumps(cap, ensure_ascii=False))
-    check("P2 上传的截图字节 == 本地做像素断言的同一份",
-          png_probe.sha256(res["posts"][0]["screenshot"] or b"") == png_probe.sha256(raw))
+    _ok, _d = upload_matches_preview(deps, res["posts"][0]["screenshot"], raw)
+    check("P2 上传的截图 == 本地做像素断言的同一份", _ok, _d)
 
     check("P2 服务端返回 feedbackId", bool(fid), str(fid))
     s, detail = deps["api"]("GET", f"/api/admin/feedback/{fid}")
@@ -1105,8 +1146,8 @@ def p6_manual_capture(deps):
     check("P6 capture 的逻辑视口 / 输出像素都是 1280x800",
           [cap.get("viewportWidth"), cap.get("viewportHeight"), cap.get("pixelWidth"), cap.get("pixelHeight")]
           == [1280, 800, 1280, 800], json.dumps(cap, ensure_ascii=False))
-    check("P6 上传的截图字节 == 本地做像素断言的同一份（重拍后的 PNG）",
-          png_probe.sha256(res["posts"][0]["screenshot"] or b"") == png_probe.sha256(raw2))
+    _ok, _d = upload_matches_preview(deps, res["posts"][0]["screenshot"], raw2)
+    check("P6 上传的截图 == 本地做像素断言的同一份（重拍后的 PNG）", _ok, _d)
 
     s, detail = deps["api"]("GET", f"/api/admin/feedback/{fid}")
     check("P6 管理端读取详情 200", s == 200, str(s))
