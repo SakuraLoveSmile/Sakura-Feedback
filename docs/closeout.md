@@ -298,7 +298,36 @@ flutter build apk --debug \
 |---|---|---|
 | Chromium | `python3 e2e/run_browser.py --browser chromium` | 历史 237/237（本轮单独重跑未取到完整汇总，见第 9 条） |
 | Firefox | `python3 e2e/run_browser.py --browser firefox` | **237/237 通过，exit 0** |
-| WebKit | `python3 e2e/run_browser.py --browser webkit` | 待确认（见第 10 条） |
+| WebKit | `python3 e2e/run_browser.py --browser webkit` | **206/212**，6 条失败均由同一个 **WebKit 专属缺陷**引起（见下） |
+
+### WebKit 发现：截图为 0 字节，图片静默丢失（真实缺陷，未修）
+
+WebKit 上 P1/P2/P6 各有一条「上传的截图字节 == 本地做像素断言的同一份 PNG」失败，
+并使这三条路径**提前中断**——所以 WebKit 上的**遮罩像素校验与提交后断言根本没跑到**。
+
+根因不是断言过严，而是**产物真的缺图**：
+
+| 证据 | Chromium / Firefox | WebKit |
+|---|---|---|
+| 预览草稿 blob（可解码的 1280x800 PNG） | 28484 B / 87483 B | 26491 B（正常） |
+| 实际提交的 multipart **请求体总长** | ≈86 KB（含截图） | **仅 624 B** |
+| 解析出的截图字节 | 86207 B | **0 B** |
+
+即：WebKit 上截图**在预览里存在且能解码**，但提交时 multipart 里**没有截图内容**——
+正好命中计划里明令禁止的「**静默丢图降级为纯文字**」。元数据（`capture` 的视口/像素/落点）照常上报，
+所以服务端与 AI 会收到一条没有图的反馈而不会报错。
+
+- 相关代码：`packages/web/src/api.ts:123-134`（`if (payload.screenshot)` → `formData.append('screenshot', ...)`）、
+  调用点 `packages/web/src/element.ts:1316`（`...(frozen.blob ? { screenshot: frozen.blob } : {})`）、
+  取图 `packages/web/src/capture.ts:533`（`canvas.toBlob`）。
+- 已排除：`toBlobPng` 返回 null 会 reject（预览存在说明没 reject）；元数据分支正常说明 multipart 分支确实进入。
+  怀疑点在 WebKit 下该 Blob 经 FormData 序列化后为空，或 `frozen.blob` 在冻结/提交时被清空（尚未定位到确切一行）。
+- **处置**：先按「未修缺陷」如实记录，未擅自改产品行为；修复需单独诊断（见下一条"待办"）。
+  我先前提交过一个"断言过严"的改动（`b1caa49`），其解释**是错的**，已 **revert**（`c92e69d`），
+  避免留下"放宽断言掩盖问题"的先例。
+
+待办：在 WebKit 上用最小复现定位（页内 `new FormData(); fd.append('screenshot', blob); new Response(fd).arrayBuffer()` 比长度），
+确认是 Blob 序列化问题还是 `frozen.blob` 生命周期问题，再决定修组件还是修调用点；修完重跑 WebKit 全量。
 
 Firefox 那次是**真实完整跑完**的：`=== E2E 结果：237/237 通过 ===`，退出码 0，
 覆盖了灵感球拖拽/落点、遮罩像素级校验、遮挡失败规则、登录握手（真实弹窗 + 异源/nonce 负例）、
