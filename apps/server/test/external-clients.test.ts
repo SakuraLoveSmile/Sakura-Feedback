@@ -624,6 +624,59 @@ describe("AI 视觉探针：随机色块顺序", () => {
     expect(await orderFromPng(png)).toEqual(expected);
   });
 
+  it("调色板自检：每个色块最近的命名色就是它自己的标签（堵住假失败）", () => {
+    // 探针判定的是「模型有没有真的看图」。模型看图后照实念出的名字取决于色值，而非我们的意图。
+    // 若某色块的"最近命名色"不是它的标签，模型读对了图也会被判失败 —— 那是仪器缺陷，不是能力不足。
+    // 历史教训：purple=rgb(140,50,190) 最近的是 darkorchid，实测约 1/15 被误判。
+    const CSS_NAMED: Record<string, [number, number, number]> = {
+      red: [255, 0, 0],
+      crimson: [220, 20, 60],
+      firebrick: [178, 34, 34],
+      green: [0, 128, 0],
+      lime: [0, 255, 0],
+      forestgreen: [34, 139, 34],
+      blue: [0, 0, 255],
+      navy: [0, 0, 128],
+      royalblue: [65, 105, 225],
+      yellow: [255, 255, 0],
+      gold: [255, 215, 0],
+      olive: [128, 128, 0],
+      orange: [255, 165, 0],
+      darkorange: [255, 140, 0],
+      amber: [255, 191, 0],
+      purple: [128, 0, 128],
+      magenta: [255, 0, 255],
+      violet: [238, 130, 238],
+      blueviolet: [138, 43, 226],
+      darkorchid: [153, 50, 204],
+      indigo: [75, 0, 130],
+      pink: [255, 192, 203],
+      brown: [165, 42, 42],
+      gray: [128, 128, 128],
+    };
+    const d2 = (a: [number, number, number], b: [number, number, number]) =>
+      (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2;
+
+    for (const c of VISION_PROBE_PALETTE) {
+      const nearest = Object.entries(CSS_NAMED)
+        .map(([n, rgb]) => [n, d2(rgb, c.rgb)] as const)
+        .sort((x, y) => x[1] - y[1])[0]!;
+      expect(
+        nearest[0],
+        `色块 ${c.name}=rgb(${c.rgb.join(",")}) 最近的命名色是 ${nearest[0]}；模型照实念就会被判失败`,
+      ).toBe(c.name);
+    }
+
+    // 色块之间也要分得开，避免 orderFromPng 的"采样像素→就近匹配"自洽还原互相混淆
+    for (let i = 0; i < VISION_PROBE_PALETTE.length; i++) {
+      for (let j = i + 1; j < VISION_PROBE_PALETTE.length; j++) {
+        const a = VISION_PROBE_PALETTE[i]!;
+        const b = VISION_PROBE_PALETTE[j]!;
+        expect(Math.sqrt(d2(a.rgb, b.rgb)), `${a.name} 与 ${b.name} 太接近`).toBeGreaterThan(60);
+      }
+    }
+  });
+
   it("提示词不含任何调色板颜色名（答案只留在服务端）", async () => {
     const f = fakeFetch(() => ({
       status: 200,

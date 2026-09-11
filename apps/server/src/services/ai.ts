@@ -119,16 +119,24 @@ function validateJson(value: unknown): ProcessedFeedback {
 }
 
 /**
- * 视觉能力探针的调色板：只用命名无歧义的基本色，便于把模型回答与期望顺序严格比对。
+ * 视觉能力探针的调色板：**每个色值取 CSS 标准命名色本身**。
+ *
+ * 为什么必须取标准值：探针要判定的是「模型有没有真的看图」，不是「模型的色彩命名有多细」。
+ * 早先用的是"意图色"（如 purple=rgb(140,50,190)），但它们最近的 CSS 命名色其实是别的
+ * （那个值最近 darkorchid；red→crimson；yellow→gold……6 个色块**全部**最近名与标签不符），
+ * 于是模型看图后照实念出的名字与期望不等 → 假失败。实测约 1/15 抖动。
+ *
+ * 取标准值后每个色块"最近的命名色 == 自己的标签"，优势 25–127，且色块两两最小距离 90，
+ * 判定不再受命名口径影响。严格性不变：顺序仍然随机、答案仍只在服务端。
  * 这些颜色名不会出现在提示词里（见 VISION_PROBE_PROMPT），否则模型可以靠复述提示词蒙对。
  */
 export const VISION_PROBE_PALETTE: { name: string; rgb: [number, number, number] }[] = [
-  { name: "red", rgb: [220, 40, 40] },
-  { name: "green", rgb: [40, 170, 50] },
-  { name: "blue", rgb: [40, 70, 220] },
-  { name: "yellow", rgb: [240, 225, 30] },
-  { name: "orange", rgb: [245, 140, 25] },
-  { name: "purple", rgb: [140, 50, 190] },
+  { name: "red", rgb: [255, 0, 0] },
+  { name: "green", rgb: [0, 128, 0] },
+  { name: "blue", rgb: [0, 0, 255] },
+  { name: "yellow", rgb: [255, 255, 0] },
+  { name: "orange", rgb: [255, 165, 0] },
+  { name: "purple", rgb: [128, 0, 128] },
 ];
 export const VISION_PROBE_BLOCKS = 3;
 export const VISION_PROBE_BLOCK_PX = 128;
