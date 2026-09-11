@@ -1,0 +1,32 @@
+$ vitest run
+
+ RUN  v3.2.7 /Users/sakurasep/Documents/Code/Project/Personal Project/Feedback/apps/server
+
+ ✓ test/feedback.test.ts (6 tests) 693ms
+ ✓ test/admin.test.ts (6 tests) 702ms
+ ✓ test/archive-data.test.ts (20 tests) 802ms
+ ✓ test/db-v3-migration.test.ts (9 tests) 32ms
+ ✓ test/screenshot-pipeline.test.ts (8 tests) 1113ms
+ ✓ test/external-clients.test.ts (35 tests) 94ms
+ ✓ test/auth.test.ts (11 tests) 1236ms
+   ✓ 认证 > 登录限流：窗口内多次失败后 429  383ms
+ ✓ test/archive-consistency.test.ts (10 tests) 1342ms
+stdout | test/pipeline.test.ts > 持久化与崩溃恢复 > 重启恢复：received/processing 重新入队处理
+[server] 恢复处理：重新入队 1 条，待核对 0 条
+
+stdout | test/pipeline.test.ts > 持久化与崩溃恢复 > 重启恢复：archiving 中断 → needs_review，绝不盲目再次创建
+[server] 恢复处理：重新入队 0 条，待核对 1 条
+
+ ✓ test/fault-injection.test.ts (13 tests) 1683ms
+ ✓ test/pipeline.test.ts (26 tests) 2940ms
+ ✓ test/logs.test.ts (48 tests) 5196ms
+   ✓ 日志校验：整单拒绝与错误码 > metadata.logs 与部件数量不一致 → invalid_log/400  314ms
+   ✓ 日志校验：整单拒绝与错误码 > 非文件部件 / 部件文件名缺失或与 metadata 不一致 → invalid_log/400  303ms
+   ✓ 日志校验：整单拒绝与错误码 > 文件名白名单与 source 校验 → invalid_log/400  385ms
+   ✓ 日志校验：整单拒绝与错误码 > 空文件 / 非法 UTF-8 / NUL / 仅 BOM → invalid_log/400  387ms
+
+ Test Files  11 passed (11)
+      Tests  192 passed (192)
+   Start at  01:43:10
+   Duration  5.74s (transform 581ms, setup 0ms, collect 2.88s, tests 15.83s, environment 1ms, prepare 757ms)
+

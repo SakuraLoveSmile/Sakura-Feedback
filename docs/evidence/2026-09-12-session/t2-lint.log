@@ -1,0 +1,321 @@
+$ biome check src test
+test/helpers.ts:478:20 lint/style/useTemplate  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  i Template literals are preferred over string concatenation.
+  
+    476 │   screenshotBuffer?: Buffer,
+    477 │ ) {
+  > 478 │   const boundary = "----FeedbackTestBoundary" + Math.random().toString(36).slice(2);
+        │                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    479 │   const parts: Buffer[] = [];
+    480 │ 
+  
+  i Unsafe fix: Use a template literal.
+  
+    476 476 │     screenshotBuffer?: Buffer,
+    477 477 │   ) {
+    478     │ - ··const·boundary·=·"----FeedbackTestBoundary"·+·Math.random().toString(36).slice(2);
+        478 │ + ··const·boundary·=·`----FeedbackTestBoundary${Math.random().toString(36).slice(2)}`;
+    479 479 │     const parts: Buffer[] = [];
+    480 480 │   
+  
+
+src/pipeline/worker.ts:936:7 lint/suspicious/noConfusingLabels ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ! Unexpected label.
+  
+    934 │       // 先核对该任务下是否已有关于此反馈的评论（幂等；含当前资产引用）
+    935 │       const existingComments = await kaneo.listComments(taskId);
+  > 936 │       screenshotPhase: if (screenshot) {
+        │       ^^^^^^^^^^^^^^^
+    937 │         // 4.3：匹配用准确反馈 ID + 图片摘要 + 当前资产引用（资产已知时旧评论引用旧资产不算命中）
+    938 │         const currentAssetUrl: string | null = cur.asset?.url ?? null;
+  
+  i Only loops should be labeled.
+    The use of labels for other statements is suspicious and unfamiliar.
+  
+
+src/pipeline/worker.ts:12:3 lint/correctness/noUnusedImports  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ! Several of these imports are unused.
+  
+    10 │   getFeedbackScreenshot,
+    11 │   getFeedbackScreenshotMeta,
+  > 12 │   getSetting,
+       │   ^^^^^^^^^^
+    13 │   listFeedbackLogs,
+    14 │   resolveOutputPixels,
+  
+  i Unused imports might be the result of an incomplete refactoring.
+  
+  i Unsafe fix: Remove the unused imports.
+  
+      10   10 │     getFeedbackScreenshot,
+      11   11 │     getFeedbackScreenshotMeta,
+      12      │ - ··getSetting,
+      13   12 │     listFeedbackLogs,
+      14   13 │     resolveOutputPixels,
+  
+
+src/pipeline/worker.ts:36:3 lint/correctness/noUnusedImports  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ! Several of these imports are unused.
+  
+    34 │   type ArchiveData,
+    35 │   type ArchiveDataNext,
+  > 36 │   type ArchiveDataV1,
+       │   ^^^^^^^^^^^^^^^^^^^
+  > 37 │   ArchivePersistenceError,
+        ...
+  > 41 │   allAttachmentsConfirmed,
+  > 42 │   attachmentConfirmed,
+       │   ^^^^^^^^^^^^^^^^^^^
+    43 │   buildUploadRecord,
+    44 │   checkArchiveTarget,
+  
+  i Unused imports might be the result of an incomplete refactoring.
+  
+  i Unsafe fix: Remove the unused imports.
+  
+      34   34 │     type ArchiveData,
+      35   35 │     type ArchiveDataNext,
+      36      │ - ··type·ArchiveDataV1,
+      37   36 │     ArchivePersistenceError,
+      38   37 │     type ArchiveTarget,
+    ········· │ 
+      40   39 │     ArchiveVersionConflictError,
+      41   40 │     allAttachmentsConfirmed,
+      42      │ - ··attachmentConfirmed,
+      43   41 │     buildUploadRecord,
+      44   42 │     checkArchiveTarget,
+  
+
+test/admin.test.ts:170:51 lint/suspicious/noExplicitAny ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ! Unexpected any. Specify a different type.
+  
+    168 │     );
+    169 │     expect(p2.data.items.length).toBe(1);
+  > 170 │     const ids = new Set([...p1.data.items.map((x: any) => x.id), ...p2.data.items.map((x: any) => x.id)]);
+        │                                                   ^^^
+    171 │     expect(ids.size).toBe(3);
+    172 │   });
+  
+  i any disables many type checking rules. Its use should be avoided.
+  
+
+test/admin.test.ts:170:91 lint/suspicious/noExplicitAny ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ! Unexpected any. Specify a different type.
+  
+    168 │     );
+    169 │     expect(p2.data.items.length).toBe(1);
+  > 170 │     const ids = new Set([...p1.data.items.map((x: any) => x.id), ...p2.data.items.map((x: any) => x.id)]);
+        │                                                                                           ^^^
+    171 │     expect(ids.size).toBe(3);
+    172 │   });
+  
+  i any disables many type checking rules. Its use should be avoided.
+  
+
+test/auth.test.ts:70:53 lint/suspicious/noExplicitAny ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ! Unexpected any. Specify a different type.
+  
+    68 │     const list = await jsonReq(t.app, "GET", "/api/auth/sessions", { cookie });
+    69 │     expect(list.status).toBe(200);
+  > 70 │     const cookieEntry = list.data.sessions.find((x: any) => x.kind === "cookie");
+       │                                                     ^^^
+    71 │     expect(cookieEntry.current).toBe(true);
+    72 │     const clientEntry = list.data.sessions.find((x: any) => x.clientLabel === "device-x");
+  
+  i any disables many type checking rules. Its use should be avoided.
+  
+
+test/auth.test.ts:72:53 lint/suspicious/noExplicitAny ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ! Unexpected any. Specify a different type.
+  
+    70 │     const cookieEntry = list.data.sessions.find((x: any) => x.kind === "cookie");
+    71 │     expect(cookieEntry.current).toBe(true);
+  > 72 │     const clientEntry = list.data.sessions.find((x: any) => x.clientLabel === "device-x");
+       │                                                     ^^^
+    73 │     expect(clientEntry).toBeTruthy();
+    74 │ 
+  
+  i any disables many type checking rules. Its use should be avoided.
+  
+
+test/helpers.ts:320:36 lint/suspicious/noExplicitAny ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ! Unexpected any. Specify a different type.
+  
+    318 │   url: string,
+    319 │   init: { body?: unknown; cookie?: string; bearer?: string; origin?: string; headers?: Record<string, string> } = {},
+  > 320 │ ): Promise<{ status: number; data: any; headers: Headers; text: string }> {
+        │                                    ^^^
+    321 │   const headers: Record<string, string> = { ...init.headers };
+    322 │   if (init.body !== undefined) headers["content-type"] = "application/json";
+  
+  i any disables many type checking rules. Its use should be avoided.
+  
+
+test/helpers.ts:358:12 lint/suspicious/noExplicitAny ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ! Unexpected any. Specify a different type.
+  
+    356 │   cookie: string,
+    357 │   input: { appId?: string; origins?: string[] } = {},
+  > 358 │ ): Promise<any> {
+        │            ^^^
+    359 │   const r = await jsonReq(feedbackApp.app, "POST", "/api/admin/apps", {
+    360 │     cookie,
+  
+  i any disables many type checking rules. Its use should be avoided.
+  
+
+test/helpers.ts:394:8 lint/suspicious/noExplicitAny ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ! Unexpected any. Specify a different type.
+  
+    392 │   bearer: string;
+    393 │   /** 建好默认软件 com.test.app（列 triage），返回其 public 对象。 */
+  > 394 │   app: any;
+        │        ^^^
+    395 │ }
+    396 │ 
+  
+  i any disables many type checking rules. Its use should be avoided.
+  
+
+test/helpers.ts:512:13 lint/suspicious/noExplicitAny ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ! Unexpected any. Specify a different type.
+  
+    510 │   });
+    511 │ 
+  > 512 │   let data: any = null;
+        │             ^^^
+    513 │   try {
+    514 │     data = await res.json();
+  
+  i any disables many type checking rules. Its use should be avoided.
+  
+
+test/logs.test.ts:83:9 lint/suspicious/noExplicitAny ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ! Unexpected any. Specify a different type.
+  
+    81 │ interface MultipartResult {
+    82 │   status: number;
+  > 83 │   data: any;
+       │         ^^^
+    84 │   headers: Headers;
+    85 │   text: string;
+  
+  i any disables many type checking rules. Its use should be avoided.
+  
+
+test/logs.test.ts:108:13 lint/suspicious/noExplicitAny ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ! Unexpected any. Specify a different type.
+  
+    106 │   const res = await app.request("http://localhost/api/feedback", init);
+    107 │   const text = await res.text();
+  > 108 │   let data: any = null;
+        │             ^^^
+    109 │   try {
+    110 │     data = JSON.parse(text);
+  
+  i any disables many type checking rules. Its use should be avoided.
+  
+
+test/logs.test.ts:180:44 lint/suspicious/noExplicitAny ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ! Unexpected any. Specify a different type.
+  
+    178 │ }
+    179 │ 
+  > 180 │ async function adminLogs(h: { feedbackApp: any; cookie: string }, id: string) {
+        │                                            ^^^
+    181 │   return jsonReq(h.feedbackApp.app, "GET", `/api/admin/feedback/${id}/logs`, { cookie: h.cookie });
+    182 │ }
+  
+  i any disables many type checking rules. Its use should be avoided.
+  
+
+test/logs.test.ts:184:46 lint/suspicious/noExplicitAny ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ! Unexpected any. Specify a different type.
+  
+    182 │ }
+    183 │ 
+  > 184 │ async function adminDetail(h: { feedbackApp: any; cookie: string }, id: string) {
+        │                                              ^^^
+    185 │   return jsonReq(h.feedbackApp.app, "GET", `/api/admin/feedback/${id}`, { cookie: h.cookie });
+    186 │ }
+  
+  i any disables many type checking rules. Its use should be avoided.
+  
+
+test/logs.test.ts:224:38 lint/suspicious/noExplicitAny ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ! Unexpected any. Specify a different type.
+  
+    222 │     const list = await jsonReq(h.feedbackApp.app, "GET", "/api/admin/feedback", { cookie: h.cookie });
+    223 │     expect(list.status).toBe(200);
+  > 224 │     const item = (list.data.items as any[]).find((i) => i.id === id);
+        │                                      ^^^
+    225 │     expect(item.logCount).toBe(2);
+    226 │ 
+  
+  i any disables many type checking rules. Its use should be avoided.
+  
+
+test/logs.test.ts:256:35 lint/suspicious/noExplicitAny ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ! Unexpected any. Specify a different type.
+  
+    254 │     expect(logs.status).toBe(200);
+    255 │     expect(logs.headers.get("cache-control")).toBe("no-store");
+  > 256 │     expect(logs.data.logs.map((l: any) => l.seq)).toEqual([0, 1]);
+        │                                   ^^^
+    257 │     expect(logs.text).not.toContain("boot ok");
+    258 │ 
+  
+  i any disables many type checking rules. Its use should be avoided.
+  
+
+test/logs.test.ts:316:36 lint/suspicious/noExplicitAny ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ! Unexpected any. Specify a different type.
+  
+    314 │     // 归档完成后：截取属性与归档进度都可读
+    315 │     const after = await adminLogs(h, id);
+  > 316 │     expect(after.data.logs.map((l: any) => l.truncated)).toEqual([true, false]);
+        │                                    ^^^
+    317 │     expect(after.data.logs.map((l: any) => l.totalCodepoints)).toEqual([8001, 2]);
+    318 │     expect(after.data.logs.map((l: any) => l.archiveState)).toEqual(["confirmed", "confirmed"]);
+  
+  i any disables many type checking rules. Its use should be avoided.
+  
+
+test/logs.test.ts:317:36 lint/suspicious/noExplicitAny ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ! Unexpected any. Specify a different type.
+  
+    315 │     const after = await adminLogs(h, id);
+    316 │     expect(after.data.logs.map((l: any) => l.truncated)).toEqual([true, false]);
+  > 317 │     expect(after.data.logs.map((l: any) => l.totalCodepoints)).toEqual([8001, 2]);
+        │                                    ^^^
+    318 │     expect(after.data.logs.map((l: any) => l.archiveState)).toEqual(["confirmed", "confirmed"]);
+    319 │ 
+  
+  i any disables many type checking rules. Its use should be avoided.
+  
+
+The number of diagnostics exceeds the limit allowed. Use --max-diagnostics to increase it.
+Diagnostics not shown: 39.
+Checked 33 files in 59ms. No fixes applied.
+Found 57 warnings.
+Found 2 infos.

@@ -1,0 +1,168 @@
+=== 失败优先证据（新补用例的阴性对照）：移除实现后测试真的失败 ===
+
+--- 对照 1：移除 buildTaskDescription 的 diagnostics 小节 ---
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+ FAIL  test/logs.test.ts > AI 提示词与 diagnostics > Kaneo 任务描述：有诊断时追加两个独立小节，无诊断时不输出空标题
+AssertionError: expected '## 使用体验\n\n整体体验流畅\n\n## 问题\n\n同步偶尔失败\…' to contain '## 日志证据（来自日志原文）\n\n- [seq=1] `app.log…'
+      Tests  1 failed | 39 skipped (40)
+
+--- 对照 2：把阶段矛盾检查退回只看 status ---
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+ FAIL  test/logs.test.ts > 归档：截图→日志顺序、集中完成判定与不重复上传 > 阶段矛盾扩展：archive_stage=complete 但日志未全部确认 → needs_review，绝不重复处理
+AssertionError: expected 'archive_stage=complete 但 status=proce…' to contain '附件未全部确认'
+      Tests  1 failed | 39 skipped (40)
+
+--- 对照 3（captain 指定的 C2 陷阱）：把 !screenshot && logRows.length === 0 退回 !screenshot ---
+     → expected +0 to be 1 // Object.is equality
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+ FAIL  test/logs.test.ts > 归档：截图→日志顺序、集中完成判定与不重复上传 > 陷阱回归（C2）：纯日志无截图且评论写入结果不确定 → 绝不直接 archived
+AssertionError: expected +0 to be 1 // Object.is equality
+      Tests  1 failed | 40 skipped (41)
+
+--- 对照 4（L6 码点字段）：把 totalCodepoints 改成按 UTF-16 码元（text.length）计数 ---
+     → expected [ 8000, 16000, 16002 ] to deeply equal [ 4000, 8000, 8001 ]
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+ FAIL  test/logs.test.ts > 日志提交：multipart 顺序、落库与管理端读取 > L6 码点边界：8000 不截取 / 8001 截取 / emoji 按码点而非字节 / 剥 BOM 后计数
+AssertionError: expected [ 8000, 16000, 16002 ] to deeply equal [ 4000, 8000, 8001 ]
+      Tests  1 failed | 41 skipped (42)
+
+--- 对照 5：把 truncated 改成按字节判定 ---
+     → expected [ 8000, 8001, 8003 ] to deeply equal [ 8000, 8001, 8000 ]
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+ FAIL  test/logs.test.ts > 日志提交：multipart 顺序、落库与管理端读取 > L6 码点边界：8000 不截取 / 8001 截取 / emoji 按码点而非字节 / 剥 BOM 后计数
+AssertionError: expected [ 8000, 8001, 8003 ] to deeply equal [ 8000, 8001, 8000 ]
+      Tests  1 failed | 41 skipped (42)
+
+--- 对照 6（budget 陷阱）：把 takeTail 的 truncated 改成按「预算裁剪后实际送出的长度」反推 ---
+     → expected false to be true // Object.is equality
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+ FAIL  test/logs.test.ts > AI 日志输入：只读已落库字节、截取与重试 > takeTail：预算不足只截取更短内容时也不得把 truncated 记为 false
+AssertionError: expected false to be true // Object.is equality
+      Tests  1 failed | 43 skipped (44)
+      Tests  1 passed | 43 skipped (44)
+
+--- 对照 7（archiveState 投影）：把「记录存在即 confirmed」当成完成（另立一套判定） ---
+     → expected [ 'confirmed', 'not_started' ] to deeply equal [ 'partial', 'not_started' ]
+     → expected [ 'confirmed', 'confirmed', …(1) ] to deeply equal [ 'partial', 'partial', 'confirmed' ]
+     → expected [ 'confirmed', 'confirmed' ] to deeply equal [ 'confirmed', 'partial' ]
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯
+ FAIL  test/logs.test.ts > LogMeta.archiveState：allAttachmentsConfirmed 的逐份展示投影 > (1) 无日志 → logs: []；有日志但无任何记录 → not_started
+AssertionError: expected [ 'confirmed', 'not_started' ] to deeply equal [ 'partial', 'not_started' ]
+ FAIL  test/logs.test.ts > LogMeta.archiveState：allAttachmentsConfirmed 的逐份展示投影 > (2)(3)(4) 仅 upload → partial；asset 有 url 但 comment 未确认 → partial；url+confirmed → confirmed
+AssertionError: expected [ 'confirmed', 'confirmed', …(1) ] to deeply equal [ 'partial', 'partial', 'confirmed' ]
+ FAIL  test/logs.test.ts > LogMeta.archiveState：allAttachmentsConfirmed 的逐份展示投影 > (6) 截图已 confirmed 但某份日志仍 partial → 反馈级判定为假、状态非 archived，且该份显示 partial
+AssertionError: expected [ 'confirmed', 'confirmed' ] to deeply equal [ 'confirmed', 'partial' ]
+      Tests  3 failed | 1 passed | 44 skipped (48)
+
+--- 对照 8（预签名顺序）：申请前先写入占位 upload 记录 ---
+     → expected [ 'partial' ] to deeply equal [ 'not_started' ]
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+ FAIL  test/logs.test.ts > LogMeta.archiveState：allAttachmentsConfirmed 的逐份展示投影 > presign 阶段失败：不落任何 upload 记录 → 该份日志可达 not_started（三态第一态）
+AssertionError: expected [ 'partial' ] to deeply equal [ 'not_started' ]
+      Tests  1 failed | 49 skipped (50)
+
+=== T8-F1 先失败取证（修复前真实失败，npx vitest run test/logs.test.ts -t 归档终态）===
+   ↓ 日志提交：multipart 顺序、落库与管理端读取 > 安全文件名与 L2 清洗一致：a"b.log → ab.log；..log → log；纯点被判 invalid_log
+   ↓ 日志校验：整单拒绝与错误码 > 数量超过 3 → too_large/413
+   ↓ 日志校验：整单拒绝与错误码 > 单份日志超过 1MiB → too_large/413
+   ↓ 日志校验：整单拒绝与错误码 > metadata.logs 与部件数量不一致 → invalid_log/400
+   ↓ 日志校验：整单拒绝与错误码 > 非文件部件 / 部件文件名缺失或与 metadata 不一致 → invalid_log/400
+   ↓ 日志校验：整单拒绝与错误码 > 文件名白名单与 source 校验 → invalid_log/400
+   ↓ 日志校验：整单拒绝与错误码 > 部件 Content-Type 不在白名单 → invalid_log/400
+   ↓ 日志校验：整单拒绝与错误码 > 空文件 / 非法 UTF-8 / NUL / 仅 BOM → invalid_log/400
+   ↓ LogMeta.archiveState：allAttachmentsConfirmed 的逐份展示投影 > (1) 无日志 → logs: []；有日志但无任何记录 → not_started
+   ↓ LogMeta.archiveState：allAttachmentsConfirmed 的逐份展示投影 > presign 阶段失败：不落任何 upload 记录 → 该份日志可达 not_started（三态第一态）
+   ↓ LogMeta.archiveState：allAttachmentsConfirmed 的逐份展示投影 > (2)(3)(4) 仅 upload → partial；asset 有 url 但 comment 未确认 → partial；url+confirmed → confirmed
+   ↓ LogMeta.archiveState：allAttachmentsConfirmed 的逐份展示投影 > (5) V1 旧记录 → not_started（不报错、不猜测）
+   ↓ LogMeta.archiveState：allAttachmentsConfirmed 的逐份展示投影 > (6) 截图已 confirmed 但某份日志仍 partial → 反馈级判定为假、状态非 archived，且该份显示 partial
+   ↓ 归档：截图→日志顺序、集中完成判定与不重复上传 > 只有日志（无截图）：逐份归档；日志未全部确认前绝不 archived
+   ↓ 归档：截图→日志顺序、集中完成判定与不重复上传 > 陷阱回归（C2）：纯日志无截图且评论写入结果不确定 → 绝不直接 archived
+   ↓ 归档：截图→日志顺序、集中完成判定与不重复上传 > 截图 + 日志：先截图，再按 seq 升序；评论标记各归其位
+   ↓ 归档：截图→日志顺序、集中完成判定与不重复上传 > 截图完成而某份日志未完成 → needs_review，绝不 archived
+   ↓ 归档：截图→日志顺序、集中完成判定与不重复上传 > 阶段矛盾扩展：archive_stage=complete 但日志未全部确认 → needs_review，绝不重复处理
+   ↓ 归档：截图→日志顺序、集中完成判定与不重复上传 > 已确认附件不重复上传：重跑只核对，远端写入次数保持不变
+   ↓ 归档：截图→日志顺序、集中完成判定与不重复上传 > 纯文字反馈（无任何附件）仍按既有语义完成归档
+   × 归档终态：HTTP 响应状态必须等于集中判定结果（不得恒报 archived） > recheck（截图评论命中分支）：DB 为 needs_review 时响应体不得是 archived 154ms
+     → expected 'archived' to be 'needs_review' // Object.is equality
+   × 归档终态：HTTP 响应状态必须等于集中判定结果（不得恒报 archived） > recheck：终态落盘失败时绝不返回 ok:true/archived（必须 502 persist_failed） 122ms
+     → expected true to be undefined
+   × 归档终态：HTTP 响应状态必须等于集中判定结果（不得恒报 archived） > recover retry_comment(logId)（评论已命中补记分支）：响应状态同样取自集中判定 120ms
+     → expected 'archived' to be 'needs_review' // Object.is equality
+   × 归档终态：HTTP 响应状态必须等于集中判定结果（不得恒报 archived） > recover retry_comment(logId)（补发成功分支）：响应状态同样取自集中判定 116ms
+     → expected 'archived' to be 'needs_review' // Object.is equality
+   × 归档终态：HTTP 响应状态必须等于集中判定结果（不得恒报 archived） > recover replace_upload(logId)（替换成功分支）：响应状态同样取自集中判定 119ms
+     → expected 'archived' to be 'needs_review' // Object.is equality
+   ↓ recover 支持可选 logId > retry_comment 指定 logId：查重未命中 → 只补发该日志一条评论
+   ↓ recover 支持可选 logId > 未知 logId → 404；非字符串/空串 → 400；缺省仍是截图行为
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 5 ⎯⎯⎯⎯⎯⎯⎯
+    1881|     // 截图侧仍未确认 → 绝不因「这份日志替换成功」而写 archived
+ Test Files  1 failed (1)
+      Tests  5 failed | 50 skipped (55)
+
+--- 对照 9（F5 跳过原因）：recordSkippedLog 变成完全静默（不写 error_summary、不打运行日志） ---
+   ↓ 日志提交：multipart 顺序、落库与管理端读取 > 安全文件名与 L2 清洗一致：a"b.log → ab.log；..log → log；纯点被判 invalid_log
+   ↓ 日志校验：整单拒绝与错误码 > 数量超过 3 → too_large/413
+   ↓ 日志校验：整单拒绝与错误码 > 单份日志超过 1MiB → too_large/413
+   ↓ 日志校验：整单拒绝与错误码 > metadata.logs 与部件数量不一致 → invalid_log/400
+   ↓ 日志校验：整单拒绝与错误码 > 非文件部件 / 部件文件名缺失或与 metadata 不一致 → invalid_log/400
+   ↓ 日志校验：整单拒绝与错误码 > 文件名白名单与 source 校验 → invalid_log/400
+   ↓ 日志校验：整单拒绝与错误码 > 部件 Content-Type 不在白名单 → invalid_log/400
+   ↓ 日志校验：整单拒绝与错误码 > 空文件 / 非法 UTF-8 / NUL / 仅 BOM → invalid_log/400
+   × AI 日志输入：不可读字节的跳过痕迹（L7） > BLOB 无法解码时跳过该份并把 seq/文件名/原因写入 error_summary，且绝不写入日志内容 163ms
+     → expected '' to contain 'seq=1'
+   ↓ LogMeta.archiveState：allAttachmentsConfirmed 的逐份展示投影 > (1) 无日志 → logs: []；有日志但无任何记录 → not_started
+   ↓ LogMeta.archiveState：allAttachmentsConfirmed 的逐份展示投影 > presign 阶段失败：不落任何 upload 记录 → 该份日志可达 not_started（三态第一态）
+   ↓ LogMeta.archiveState：allAttachmentsConfirmed 的逐份展示投影 > (2)(3)(4) 仅 upload → partial；asset 有 url 但 comment 未确认 → partial；url+confirmed → confirmed
+   ↓ LogMeta.archiveState：allAttachmentsConfirmed 的逐份展示投影 > (5) V1 旧记录 → not_started（不报错、不猜测）
+   ↓ LogMeta.archiveState：allAttachmentsConfirmed 的逐份展示投影 > (6) 截图已 confirmed 但某份日志仍 partial → 反馈级判定为假、状态非 archived，且该份显示 partial
+   ↓ 归档：截图→日志顺序、集中完成判定与不重复上传 > 只有日志（无截图）：逐份归档；日志未全部确认前绝不 archived
+   ↓ 归档：截图→日志顺序、集中完成判定与不重复上传 > 陷阱回归（C2）：纯日志无截图且评论写入结果不确定 → 绝不直接 archived
+   ↓ 归档：截图→日志顺序、集中完成判定与不重复上传 > 截图 + 日志：先截图，再按 seq 升序；评论标记各归其位
+   ↓ 归档：截图→日志顺序、集中完成判定与不重复上传 > 截图完成而某份日志未完成 → needs_review，绝不 archived
+   ↓ 归档：截图→日志顺序、集中完成判定与不重复上传 > 阶段矛盾扩展：archive_stage=complete 但日志未全部确认 → needs_review，绝不重复处理
+   ↓ 归档：截图→日志顺序、集中完成判定与不重复上传 > 已确认附件不重复上传：重跑只核对，远端写入次数保持不变
+   ↓ 归档：截图→日志顺序、集中完成判定与不重复上传 > 纯文字反馈（无任何附件）仍按既有语义完成归档
+   ↓ recover 支持可选 logId > retry_comment 指定 logId：查重未命中 → 只补发该日志一条评论
+   ↓ recover 支持可选 logId > 未知 logId → 404；非字符串/空串 → 400；缺省仍是截图行为
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+AssertionError: expected '' to contain 'seq=1'
+      Tests  1 failed | 55 skipped (56)
+
+=== t16 判别力对照：archive-data.ts 空集合判定改成「视为无日志」→ 新用例变红（真实输出）===
+变异前 sha256: ce47c4569ac34569001a0af1beb5c0c2f41e5bf48afe21c42fc1a20121728a92  src/pipeline/archive-data.ts
+变异后 npx vitest run test/archive-data.test.ts：
+   ✓ ArchiveDataV1 严格解析 > 当前版本 v2 合法、v1 仍可读、未知版本 → unsupported；损坏 JSON → corrupt 0ms
+   × ArchiveDataV1 严格解析 > V2 `logs: {}` 判 corrupt，而 `logs` 键缺省为合法——`{}` 与缺省不等价（契约 :643） 6ms
+     → expected { kind: 'valid', …(1) } to deeply equal { Object (kind, reason) }
+   ✓ ArchiveDataV1 序列化与 revision 持久化 > SQLite 写入失败 → ArchivePersistenceError 4ms
+   ✓ worker 集成：目标固定、凭证落盘门禁与损坏数据停止 > archive_data_json 损坏或版本未知 → needs_review，零远端写入 113ms
+   ✓ worker 集成：目标固定、凭证落盘门禁与损坏数据停止 > 归档目标改变（apiBase）→ 停止待核对，不发出远端写入 112ms
+   ✓ worker 集成：目标固定、凭证落盘门禁与损坏数据停止 > 持久化失败（凭证落盘时数据库不可写）→ 不向存储发送字节、不 finalize 132ms
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+    180|     // 2) `"logs": {}` → corrupt（空集合必须省略该键，不得输出 "logs": {}）
+      Tests  1 failed | 20 passed (21)
+
+--- 已改回实现，复跑 ---
+      Tests  21 passed (21)
+   Start at  03:02:09
+   Duration  1.24s (transform 167ms, setup 0ms, collect 257ms, tests 715ms, environment 0ms, prepare 44ms)
+
+
+=== t16 判别力对照（最终测试文件版本，3 段真实输出）===
+[变异前] archive-data.ts sha256 = ce47c4569ac34569001a0af1beb5c0c2f41e5bf48afe21c42fc1a20121728a92
+[变异] 删掉 'if (keys.length === 0) return null;'，空集合视为无日志 → 运行 test/archive-data.test.ts：
+   ✓ ArchiveDataV1 严格解析 > 当前版本 v2 合法、v1 仍可读、未知版本 → unsupported；损坏 JSON → corrupt 1ms
+   × ArchiveDataV1 严格解析 > V2 `logs: {}` 判 corrupt，而 `logs` 键缺省为合法——`{}` 与缺省不等价（契约 :643） 6ms
+     → expected { kind: 'valid', …(1) } to deeply equal { Object (kind, reason) }
+   ✓ ArchiveDataV1 序列化与 revision 持久化 > SQLite 写入失败 → ArchivePersistenceError 4ms
+   ✓ worker 集成：目标固定、凭证落盘门禁与损坏数据停止 > archive_data_json 损坏或版本未知 → needs_review，零远端写入 126ms
+   ✓ worker 集成：目标固定、凭证落盘门禁与损坏数据停止 > 归档目标改变（apiBase）→ 停止待核对，不发出远端写入 110ms
+   ✓ worker 集成：目标固定、凭证落盘门禁与损坏数据停止 > 持久化失败（凭证落盘时数据库不可写）→ 不向存储发送字节、不 finalize 110ms
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+AssertionError: expected { kind: 'valid', …(1) } to deeply equal { Object (kind, reason) }
+    180|     // 2) `"logs": {}` → corrupt（空集合必须省略该键，不得输出 "logs": {}）
+      Tests  1 failed | 20 passed (21)
+[改回] sha256 = ce47c4569ac34569001a0af1beb5c0c2f41e5bf48afe21c42fc1a20121728a92
+[改回后复跑]
+ Test Files  1 passed (1)
+      Tests  21 passed (21)
