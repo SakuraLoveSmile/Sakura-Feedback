@@ -283,8 +283,36 @@ flutter build apk --debug \
    留下 `preview.py` / `mock-external.mjs` / tsx server / 静态服务器占用 8787、5187-5189、8898-8899
    （已手动清理）。第二次中断前观察到 **77 PASS / 0 FAIL**，属**部分记录，不作为通过结论**。
    因此本轮的浏览器证据仍以**历史 237/237** 为准，本次未重跑成功。
-10. **Firefox / WebKit 未覆盖**：现有 E2E runner 是 **Chromium-only**（`launch_chromium`），
-    而检查项要求补 Chromium、Firefox、WebKit。本机已装 `firefox-1509` / `webkit-2248`
-    Playwright 浏览器，但把 runner 参数化属独立改动，本轮未做——**此项未完成**。
+10. **Firefox / WebKit 覆盖**：runner 已参数化（`--browser {chromium,firefox,webkit}`），
+    可对同一套全量场景择引擎运行。**Firefox 已跑通**（见"跨引擎浏览器运行"）；
+    **WebKit 尚在运行/待确认**，未出结果前按未验证处理。
 11. **Docker 套件未跑**：本机 Docker daemon 未运行，`e2e/run_docker.py` 未执行；
     因此「停服备份 → 保留主密钥 → 恢复到隔离实例」与「Docker 套件清空测试表」未取得本轮证据。
+
+## 跨引擎浏览器运行（Chromium / Firefox / WebKit）
+
+同一套全量场景（`e2e/run_browser.py`）按引擎分别运行，用于覆盖检查项要求的
+「截图、弹窗和提交路径」在三个引擎上的行为差异。
+
+| 引擎 | 命令 | 结果 |
+|---|---|---|
+| Chromium | `python3 e2e/run_browser.py --browser chromium` | 历史 237/237（本轮单独重跑未取到完整汇总，见第 9 条） |
+| Firefox | `python3 e2e/run_browser.py --browser firefox` | **237/237 通过，exit 0** |
+| WebKit | `python3 e2e/run_browser.py --browser webkit` | 待确认（见第 10 条） |
+
+Firefox 那次是**真实完整跑完**的：`=== E2E 结果：237/237 通过 ===`，退出码 0，
+覆盖了灵感球拖拽/落点、遮罩像素级校验、遮挡失败规则、登录握手（真实弹窗 + 异源/nonce 负例）、
+截图生命周期（重拍/移除）、multipart 提交落库、AI 失败分支、跨域会话恢复、窄屏键盘、Vue 示例接入。
+
+用法（三引擎同命令，仅换 `--browser`）：
+
+```bash
+for b in chromium firefox webkit; do
+  for p in 8787 8788 5187 5188 5189 8898 8899; do
+    pid=$(lsof -nP -iTCP:$p -sTCP:LISTEN -t); [ -n "$pid" ] && kill -9 $pid
+  done
+  python3 e2e/run_browser.py --browser "$b"
+done
+```
+
+注意：三引擎共用 8787/5189 等端口，**必须串行**；runner 现在会在启动前检测端口占用并 FATAL 退出。
