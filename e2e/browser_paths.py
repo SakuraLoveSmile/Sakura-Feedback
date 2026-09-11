@@ -196,6 +196,21 @@ def parse_multipart(body: bytes, content_type: str) -> dict:
 # ---------------- 通用工具 ----------------
 
 
+def pixel_sha(arr) -> str:
+    """解码后位图的像素签名（尺寸 + RGBA 摘要）；兼容 numpy 与 PIL 两种后端。"""
+    w, h = png_probe.size(arr)
+    if hasattr(arr, "tobytes"):
+        body = arr.tobytes()
+    else:
+        body = arr.convert("RGBA").tobytes()
+    return f"{w}x{h}:{png_probe.sha256(body)}"
+
+
+def same_pixels(a, b) -> bool:
+    """两张解码后的位图是否逐像素一致（尺寸 + 全部 RGBA 字节）。"""
+    return pixel_sha(a) == pixel_sha(b)
+
+
 def new_page(deps, url, console_log=None):
     page = deps["ctx"].new_page()
     page.set_viewport_size({"width": 1280, "height": 800})
@@ -421,8 +436,6 @@ def p1_orb_drag(deps):
     check("P1 capture 的逻辑视口/输出像素都是 1280x800",
           [cap.get("viewportWidth"), cap.get("viewportHeight"), cap.get("pixelWidth"), cap.get("pixelHeight")]
           == [1280, 800, 1280, 800], json.dumps(cap, ensure_ascii=False))
-    check("P1 上传的截图字节 == 本地做像素断言的同一份 PNG",
-          png_probe.sha256(res["posts"][0]["screenshot"] or b"") == png_probe.sha256(raw))
 
     s, detail = deps["api"]("GET", f"/api/admin/feedback/{fid}")
     check("P1 管理端读取详情 200", s == 200, str(s))
@@ -439,6 +452,10 @@ def p1_orb_drag(deps):
     srv_arr = png_probe.decode(srv_bytes)
     png_probe.dump("P1 服务端落库 PNG",
                    {"bytes": len(srv_bytes), "sha256": png_probe.sha256(srv_bytes), "size": list(png_probe.size(srv_arr))})
+    # 服务端落库的图必须与本地预览**逐像素一致**——
+    # 这是「用户提交的就是他预览到的那张图」的服务端侧证据。
+    # 不使用 Playwright 读 multipart：WebKit 上该通道只给出元数据段（读不到文件部分）。
+    check("P1 服务端落库 PNG 与本地预览逐像素一致", same_pixels(srv_arr, arr), pixel_sha(srv_arr) + " vs " + pixel_sha(arr))
     png_probe.save(srv_arr, None, os.path.join(deps["shots_dir"], "P1-orb-drag-server.png"))
     visible_probe("P1 服务端 PNG landmark", srv_arr, landmark, RED_RGBA, deps, "P1srv")
     probe("P1 服务端 PNG 灵感球原位区域", srv_arr, original_orb_rect, WHITE_RGBA, 2, deps, "P1srv")
@@ -526,8 +543,6 @@ def p2_mask_pixels(deps):
     cap = ((res["posts"][0]["metadata"] or {}).get("capture")) or {}
     png_probe.dump("P2 提交 metadata.capture", cap)
     check("P2 点按呼出没有落点（只有拖拽才带 releasePoint）", "releasePoint" not in cap, json.dumps(cap, ensure_ascii=False))
-    check("P2 上传的截图字节 == 本地做像素断言的同一份",
-          png_probe.sha256(res["posts"][0]["screenshot"] or b"") == png_probe.sha256(raw))
 
     check("P2 服务端返回 feedbackId", bool(fid), str(fid))
     s, detail = deps["api"]("GET", f"/api/admin/feedback/{fid}")
@@ -540,6 +555,7 @@ def p2_mask_pixels(deps):
     srv_arr = png_probe.decode(srv_bytes)
     png_probe.dump("P2 服务端落库 PNG",
                    {"bytes": len(srv_bytes), "sha256": png_probe.sha256(srv_bytes), "size": list(png_probe.size(srv_arr))})
+    check("P2 服务端落库 PNG 与本地预览逐像素一致", same_pixels(srv_arr, arr), pixel_sha(srv_arr) + " vs " + pixel_sha(arr))
     png_probe.save(srv_arr, None, os.path.join(deps["shots_dir"], "P2-mask-server.png"))
     probe("P2 服务端 PNG [mask]区域", srv_arr, rects["secret-card"], MASK_RGBA, 3, deps, "P2srv")
     probe("P2 服务端 PNG password区域", srv_arr, rects["pw"], MASK_RGBA, 3, deps, "P2srv")
@@ -1105,8 +1121,6 @@ def p6_manual_capture(deps):
     check("P6 capture 的逻辑视口 / 输出像素都是 1280x800",
           [cap.get("viewportWidth"), cap.get("viewportHeight"), cap.get("pixelWidth"), cap.get("pixelHeight")]
           == [1280, 800, 1280, 800], json.dumps(cap, ensure_ascii=False))
-    check("P6 上传的截图字节 == 本地做像素断言的同一份（重拍后的 PNG）",
-          png_probe.sha256(res["posts"][0]["screenshot"] or b"") == png_probe.sha256(raw2))
 
     s, detail = deps["api"]("GET", f"/api/admin/feedback/{fid}")
     check("P6 管理端读取详情 200", s == 200, str(s))
@@ -1121,6 +1135,7 @@ def p6_manual_capture(deps):
     srv_arr = png_probe.decode(srv_bytes)
     png_probe.dump("P6 服务端落库 PNG",
                    {"bytes": len(srv_bytes), "sha256": png_probe.sha256(srv_bytes), "size": list(png_probe.size(srv_arr))})
+    check("P6 服务端落库 PNG 与本地预览逐像素一致（重拍后）", same_pixels(srv_arr, arr2), pixel_sha(srv_arr) + " vs " + pixel_sha(arr2))
     png_probe.save(srv_arr, None, os.path.join(deps["shots_dir"], "P6-manual-server.png"))
     visible_probe("P6 服务端 PNG 正常内容", srv_arr, rects["visible-block"], GREEN_RGBA, deps, "P6srv")
     probe("P6 服务端 PNG [mask] 区域", srv_arr, rects["secret-card"], MASK_RGBA, 3, deps, "P6srv")

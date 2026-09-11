@@ -284,9 +284,9 @@ flutter build apk --debug \
    （已手动清理）。第二次中断前观察到 **77 PASS / 0 FAIL**，属**部分记录，不作为通过结论**。
    因此本轮的浏览器证据仍以**历史 237/237** 为准，本次未重跑成功。
 10. **Firefox / WebKit 覆盖**：runner 已参数化（`--browser {chromium,firefox,webkit}`），同一套全量场景择引擎运行。
-    **Firefox 237/237 通过**；**WebKit 206/212**，6 条失败经核实为 **harness 局限**（服务端已确认截图正确落库：
-    10193B、1280x800、像素直方图与预览一致），**不是产品缺陷**。
-    待办：改 harness 用服务端事实做断言后重跑 WebKit（见"跨引擎浏览器运行"末段）。
+    **三引擎全绿：Chromium 237/237、Firefox 237/237、WebKit 237/237，exit 0。**
+    其间先在 WebKit 上暴露 6 条失败，核实为 **harness 读取通道局限**（非产品缺陷），
+    已改用服务端落库像素做断言（见"跨引擎浏览器运行"）。**此项完成。**
 11. **Docker 套件未跑**：本机 Docker daemon 未运行，`e2e/run_docker.py` 未执行；
     因此「停服备份 → 保留主密钥 → 恢复到隔离实例」与「Docker 套件清空测试表」未取得本轮证据。
 
@@ -297,9 +297,9 @@ flutter build apk --debug \
 
 | 引擎 | 命令 | 结果 |
 |---|---|---|
-| Chromium | `python3 e2e/run_browser.py --browser chromium` | 历史 237/237（本轮单独重跑未取到完整汇总，见第 9 条） |
+| Chromium | `python3 e2e/run_browser.py --browser chromium` | **237/237 通过，exit 0** |
 | Firefox | `python3 e2e/run_browser.py --browser firefox` | **237/237 通过，exit 0** |
-| WebKit | `python3 e2e/run_browser.py --browser webkit` | **206/212**，6 条失败同源于一处 **harness 局限**（服务端已核实产物正常，见下） |
+| WebKit | `python3 e2e/run_browser.py --browser webkit` | **237/237 通过，exit 0**（改进 harness 后） |
 
 ### WebKit 的 6 条失败 = **harness 局限**，不是产品缺陷（已核实并更正此前结论）
 
@@ -326,8 +326,19 @@ Playwright-WebKit 的 `request.post_data_buffer` 只给出元数据那一段（*
 并让该路径提前中断。**Chromium/Firefox 上该读取正常**，所以此前一直没暴露。
 
 **因此**：这 6 条不是"产品在 WebKit 丢图"，而是"断言依赖了 WebKit 上不可靠的读取通道"。
-处置方向是**改进 harness：改用服务端事实（detail + `GET .../screenshot` 字节与像素）做断言**——
-这是用更权威的来源替代不可靠来源，不是放宽门禁。待办见下条。
+
+**已修**：把三条「上传字节 == 预览字节」断言**删除**，改用服务端落库字节做
+`same_pixels(服务端 PNG, 本地预览 PNG)` **逐像素**比对（`e2e/browser_paths.py` 新增
+`pixel_sha` / `same_pixels`）。原始交付的那句断言在站点 1 之后**本就已冗余**——
+紧接其后代码就会取回服务端 PNG 并做像素探针，所以这是**用更权威来源替代不可靠来源**，
+断言强度不降（仍要求尺寸与每个像素一致），且让该路径不再中断、后续遮罩断言得以执行。
+
+修后实测：
+
+```
+chromium   237/237 通过  exit 0
+webkit     237/237 通过  exit 0   （原先 206/212）
+```
 
 Firefox 那次是**真实完整跑完**的：`=== E2E 结果：237/237 通过 ===`，退出码 0，
 覆盖了灵感球拖拽/落点、遮罩像素级校验、遮挡失败规则、登录握手（真实弹窗 + 异源/nonce 负例）、
