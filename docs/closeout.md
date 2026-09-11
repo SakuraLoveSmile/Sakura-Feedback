@@ -130,6 +130,32 @@ pnpm=11.23.0
   提示词不泄漏答案、正确顺序 → `ok:true`、错误顺序 → `ok:false`、**旧探针的通过条件现在必须失败**）。
 - **变异检查**：把匹配判断临时改成恒真 → 上述两条失败用例如期失败，证明断言非空转。
 
+### 生产 HTTPS 形态实测（Nginx TLS 终止 + 公网 origin 校验）
+
+本轮把生产部署形态真正搭起来跑了一遍（不是只看配置文本）：`deploy/nginx/feedback.conf.template`
+替换占位符 → `nginx -t` 通过 → 用自签证书起 `nginx:alpine` 反代到服务容器
+（服务设 `FEEDBACK_PUBLIC_URL=https://localhost:8443`、`FEEDBACK_COOKIE_SECURE=true`、
+端口只绑回环）。实测结果：
+
+| 检查 | 结果 |
+|---|---|
+| `nginx -t`（模板替换后） | **syntax is ok / test is successful** |
+| 80 → 443 | `301` → `https://localhost/healthz` |
+| 经 Nginx 的 HTTPS `GET /healthz` | `200`（TLS 终止 + 反代可用） |
+| 安全头 | `strict-transport-security: max-age=31536000`、`x-content-type-options: nosniff`、`referrer-policy: no-referrer` |
+| 登录（`Origin` = 公网地址）| `HTTP/2 200`，`set-cookie: fb_session=…; HttpOnly; **Secure**; SameSite=Lax` |
+| 管理页保存连接配置（公网 origin）| `200 {"ok":true,"apiKeySet":true}` — **没有** `origin_mismatch` |
+| 伪造 `Origin: https://evil.example` | `403 {"code":"origin_mismatch"}` |
+| 登记 `appId=rag`（允许 `http://127.0.0.1:5174`）| `201` |
+| 跨源预检（已登记 origin）| `204` + `access-control-allow-origin: http://127.0.0.1:5174` |
+| 跨源预检（未登记 origin）| `404`，**无** CORS 回显 |
+
+要点：这同时验证了 `http.ts` 的同源校验**确实以 `FEEDBACK_PUBLIC_URL` 为准**——
+容器内部看到的请求 URL 是 `http://fb-tls-app:8787`，与浏览器 `Origin` 完全不同，
+若仍按内部 URL 判断就会误报 `origin_mismatch`；实测通过，说明修复生效。
+
+未做：真实域名 + 公网证书（等域名/证书）；真实 RAG 宿主的登录弹窗跨源流程（需要你本地起 5174）。
+
 ### 恢复与重复操作
 
 沿用现有恢复状态机，本轮**未新增**任何自动补发。相关既有覆盖（归档一致性、失败重试、
@@ -308,7 +334,9 @@ flutter build apk --debug \
 2. **release.yml 已真实验证通过**（见上文"发布实跑"）：镜像已推送并可从 registry 取回 manifest，
    Release 上的 5 个资产齐全，`SOURCE.txt` 的 `commit=` 与 `v0.1.0` 指向的提交**完全一致**。
    此项不再是未验证。
-3. **Nginx 模板未做 `nginx -t`**：本机 Docker daemon 未运行，无法起 nginx 容器校验语法；模板占位符替换已实测无残留。
+3. ~~**Nginx 模板未做 `nginx -t`**~~ → **已补做**：本轮起了 `nginx:alpine` 容器，模板替换占位符后
+   `nginx -t` 通过，并实测 80→443 跳转、HTTPS 反代、`Secure` Cookie、公网 origin 校验
+   （详见上文"生产 HTTPS 形态实测"）。**此项完成。** 仍未做的是真实域名 + 公网证书。
 4. **视觉探针只做了能力层验证**：真实多模态模型未配置，`test-vision` 未对真实模型跑过；
    「能力探针不能替代业务验收」——`organize → Kaneo` 的真实截图闭环仍待你配置模型后进行。
 5. **本地 SSH 到 GitHub 22 端口不通**：`ssh.github.com:443` 返回 `Permission denied (publickey)`，
@@ -317,17 +345,17 @@ flutter build apk --debug \
    截图、键盘、返回键与重启后登录存储。
 7. **RAG 运行时未在浏览器实测**：仅做了构建与条件打包验证，未在 `127.0.0.1:5174` 打开面板提交。
 8. **Comic 改动未提交**：宿主已有 115 项未提交改动，本轮改动与它们混在工作区，未擅自提交（按你选择保留）。
-9. **浏览器 E2E 本次未取得完整汇总**：本轮两次尝试重跑 `e2e/run_browser.py`，
-   两次都在运行中被 SIGKILL 中断（`E2E_PY_EXIT=137`），且脚本在异常路径下未回收子进程，
-   留下 `preview.py` / `mock-external.mjs` / tsx server / 静态服务器占用 8787、5187-5189、8898-8899
-   （已手动清理）。第二次中断前观察到 **77 PASS / 0 FAIL**，属**部分记录，不作为通过结论**。
-   因此本轮的浏览器证据仍以**历史 237/237** 为准，本次未重跑成功。
+9. ~~**浏览器 E2E 本次未取得完整汇总**~~ → **已作废**：那次 SIGKILL 中断后的重跑成功，
+   三引擎均取得完整汇总（见第 10 项与"跨引擎浏览器运行"）。中断时残留的
+   `preview.py` / `mock-external.mjs` / tsx server 等进程已手动清理。**此项完成。**
 10. **Firefox / WebKit 覆盖**：runner 已参数化（`--browser {chromium,firefox,webkit}`），同一套全量场景择引擎运行。
     **三引擎全绿：Chromium 237/237、Firefox 237/237、WebKit 237/237，exit 0。**
     其间先在 WebKit 上暴露 6 条失败，核实为 **harness 读取通道局限**（非产品缺陷），
     已改用服务端落库像素做断言（见"跨引擎浏览器运行"）。**此项完成。**
-11. **Docker 套件未跑**：本机 Docker daemon 未运行，`e2e/run_docker.py` 未执行；
-    因此「停服备份 → 保留主密钥 → 恢复到隔离实例」与「Docker 套件清空测试表」未取得本轮证据。
+11. ~~**Docker 套件未跑**~~ → **已补做**：本轮在**重建后的镜像**上重跑 `e2e/run_docker.py`
+    → **59/59 通过**（确认优雅退出改动未破坏 `docker restart` 的崩溃恢复契约）；
+    并新增 `e2e/run_backup_restore.py` → **28/28 通过**（停服备份 / 保留主密钥 / 隔离恢复不重放）。
+    **此项完成。**
 
 ## 跨引擎浏览器运行（Chromium / Firefox / WebKit）
 
