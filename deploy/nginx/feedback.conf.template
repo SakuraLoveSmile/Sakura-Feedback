@@ -1,0 +1,62 @@
+# 反馈服务 HTTPS 反向代理模板（Nginx）
+#
+# 部署时替换以下占位符后，放到 Nginx 配置目录（如 /etc/nginx/conf.d/feedback.conf）：
+#   __SERVER_NAME__     公网域名，如 feedback.example.com
+#   __TLS_CERT_PATH__   证书链路径，如 /etc/letsencrypt/live/feedback.example.com/fullchain.pem
+#   __TLS_KEY_PATH__    私钥路径，如 /etc/letsencrypt/live/feedback.example.com/privkey.pem
+#   __UPSTREAM__        上游地址，默认 127.0.0.1:8787（容器只绑回环，必须经此代理）
+#
+# 注意：
+#   - 不要在这里放宽或伪造 CORS；跨源反馈接口只回显已在服务端登记的 allowedOrigins。
+#   - 服务端的 Cookie 同源校验以 FEEDBACK_PUBLIC_URL 为准，不信任 X-Forwarded-* 头，
+#     因此这里只需原样转发 Host，不必也不能靠转发头"解决" origin 问题。
+#   - /login 页面自带 CSP（frame-ancestors 'none' 等），不要用 add_header 覆盖它。
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name __SERVER_NAME__;
+
+    # 证书签发/续期的 ACME 校验路径
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name __SERVER_NAME__;
+
+    ssl_certificate     __TLS_CERT_PATH__;
+    ssl_certificate_key __TLS_KEY_PATH__;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_session_cache   shared:SSL:10m;
+    ssl_session_timeout 10m;
+
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer" always;
+
+    # 截图走 multipart，服务端上限 6MiB；留出协议开销余量
+    client_max_body_size 10m;
+
+    location / {
+        proxy_pass http://__UPSTREAM__;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # AI 整理 + Kaneo 上传在服务端异步进行，但单次请求本身可能等待较久
+        proxy_connect_timeout 5s;
+        proxy_send_timeout    120s;
+        proxy_read_timeout    120s;
+    }
+}

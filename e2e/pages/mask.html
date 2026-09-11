@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>E2E 宿主页 · 敏感区遮挡</title>
+    <!--
+      e2e 专用宿主页（不是产品代码）：两个敏感区 + 两块正常内容，
+      用于在最终 PNG 上做像素级遮挡断言。
+
+      版面（1280x800 视口，dpr=1，scale=1 → CSS 坐标 == PNG 像素坐标）：
+        #visible-block  (60,60)-(380,240)    纯绿 #00ff00   必须可见
+        #secret-card    (500,80)-(860,280)   纯品红 #ff00ff + [data-feedback-capture-mask]
+        #pw             (500,340)-(860,388)  纯青 #00ffff input[type=password]
+        #footer-block   (60,400)-(380,520)   纯蓝 #0000ff   必须可见
+    -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: #ffffff;
+      }
+      body {
+        position: relative;
+        width: 1280px;
+        height: 800px;
+        overflow: hidden;
+        font-family: system-ui, -apple-system, sans-serif;
+      }
+      .block {
+        position: absolute;
+        color: #000000;
+        font-size: 18px;
+        padding: 8px;
+        box-sizing: border-box;
+      }
+      #visible-block {
+        left: 60px;
+        top: 60px;
+        width: 320px;
+        height: 180px;
+        background: #00ff00;
+      }
+      #secret-card {
+        left: 500px;
+        top: 80px;
+        width: 360px;
+        height: 200px;
+        background: #ff00ff;
+        color: #ffff00;
+      }
+      #pw {
+        position: absolute;
+        left: 500px;
+        top: 340px;
+        width: 360px;
+        height: 48px;
+        background: #00ffff;
+        border: 0;
+        font-size: 18px;
+        padding: 0 8px;
+        box-sizing: border-box;
+      }
+      #footer-block {
+        left: 60px;
+        top: 400px;
+        width: 320px;
+        height: 120px;
+        background: #0000ff;
+        color: #ffffff;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="visible-block" class="block">VISIBLE-NORTH</div>
+
+    <div id="secret-card" class="block" data-feedback-capture-mask>
+      SECRET-CANARY-TOKEN-abcdef0123456789
+    </div>
+
+    <input id="pw" type="password" value="pw-canary-9182736455" />
+
+    <div id="footer-block" class="block">VISIBLE-SOUTH</div>
+
+    <script>
+      // 测试脚手架（仅 e2e）：只暴露读取入口，页面内容本身是静态的。
+      window.__fbE2E = {
+        messages: [],
+        widget: () => document.querySelector('feedback-widget'),
+        rects() {
+          const r = {};
+          for (const id of ['visible-block', 'secret-card', 'pw', 'footer-block']) {
+            const b = document.getElementById(id).getBoundingClientRect();
+            r[id] = { x: b.x, y: b.y, width: b.width, height: b.height };
+          }
+          return r;
+        },
+        thumbSrc() {
+          const img = this.widget().shadowRoot.querySelector('.fb-screenshot-thumb');
+          return img ? img.getAttribute('src') : null;
+        },
+        statusText() {
+          const el = this.widget().shadowRoot.querySelector('.fb-status');
+          return el ? el.textContent : '';
+        },
+        async blobBase64() {
+          const img = this.widget().shadowRoot.querySelector('.fb-screenshot-thumb');
+          if (!img || !img.getAttribute('src')) return null;
+          const res = await fetch(img.getAttribute('src'));
+          const bytes = new Uint8Array(await res.arrayBuffer());
+          let s = '';
+          const chunk = 0x8000;
+          for (let i = 0; i < bytes.length; i += chunk) {
+            s += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+          }
+          return btoa(s);
+        },
+      };
+      window.addEventListener('message', (ev) => {
+        window.__fbE2E.messages.push({
+          origin: ev.origin,
+          type: ev.data && ev.data.type,
+          nonce: ev.data && ev.data.nonce,
+          token: ev.data && ev.data.accessToken,
+        });
+      });
+    </script>
+
+    <script src="/sdk/feedback-web.umd.js"></script>
+    <feedback-widget
+      id="widget"
+      api-base="http://localhost:8787"
+      app-id="com.example.demo-e2e"
+      app-version="3.1.4"
+      page-label="e2e-mask"
+      side="right"
+      launcher-mode="orb"
+      capture-mode="viewport"
+    ></feedback-widget>
+  </body>
+</html>

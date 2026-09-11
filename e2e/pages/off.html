@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>E2E 宿主页 · 默认 capture-mode（off）</title>
+    <!--
+      e2e 专用宿主页（不是产品代码）。
+
+      存在的理由：**故意不声明 `capture-mode`**，走组件的默认值 `off`。
+      这是绝大多数真实宿主的形态（升级不改变旧宿主行为 → 默认关闭截图）。
+      组件默认值见 packages/web/README.md 属性表：launcher-mode=tab、capture-mode=off。
+
+      断言目标：默认模式下呼出面板时，**截图区必须真的不可见**，
+      且不得出现 `.fb-screenshot-thumb` 的空 src 破图占位。
+      历史缺陷：`.fb-screenshot-wrap { display: flex }` 会盖掉浏览器默认的
+      `[hidden] { display: none }`，导致 `hidden = true` 完全失效。
+    -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: #ffffff;
+        font-family: system-ui, -apple-system, sans-serif;
+      }
+      body {
+        width: 1280px;
+        height: 800px;
+        overflow: hidden;
+      }
+      #plain {
+        position: absolute;
+        left: 40px;
+        top: 40px;
+        font-size: 16px;
+        color: #111111;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="plain">DEFAULT-CAPTURE-MODE-HOST</div>
+
+    <script src="/sdk/feedback-web.umd.js"></script>
+    <!-- 注意：这里**没有** launcher-mode / capture-mode 属性 -->
+    <feedback-widget
+      id="widget"
+      api-base="http://localhost:8787"
+      app-id="com.example.demo-e2e"
+      app-version="3.1.4"
+      page-label="e2e-off"
+    ></feedback-widget>
+  </body>
+</html>

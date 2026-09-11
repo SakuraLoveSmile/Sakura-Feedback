@@ -1,0 +1,11 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+  - "examples/*"
+
+# 供应链策略：本地开发环境同一配置（pnpm 11 中 .npmrc 的 pnpm 键已失效，须写在本文件）。
+# 锁文件在本地以相同策略验证通过后安装；如需恢复 24h 缓冲，删除本行并重新解析锁文件。
+minimumReleaseAge: 0
+
+allowBuilds:
+  esbuild: true

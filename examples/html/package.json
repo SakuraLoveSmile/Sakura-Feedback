@@ -1,0 +1,11 @@
+{
+  "name": "@feedback/example-html",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "原生 HTML：用 <script> 加载自托管 UMD 产物的最小接入示例（无构建步骤）",
+  "scripts": {
+    "copy:bundle": "cp ../../packages/web/dist/feedback-web.umd.cjs ./feedback-web.umd.js",
+    "serve": "node serve.mjs"
+  }
+}
