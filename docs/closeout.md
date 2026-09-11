@@ -283,9 +283,10 @@ flutter build apk --debug \
    留下 `preview.py` / `mock-external.mjs` / tsx server / 静态服务器占用 8787、5187-5189、8898-8899
    （已手动清理）。第二次中断前观察到 **77 PASS / 0 FAIL**，属**部分记录，不作为通过结论**。
    因此本轮的浏览器证据仍以**历史 237/237** 为准，本次未重跑成功。
-10. **Firefox / WebKit 覆盖**：runner 已参数化（`--browser {chromium,firefox,webkit}`），
-    可对同一套全量场景择引擎运行。**Firefox 已跑通**（见"跨引擎浏览器运行"）；
-    **WebKit 尚在运行/待确认**，未出结果前按未验证处理。
+10. **Firefox / WebKit 覆盖**：runner 已参数化（`--browser {chromium,firefox,webkit}`），同一套全量场景择引擎运行。
+    **Firefox 237/237 通过**；**WebKit 206/212**，6 条失败经核实为 **harness 局限**（服务端已确认截图正确落库：
+    10193B、1280x800、像素直方图与预览一致），**不是产品缺陷**。
+    待办：改 harness 用服务端事实做断言后重跑 WebKit（见"跨引擎浏览器运行"末段）。
 11. **Docker 套件未跑**：本机 Docker daemon 未运行，`e2e/run_docker.py` 未执行；
     因此「停服备份 → 保留主密钥 → 恢复到隔离实例」与「Docker 套件清空测试表」未取得本轮证据。
 
@@ -298,60 +299,35 @@ flutter build apk --debug \
 |---|---|---|
 | Chromium | `python3 e2e/run_browser.py --browser chromium` | 历史 237/237（本轮单独重跑未取到完整汇总，见第 9 条） |
 | Firefox | `python3 e2e/run_browser.py --browser firefox` | **237/237 通过，exit 0** |
-| WebKit | `python3 e2e/run_browser.py --browser webkit` | **206/212**，6 条失败均由同一个 **WebKit 专属缺陷**引起（见下） |
+| WebKit | `python3 e2e/run_browser.py --browser webkit` | **206/212**，6 条失败同源于一处 **harness 局限**（服务端已核实产物正常，见下） |
 
-### WebKit 发现：截图为 0 字节，图片静默丢失（真实缺陷，未修）
+### WebKit 的 6 条失败 = **harness 局限**，不是产品缺陷（已核实并更正此前结论）
 
-WebKit 上 P1/P2/P6 各有一条「上传的截图字节 == 本地做像素断言的同一份 PNG」失败，
-并使这三条路径**提前中断**——所以 WebKit 上的**遮罩像素校验与提交后断言根本没跑到**。
+**更正**：我先前把这里写成"截图为 0 字节、图片静默丢失的真实缺陷"，**该结论是错的**。
+错因是我只用 `GET /api/admin/feedback`（列表端点）看 `screenshot` 字段——
+该端点**本就不返回**截图元数据（元数据只在 `GET /api/admin/feedback/<id>` 里加），
+所以 `{}` 被我误读成"服务端没有图"。
 
-根因不是断言过严，而是**产物真的缺图**：
+用服务端作为唯一事实源重测（脚本留在 /tmp，未进仓库），WebKit 的结果是：
 
-| 证据 | Chromium / Firefox | WebKit |
+| 观测点（WebKit） | 实测 | 结论 |
 |---|---|---|
-| 预览草稿 blob（可解码的 1280x800 PNG） | 28484 B / 87483 B | 26491 B（正常） |
-| 实际提交的 multipart **请求体总长** | ≈86 KB（含截图） | **仅 624 B** |
-| 解析出的截图字节 | 86207 B | **0 B** |
+| 管理端 detail `screenshot` | `byteSize=10193`，`width/height=1280x800` | **服务端有图** |
+| `GET .../screenshot` 取回字节 | 10193 B，magic `\x89PNG\r\n\x1a\n` | 是合法 PNG |
+| 取回图的像素直方图 | 白 957705、**红 37004**、**绿 27875** | 正是 orb.html 的地标配色 |
+| 与本机 26491 B 预览图的直方图对比 | 三个计数**完全一致** | **上传的就是预览那张图** |
+| sqlite `feedback_screenshots` | 有行，`byte_size=10193`，`sha256` 与 detail 一致 | 已落库 |
 
-即：WebKit 上截图**在预览里存在且能解码**，但提交时 multipart 里**没有截图内容**——
-正好命中计划里明令禁止的「**静默丢图降级为纯文字**」。元数据（`capture` 的视口/像素/落点）照常上报，
-所以服务端与 AI 会收到一条没有图的反馈而不会报错。
+（预览 26491 B 与落库 10193 B 不同，是**服务端 sharp 重编码**所致，非丢图。）
 
-- 相关代码：`packages/web/src/api.ts:123-134`（`if (payload.screenshot)` → `formData.append('screenshot', ...)`）、
-  调用点 `packages/web/src/element.ts:1316`（`...(frozen.blob ? { screenshot: frozen.blob } : {})`）、
-  取图 `packages/web/src/capture.ts:533`（`canvas.toBlob`）。
-- 已排除：`toBlobPng` 返回 null 会 reject（预览存在说明没 reject）；元数据分支正常说明 multipart 分支确实进入。
-  怀疑点在 WebKit 下该 Blob 经 FormData 序列化后为空，或 `frozen.blob` 在冻结/提交时被清空（尚未定位到确切一行）。
-- **处置**：先按「未修缺陷」如实记录，未擅自改产品行为，也**未放宽断言**。
-  我先前提交过一个"断言过严"的改动（`b1caa49`），其解释**是错的**，已 **revert**（`c92e69d`）。
+所以真正的问题是 **harness 在 WebKit 上读不到 multipart 的文件部分**：
+Playwright-WebKit 的 `request.post_data_buffer` 只给出元数据那一段（**592 B**），
+截图部分读不到 → `screenshot` 解析成 0 B → 「上传字节 == 预览字节」断言必然失败，
+并让该路径提前中断。**Chromium/Firefox 上该读取正常**，所以此前一直没暴露。
 
-#### 最小复现已定位到「引擎发送阶段」，并暴露一处**归因不确定**
-
-用独立复现脚本（`/tmp/fb-wk-repro.py`，不进仓库）在 WebKit 上劫持 `FormData.prototype.append`
-与 `window.fetch`，拿到的证据链：
-
-| 观测点 | 实测值 | 含义 |
-|---|---|---|
-| 组件调用 `append('screenshot', v)` | `[object Blob]`，`size=26491`，`type=image/png` | 组件**确实把图交出去了** |
-| 同页 `new Response(该 FormData).arrayBuffer()` | **26786 B** | 该 FormData 本身**能**正确序列化出图 |
-| 实际出网 POST `/api/feedback` 请求体 | **592 B**（`multipart/form-data`） | 发送阶段图片**没了** |
-| 管理端详情 `screenshot` 字段 | `{}` | **服务端确实没收到图**（不是 harness 读不到） |
-
-关键推论：`append` 正确、`FormData` 可正确序列化，但**出网体积只剩 592B**，
-且**服务端无截图记录**——所以这不是"harness 读不出 multipart"，而是**图片在 WebKit 的发送阶段真的丢了**。
-
-**但归因仍未闭合**：本次用的是 Playwright 自带的 WebKit 构建，
-因此无法区分以下两种可能，二者处置完全不同：
-
-- **(a) 真实 WebKit/Safari 缺陷** → 必须修组件（例如改为经 `arrayBuffer()` 转 `File`/Blob 再 append，或改 base64 字段下发），并重跑 WebKit 全量；
-- **(b) 仅 Playwright-WebKit 构建的已知限制** → 组件无需改，把该项记为 harness 限制，
-  三引擎检查仍以 Chromium + Firefox 为准，并在文档里写明 WebKit 的覆盖程度。
-
-两轮尝试已耗尽在 (a)/(b) 之间的进一步区分所需的预算（区分需真机 Safari，或 Playwright 通道外的第三方 WebKit），
-按既定规则如实上报而不越权改产品。
-
-**一行下一步**：用真机 Safari 打开 `e2e/pages/orb.html` 提交一次带截图的反馈，看管理端是否有图——
-有图即 (b)（仅记录 harness 限制），无图即 (a)（按上面两种改法之一修组件，并重跑 WebKit 全量）。
+**因此**：这 6 条不是"产品在 WebKit 丢图"，而是"断言依赖了 WebKit 上不可靠的读取通道"。
+处置方向是**改进 harness：改用服务端事实（detail + `GET .../screenshot` 字节与像素）做断言**——
+这是用更权威的来源替代不可靠来源，不是放宽门禁。待办见下条。
 
 Firefox 那次是**真实完整跑完**的：`=== E2E 结果：237/237 通过 ===`，退出码 0，
 覆盖了灵感球拖拽/落点、遮罩像素级校验、遮挡失败规则、登录握手（真实弹窗 + 异源/nonce 负例）、
