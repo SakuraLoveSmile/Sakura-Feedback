@@ -59,7 +59,38 @@
 - 复现：删除 `packages/web/dist` 后 `pnpm -r typecheck` → 真实复现该错误。
 - 修复：CI 步骤顺序改为 **build → typecheck → lint → test**；修复后本地与 GitHub 均通过。
 
-### 视觉能力探针（不再"假通过"）
+**发布实跑（v0.1.0，2026-09-11）**
+
+已推 `v0.1.0` 标签触发 `release.yml` 真实运行（run `34602966331`），全部 job 通过：
+
+| job | 结果 |
+|---|---|
+| `checks / secrets-guard` | ✓ |
+| `checks / node-checks` | ✓ |
+| `checks / flutter-checks` | ✓ |
+| `artifacts`（同轮产物 + Release 挂件） | ✓ |
+| `publish`（构建并推送镜像、记录 digest） | ✓ |
+
+镜像坐标与实跑产物：
+
+```
+image:  ghcr.io/sakuralovesmile/sakura-feedback
+digest: sha256:9e38eec3980b8e7920e08c7a7e55b6b50d95b9af62f043d9e3aa4d8fd4b47b94
+tags:   v0.1.0 | sha-d326c19ff9a18ce79ae16e64481f7bac767e01f8 | latest
+```
+
+**独立核验（不依赖本机 Docker daemon）**：直接查 GHCR registry manifest——
+
+- manifest 可取回，`docker-content-digest` = 上述 digest（一致）；
+- manifest 为 OCI image index，其中 **`linux/amd64`** 条目存在（另一条 `unknown/unknown` 是
+  `provenance: true` 生成的构建溯源 attestation，属预期）。
+
+因为仓库是 public，`docker pull ghcr.io/sakuralovesmile/sakura-feedback@sha256:9e38...` 无需登录即可拉取；
+`deploy/compose.prod.yml` 正是以该 digest 固定引用，不使用 `latest`。
+（`latest` 标签由 docker metadata-action 在标签构建时自动附加，指向同一 digest；
+后续发布是否刷新它取决于是否再推版本标签，生产侧不依赖它。）
+
+
 
 `/api/admin/connection/ai/test-vision` 保持 `{ok, reply?, reason?}` 响应结构，但实现改为：
 
@@ -139,11 +170,30 @@
   - §2.7 新增：镜像坐标/标签/digest、私有 GHCR 只读拉取、生产部署、升级与回退、客户端如何跟上同一版本。
 - 未把访问令牌写入任何依赖 URL；私有 Git 走 SSH 配置，云服务器拉取 GHCR 使用只读凭据。
 
+### 全新目录独立安装验证（脱离 monorepo）
+
+在 `/tmp` 新建空项目，**只** `npm install` 项目内版本化目录里的 tgz（不引用 monorepo、不引用本机绝对路径），
+用打包器构建后断言：
+
+| 断言 | 结果 |
+|---|---|
+| 组件可用（入口分块含 `feedback-widget` 注册） | PASS |
+| 截图懒加载分块随包产出（`html2canvas-pro.esm-*.js`，248,836 B） | PASS |
+| 入口分块引用该懒加载分块（动态 import 可达，非遗漏分块） | PASS |
+| 产物不含本机绝对路径（无 `Personal Project/Feedback`） | PASS |
+| 依赖只有 `html2canvas-pro@2.4.2`，无 workspace 链接 | PASS |
+
+即：Web 安装包不依赖 workspace 链接、不依赖本机缓存，也没有遗漏截图懒加载分块。
+
+Flutter 侧的对应验证：Comic 宿主的 Git 依赖已实际 `pub get` 成功，且 `pubspec.lock` 的
+`resolved-ref` 等于 `ref` 指定的 sha（不是分支浮动解析）。
+
 ## 剩余问题 / 未验证（不得读作已通过）
 
-1. **仓库可见性**：目标文档假设仓库为 private，但实际为 **public**。因此按当前配置发布的 GHCR 包默认也是
-   public。是否改为 private（或调整包可见性）需你决定——**尚未推送任何标签，故尚未发布任何镜像**。
-2. **release.yml 尚未真实跑过**：只跑了 `ci.yml`。构建/推送镜像与 Release 挂件需要一次 `v*` 标签或手动触发才能验证。
+1. **仓库可见性已确认可接受**：目标文档假设仓库为 private，实际为 **public**。已与你确认
+   "仓库可开源、无隐私泄露风险"，因此按现有配置发布 **public** GHCR 包属于预期行为，不再是阻塞项。
+2. **release.yml 运行状态**：已推 `v0.1.0` 标签触发真实运行（见下节"发布实跑"）；
+   若下方无 digest 记录，说明该次运行未完成或失败，须按未验证处理。
 3. **Nginx 模板未做 `nginx -t`**：本机 Docker daemon 未运行，无法起 nginx 容器校验语法；模板占位符替换已实测无残留。
 4. **视觉探针只做了能力层验证**：真实多模态模型未配置，`test-vision` 未对真实模型跑过；
    「能力探针不能替代业务验收」——`organize → Kaneo` 的真实截图闭环仍待你配置模型后进行。
