@@ -136,6 +136,45 @@ pnpm=11.23.0
 待核对恢复、过期页面冲突、重复提交不重复建任务、重启后数据仍在）保留在
 `apps/server/test/{pipeline,fault-injection,archive-consistency,archive-data}.test.ts`。
 
+#### 停服备份 / 保留主密钥 / 隔离恢复（本轮新增，自动脚本）
+
+新脚本 `e2e/run_backup_restore.py`，**28/28 通过**（`python3 e2e/run_backup_restore.py`）。
+前置：宿主 mock 在 8898/8899、镜像 `feedback-service:local` 已构建、Docker 可用。
+
+它自建容器/卷（`fb-br-a/b/c`，端口 8791–8793），不依赖 `run_docker.py` 的模块级常量：
+
+1. 实例 A 用主密钥 A 保存 Kaneo/AI 凭据（密文）并登记软件；在 mock 的 `task` 阶段注入
+   `hold`+`afterWrite`，制造「**远端已写入但结果未知**」：mock 确实创建了任务（`tasks: 0→1`），
+   而请求被挂起。
+2. `docker restart`（模拟进程崩溃）→ 记录转 `needs_review`
+   （`error_summary`：*服务在处理中断，Kaneo 写入结果不确定，待核对*），**且没有重复创建任务**（`1→1`）。
+3. `docker stop --time 30` → `data/` 只剩 `feedback.db`（无 `-wal`/`-shm`）。
+4. 整目录拷贝到隔离卷 → 实例 B 用**同一主密钥**启动：记录仍在、仍是 `needs_review`、
+   Kaneo 连接测试 `ok:true`（凭据可解密）、mock 任务数 **1→1（隔离恢复不向 Kaneo 重放）**。
+5. 反证：实例 C 换**不同主密钥**启动同一份数据 → 连接测试 `502 ok:false`（无法解密），
+   且同样零远端写入。
+
+#### 顺带修掉的一个真实缺陷：优雅退出从未实现
+
+`docs/deployment.md` 原本声称「优雅退出会关闭 SQLite WAL 并完成 checkpoint」，但
+`apps/server/src/index.ts` 当时**没有任何 `SIGTERM`/`SIGINT` 处理**——实测 `docker stop` 后
+`data/` 里 `feedback.db-wal` 仍在。这会让人误以为「只拷 `feedback.db` 单文件」是安全的。
+
+本轮实现并验证：
+
+- `apps/server/src/index.ts` 新增优雅退出：收到 `SIGTERM`/`SIGINT` → 停止接受新请求
+  （并关闭空闲 keep-alive 连接）→ `worker.idle()` 等队列排空 → `PRAGMA wal_checkpoint(TRUNCATE)`
+  → `db.close()` → 退出。20s 未排空则退出并由下次启动的恢复流程兜底（绝不自动补发）。
+- `deploy/compose.prod.yml` 设 `stop_grace_period: 30s`：`docker stop` 默认只给 10s 就 `SIGKILL`，
+  会早于应用自身的 20s 预算，把 WAL 留在盘上。
+- `docs/deployment.md` 改写成与实现一致的停机步骤，并补上「残留 `-wal` 时不要只拷单文件」的处置。
+- 证据：同一脚本第 3 步断言停机后无 `-wal`/`-shm` 残留（修复前实测有 `feedback.db-wal`）。
+
+> 写这个脚本时先踩了 4 个**脚本自身**的坑（不是产品问题），已全部修正并记录以免复发：
+> AI mock 端口写成 Kaneo 的 8898（→ AI 阶段 404 → 记录 `failed`）；用 `uncertain` 模式期待
+> 「远端已写入」（该模式其实在写入前就掐断连接，远端不留任务）；连接测试缺少必填
+> `{"projectId": "p-docker"}`；用客户端令牌的会话去读管理接口（403 `凭据类型不允许此操作`）。
+
 ## T2 — RAG 与 Comic 接入同一服务
 
 ### RAG（`RAG/frontend`）
