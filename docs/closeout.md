@@ -320,8 +320,20 @@ pnpm=11.23.0
 
 即：Web 安装包不依赖 workspace 链接、不依赖本机缓存，也没有遗漏截图懒加载分块。
 
-Flutter 侧的对应验证：Comic 宿主的 Git 依赖已实际 `pub get` 成功，且 `pubspec.lock` 的
-`resolved-ref` 等于 `ref` 指定的 sha（不是分支浮动解析）。
+Flutter 侧的对应验证（**同样在全新空目录里做**，`/tmp/fb-flutter-dep`，
+`pubspec.yaml` 只含 `flutter` sdk 与那一条 git 依赖，不引用 monorepo、不引用本机路径）：
+
+| 断言 | 结果 |
+|---|---|
+| `flutter pub get` 成功（57 个依赖，无 workspace 链接） | PASS |
+| `pubspec.lock` 的 `resolved-ref` == `ref` 指定的 sha | PASS（`8c66cc07…`） |
+| 包解析到 **pub 缓存**而非 monorepo：`~/.pub-cache/git/Sakura-Feedback-8c66cc07…/flutter/feedback` | PASS |
+| `import 'package:feedback_widget/feedback_widget.dart'` 后 `flutter analyze` | PASS（No issues found） |
+
+> 诚实边界：本机到 `github.com:22` 不通，上面用的是文档里那条**一次性**
+> `GIT_CONFIG_*` 覆盖把 `git@github.com:` 改写为 HTTPS（仓库为 public，故可读）。
+> 即被验证的是**「Git 依赖 + 子目录 + 固定 SHA」这套机制**，
+> **不是** SSH 认证本身——SSH 路径需在已配置 key 的机器/CI 上才能验证。
 
 ## 需要你完成（这些我无法代做）
 
