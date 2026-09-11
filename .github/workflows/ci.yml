@@ -56,14 +56,17 @@ jobs:
           cache: pnpm
       - name: pnpm install --frozen-lockfile
         run: pnpm install --frozen-lockfile
+      # 必须先 build：examples/* 依赖 workspace 包 @feedback/web，其类型入口是 dist/index.d.ts，
+      # 全新检出时 dist 不存在，直接 typecheck 会报 TS2307 "Cannot find module '@feedback/web'"。
+      # 本地能过只是因为恰好留有上次构建产物。顺序固定为 build → typecheck → lint → test。
+      - name: build（先产出 workspace 包的 dist 与类型声明）
+        run: pnpm -r build
       - name: typecheck
         run: pnpm -r typecheck
       - name: lint
         run: pnpm -r lint
       - name: test
         run: pnpm -r test
-      - name: build
-        run: pnpm -r build
 
   flutter-checks:
     runs-on: ubuntu-latest
