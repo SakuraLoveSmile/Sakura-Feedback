@@ -1,0 +1,157 @@
+name: Release
+
+# 只有以下两种情况发布镜像；PR 永远不会发布（见 ci.yml）。
+#   - 推送版本标签 v*（例如 v0.1.0）
+#   - 手动触发（workflow_dispatch），可选填写版本标签
+# 发布前必须先通过 CI：调用 ci.yml（workflow_call），检查不通过则不构建、不推送。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version_tag:
+        description: 版本标签（例如 v0.1.0）。留空则只发布 sha 标签。
+        required: false
+        default: ""
+
+# 顶层只读；packages: write 仅授予 publish job，contents: write 仅用于挂 Release 资产。
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: ghcr.io/sakuralovesmile/sakura-feedback
+
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  # 与镜像同一轮构建：Web .tgz、完整浏览器 dist、SHA-256 清单、来源提交。
+  # 不读取任何生产 .env / 数据库 / AI / Kaneo 凭据。
+  artifacts:
+    needs: [checks]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: 构建 Web 组件与管理页
+        run: |
+          pnpm --filter @feedback/web build
+          pnpm --filter @feedback/admin build
+
+      - name: 打包 Web npm tarball
+        run: |
+          mkdir -p out
+          pnpm --filter @feedback/web pack --pack-destination "$PWD/out"
+
+      - name: 压缩完整浏览器 dist
+        run: |
+          cd packages/web && zip -qr "$GITHUB_WORKSPACE/out/feedback-web-dist.zip" dist
+          cd "$GITHUB_WORKSPACE/apps/admin" && zip -qr "$GITHUB_WORKSPACE/out/feedback-admin-dist.zip" dist
+
+      - name: 生成 SHA-256 清单与来源提交
+        run: |
+          cd out
+          sha256sum ./*.tgz ./*.zip > SHA256SUMS
+          {
+            echo "commit=$GITHUB_SHA"
+            echo "ref=$GITHUB_REF"
+            echo "run=$GITHUB_RUN_ID"
+            echo "node=$(node -v)"
+            echo "pnpm=$(pnpm -v)"
+          } > SOURCE.txt
+          cat SHA256SUMS SOURCE.txt
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: feedback-web-${{ github.sha }}
+          path: out/
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: 标签推送时挂到 GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # 标签名来自外部，先做白名单校验再使用
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9A-Za-z._-]+$'; then
+            echo "::error::标签名不符合 v* 命名约定：$TAG"; exit 1
+          fi
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --generate-notes
+          gh release upload "$TAG" out/*.tgz out/*.zip out/SHA256SUMS out/SOURCE.txt --clobber
+
+  publish:
+    needs: [artifacts]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # 仅此 job 有发布权限
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR（使用 GITHUB_TOKEN，无需额外密钥）
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 标签由 metadata-action 生成，不把 ref 插值进 shell
+      - name: 生成镜像标签
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=tag
+            type=raw,value=${{ inputs.version_tag }},enable=${{ inputs.version_tag != '' }}
+            type=sha,format=long
+
+      - name: 构建并推送 linux/amd64 镜像
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+
+      - name: 记录 digest（生产部署按 digest 固定）
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          {
+            echo "image: $IMAGE_NAME"
+            echo "digest: $DIGEST"
+            echo "tags:"
+            printf '%s\n' "$TAGS" | sed 's/^/  - /'
+          } > image-digest.txt
+          echo "### 生产固定引用" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "${IMAGE_NAME}@${DIGEST}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传 digest 清单
+        uses: actions/upload-artifact@v4
+        with:
+          name: feedback-image-digest
+          path: image-digest.txt
+          retention-days: 90

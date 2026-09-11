@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>E2E 宿主页 · 灵感球拖拽（视口截图）</title>
+    <!--
+      e2e 专用宿主页（不是产品代码）：给「灵感球拖动 → 落点 → 视口截图」提供
+      可精确断言的版面。所有坐标都是 px 且页面不滚动，因此
+      CSS 视口坐标 == 截图输出像素坐标（dpr=1 时 scale=1）。
+
+      版面（1280x800 视口，dpr=1）：
+        #landmark      (100,100)-(340,260)  纯红 #ff0000  ← 拖拽落点瞄准的目标
+        #safe-block    (100,400)-(340,520)  纯绿 #00a651
+        右下角 300x300 保持纯白 ← 断言灵感球本身不在截图里
+    -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: #ffffff;
+      }
+      body {
+        position: relative;
+        width: 1280px;
+        height: 800px;
+        overflow: hidden;
+        font-family: system-ui, -apple-system, sans-serif;
+      }
+      #landmark {
+        position: absolute;
+        left: 100px;
+        top: 100px;
+        width: 240px;
+        height: 160px;
+        background: #ff0000;
+        color: #ffffff;
+        font-size: 20px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      #safe-block {
+        position: absolute;
+        left: 100px;
+        top: 400px;
+        width: 240px;
+        height: 120px;
+        background: #00a651;
+        color: #ffffff;
+        font-size: 20px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      #hooks {
+        position: absolute;
+        left: 20px;
+        top: 700px;
+        font-size: 12px;
+        color: #666666;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="landmark">PROBLEM-AREA</div>
+    <div id="safe-block">SAFE-AREA</div>
+    <div id="hooks" hidden>
+      <button id="e2e-set-text" type="button">set text</button>
+      <button id="e2e-retake" type="button">retake</button>
+    </div>
+
+    <script>
+      // 测试脚手架（仅 e2e）：在组件加载之前装上 message 记录器，
+      // 便于断言「消息真的送达了宿主页」而不是被浏览器丢弃。
+      window.__fbE2E = {
+        messages: [],
+        widget: () => document.querySelector('feedback-widget'),
+        setText(text) {
+          this.widget().shadowRoot.querySelector('.fb-textarea').value = text;
+        },
+        thumbSrc() {
+          const img = this.widget().shadowRoot.querySelector('.fb-screenshot-thumb');
+          return img ? img.getAttribute('src') : null;
+        },
+        statusText() {
+          const el = this.widget().shadowRoot.querySelector('.fb-status');
+          return el ? el.textContent : '';
+        },
+        async blobBase64() {
+          const img = this.widget().shadowRoot.querySelector('.fb-screenshot-thumb');
+          if (!img || !img.getAttribute('src')) return null;
+          const res = await fetch(img.getAttribute('src'));
+          const bytes = new Uint8Array(await res.arrayBuffer());
+          let s = '';
+          const chunk = 0x8000;
+          for (let i = 0; i < bytes.length; i += chunk) {
+            s += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+          }
+          return btoa(s);
+        },
+      };
+      window.addEventListener('message', (ev) => {
+        window.__fbE2E.messages.push({
+          origin: ev.origin,
+          type: ev.data && ev.data.type,
+          nonce: ev.data && ev.data.nonce,
+          token: ev.data && ev.data.accessToken,
+        });
+      });
+      document.getElementById('e2e-set-text').addEventListener('click', () => {
+        window.__fbE2E.setText('e2e 文本');
+      });
+      document.getElementById('e2e-retake').addEventListener('click', () => {
+        window.__fbE2E.widget().retakeScreenshot();
+      });
+    </script>
+
+    <script src="/sdk/feedback-web.umd.js"></script>
+    <feedback-widget
+      id="widget"
+      api-base="http://localhost:8787"
+      app-id="com.example.demo-e2e"
+      app-version="3.1.4"
+      page-label="e2e-orb"
+      side="right"
+      launcher-mode="orb"
+      capture-mode="viewport"
+    ></feedback-widget>
+  </body>
+</html>

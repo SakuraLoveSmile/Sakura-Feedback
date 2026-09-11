@@ -1,0 +1,11 @@
+{
+  "name": "@feedback/example-ssr",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "最小服务端渲染示例：Node http 渲染 HTML，反馈组件只在客户端动态 import（无框架、无构建步骤）",
+  "scripts": {
+    "start": "node server.mjs",
+    "typecheck": "node --check server.mjs && node --check page.mjs"
+  }
+}

@@ -1,0 +1,237 @@
+:root {
+  color-scheme: light;
+  font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  background: #f6f7f9;
+  color: #1c1e21;
+  font-size: 14px;
+}
+h1 {
+  font-size: 18px;
+}
+button {
+  border: 1px solid #d0d3d8;
+  background: #fff;
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+button:hover {
+  border-color: #2563eb;
+  color: #2563eb;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+button.primary {
+  background: #2563eb;
+  border-color: #2563eb;
+  color: #fff;
+}
+input,
+select,
+textarea {
+  border: 1px solid #d0d3d8;
+  border-radius: 8px;
+  padding: 7px 9px;
+  font-size: 13px;
+  width: 100%;
+  font-family: inherit;
+}
+input:focus,
+textarea:focus,
+select:focus {
+  outline: 2px solid #2563eb55;
+  border-color: #2563eb;
+}
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+th,
+td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid #e5e7eb;
+  vertical-align: top;
+}
+th {
+  color: #666;
+  font-weight: 500;
+  font-size: 12px;
+}
+.card {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 18px;
+  margin-bottom: 16px;
+}
+.row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+.spread {
+  justify-content: space-between;
+}
+.muted {
+  color: #888;
+}
+.err {
+  color: #b91c1c;
+}
+.ok-text {
+  color: #15803d;
+}
+.tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 99px;
+  font-size: 12px;
+  background: #eef1f5;
+}
+.tag.archived {
+  background: #dcfce7;
+  color: #15803d;
+}
+.tag.failed {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+.tag.needs_review {
+  background: #fef3c7;
+  color: #92400e;
+}
+.tag.received,
+.tag.processing,
+.tag.archiving {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+.field {
+  margin-bottom: 12px;
+}
+.field label {
+  display: block;
+  font-size: 12px;
+  color: #666;
+  margin-bottom: 4px;
+}
+.tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.tabs button.active {
+  background: #111827;
+  color: #fff;
+  border-color: #111827;
+}
+.detail-pane {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: min(520px, 100vw);
+  height: 100vh;
+  overflow: auto;
+  background: #fff;
+  border-left: 1px solid #d0d3d8;
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.08);
+  padding: 20px;
+  z-index: 40;
+}
+blockquote {
+  margin: 0;
+  padding: 8px 12px;
+  background: #f3f4f6;
+  border-left: 3px solid #9ca3af;
+  white-space: pre-wrap;
+}
+.kv {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 6px 12px;
+  font-size: 13px;
+}
+code {
+  background: #f3f4f6;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+.screenshot-thumb-wrap {
+  position: relative;
+  display: inline-block;
+  cursor: pointer;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid #d0d3d8;
+  transition:
+    transform 0.15s ease,
+    box-shadow 0.15s ease;
+}
+.screenshot-thumb-wrap:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  border-color: #2563eb;
+}
+.screenshot-lightbox-backdrop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 999;
+  padding: 24px;
+}
+.screenshot-lightbox-content {
+  position: relative;
+  max-width: 90vw;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.screenshot-lightbox-content img {
+  max-width: 100%;
+  max-height: 85vh;
+  object-fit: contain;
+  border-radius: 6px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+.screenshot-pin {
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: rgba(239, 68, 68, 0.85);
+  border: 2px solid #ffffff;
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.9);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  animation: pulse-pin 1.8s infinite;
+}
+@keyframes pulse-pin {
+  0% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);
+  }
+  70% {
+    box-shadow: 0 0 0 12px rgba(239, 68, 68, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);
+  }
+}

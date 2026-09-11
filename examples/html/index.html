@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Feedback × 原生 HTML 示例</title>
+    <style>
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        color: #0f172a;
+      }
+      main {
+        max-width: 720px;
+        padding: 40px;
+      }
+      h1 {
+        font-size: 24px;
+      }
+      p {
+        line-height: 1.6;
+      }
+      .row {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-bottom: 8px;
+      }
+      button {
+        font: inherit;
+        padding: 8px 16px;
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        background: #f8fafc;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #eef2f7;
+      }
+      .hint {
+        font-size: 13px;
+        color: #64748b;
+      }
+      .status {
+        color: #059669;
+        min-height: 24px;
+      }
+      .sensitive {
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+        padding: 16px;
+        background: #f8fafc;
+        max-width: 400px;
+        margin-bottom: 20px;
+      }
+      code {
+        background: #f1f5f9;
+        padding: 1px 4px;
+        border-radius: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>原生 HTML × @feedback/web 示例</h1>
+      <p>
+        右下角为灵感球（可拖动到界面任意位置指出问题并截图）。没有打包器、没有框架：
+        只有一个 <code>&lt;script&gt;</code> 标签 + 一个自定义元素。
+      </p>
+
+      <div class="row">
+        <button id="btn-open" type="button">打开面板（不截图）</button>
+        <button id="btn-capture" type="button">截图并打开</button>
+      </div>
+      <p class="hint">
+        <code>open()</code> 只打开面板；截图必须调用元素的
+        <code>captureAndOpen()</code>。<code>openFeedback()</code> 内部只调
+        <code>open()</code>，不会截图。
+      </p>
+
+      <p id="status" class="status" role="status"></p>
+
+      <div class="sensitive" data-feedback-capture-mask>
+        <strong>敏感数据保护演示区</strong>
+        <p class="hint">
+          带 <code>data-feedback-capture-mask</code> 的区域在截图时会被中性遮罩覆盖：
+        </p>
+        <div>密码：<code>MySecretP@ssw0rd!</code></div>
+      </div>
+
+      <p class="hint">
+        截图范围是<strong>当前应用视口</strong>：拖拽落点只标记问题位置，
+        没有局部裁剪、没有系统悬浮窗、也拍不到其它应用。
+      </p>
+    </main>
+
+    <!--
+      1) 自托管 UMD 产物：先 `pnpm --filter @feedback/web build`，
+         再把 packages/web/dist/feedback-web.umd.cjs 拷贝成本目录下的
+         feedback-web.umd.js（改名见 README：.cjs 常被静态服务器当成
+         application/octet-stream，浏览器会拒绝执行）。
+         该产物不入 git（见 .gitignore）。
+      2) 加载后元素由顶层副作用自动注册，无需再调 customElements.define。
+    -->
+    <script src="./feedback-web.umd.js"></script>
+
+    <!--
+      3) 声明元素。launcher-mode / capture-mode 必须显式写：
+         组件默认是 tab / off（升级不改变旧宿主行为）。
+    -->
+    <feedback-widget
+      id="widget"
+      api-base="http://localhost:8787"
+      app-id="com.example.demo-html"
+      app-version="1.0.0"
+      page-label="home"
+      side="right"
+      launcher-mode="orb"
+      capture-mode="viewport"
+    ></feedback-widget>
+
+    <script>
+      // UMD 顶层副作用已注册 <feedback-widget>；这里只做事件订阅与按钮接线。
+      const widget = document.getElementById('widget');
+      const status = document.getElementById('status');
+
+      if (!customElements.get('feedback-widget')) {
+        status.style.color = '#dc2626';
+        status.textContent =
+          '未找到 <feedback-widget>：请先构建并拷贝 UMD 产物（见 README）。';
+      }
+
+      // 服务已接收提交（201/200）后在元素上派发；不是"Kaneo 已归档"通知。
+      widget.addEventListener('feedback-submitted', (event) => {
+        const { feedbackId, status: submitStatus, replayed } = event.detail;
+        status.style.color = '#059669';
+        status.textContent =
+          '服务已接收：feedbackId=' + feedbackId + ' status=' + submitStatus +
+          (replayed ? '（重放）' : '');
+      });
+
+      document.getElementById('btn-open').addEventListener('click', () => {
+        widget.open();
+      });
+
+      document.getElementById('btn-capture').addEventListener('click', () => {
+        widget.captureAndOpen();
+      });
+    </script>
+  </body>
+</html>

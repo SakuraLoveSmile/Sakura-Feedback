@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>E2E 宿主页 · 默认 capture-mode（off）+ 侧边标签手动截图</title>
+    <!--
+      e2e 专用宿主页（不是产品代码）。
+
+      存在的理由（本次修复的缺口）：
+        宿主**故意不声明** `capture-mode`，走组件默认值 `off`——这是绝大多数真实
+        宿主的形态。`off` 的语义是「关闭**自动**截图」，不是「关掉截图能力」：
+        用户必须在面板里能用「截取当前页面」手动补拍。
+        修复前：截图操作区整体长在「仅有截图才显示」的预览里，`off` 宿主既不会
+        自动截图、又没有首次截图入口；先输入文字后连 `captureAndOpen()` 也被草稿
+        拦下 → 完全没有补拍入口。
+
+      版面（1280x800 视口，dpr=1，scale=1 → CSS 坐标 == PNG 像素坐标），
+      与 mask.html 一致，便于复用同一套像素断言：
+        #visible-block  (60,60)-(380,240)    纯绿 #00ff00   必须可见
+        #secret-card    (500,80)-(860,280)   纯品红 #ff00ff + [data-feedback-capture-mask]
+        #pw             (500,340)-(860,388)  纯青 #00ffff input[type=password]
+        #footer-block   (60,400)-(380,520)   纯蓝 #0000ff   必须可见
+      面板固定在右侧 400px（x 从 1280-16-400=864 起），两个敏感区都在其左侧，
+      因此「面板不在截图里」与「敏感区被遮挡」两类断言互不干扰。
+
+      侧边组件默认形态：未声明 launcher-mode → 贴边标签（tab）；未声明 side → right。
+    -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: #ffffff;
+      }
+      body {
+        position: relative;
+        width: 1280px;
+        height: 800px;
+        overflow: hidden;
+        font-family: system-ui, -apple-system, sans-serif;
+      }
+      .block {
+        position: absolute;
+        color: #000000;
+        font-size: 18px;
+        padding: 8px;
+        box-sizing: border-box;
+      }
+      #visible-block {
+        left: 60px;
+        top: 60px;
+        width: 320px;
+        height: 180px;
+        background: #00ff00;
+      }
+      #secret-card {
+        left: 500px;
+        top: 80px;
+        width: 360px;
+        height: 200px;
+        background: #ff00ff;
+        color: #ffff00;
+      }
+      #pw {
+        position: absolute;
+        left: 500px;
+        top: 340px;
+        width: 360px;
+        height: 48px;
+        background: #00ffff;
+        border: 0;
+        font-size: 18px;
+        padding: 0 8px;
+        box-sizing: border-box;
+      }
+      #footer-block {
+        left: 60px;
+        top: 400px;
+        width: 320px;
+        height: 120px;
+        background: #0000ff;
+        color: #ffffff;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="visible-block" class="block">VISIBLE-NORTH</div>
+
+    <div id="secret-card" class="block" data-feedback-capture-mask>
+      SECRET-CANARY-TOKEN-abcdef0123456789
+    </div>
+
+    <input id="pw" type="password" value="pw-canary-9182736455" />
+
+    <div id="footer-block" class="block">VISIBLE-SOUTH</div>
+
+    <script>
+      // 测试脚手架（仅 e2e）：只暴露读取入口，页面内容本身是静态的。
+      window.__fbE2E = {
+        messages: [],
+        widget: () => document.querySelector('feedback-widget'),
+        rects() {
+          const r = {};
+          for (const id of ['visible-block', 'secret-card', 'pw', 'footer-block']) {
+            const b = document.getElementById(id).getBoundingClientRect();
+            r[id] = { x: b.x, y: b.y, width: b.width, height: b.height };
+          }
+          return r;
+        },
+        shadow() {
+          return this.widget().shadowRoot;
+        },
+        thumbSrc() {
+          const img = this.shadow().querySelector('.fb-screenshot-thumb');
+          return img ? img.getAttribute('src') : null;
+        },
+        statusText() {
+          const el = this.shadow().querySelector('.fb-status');
+          return el ? el.textContent : '';
+        },
+        // 焦点观测：面板在捕获期间整体 visibility:hidden，真实浏览器会把焦点丢到 body
+        active() {
+          const el = this.shadow().activeElement;
+          if (!el) return { found: false };
+          return {
+            found: true,
+            tag: el.tagName,
+            cls: String(el.className || ''),
+            label: el.getAttribute('aria-label'),
+            unreachable: !!(el.hidden || el.closest('[hidden]')),
+            disabled: el.disabled === true,
+          };
+        },
+        async blobBase64() {
+          const img = this.shadow().querySelector('.fb-screenshot-thumb');
+          if (!img || !img.getAttribute('src')) return null;
+          const res = await fetch(img.getAttribute('src'));
+          const bytes = new Uint8Array(await res.arrayBuffer());
+          let s = '';
+          const chunk = 0x8000;
+          for (let i = 0; i < bytes.length; i += chunk) {
+            s += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+          }
+          return btoa(s);
+        },
+      };
+      window.addEventListener('message', (ev) => {
+        window.__fbE2E.messages.push({
+          origin: ev.origin,
+          type: ev.data && ev.data.type,
+          nonce: ev.data && ev.data.nonce,
+          token: ev.data && ev.data.accessToken,
+        });
+      });
+    </script>
+
+    <script src="/sdk/feedback-web.umd.js"></script>
+    <!-- 注意：这里**没有** launcher-mode / capture-mode / side 属性（默认形态） -->
+    <feedback-widget
+      id="widget"
+      api-base="http://localhost:8787"
+      app-id="com.example.demo-e2e"
+      app-version="3.1.4"
+      page-label="e2e-manual"
+    ></feedback-widget>
+  </body>
+</html>

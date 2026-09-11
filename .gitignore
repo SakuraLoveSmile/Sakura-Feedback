@@ -1,0 +1,33 @@
+node_modules/
+dist/
+build/
+coverage/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/
+.env
+.env.local
+.env.*.local
+.env.prod
+deploy/.env.prod
+.dart_tool/
+flutter/**/build/
+flutter/**/.dart_tool/
+flutter/**/pubspec.lock
+examples/flutter/.dart_tool/
+examples/flutter/build/
+*.o
+*.so
+.DS_Store
+
+# 本机 pnpm 内容寻址缓存（不入库；CI 与部署各自安装）
+.pnpm-store/
+# 本机 agent 团队运行记录（非源码；含会话/成员状态）
+.agent-teams/
+# Python 字节码缓存
+__pycache__/
+*.pyc
+# flutter pub get 生成的插件清单
+.flutter-plugins-dependencies

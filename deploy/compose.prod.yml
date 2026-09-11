@@ -1,0 +1,40 @@
+# 生产部署：拉取 GitHub Actions 构建的固定 digest 镜像，不构建、不跟随 latest。
+# 详细步骤见 docs/deployment.md 与 deploy/README.md。
+#
+# 前置：
+#   cp deploy/.env.prod.example deploy/.env.prod   # 填写 MASTER_KEY / 域名 / 镜像 digest
+#   docker compose --env-file deploy/.env.prod -f deploy/compose.prod.yml up -d
+#
+# 关键约束：
+#   - 端口只绑服务器回环，公网入口一律走 Nginx TLS 终止（deploy/nginx/feedback.conf.template）。
+#   - FEEDBACK_PUBLIC_URL 必填：Cookie 写操作的同源校验以它为准（反向代理会改写内部请求 URL）。
+#   - 镜像用 digest 固定（image: ...@sha256:...），升级时显式替换 digest，不使用可变标签。
+
+services:
+  feedback:
+    image: ${FEEDBACK_IMAGE:?请设置 FEEDBACK_IMAGE=ghcr.io/sakuralovesmile/sakura-feedback@sha256:<digest>}
+    ports:
+      # 只绑回环：外部无法直连 8787，必须经 Nginx HTTPS
+      - "127.0.0.1:8787:8787"
+    environment:
+      # 生产固定值（优先于 env_file，避免文件里漏配导致降级）
+      FEEDBACK_PUBLIC_URL: ${FEEDBACK_PUBLIC_URL:?请设置 FEEDBACK_PUBLIC_URL=https://<域名>}
+      FEEDBACK_COOKIE_SECURE: "true"
+      FEEDBACK_DATA_DIR: /data
+      FEEDBACK_PORT: "8787"
+    env_file:
+      # FEEDBACK_MASTER_KEY / FEEDBACK_ADMIN_USER / FEEDBACK_ADMIN_PASSWORD
+      - .env.prod
+    volumes:
+      # 命名卷持久化 SQLite 与截图；不要用匿名卷，否则容器重建会丢数据
+      - feedback-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8787/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  feedback-data:

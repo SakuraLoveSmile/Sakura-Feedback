@@ -1,0 +1,14 @@
+services:
+  feedback:
+    build: .
+    image: feedback-service:local
+    ports:
+      - "8787:8787"
+    # 不再在此覆盖 FEEDBACK_COOKIE_SECURE：由 .env 决定，避免本地文件把生产配置强制降级为不安全。
+    # 本地 HTTP 调试请在 .env 里显式写 FEEDBACK_COOKIE_SECURE=false；
+    # HTTPS 生产部署使用 compose.prod.yml（拉取固定 digest 镜像 + Secure Cookie + 回环绑定）。
+    env_file:
+      - .env
+    volumes:
+      - ./data:/data
+    restart: unless-stopped

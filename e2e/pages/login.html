@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>E2E 宿主页 · 登录握手</title>
+    <!--
+      e2e 专用宿主页（不是产品代码）：登录握手正/负例的宿主。
+      组件用 tab 模式 + capture-mode=off，避免截图干扰握手断言。
+
+      页面自己（而不是被测试组件）在 window 上挂 message 记录器：
+      只有记录器收到了某条消息，才能说「消息确实送达宿主页、被组件忽略」。
+    -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: #ffffff;
+        font-family: system-ui, -apple-system, sans-serif;
+      }
+      body {
+        position: relative;
+        width: 1280px;
+        height: 800px;
+        overflow: hidden;
+      }
+      #host-labels {
+        padding: 24px;
+        color: #333333;
+      }
+      #e2e-open-attacker {
+        margin: 8px 0 0 0;
+        font: inherit;
+        padding: 6px 12px;
+      }
+      #hooks {
+        position: absolute;
+        left: 24px;
+        top: 600px;
+        display: flex;
+        gap: 8px;
+      }
+      #hooks button {
+        font: inherit;
+        padding: 6px 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="host-labels">
+      <h1 id="host-title">E2E 登录宿主页</h1>
+      <p id="host-origin"></p>
+      <button id="e2e-open-attacker" type="button">打开（异源）攻击窗口</button>
+    </div>
+
+    <div id="hooks" hidden>
+      <button id="e2e-set-text" type="button">set text</button>
+    </div>
+
+    <script>
+      // 测试脚手架（仅 e2e）。
+      window.__fbE2E = {
+        messages: [],
+        widget: () => document.querySelector('feedback-widget'),
+        setText(text) {
+          this.widget().shadowRoot.querySelector('.fb-textarea').value = text;
+        },
+        statusText() {
+          const el = this.widget().shadowRoot.querySelector('.fb-status');
+          return el ? el.textContent : '';
+        },
+        setApiBase(value) {
+          // 文档化用法：api-base 属性变化 = 完整身份切换（README §属性）
+          this.widget().apiBase = value;
+        },
+        setAppId(value) {
+          this.widget().appId = value;
+        },
+        openAttacker(url) {
+          const btn = document.getElementById('e2e-open-attacker');
+          btn.dataset.url = url;
+          btn.click();
+        },
+      };
+      window.addEventListener('message', (ev) => {
+        window.__fbE2E.messages.push({
+          origin: ev.origin,
+          type: ev.data && ev.data.type,
+          nonce: ev.data && ev.data.nonce,
+          token: ev.data && ev.data.accessToken,
+          at: Date.now(),
+        });
+      });
+      document.getElementById('host-origin').textContent = '宿主 origin：' + location.origin;
+      document.getElementById('e2e-open-attacker').addEventListener('click', (ev) => {
+        const url = ev.currentTarget.dataset.url;
+        if (url) window.open(url, 'e2e-attacker');
+      });
+      document.getElementById('e2e-set-text').addEventListener('click', () => window.__fbE2E.setText('e2e 文本'));
+    </script>
+
+    <script src="/sdk/feedback-web.umd.js"></script>
+    <feedback-widget
+      id="widget"
+      api-base="http://localhost:8787"
+      app-id="com.example.demo-e2e"
+      app-version="3.1.4"
+      page-label="e2e-login"
+      side="right"
+    ></feedback-widget>
+  </body>
+</html>

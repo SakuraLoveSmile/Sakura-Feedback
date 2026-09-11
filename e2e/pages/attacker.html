@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>E2E 异源攻击页</title>
+    <!--
+      e2e 专用「攻击者」页（不是产品代码）：由宿主页用 window.open 打开，
+      因此拿到 window.opener 引用；它来自另一个 origin（宿主用 http://localhost:5189，
+      本页用 http://127.0.0.1:5189），用 postMessage 向宿主投递一条伪造的
+      feedback:auth 消息。
+
+      参数：
+        token  - 伪造的访问令牌（默认 FORGED-TOKEN-FROM-WRONG-ORIGIN）
+        nonce  - 投递时使用的 nonce；e2e 会把真实的 nonce 传进来，
+                 这样负例断言的就不是「nonce 不匹配」，而是「origin 不匹配」。
+        target - 目标 origin；默认取 document.referrer 的 origin（真实攻击者的做法）。
+      页面在 window 上记录自己的投递结果，供测试断言「消息确实发出去了」。
+    -->
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        padding: 24px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1 id="attacker-title">异源攻击页</h1>
+    <p id="attacker-log"></p>
+    <script>
+      const q = new URLSearchParams(location.search);
+      const nonce = q.get('nonce') || 'attacker-nonce';
+      const token = q.get('token') || 'FORGED-TOKEN-FROM-WRONG-ORIGIN';
+      let target = q.get('target');
+      if (!target) {
+        try {
+          target = document.referrer ? new URL(document.referrer).origin : '';
+        } catch (e) {
+          target = '';
+        }
+      }
+      window.__attacker = {
+        origin: location.origin,
+        target,
+        nonce,
+        token,
+        posts: 0,
+        lastError: null,
+        hasOpener: !!window.opener,
+      };
+      function fire() {
+        const log = document.getElementById('attacker-log');
+        if (!window.opener) {
+          window.__attacker.lastError = 'no-opener';
+          log.textContent = '没有 window.opener，无法投递';
+          return;
+        }
+        try {
+          window.opener.postMessage(
+            {
+              type: 'feedback:auth',
+              nonce,
+              accessToken: token,
+              expiresAt: new Date(Date.now() + 3600 * 1000).toISOString(),
+            },
+            target || '*',
+          );
+          window.__attacker.posts++;
+          log.textContent = '已向 ' + (target || '*') + ' 投递 feedback:auth（nonce=' + nonce + '）';
+        } catch (e) {
+          window.__attacker.lastError = String(e);
+          log.textContent = '投递失败：' + e;
+        }
+      }
+      fire();
+      setTimeout(fire, 300);
+    </script>
+  </body>
+</html>

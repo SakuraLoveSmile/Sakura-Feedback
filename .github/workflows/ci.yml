@@ -1,0 +1,88 @@
+name: CI
+
+# - PR / 分支推送：只跑检查，绝不发布
+# - 被 release.yml 以 workflow_call 复用：先检查通过，才允许发布
+on:
+  pull_request:
+  push:
+    branches: ["main", "master"]
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 供应链卫生：确认没有把本地凭据/数据库/缓存提交进来。发布构建不读取任何生产 .env。
+  secrets-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 仓库内不得存在被跟踪的凭据、数据库或本地代理记录
+        run: |
+          set -euo pipefail
+          bad=0
+          # 凭据/环境文件（.example 模板允许）
+          if git ls-files | grep -E '(^|/)\.env($|\.)' | grep -v '\.example$'; then
+            echo "::error::发现被跟踪的 .env 类文件"; bad=1
+          fi
+          # 数据库与 WAL 文件
+          if git ls-files | grep -E '\.db(-journal|-wal|-shm)?$'; then
+            echo "::error::发现被跟踪的 SQLite 文件"; bad=1
+          fi
+          # 本机代理/终端记录与缓存
+          if git ls-files | grep -E '(^|/)(\.pnpm-store|node_modules|dist|build|data)/'; then
+            echo "::error::发现被跟踪的缓存或构建产物目录"; bad=1
+          fi
+          if git ls-files | grep -E '(^|/)\.(DS_Store|idea|vscode)/?$' | grep -v '\.vscode/extensions'; then
+            echo "::error::发现被跟踪的本机编辑器/系统文件"; bad=1
+          fi
+          if [ "$bad" -ne 0 ]; then exit 1; fi
+          echo "OK: 无凭据/数据库/缓存入库"
+
+  node-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+      - name: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile
+      - name: typecheck
+        run: pnpm -r typecheck
+      - name: lint
+        run: pnpm -r lint
+      - name: test
+        run: pnpm -r test
+      - name: build
+        run: pnpm -r build
+
+  flutter-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.41.3
+          channel: stable
+          cache: true
+      - name: 组件包 analyze + test
+        working-directory: flutter/feedback
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter test
+      - name: 示例 analyze + test
+        working-directory: examples/flutter
+        run: |
+          flutter pub get
+          flutter analyze
+          flutter test
