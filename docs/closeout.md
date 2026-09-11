@@ -240,6 +240,16 @@ pnpm=11.23.0
   只有配置齐全时才加载。
 - 配置：`VITE_FEEDBACK_API_BASE` + `VITE_FEEDBACK_APP_ID`；**任一为空则整段不渲染**（宿主行为不变）。
 - 页面标签：`String(route.name ?? 'unknown')`，**只传名称、不带查询参数**。
+- **已在浏览器实测**（隔离服务 `fb-rag` :8798 + `vite --port 5174`，注入
+  `VITE_FEEDBACK_API_BASE=http://127.0.0.1:8798`、`VITE_FEEDBACK_APP_ID=rag`）：
+  - 组件确实挂载为自定义元素，属性齐全：
+    `api-base=http://127.0.0.1:8798 app-id=rag page-label=today side=right launcher-mode=orb capture-mode=viewport`，
+    带 Shadow DOM，**无** `Failed to resolve component: feedback-widget` 警告（证 `isCustomElement` 生效）。
+  - 宿主导航 `/today → /recall`：`page-label` 随之 `today → recall`，**同一实例保留**
+    （在 DOM 节点上打的标记存活）、页面内 `feedback-widget` 数量恒为 **1** ⇒ 路由切换不重建。
+  - 未登记来源被拒（本机 5174 未登记到该实例）：跨源资源请求返回 `502`；登记 `appId=rag`
+    且 `allowedOrigins=['http://127.0.0.1:5174']` 后 CORS 预检才回显（另见上文 HTTPS 一节的 204/404 证据）。
+  - **未做**：在 5174 里完成一次真实登录→截图→提交（需你在有真实 Kaneo/AI 的环境点一次）。
 - 服务端登记：`appId=rag`，允许来源需含 `http://127.0.0.1:5174`（实际开发入口）与部署后的真实 origin。
 - 遮挡：**该应用没有密钥/凭据输入界面**（已检索 views/components 确认），故"配置页密钥区域遮挡"在此处不适用。
 
@@ -371,7 +381,8 @@ flutter build apk --debug \
    即当前机器的 key 未注册。推送基线走的是 HTTPS + `gh` 凭据助手；CI 与生产机需可用 SSH 才能拉取私有 Git 依赖。
 6. **真实 Android 实机未验收**：未在 Mi 10 上安装含真实 Rust 核心的构建，未验证书库/阅读页/设置页呼出、
    截图、键盘、返回键与重启后登录存储。
-7. **RAG 运行时未在浏览器实测**：仅做了构建与条件打包验证，未在 `127.0.0.1:5174` 打开面板提交。
+7. **RAG 已在浏览器实测（接入层）**：`vite --port 5174` 下组件挂载、属性、Shadow DOM、路由切换不重建
+   均已实测（见 T2/RAG 段）。**仍未做**的是在 5174 里完成一次真实「登录 → 截图 → 提交」到真实 Kaneo。
 8. **Comic 改动未提交**：宿主已有 115 项未提交改动，本轮改动与它们混在工作区，未擅自提交（按你选择保留）。
 9. ~~**浏览器 E2E 本次未取得完整汇总**~~ → **已作废**：那次 SIGKILL 中断后的重跑成功，
    三引擎均取得完整汇总（见第 10 项与"跨引擎浏览器运行"）。中断时残留的
