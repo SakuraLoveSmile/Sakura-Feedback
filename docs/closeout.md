@@ -276,10 +276,17 @@ pnpm=11.23.0
 
 - `flutter pub get` 成功（本机 SSH 22 端口不通，仅本地验证用一次性 env 覆盖改走 HTTPS；
   `pubspec.yaml` 内保持 SSH url，未改全局 git config）。
-- `flutter analyze` → **No issues found**。
-- `flutter test` → **159 项通过**。
+- **本轮复跑（改动落地后）**：`flutter analyze`（`flutter/feedback`）→ **No issues found**；
+  `flutter test` → **76 项通过**。
+  （更正：此前记的「159 项」不准确——`Feedback/flutter/` 下只有 `feedback/` 一个包，
+  实测与 `test/*.dart` 中的 test 声明数均为 **76**；以 76 为准。）
+- **宿主侧复跑**：`Comic/android/app` `flutter analyze` → **No issues found**；
+  再对两个接入点单独分析（`lib/main.dart`、`lib/src/server_form_screen.dart`）→ **No issues found**。
+  即分析器能沿 Git 依赖解析到 `feedback_widget`，集成在编译期成立；
+  `pubspec.lock` 中 `resolved-ref` 与 `ref` 完全一致（`8c66cc07…`）。
 - **挂载双分支实测**：临时用例分别在不带/带 `--dart-define` 下运行，均通过；
   再**变异检查**（把 `builder` 临时改成 `null`）→ 带配置那条如期失败，证明断言非空转。临时用例已删除。
+- **仍未做**：Mi 10 实机的书库/阅读页/设置页呼出、截图、键盘、返回键与重启后登录存储。
 
 ### 两端统一
 
