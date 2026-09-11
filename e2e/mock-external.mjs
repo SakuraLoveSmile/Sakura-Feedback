@@ -55,7 +55,12 @@ const state = {
   uploadAuthLeaks: [], // 预签名上传里出现 Authorization 的记录
 
   // ---- 精确阶段故障注入（见文件头 4/5/6/7）----
-  fail: { stage: null, mode: null, once: true, afterWrite: true, fired: 0 },
+  // skip/filename 是 e2e 侧的**定位**扩展（默认关，行为与扩展前逐字一致）：
+  //   - skip: 跳过前 N 次匹配该阶段的请求再触发（用于「先截图后日志」的归档顺序里命中第 N+1 个附件）；
+  //   - filename: 只命中某一份日志（presign 请求体带 filename；put/finalize 用 key 反查，
+  //     comment 用内容里出现的 key 反查）。不匹配则**不消费**注入。
+  fail: { stage: null, mode: null, once: true, afterWrite: true, fired: 0, skip: 0, matched: 0, filename: null },
+  keyFilenames: new Map(), // key -> 该附件上传时的 filename（仅供 filename 定位）
   expireNextPresign: false,
   calls: emptyCalls(),
   presigns: [], // [{ seq, taskId, key, uploadUrl, expired, at }]
@@ -131,17 +136,46 @@ let kaneoBase = process.env.E2E_KANEO_PUBLIC_BASE || "http://127.0.0.1:8898";
 /**
  * 取出并（必要时）消费当前匹配该阶段的注入配置。
  * 返回 { mode, afterWrite } 或 null（无注入）。
+ *
+ * `info` 提供**定位**信息（可选）：{ filename }、{ key }、{ text }。
+ * 只有配置了 `filename` 时才用它过滤；不匹配一律返回 null 且**不消费**注入。
+ * `skip` 跳过前 N 次匹配（默认 0 → 与扩展前行为逐字一致）。
  */
-function takeInjection(stage) {
+function takeInjection(stage, info = {}) {
   const f = state.fail;
   if (!f.stage || !f.mode || f.stage !== stage) return null;
+  if (f.filename) {
+    const want = String(f.filename);
+    const have = info.filename ?? filenameFor(info.key) ?? filenameInText(info.text);
+    if (!have || !String(have).includes(want)) return null;
+  }
+  if (f.skip && (f.matched ?? 0) < f.skip) {
+    f.matched = (f.matched ?? 0) + 1;
+    return null;
+  }
   const out = { mode: f.mode, afterWrite: f.afterWrite !== false };
+  f.matched = (f.matched ?? 0) + 1;
   f.fired += 1;
   if (f.once !== false) {
     f.stage = null;
     f.mode = null;
   }
   return out;
+}
+
+/** key → 该附件上传时的 filename（仅当该次 presign 带过 filename）。 */
+function filenameFor(key) {
+  if (!key) return undefined;
+  return state.keyFilenames.get(String(key));
+}
+
+/** 从评论正文里出现的 key 反查 filename（日志评论正文含自己的资产 URL）。 */
+function filenameInText(text) {
+  if (!text) return undefined;
+  for (const [k, name] of state.keyFilenames) {
+    if (text.includes(k)) return name;
+  }
+  return undefined;
 }
 
 /** 按注入模式结束一个请求：uncertain=掐断连接；definite=403 明文拒绝。 */
@@ -186,6 +220,28 @@ function failState() {
   return { ...state.fail, expireNextPresign: state.expireNextPresign };
 }
 
+/**
+ * 日志诊断的 mock 产出（仅当请求带日志时）。
+ * - `logEvidence` 逐字摘录日志原文（优先含 canary 的那一行），并携带合法 `seq`；
+ * - `possibleCauses` 只放未证实的推测，`confidence` 为 low/medium。
+ * 两者分字段，正是 e2e 要断言的「证据 vs 推测」契约形态。
+ */
+function buildMockDiagnostics(userMsg, seqs) {
+  const lines = userMsg.split("\n").map((l) => l.trim()).filter(Boolean);
+  const canaryLine = lines.find((l) => l.includes("E2E-LOG-CANARY"));
+  const quote = (canaryLine ?? lines.find((l) => !l.startsWith("【")) ?? "（mock）日志原文片段").slice(0, 200);
+  return {
+    logEvidence: [{ seq: seqs[0], filename: "app.log", quote }],
+    possibleCauses: [
+      {
+        hypothesis: "（mock 推测）导出流程在数据尚未就绪时读取了 rows",
+        confidence: "low",
+        basedOn: "app.log 中的 TypeError 行",
+      },
+    ],
+  };
+}
+
 // ---------- AI mock ----------
 http
   .createServer(async (req, res) => {
@@ -207,6 +263,19 @@ http
         hasImage: hasImagePart(userContent),
       });
       if (state.aiCalls.length > 50) state.aiCalls.shift();
+      // 日志诊断（L7 契约）：仅当本次请求确实带日志段落时返回 diagnostics，
+      // 让「证据（逐字摘录 + seq）与推测（confidence）分字段」在真实链路上可断言。
+      // 不带日志时行为与扩展前逐字一致（旧场景不受影响）。
+      // 注意：带图片时 messages[].content 是「文本 + image_url」数组，
+      // 因此必须用已抽出的纯文本 userMsg（字符串）做匹配，不能用 userContent。
+      // 诊断产出包在 try/catch 里：mock 侧的任何意外都不得让 AI 响应失败（否则整条归档链路被误伤）。
+      let diagnostics;
+      try {
+        const logSeqs = [...String(userMsg).matchAll(/【日志 \d+\/\d+（seq=(\d+)/g)].map((m) => Number(m[1]));
+        if (logSeqs.length > 0) diagnostics = buildMockDiagnostics(String(userMsg), logSeqs);
+      } catch (e) {
+        console.error("[mock-ai] diagnostics 生成失败（已忽略）:", e && e.message);
+      }
       return json(res, 200, {
         choices: [
           {
@@ -219,6 +288,7 @@ http
                   suggestions: "",
                   questions: "",
                 },
+                ...(diagnostics ? { diagnostics } : {}),
               }),
             },
           },
@@ -263,6 +333,7 @@ http
         fail: failState(),
         calls: { ...state.calls },
         presigns: state.presigns,
+        keyFilenames: Object.fromEntries(state.keyFilenames), // key -> 该附件的 filename（定位/归属断言用）
         putAttempts: state.putAttempts,
         finalizeAttempts: state.finalizeAttempts,
         commentAttempts: state.commentAttempts,
@@ -298,6 +369,12 @@ http
       }
       if ("once" in body) state.fail.once = Boolean(body.once);
       if ("afterWrite" in body) state.fail.afterWrite = Boolean(body.afterWrite);
+      // ---- 定位扩展（e2e 侧）：skip 跳过前 N 次匹配；filename 只命中某一份日志 ----
+      if ("skip" in body) state.fail.skip = Math.max(0, Number(body.skip) || 0);
+      if ("filename" in body) {
+        state.fail.filename = body.filename === null || body.filename === "" ? null : String(body.filename);
+      }
+      if ("stage" in body || "mode" in body || "skip" in body || "filename" in body) state.fail.matched = 0;
       if (body.mode === null || body.stage === null) state.fail.fired = 0;
       if ("expire" in body) state.expireNextPresign = Boolean(body.expire);
       return json(res, 200, failState());
@@ -317,7 +394,11 @@ http
       state.commentSeq = 0;
       state.uploadAuthLeaks = [];
       // 新增状态一并复位
-      state.fail = { stage: null, mode: null, once: true, afterWrite: true, fired: 0 };
+      state.fail = {
+        stage: null, mode: null, once: true, afterWrite: true, fired: 0,
+        skip: 0, matched: 0, filename: null,
+      };
+      state.keyFilenames = new Map();
       state.expireNextPresign = false;
       state.calls = emptyCalls();
       state.presigns = [];
@@ -335,7 +416,7 @@ http
       if (req.headers.authorization) {
         state.uploadAuthLeaks.push({ key, authorization: req.headers.authorization });
       }
-      const inj = takeInjection("put");
+      const inj = takeInjection("put", { key });
       if (inj && inj.mode !== "hold") {
         // 结果是确定失败/未知：本次不上传字节
         state.putAttempts.push({
@@ -414,11 +495,12 @@ http
       const taskId = match[1];
       state.calls.presign += 1;
       const body = await readBody(req);
-      const inj = takeInjection("presign");
+      const inj = takeInjection("presign", { filename: body.filename });
       if (inj && inj.mode !== "hold") {
         return rejectByInjection(req, res, inj.mode);
       }
       const key = `asset-${++state.assetSeq}-${req.headers["x-e2e-nonce"] ?? Date.now()}`;
+      if (body.filename) state.keyFilenames.set(key, String(body.filename));
       const expired = state.expireNextPresign;
       // 过期模拟：v2 风格 Expires 签名参数（服务端 parsePresignedExpiry 据此得出过去的 expiresAt）
       const query = expired ? `?Expires=${Math.floor(Date.now() / 1000) - 60}` : "";
@@ -450,7 +532,7 @@ http
       state.calls.finalize += 1;
       const body = await readBody(req);
       const key = String(body.key ?? "");
-      const inj = takeInjection("finalize");
+      const inj = takeInjection("finalize", { key });
       if (inj && inj.mode !== "hold") {
         state.finalizeAttempts.push({
           seq: state.finalizeAttempts.length + 1,
@@ -507,7 +589,7 @@ http
       const taskId = match[1];
       state.calls.comment += 1;
       const body = await readBody(req);
-      const inj = takeInjection("comment");
+      const inj = takeInjection("comment", { text: String(body.content ?? "") });
       if (inj && inj.mode !== "hold") {
         state.commentAttempts.push({
           seq: state.commentAttempts.length + 1,

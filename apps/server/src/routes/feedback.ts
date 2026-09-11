@@ -1,11 +1,13 @@
+import { createHash } from "node:crypto";
 import { Hono } from "hono";
 import type { RateLimiter } from "../auth/ratelimit.ts";
-import type { Db, FeedbackRow, FeedbackStatus, SessionRow } from "../db/repos.ts";
+import type { Db, FeedbackRow, FeedbackStatus, NewFeedbackLog, SessionRow } from "../db/repos.ts";
 import {
   contentHash,
   getAppByAppId,
   getFeedback,
   getFeedbackByKey,
+  getFeedbackLog,
   getFeedbackScreenshot,
   insertFeedbackWithScreenshot,
 } from "../db/repos.ts";
@@ -13,9 +15,172 @@ import type { ServerConfig } from "../env.ts";
 import { checkLimiter, checkSameOrigin, type Err, err, fail, isErr, readJson, requireSession } from "../http.ts";
 import type { Worker, WorkerOpResult } from "../pipeline/worker.ts";
 import { ImageValidationError, type SanitizedImage, validateAndSanitizePng } from "../services/image.ts";
+import { decodeLogStrict } from "../services/log-text.ts";
 
 const MAX_TEXT_CODEPOINTS = 10_000;
-const MAX_MULTIPART_BYTES = 6 * 1024 * 1024; // 6MiB
+const MAX_MULTIPART_BYTES = 9 * 1024 * 1024; // 9MiB（5MiB 截图 + 3MiB 日志 + 协议开销，见 docs/api.md L1）
+const MAX_LOGS = 3;
+const MAX_LOG_BYTES = 1024 * 1024; // 单份日志上限 1MiB
+const MAX_LOGS_TOTAL_BYTES = 3 * 1024 * 1024; // 全部日志合计上限（派生上界，仍需显式校验）
+const MAX_LOG_FILENAME_CHARS = 255;
+const LOG_EXTENSIONS = [".log", ".txt", ".json", ".jsonl"];
+const LOG_CONTENT_TYPES = [
+  "text/plain",
+  "application/json",
+  "application/x-ndjson",
+  "application/jsonl",
+  "application/octet-stream",
+];
+
+/** 取小写扩展名（含点）；无扩展名返回 ""。 */
+function logExtension(name: string): string {
+  const base = basenameOf(name);
+  const idx = base.lastIndexOf(".");
+  return idx < 0 ? "" : base.slice(idx).toLowerCase();
+}
+
+/** 丢弃路径分隔符之前的部分（部件 filename 可能被客户端带上路径）。 */
+function basenameOf(name: string): string {
+  const normalized = name.replaceAll("\\", "/");
+  const idx = normalized.lastIndexOf("/");
+  return idx < 0 ? normalized : normalized.slice(idx + 1);
+}
+
+/**
+ * 统一清洗规则（L2，逐字；L6 下载名沿用同一字符集）：
+ * `trim` → 删除全部 C0 控制字符（U+0000..U+001F、U+007F）→ 删除全部 `"` → 删除全部前导 `.` → 截断 ≤255。
+ * 注意：扩展名白名单按**清洗前的 `trim` 结果**判定。
+ */
+function stripC0Controls(text: string): string {
+  let out = "";
+  for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (code <= 0x1f || code === 0x7f) continue; // C0 与 DEL
+    out += ch;
+  }
+  return out;
+}
+
+function sanitizeLogFilename(trimmedName: string): string {
+  return stripC0Controls(trimmedName.replaceAll('"', "")).replace(/^\.+/, "").slice(0, MAX_LOG_FILENAME_CHARS);
+}
+
+/**
+ * 严格 UTF-8 解码（L3）：剥离开头单个 BOM 后 fatal 解码。
+ * - 字节数 0，或剥离 BOM 后为 0 码点 → `日志文件为空`；
+ * - fatal 解码失败，或解码后含 `U+0000`（NUL）→ `日志不是有效 UTF-8 文本`。
+ */
+function decodeLogText(bytes: Buffer): { text: string } | { error: string } {
+  if (bytes.byteLength === 0) return { error: "日志文件为空" };
+  const text = decodeLogStrict(bytes);
+  if (text === null) return { error: "日志不是有效 UTF-8 文本" };
+  if (text.length === 0) return { error: "日志文件为空" };
+  if (text.includes("\u0000")) return { error: "日志不是有效 UTF-8 文本" };
+  return { text };
+}
+
+function isFilePart(raw: unknown): raw is Blob {
+  return typeof raw === "object" && raw !== null && "arrayBuffer" in (raw as Record<string, unknown>);
+}
+
+/**
+ * 日志校验（L3，顺序固定，先命中先返回）：任一失败整单拒绝，绝不静默丢弃/截断。
+ */
+async function validateLogParts(rawParts: unknown[], metaInput: unknown): Promise<Err | { logs: NewFeedbackLog[] }> {
+  // 1) 数量上限（413）——
+  if (rawParts.length > MAX_LOGS) {
+    return err("too_large", `日志数量超过 ${MAX_LOGS} 个上限`, 413);
+  }
+  // 2)/3) 单份与总量字节上限（413）。非文件部件留到结构性检查时再报错。
+  const fileBytes: (Buffer | null)[] = [];
+  let totalBytes = 0;
+  for (const raw of rawParts) {
+    if (!isFilePart(raw)) {
+      fileBytes.push(null);
+      continue;
+    }
+    const bytes = Buffer.from(await raw.arrayBuffer());
+    fileBytes.push(bytes);
+    totalBytes += bytes.byteLength;
+  }
+  for (const bytes of fileBytes) {
+    if (bytes && bytes.byteLength > MAX_LOG_BYTES) {
+      return err("too_large", "日志文件超过 1MiB 上限", 413);
+    }
+  }
+  if (totalBytes > MAX_LOGS_TOTAL_BYTES) {
+    return err("too_large", "日志总大小超过 3MiB 上限", 413);
+  }
+
+  // 5) metadata.logs 与部件数量一致（缺省 / null / [] 均等价于无日志）
+  const metas: Record<string, unknown>[] = [];
+  if (metaInput !== undefined && metaInput !== null) {
+    if (!Array.isArray(metaInput)) return err("invalid_log", "metadata.logs 必须是数组", 400);
+    for (const item of metaInput) {
+      if (typeof item !== "object" || item === null || Array.isArray(item)) {
+        return err("invalid_log", "metadata.logs 条目必须是对象", 400);
+      }
+      metas.push(item as Record<string, unknown>);
+    }
+  }
+  if (metas.length !== rawParts.length) {
+    return err("invalid_log", "metadata.logs 数量与日志部件数量不一致", 400);
+  }
+
+  const logs: NewFeedbackLog[] = [];
+  for (let i = 0; i < rawParts.length; i++) {
+    const raw = rawParts[i];
+    const meta = metas[i]!;
+    // 6) 必须是文件部件
+    if (!isFilePart(raw)) return err("invalid_log", "日志部件必须是文件部件", 400);
+    // 7) metadata.logs[i].name：1..255、无路径分隔符、扩展名在白名单内
+    const rawName = typeof meta.name === "string" ? meta.name : "";
+    const trimmed = rawName.trim();
+    if (
+      trimmed.length < 1 ||
+      trimmed.length > MAX_LOG_FILENAME_CHARS ||
+      trimmed.includes("/") ||
+      trimmed.includes("\\")
+    ) {
+      return err("invalid_log", "日志文件名必须是 .log/.txt/.json/.jsonl", 400);
+    }
+    // 扩展名白名单按清洗前的 trim 结果判定
+    const ext = logExtension(trimmed);
+    if (!LOG_EXTENSIONS.includes(ext)) {
+      return err("invalid_log", "日志文件名必须是 .log/.txt/.json/.jsonl", 400);
+    }
+    const filename = sanitizeLogFilename(trimmed);
+    if (filename === "") {
+      return err("invalid_log", "日志文件名必须是 .log/.txt/.json/.jsonl", 400);
+    }
+    // 8) 部件 filename 必须存在且扩展名与 metadata 一致
+    const partName = typeof (raw as File).name === "string" ? (raw as File).name : "";
+    if (!partName || logExtension(partName) !== ext) {
+      return err("invalid_log", "日志部件文件名缺失或与 metadata 不一致", 400);
+    }
+    // 9) Content-Type 白名单（忽略参数；缺省按 octet-stream）
+    const declared = ((raw as File).type ?? "").split(";")[0]!.trim().toLowerCase();
+    const contentType = declared === "" ? "application/octet-stream" : declared;
+    if (!LOG_CONTENT_TYPES.includes(contentType)) {
+      return err("invalid_log", "日志部件 Content-Type 不受支持", 400);
+    }
+    // 10) source 只允许 auto/manual
+    if (meta.source !== "auto" && meta.source !== "manual") {
+      return err("invalid_log", "日志来源必须是 auto 或 manual", 400);
+    }
+    // 11) 空文件；12) 严格 UTF-8 解码且不含 NUL
+    const bytes = fileBytes[i]!;
+    const decoded = decodeLogText(bytes);
+    if ("error" in decoded) return err("invalid_log", decoded.error, 400);
+    logs.push({
+      filename,
+      source: meta.source,
+      blob: bytes,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    });
+  }
+  return { logs };
+}
 
 export interface FeedbackDeps {
   db: Db;
@@ -67,11 +232,13 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
     let contextInput: unknown = null;
     let captureInput: unknown = null;
     let screenshotBuffer: Buffer | null = null;
+    let logsRawParts: unknown[] = [];
+    let logsMetaInput: unknown;
 
     if (contentType.includes("multipart/form-data")) {
       const len = Number(c.req.header("content-length") ?? 0);
       if (len > MAX_MULTIPART_BYTES) {
-        return fail(c, err("too_large", "请求体超过 6MiB 上限", 413));
+        return fail(c, err("too_large", "请求体超过 9MiB 上限", 413));
       }
 
       const reader = c.req.raw.body?.getReader();
@@ -83,7 +250,7 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
         if (done) break;
         totalBytes += value.byteLength;
         if (totalBytes > MAX_MULTIPART_BYTES) {
-          return fail(c, err("too_large", "请求体超过 6MiB 上限", 413));
+          return fail(c, err("too_large", "请求体超过 9MiB 上限", 413));
         }
         chunks.push(value);
       }
@@ -116,6 +283,8 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
       text = typeof metaParsed.text === "string" ? metaParsed.text : "";
       contextInput = metaParsed.context;
       captureInput = metaParsed.capture;
+      logsMetaInput = metaParsed.logs;
+      logsRawParts = formData.getAll("logs") as unknown[];
 
       const fileField = formData.get("screenshot");
       if (fileField && typeof fileField === "object" && "arrayBuffer" in fileField) {
@@ -201,6 +370,11 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
       }
     }
 
+    // 日志校验（L3 第 5 步）：数量/大小 413（too_large），其余 invalid_log/400；整单拒绝
+    const validatedLogs = await validateLogParts(logsRawParts, logsMetaInput);
+    if (isErr(validatedLogs)) return fail(c, validatedLogs);
+    const logs = validatedLogs.logs;
+
     let sanitizedImage: SanitizedImage | null = null;
     if (screenshotBuffer) {
       try {
@@ -222,6 +396,7 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
       text,
       context,
       sanitizedImage ? { sha256: sanitizedImage.sha256, releasePoint: capture?.releasePoint } : null,
+      logs.map((l) => ({ sha256: l.sha256, byteSize: l.blob.byteLength })),
     );
 
     const existing = getFeedbackByKey(db, idempotencyKey);
@@ -254,6 +429,7 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
               captureJson: capture ? JSON.stringify(capture) : null,
             }
           : null,
+        logs,
       );
     } catch (insertErr) {
       // 并发下的 UNIQUE 冲突兜底
@@ -390,7 +566,7 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
   routes.post("/:id/recover", async (c) => {
     const g = cookieGuard(c);
     if (g instanceof Response) return g;
-    const body = await readJson<{ action?: unknown; expectedRevision?: unknown }>(c);
+    const body = await readJson<{ action?: unknown; expectedRevision?: unknown; logId?: unknown }>(c);
     if (isErr(body)) return fail(c, body);
     const id = c.req.param("id");
     const rev = parseExpectedRevision(body.expectedRevision);
@@ -398,12 +574,23 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
     if (rev === undefined) {
       return fail(c, err("invalid_request", "recover 操作必须携带 expectedRevision", 400));
     }
+    // 可选 logId（L10）：缺省/null → 既有截图行为；空串或非字符串 → 400；不存在 → 404
+    let logId: string | undefined;
+    if (body.logId !== undefined && body.logId !== null) {
+      if (typeof body.logId !== "string" || body.logId.trim() === "") {
+        return fail(c, err("invalid_request", "logId 必须是非空字符串", 400));
+      }
+      if (!getFeedbackLog(db, id, body.logId)) {
+        return fail(c, err("not_found", "日志不存在", 404));
+      }
+      logId = body.logId;
+    }
     let r: WorkerOpResult;
     try {
       if (body.action === "retry_comment") {
-        r = await worker.recoverRetryComment(id, rev);
+        r = await worker.recoverRetryComment(id, rev, logId);
       } else if (body.action === "replace_upload") {
-        r = await worker.recoverReplaceUpload(id, rev);
+        r = await worker.recoverReplaceUpload(id, rev, logId);
       } else {
         return fail(c, err("invalid_request", 'action 必须为 "retry_comment" 或 "replace_upload"', 400));
       }

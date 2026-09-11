@@ -1,3 +1,6 @@
+import 'dart:convert' show utf8;
+import 'dart:typed_data';
+
 import 'package:feedback_widget/feedback_widget.dart';
 import 'package:flutter/material.dart';
 
@@ -108,6 +111,19 @@ class _FeedbackExampleAppState extends State<FeedbackExampleApp> {
         // 显式声明：灵感球（可拖拽落点）+ 呼出时截取当前应用视口。
         launcherMode: FeedbackLauncherMode.orb,
         captureMode: FeedbackCaptureMode.viewport,
+        // 日志回调：演示如何导出宿主已有日志并交给组件。
+        // 注意：宿主必须在交付前对日志做脱敏处理（去除 Token、密码、个人身份等敏感信息）。
+        logProvider: () async {
+          final String mockLogs = '[INFO] ${DateTime.now().toIso8601String()} App started\n'
+              '[INFO] ${DateTime.now().toIso8601String()} Navigated to $pageLabel\n'
+              '[WARN] Sample warning log line\n';
+          return <FeedbackLogPart>[
+            FeedbackLogPart(
+              name: 'app.log',
+              bytes: Uint8List.fromList(utf8.encode(mockLogs)),
+            ),
+          ];
+        },
       ),
       controller: _feedback,
       child: child ?? const SizedBox.shrink(),

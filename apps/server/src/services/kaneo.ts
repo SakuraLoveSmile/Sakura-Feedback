@@ -90,6 +90,21 @@ export interface KaneoClient {
     taskId: string,
     input: { key: string; filename: string; contentType: string; size: number; surface: "comment" },
   ): Promise<KaneoFinalizedAsset>;
+  /**
+   * 通用二进制上传（C4）：任意文件名 / Content-Type（日志附件用），
+   * `surface` 沿用 `"comment"`；图片方法保留为同实现的包装，避免回归。
+   */
+  createBinaryUpload(
+    taskId: string,
+    input: { filename: string; contentType: string; size: number; surface: "comment" },
+  ): Promise<KaneoUploadPresigned>;
+  /** 上传任意二进制字节至预签名地址（绝不携带 Kaneo API Key）。 */
+  uploadToPresigned(uploadUrl: string, headers: Record<string, string>, bytes: Buffer | Uint8Array): Promise<void>;
+  /** 登记已上传的任意二进制资产。 */
+  finalizeBinaryUpload(
+    taskId: string,
+    input: { key: string; filename: string; contentType: string; size: number; surface: "comment" },
+  ): Promise<KaneoFinalizedAsset>;
   /** 添加评论。 */
   createComment(taskId: string, input: { content: string }): Promise<{ id: string }>;
   /** 获取任务所有评论列表。 */
@@ -119,6 +134,37 @@ export function buildScreenshotComment(meta: {
   ].join("\n\n");
 }
 
+/** 日志附件按扩展名映射的 Content-Type（L8.7）。 */
+export function logContentTypeFor(filename: string): string {
+  const lower = filename.toLowerCase();
+  if (lower.endsWith(".json") || lower.endsWith(".jsonl")) return "application/json";
+  return "text/plain";
+}
+
+/**
+ * 生成日志评论内容（L8.6）：必须包含 `logCommentMarker`（`feedbackId|logId|logSha256`）、
+ * 资产 URL 与安全文件名，供「按反馈 ID + 日志 ID + 摘要 + 当前资产引用」查重。
+ */
+export function buildLogComment(meta: {
+  feedbackId: string;
+  logId: string;
+  marker: string;
+  assetUrl: string;
+  sha256: string;
+  filename: string;
+  byteSize: number;
+}): string {
+  return [
+    `![日志附件 ${meta.filename}](${meta.assetUrl})`,
+    "---",
+    `**反馈ID**：${meta.feedbackId}`,
+    `**日志ID**：${meta.logId}`,
+    `**日志文件名**：\`${meta.filename}\``,
+    `**日志摘要**：\`${meta.sha256}\` · ${meta.byteSize} 字节`,
+    `**评论标记**：\`${meta.marker}\``,
+  ].join("\n\n");
+}
+
 /** 归档任务描述：AI 整理结果在前，来源与原话由服务端追加，AI 不可改写。 */
 export function buildTaskDescription(
   feedbackId: string,
@@ -140,6 +186,19 @@ export function buildTaskDescription(
   section("问题", processed.sections.problems);
   section("建议", processed.sections.suggestions);
   section("待确认事项", processed.sections.questions);
+
+  // 日志诊断（L7 展示要求）：证据与推测必须分属两个小节，且不得合并；
+  // 无诊断 / 两个数组都为空时不输出空标题。
+  const evidence = processed.diagnostics?.logEvidence ?? [];
+  const causes = processed.diagnostics?.possibleCauses ?? [];
+  if (evidence.length > 0) {
+    const lines = evidence.map((e) => `- [seq=${e.seq}] \`${e.filename}\`：> ${e.quote}`);
+    parts.push(`## 日志证据（来自日志原文）\n\n${lines.join("\n")}`);
+  }
+  if (causes.length > 0) {
+    const lines = causes.map((c) => `- ${c.hypothesis}（置信度：${c.confidence}）`);
+    parts.push(`## 可能原因（推测，未证实）\n\n${lines.join("\n")}`);
+  }
 
   const sourceBits = [`${meta.appName}（${meta.appId}）`];
   if (meta.appVersion) sourceBits.push(`版本 ${meta.appVersion}`);

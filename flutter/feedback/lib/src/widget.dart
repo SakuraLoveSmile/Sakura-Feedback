@@ -509,14 +509,14 @@ class _FeedbackWidgetState extends State<FeedbackWidget> {
     return null;
   }
 
-  /// 统一草稿守卫：面板已持有草稿文本或截图时，任何呼出入口都不得重新截图
+  /// 统一草稿守卫：面板已持有草稿文本、截图或日志时，任何呼出入口都不得重新截图
   /// ——否则新图会覆盖用户正在编辑的内容。
   ///
   /// 面板只在首次呼出（`_everOpened`）后挂载；未挂载（null）即无草稿可言，
   /// 照常捕获。`hasDraft` 按去空白后的正文判定。
   bool _panelHasDraftContent() {
     final FeedbackPanelState? panel = _panelKey.currentState;
-    return panel != null && (panel.hasDraft || panel.hasScreenshot);
+    return panel != null && (panel.hasDraft || panel.hasScreenshot || panel.hasLogs);
   }
 
   /// 先截图后开面板：保持宿主当前布局等待 paint → 捕获宿主边界完成遮挡

@@ -14,6 +14,28 @@ export function App() {
 
   useEffect(() => {
     if (!widget) return;
+
+    // 演示：导出宿主已有日志系统的数据交给组件
+    // ⚠️ 宿主负责在交给组件前去除凭据、Token、密码等敏感内容！
+    widget.logProvider = async () => {
+      const existingLogs = [
+        '[INFO] React App mounted successfully',
+        '[ROUTE] Navigated to /home',
+        '[API] GET /api/user 200 OK',
+      ];
+      // 模拟宿主端日志脱敏（例如移除 Authorization / Token / 密码等）
+      const sanitized = existingLogs
+        .map((msg) => msg.replace(/(token|password|auth)=([^\s]+)/gi, '$1=***'))
+        .join('\n');
+
+      return [
+        {
+          name: 'react-app.log',
+          bytes: new TextEncoder().encode(sanitized),
+        },
+      ];
+    };
+
     const onSubmit = (ev: Event): void => {
       const detail = (ev as CustomEvent<FeedbackSubmittedDetail>).detail;
       setLast(`feedbackId=${detail.feedbackId} status=${detail.status}`);

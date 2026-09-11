@@ -1,5 +1,18 @@
 import { type ReactNode, useCallback, useEffect, useState } from "react";
-import { ApiError, api, type FeedbackDetail, type FeedbackListItem, STATUS_LABELS } from "../api.ts";
+import {
+  ApiError,
+  api,
+  CONFIDENCE_LABELS,
+  type FeedbackDetail,
+  type FeedbackDiagnostics,
+  type FeedbackListItem,
+  type FeedbackLogMeta,
+  LOG_ARCHIVE_STATE_LABELS,
+  LOG_SOURCE_LABELS,
+  type LogEvidenceItem,
+  type LogSpeculationItem,
+  STATUS_LABELS,
+} from "../api.ts";
 
 const STATUSES = Object.keys(STATUS_LABELS);
 
@@ -78,6 +91,7 @@ export default function FeedbacksView() {
               <th>时间</th>
               <th>软件</th>
               <th>标题 / 摘要</th>
+              <th>日志</th>
               <th>状态</th>
               <th>Kaneo</th>
               <th></th>
@@ -85,12 +99,28 @@ export default function FeedbacksView() {
           </thead>
           <tbody>
             {items.map((it) => (
-              <tr key={it.id}>
+              <tr key={it.id} data-testid="feedback-row" data-feedback-id={it.id}>
                 <td className="muted">{new Date(it.createdAt).toLocaleString()}</td>
                 <td>{it.appId}</td>
                 <td>{it.title ?? <span className="muted">{(it.errorSummary ?? "—").slice(0, 60)}</span>}</td>
                 <td>
-                  <span className={`tag ${it.status}`}>{STATUS_LABELS[it.status] ?? it.status}</span>
+                  <span
+                    className={it.logCount ? "log-count has-logs" : "log-count muted"}
+                    data-testid="log-count"
+                    data-log-count={String(it.logCount ?? 0)}
+                  >
+                    {(it.logCount ?? 0) > 0 ? `${it.logCount} 份` : "0 份"}
+                  </span>
+                </td>
+                <td>
+                  <span
+                    className={`tag ${it.status}`}
+                    data-testid="feedback-row-status"
+                    data-status={it.status}
+                    data-archive-complete={it.status === "archived" ? "true" : "false"}
+                  >
+                    {STATUS_LABELS[it.status] ?? it.status}
+                  </span>
                 </td>
                 <td>
                   {it.kaneoUrl ? (
@@ -110,7 +140,7 @@ export default function FeedbacksView() {
             ))}
             {items.length === 0 && (
               <tr>
-                <td colSpan={6} className="muted" style={{ padding: 20 }}>
+                <td colSpan={7} className="muted" style={{ padding: 20 }}>
                   暂无记录
                 </td>
               </tr>
@@ -133,6 +163,33 @@ function DetailPane({
   onAction: (fn: () => Promise<unknown>) => Promise<void>;
 }) {
   const [lightboxOpen, setLightboxOpen] = useState(false);
+  const [preview, setPreview] = useState<LogPreview | null>(null);
+  /** 契约保证 `logs` 恒为数组；这里仍做读取侧兜底，旧响应/半升级服务端也不得报错。 */
+  const logs = detail.logs ?? [];
+
+  /**
+   * 预览：页面内请求管理端日志接口（cookie 会话），响应体按纯文本渲染。
+   * 绝不使用 innerHTML；绝不把响应体写入控制台或任何运行日志。
+   */
+  async function togglePreview(logId: string) {
+    if (preview?.logId === logId) {
+      setPreview(null);
+      return;
+    }
+    setPreview({ logId, status: "loading", text: "", error: "" });
+    try {
+      const res = await fetch(`/api/admin/feedback/${detail.id}/logs/${logId}`, { credentials: "same-origin" });
+      const body = await res.text();
+      if (!res.ok) {
+        setPreview({ logId, status: "error", text: "", error: errorCodeOf(body, res.status) });
+        return;
+      }
+      setPreview({ logId, status: "ok", text: body, error: "" });
+    } catch {
+      setPreview({ logId, status: "error", text: "", error: "网络错误（未取到响应）" });
+    }
+  }
+
   return (
     <aside className="detail-pane" role="dialog" aria-label="反馈详情" aria-modal="true">
       <div className="row spread">
@@ -143,7 +200,14 @@ function DetailPane({
       </div>
       <div className="kv" style={{ margin: "14px 0" }}>
         <span>状态</span>
-        <span className={`tag ${detail.status}`}>{STATUS_LABELS[detail.status] ?? detail.status}</span>
+        <span
+          className={`tag ${detail.status}`}
+          data-testid="feedback-status"
+          data-status={detail.status}
+          data-archive-complete={detail.status === "archived" ? "true" : "false"}
+        >
+          {STATUS_LABELS[detail.status] ?? detail.status}
+        </span>
         <span>反馈 ID</span>
         <code>{detail.id}</code>
         <span>软件</span>
@@ -238,6 +302,78 @@ function DetailPane({
           </div>
         </div>
       )}
+      {logs.length > 0 && (
+        <section data-testid="feedback-logs" aria-label="日志列表" style={{ margin: "14px 0" }}>
+          <h3 style={{ marginBottom: 4 }}>日志（{logs.length} 份）</h3>
+          <p className="muted" style={{ fontSize: 12, margin: "0 0 8px" }}>
+            日志会参与 AI 分析并归档到 Kaneo；已提交的完整字节始终保留，可在此预览与下载。
+          </p>
+          <ul data-testid="log-list" className="log-list">
+            {logs.map((log) => {
+              const open = preview?.logId === log.id;
+              return (
+                <li key={log.id} data-testid="log-item" {...logDataAttrs(log)}>
+                  <div className="log-head">
+                    <code className="log-seq">#{log.seq}</code>
+                    <b className="log-name">{log.filename}</b>
+                    <span className="log-source">{LOG_SOURCE_LABELS[log.source] ?? log.source}</span>
+                    {archiveBadge(log)}
+                  </div>
+                  <div className="muted log-meta">
+                    大小 {formatBytes(log.byteSize)}（{log.byteSize} 字节） · SHA-256{" "}
+                    {typeof log.sha256 === "string" && log.sha256 !== "" ? (
+                      <code title={log.sha256}>{log.sha256.slice(0, 12)}…</code>
+                    ) : (
+                      "—"
+                    )}
+                    {typeof log.totalCodepoints === "number" && log.totalCodepoints >= 0 && (
+                      <> · {log.totalCodepoints} 码点</>
+                    )}
+                  </div>
+                  <div className="log-meta">{truncationNote(log)}</div>
+                  <div className="row" style={{ marginTop: 6 }}>
+                    <button
+                      type="button"
+                      data-testid="log-preview"
+                      aria-label={`预览日志 ${log.filename}`}
+                      aria-expanded={open}
+                      onClick={() => void togglePreview(log.id)}
+                    >
+                      {open ? "收起预览" : "预览"}
+                    </button>
+                    <a
+                      data-testid="log-download"
+                      aria-label={`下载日志 ${log.filename}`}
+                      href={`/api/admin/feedback/${detail.id}/logs/${log.id}?download=1`}
+                    >
+                      下载
+                    </a>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+          {preview && (
+            <div className="log-preview">
+              <div className="row spread">
+                <span className="muted" style={{ fontSize: 12 }}>
+                  预览（纯文本原样呈现，不执行、不渲染 HTML）
+                </span>
+                <button type="button" onClick={() => setPreview(null)}>
+                  关闭预览
+                </button>
+              </div>
+              {preview.status === "loading" && <p className="muted">加载中…</p>}
+              {preview.status === "error" && <p className="err">预览失败：{preview.error}</p>}
+              {preview.status === "ok" && (
+                <pre data-testid="log-preview-body" data-log-id={preview.logId}>
+                  {preview.text}
+                </pre>
+              )}
+            </div>
+          )}
+        </section>
+      )}
       {detail.processed && (
         <>
           <h3>AI 整理结果</h3>
@@ -253,6 +389,7 @@ function DetailPane({
                 </li>
               ))}
           </ul>
+          <DiagnosticsBlock diagnostics={detail.processed.diagnostics} />
         </>
       )}
       {detail.errorSummary && (
@@ -337,4 +474,187 @@ function DetailPane({
 
 function sectionLabel(k: string): ReactNode {
   return { experience: "使用体验", problems: "问题", suggestions: "建议", questions: "待确认" }[k] ?? k;
+}
+
+/** 详情内的日志预览状态（同时只预览一份）。 */
+interface LogPreview {
+  logId: string;
+  status: "loading" | "ok" | "error";
+  text: string;
+  error: string;
+}
+
+/** 只取错误码用于提示；绝不把响应体（可能含日志内容）写入控制台或任何运行日志。 */
+function errorCodeOf(body: string, status: number): string {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (parsed !== null && typeof parsed === "object" && "error" in parsed) {
+      const e = (parsed as { error?: unknown }).error;
+      if (e !== null && typeof e === "object" && "code" in e) {
+        const code = (e as { code?: unknown }).code;
+        if (typeof code === "string" && code !== "") return code;
+      }
+    }
+  } catch {
+    /* 非 JSON：不读取正文 */
+  }
+  return `http_${status}`;
+}
+
+function formatBytes(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return "—";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+const LOG_ARCHIVE_STATES: readonly string[] = ["not_started", "partial", "confirmed"];
+
+/**
+ * 日志条目的数据属性：值一律逐字取自服务端 `LogMeta`，UI 不做推导。
+ * 字段缺失（旧响应 / 未落地）时省略该属性并在界面上显示「不可用」，不猜测、不写 false。
+ */
+function logDataAttrs(log: FeedbackLogMeta): Record<string, string> {
+  const attrs: Record<string, string> = {
+    "data-log-id": log.id,
+    "data-log-seq": String(log.seq),
+    "data-log-filename": log.filename,
+    "data-log-source": log.source,
+    "data-log-bytesize": String(log.byteSize),
+    "data-log-size": formatBytes(log.byteSize),
+  };
+  if (typeof log.truncated === "boolean") attrs["data-log-truncated"] = log.truncated ? "true" : "false";
+  if (typeof log.totalCodepoints === "number" && Number.isFinite(log.totalCodepoints)) {
+    attrs["data-log-codepoints"] = String(log.totalCodepoints);
+  }
+  if (typeof log.archiveState === "string" && LOG_ARCHIVE_STATES.includes(log.archiveState)) {
+    attrs["data-log-archive-state"] = log.archiveState;
+    attrs["data-log-archive-label"] = LOG_ARCHIVE_STATE_LABELS[log.archiveState] ?? log.archiveState;
+  }
+  return attrs;
+}
+
+/** 该份日志的归档确认进度（只反映这一份，不构成「全部归档完成」的结论）。 */
+function archiveBadge(log: FeedbackLogMeta): ReactNode {
+  if (typeof log.archiveState !== "string" || !LOG_ARCHIVE_STATES.includes(log.archiveState)) {
+    return <span className="log-note muted">归档进度不可用</span>;
+  }
+  return (
+    <span className={`log-archive-state ${log.archiveState}`}>
+      {LOG_ARCHIVE_STATE_LABELS[log.archiveState] ?? log.archiveState}
+    </span>
+  );
+}
+
+/** 截取说明只陈述确定事实：单份上限 8000 码点、送 AI 只取末尾；完整字节仍可下载。 */
+function truncationNote(log: FeedbackLogMeta): ReactNode {
+  if (log.truncated === true) {
+    return (
+      <span className="log-note warn">
+        该文件超过单份上限（8000 码点），送 AI 时只取末尾 8000 码点；已提交的完整字节仍原样保留，可下载。
+      </span>
+    );
+  }
+  if (log.truncated === false) {
+    return <span className="log-note muted">未超过单份上限（8000 码点）</span>;
+  }
+  return <span className="log-note muted">截取状态不可用</span>;
+}
+
+/**
+ * AI 诊断展示：证据（未逐字校验）与可能原因（推测，未证实）分区块、
+ * 不同视觉；推测显式标注「不确定」与置信度。无任何合法条目时整块不渲染（无空壳）。
+ */
+function DiagnosticsBlock({ diagnostics }: { diagnostics?: FeedbackDiagnostics | null }) {
+  const evidence = normalizeEvidence(diagnostics);
+  const causes = normalizeCauses(diagnostics);
+  if (evidence.length === 0 && causes.length === 0) return null;
+  return (
+    <div data-testid="diagnostics" style={{ marginTop: 12 }}>
+      <h3 style={{ marginBottom: 4 }}>日志分析（附加）</h3>
+      <p className="muted" style={{ fontSize: 12, margin: "0 0 8px" }}>
+        以下内容只作排查参考，不改变上面的整理结果，也不改写用户原话。
+      </p>
+      {evidence.length > 0 && (
+        <div data-testid="diag-evidence" className="diag diag-evidence">
+          <div className="diag-title">日志证据（模型摘录自日志原文，未逐字校验）</div>
+          <ul className="diag-list">
+            {evidence.map((item) => (
+              <li
+                key={`${item.seq ?? "x"}|${item.filename}|${item.quote}`}
+                data-testid="evidence-item"
+                data-log-seq={typeof item.seq === "number" ? String(item.seq) : undefined}
+              >
+                <code>
+                  {typeof item.seq === "number" ? `[seq=${item.seq}] ` : ""}
+                  {item.filename}
+                </code>
+                <blockquote>{item.quote}</blockquote>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {causes.length > 0 && (
+        <div data-testid="diag-causes" className="diag diag-causes">
+          <div className="diag-title">可能原因（推测，未证实）</div>
+          <ul className="diag-list">
+            {causes.map((item) => (
+              <li
+                key={`${item.confidence}|${item.hypothesis}|${item.basedOn ?? ""}`}
+                data-testid="cause-item"
+                data-confidence={item.confidence}
+              >
+                <span className="uncertain-badge">不确定</span>
+                <span className="cause-text">{item.hypothesis}</span>
+                <span className="muted">（置信度：{CONFIDENCE_LABELS[item.confidence] ?? item.confidence}）</span>
+                {item.basedOn && <div className="muted cause-basis">依据：{item.basedOn}</div>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 读取侧防御：旧记录或非法条目一律丢弃，绝不让展示层报错。 */
+function normalizeEvidence(diagnostics?: FeedbackDiagnostics | null): LogEvidenceItem[] {
+  const raw = diagnostics?.logEvidence;
+  if (!Array.isArray(raw)) return [];
+  const out: LogEvidenceItem[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw as unknown[]) {
+    if (entry === null || typeof entry !== "object") continue;
+    const rec = entry as Record<string, unknown>;
+    const quote = typeof rec.quote === "string" ? rec.quote.trim() : "";
+    const filename = typeof rec.filename === "string" ? rec.filename.trim() : "";
+    if (quote === "" || filename === "") continue;
+    const seq = typeof rec.seq === "number" && Number.isInteger(rec.seq) ? rec.seq : undefined;
+    const key = `${seq ?? "x"}|${filename}|${quote}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(seq === undefined ? { filename, quote } : { seq, filename, quote });
+  }
+  return out;
+}
+
+function normalizeCauses(diagnostics?: FeedbackDiagnostics | null): LogSpeculationItem[] {
+  const raw = diagnostics?.possibleCauses;
+  if (!Array.isArray(raw)) return [];
+  const out: LogSpeculationItem[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw as unknown[]) {
+    if (entry === null || typeof entry !== "object") continue;
+    const rec = entry as Record<string, unknown>;
+    const hypothesis = typeof rec.hypothesis === "string" ? rec.hypothesis.trim() : "";
+    if (hypothesis === "") continue;
+    const confidence: "low" | "medium" = rec.confidence === "medium" ? "medium" : "low";
+    const basedOn = typeof rec.basedOn === "string" && rec.basedOn.trim() !== "" ? rec.basedOn.trim() : undefined;
+    const key = `${confidence}|${hypothesis}|${basedOn ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(basedOn === undefined ? { hypothesis, confidence } : { hypothesis, confidence, basedOn });
+  }
+  return out;
 }

@@ -82,3 +82,23 @@ PORT=8080 pnpm --filter @feedback/example-html serve &
 curl -sI http://127.0.0.1:8080/                    | head -1   # HTTP/1.1 200 OK
 curl -sI http://127.0.0.1:8080/feedback-web.umd.js | head -1   # HTTP/1.1 200 OK
 ```
+
+## 日志接入（`logProvider`）
+
+本示例在 `index.html` 里给元素赋了 `logProvider`，把宿主已有的日志缓冲交给组件（返回前先做一次简单脱敏）：
+
+```js
+const hostLogs = [ /* 宿主自己的日志行 */ ];
+widget.logProvider = async () => {
+  const sanitized = hostLogs
+    .map((line) => line.replace(/Bearer\s+[A-Za-z0-9._-]+/g, 'Bearer ***'))
+    .join('\n');
+  return [{ name: 'client.log', bytes: new TextEncoder().encode(sanitized) }];
+};
+```
+
+- 类型：`() => FeedbackLogPart[] | Promise<FeedbackLogPart[]>`，`FeedbackLogPart = { name, bytes: Uint8Array }`。**不配置就完全不自动采集**（仍可在面板里手动添加）。
+- 时机与超时：每份新草稿**首次打开面板时调用一次**，超时 **3 秒**；失败/超时后面板提示「日志获取失败」，可点「重试」或**不带日志继续提交**。面板内另有「+ 添加文件」手动入口。
+- 限制（自动 + 手动合计）：≤ **3** 个文件、单份 ≤ **1 MiB**、合计 ≤ **3 MiB**，仅 `.log` / `.txt` / `.json` / `.jsonl`，必须是有效 UTF-8 且不含 NUL。数量/大小超限 → `413 too_large`；其余 → `400 invalid_log`，**整单拒绝**（不会只丢一份）。
+- ⚠️ **脱敏是宿主的责任**（组件不做过滤）：去掉 `Bearer`/Token/Cookie/密码等凭据与个人数据。日志**会参与 AI 诊断并被归档到 Kaneo 任务**，请按你的合规要求处理。
+- 状态：本轮**已落地（待体验）**——有可用入口，但尚未完成真实环境端到端验收。完整说明见 [`docs/integration.md` 第 9 章](../../docs/integration.md#9-日志接入本轮新增) 与 [`docs/api.md`](../../docs/api.md) 的 L1–L11。

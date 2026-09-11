@@ -319,7 +319,7 @@ export function createKaneoHttpClient(
       return null;
     },
 
-    async createImageUpload(taskId, input) {
+    async createBinaryUpload(taskId, input) {
       // 写操作（分配预签名地址）：网络失败/5xx/响应不可解析 → 结果不确定（4.3 错误分类）
       const res = await req(`/task/image-upload/${encodeURIComponent(taskId)}`, {
         method: "PUT",
@@ -336,7 +336,7 @@ export function createKaneoHttpClient(
         throw new KaneoUncertainError(`Kaneo 返回 ${res.status}，预签名分配结果不确定`);
       }
       if (!res.ok) {
-        throw new KaneoDefiniteError(`Kaneo 申请图片上传地址失败 (${res.status})：${await bodyText(res)}`);
+        throw new KaneoDefiniteError(`Kaneo 申请附件上传地址失败 (${res.status})：${await bodyText(res)}`);
       }
       let data: { key?: unknown; uploadUrl?: unknown; headers?: unknown } | null = null;
       try {
@@ -345,7 +345,7 @@ export function createKaneoHttpClient(
         data = null;
       }
       if (!data || typeof data.key !== "string" || typeof data.uploadUrl !== "string") {
-        throw new KaneoUncertainError("Kaneo 图片上传响应不可解析，分配结果不确定");
+        throw new KaneoUncertainError("Kaneo 附件上传响应不可解析，分配结果不确定");
       }
       const headers: Record<string, string> = {};
       if (typeof data.headers === "object" && data.headers !== null) {
@@ -355,8 +355,12 @@ export function createKaneoHttpClient(
       }
       return { key: data.key, uploadUrl: data.uploadUrl, headers };
     },
+    // 图片包装：与通用二进制上传同一实现（C4 选定方案：保留图片包装以免回归）
+    async createImageUpload(taskId, input) {
+      return this.createBinaryUpload(taskId, input);
+    },
 
-    async uploadImageToPresigned(uploadUrl, headers, bytes) {
+    async uploadToPresigned(uploadUrl, headers, bytes) {
       let res: Response;
       try {
         res = await fetchImpl(uploadUrl, {
@@ -366,14 +370,17 @@ export function createKaneoHttpClient(
           signal: AbortSignal.timeout(30_000),
         });
       } catch (err) {
-        throw new KaneoUncertainError(`图片上传至存储服务连接异常: ${(err as Error).message?.slice(0, 150)}`);
+        throw new KaneoUncertainError(`附件上传至存储服务连接异常: ${(err as Error).message?.slice(0, 150)}`);
       }
       if (!res.ok) {
-        throw new KaneoDefiniteError(`图片上传至存储服务失败 (${res.status})`);
+        throw new KaneoDefiniteError(`附件上传至存储服务失败 (${res.status})`);
       }
     },
+    async uploadImageToPresigned(uploadUrl, headers, bytes) {
+      return this.uploadToPresigned(uploadUrl, headers, bytes);
+    },
 
-    async finalizeImageUpload(taskId, input) {
+    async finalizeBinaryUpload(taskId, input) {
       const res = await req(`/task/image-upload/${encodeURIComponent(taskId)}/finalize`, {
         method: "POST",
         body: JSON.stringify({
@@ -390,7 +397,7 @@ export function createKaneoHttpClient(
         throw new KaneoUncertainError(`Kaneo 返回 ${res.status}，资产登记结果不确定`);
       }
       if (!res.ok) {
-        throw new KaneoDefiniteError(`Kaneo 登记图片资产失败 (${res.status})：${await bodyText(res)}`);
+        throw new KaneoDefiniteError(`Kaneo 登记资产失败 (${res.status})：${await bodyText(res)}`);
       }
       let data: { id?: unknown; url?: unknown } | null = null;
       try {
@@ -399,9 +406,12 @@ export function createKaneoHttpClient(
         data = null;
       }
       if (!data || typeof data.id !== "string" || typeof data.url !== "string") {
-        throw new KaneoUncertainError("Kaneo 登记图片资产响应不可解析，登记结果不确定");
+        throw new KaneoUncertainError("Kaneo 登记资产响应不可解析，登记结果不确定");
       }
       return { id: data.id, url: data.url };
+    },
+    async finalizeImageUpload(taskId, input) {
+      return this.finalizeBinaryUpload(taskId, input);
     },
 
     async createComment(taskId, input) {

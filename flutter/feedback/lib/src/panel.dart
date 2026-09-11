@@ -1,6 +1,7 @@
 import 'dart:async';
-import 'dart:convert' show jsonEncode;
+import 'dart:convert' show Utf8Decoder, jsonEncode, utf8;
 
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -46,17 +47,31 @@ enum FeedbackStage {
   replay,
 }
 
+/// 日志项展示模型（包含来源与原始内容）。
+class FeedbackPanelLogItem {
+  const FeedbackPanelLogItem({
+    required this.name,
+    required this.bytes,
+    required this.source,
+  });
+
+  final String name;
+  final Uint8List bytes;
+  final String source; // 'auto' | 'manual'
+}
+
 /// 结果未知（[FeedbackStage.notSent]）提交冻结的完整快照：
-/// 正文 + 截图字节 + 截图元数据。
+/// 正文 + 截图字节 + 截图元数据 + 日志列表。
 ///
 /// 复用同一幂等键的前提是快照**完全一致**（服务契约要求同 key 必须同字节，
-/// 同 key 不同内容会被判为 409 冲突）。因此改文案、重拍（新截图字节）或移除
-/// 截图都属于新快照，必须换新 key 重新提交。
+/// 同 key 不同内容会被判为 409 冲突）。因此改文案、重拍（新截图字节）、移除截图、
+/// 或修改/增删/改变日志字节顺序都属于新快照，必须换新 key 重新提交。
 class _FrozenSubmit {
   const _FrozenSubmit({
     required this.text,
     this.screenshotBytes,
     this.captureInfo,
+    this.logs = const <FeedbackPanelLogItem>[],
   });
 
   /// 提交时的正文。
@@ -68,12 +83,23 @@ class _FrozenSubmit {
   /// 提交时的截图元数据（无截图为 null）。
   final FeedbackCaptureInfo? captureInfo;
 
+  /// 提交时的日志列表。
+  final List<FeedbackPanelLogItem> logs;
+
   /// 与 [other] 是否属于同一份提交快照：
-  /// 正文逐字符、截图逐字节、元数据按序列化结果比较。
-  bool sameAs(_FrozenSubmit other) =>
-      text == other.text &&
-      listEquals(screenshotBytes, other.screenshotBytes) &&
-      _captureSignature(captureInfo) == _captureSignature(other.captureInfo);
+  /// 正文逐字符、截图逐字节、元数据按序列化结果比较、日志按每份字节与顺序严格比较。
+  bool sameAs(_FrozenSubmit other) {
+    if (text != other.text) return false;
+    if (!listEquals(screenshotBytes, other.screenshotBytes)) return false;
+    if (_captureSignature(captureInfo) != _captureSignature(other.captureInfo)) {
+      return false;
+    }
+    if (logs.length != other.logs.length) return false;
+    for (int i = 0; i < logs.length; i++) {
+      if (!listEquals(logs[i].bytes, other.logs[i].bytes)) return false;
+    }
+    return true;
+  }
 
   static String? _captureSignature(FeedbackCaptureInfo? info) =>
       info == null ? null : jsonEncode(info.toJson());
@@ -164,6 +190,9 @@ class FeedbackPanelState extends State<FeedbackPanel> {
   /// 面板是否持有当前截图（只读）。
   bool get hasScreenshot => _screenshotBytes != null;
 
+  /// 面板是否持有日志附件（只读）。
+  bool get hasLogs => _logs.isNotEmpty;
+
   /// 当前截图的捕获元数据（若有；只读）。
   FeedbackCaptureInfo? get captureInfo => _captureInfo;
 
@@ -188,6 +217,19 @@ class FeedbackPanelState extends State<FeedbackPanel> {
       _captureInfo = captureInfo;
     });
   }
+
+  /// 日志列表状态。
+  final List<FeedbackPanelLogItem> _logs = <FeedbackPanelLogItem>[];
+  bool _logCollectionAttempted = false; // 是否已尝试自动采集（每份新草稿只采一次）
+  bool _logCollecting = false;          // 自动采集是否进行中
+  String? _logCollectError;             // 自动采集错误（如「日志获取失败」）
+  int _logCollectSeq = 0;               // 采集世代（防止迟到结果写回）
+  String _activeApiBase = '';
+  String _activeAppId = '';
+
+  List<FeedbackPanelLogItem> get logs => List<FeedbackPanelLogItem>.unmodifiable(_logs);
+  bool get isLogCollecting => _logCollecting;
+  String? get logCollectError => _logCollectError;
 
   Timer? _pollTimer;
   Duration _pollDelay = const Duration(seconds: 2);
@@ -222,6 +264,9 @@ class FeedbackPanelState extends State<FeedbackPanel> {
   // 原生登录辅助状态。
   String? _loginError;
 
+  /// 当前使用的幂等键（测试可见）。
+  String? get idempotencyKey => _idempotencyKey;
+
   /// 当前令牌仓库（测试可见）。
   FeedbackTokenStore get tokenStore => _tokenStore;
 
@@ -231,6 +276,8 @@ class FeedbackPanelState extends State<FeedbackPanel> {
   @override
   void initState() {
     super.initState();
+    _activeApiBase = widget.config.apiBase;
+    _activeAppId = widget.config.appId;
     _tokenStore = widget.tokenStore ?? createDefaultTokenStore(widget.config);
     _api = ApiClient(
       config: widget.config,
@@ -240,6 +287,7 @@ class FeedbackPanelState extends State<FeedbackPanel> {
     );
     _draft.addListener(_onDraftChanged);
     unawaited(_restoreSession());
+    _triggerAutoLogCollection();
   }
 
   Future<void> _restoreSession() async {
@@ -278,7 +326,27 @@ class FeedbackPanelState extends State<FeedbackPanel> {
   }
 
   @override
+  void didUpdateWidget(FeedbackPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.config.apiBase != widget.config.apiBase ||
+        oldWidget.config.appId != widget.config.appId) {
+      // 切换服务或应用：使正在进行的采集失效，重置草稿与状态
+      _logCollectSeq++;
+      _activeApiBase = widget.config.apiBase;
+      _activeAppId = widget.config.appId;
+      _logs.clear();
+      _logCollectionAttempted = false;
+      _logCollecting = false;
+      _logCollectError = null;
+      _idempotencyKey = null;
+      _pendingSubmit = null;
+      _triggerAutoLogCollection();
+    }
+  }
+
+  @override
   void dispose() {
+    _logCollectSeq++;
     _pollTimer?.cancel();
     _draft.removeListener(_onDraftChanged);
     _api.dispose();
@@ -380,6 +448,253 @@ class FeedbackPanelState extends State<FeedbackPanel> {
     });
   }
 
+  // ---------------------------------------------------------------- 日志自动与手动管理
+
+  static const int kMaxLogs = 3;
+  static const int kMaxLogBytes = 1048576; // 1 MiB
+  static const int kMaxLogsTotalBytes = 3145728; // 3 MiB
+  static const List<String> kAllowedLogExtensions = <String>[
+    '.log',
+    '.txt',
+    '.json',
+    '.jsonl',
+  ];
+
+  /// 验证单份日志文件是否符合契约：
+  /// - 扩展名白名单（.log / .txt / .json / .jsonl，大小写不敏感）
+  /// - 单文件 ≤ 1 MiB（1048576 字节）
+  /// - 非空（> 0 字节）
+  /// - 严格 UTF-8 编码且不含 U+0000 (NUL)
+  static String? validateLogFile({
+    required String name,
+    required Uint8List bytes,
+  }) {
+    final String trimmedName = name.trim();
+    if (trimmedName.isEmpty || trimmedName.length > 255) {
+      return '文件名长度必须在 1 到 255 个字符之间';
+    }
+    if (trimmedName.contains('/') || trimmedName.contains('\\')) {
+      return '日志文件名不能包含路径分隔符';
+    }
+    final String lower = trimmedName.toLowerCase();
+    final bool allowedExt = kAllowedLogExtensions.any((ext) => lower.endsWith(ext));
+    if (!allowedExt) {
+      return '仅支持 .log / .txt / .json / .jsonl 文件';
+    }
+    if (bytes.isEmpty) {
+      return '日志文件不能为空';
+    }
+    if (bytes.length > kMaxLogBytes) {
+      return '单个日志文件不能超过 1 MiB';
+    }
+    // 严格 UTF-8 解码且无 NUL
+    try {
+      final String decoded = const Utf8Decoder(allowMalformed: false).convert(bytes);
+      if (decoded.contains('\u0000')) {
+        return '日志不能包含 NUL 字符';
+      }
+    } catch (_) {
+      return '日志必须是有效的 UTF-8 文本';
+    }
+    return null;
+  }
+
+  void _triggerAutoLogCollection() {
+    final FeedbackLogProvider? provider = widget.config.logProvider;
+    if (provider == null || _logCollectionAttempted) return;
+    _logCollectionAttempted = true;
+    _collectLogs(provider);
+  }
+
+  Future<void> _collectLogs(FeedbackLogProvider provider) async {
+    final int seq = ++_logCollectSeq;
+    final String expectedBase = _activeApiBase;
+    final String expectedAppId = _activeAppId;
+
+    setState(() {
+      _logCollecting = true;
+      _logCollectError = null;
+    });
+
+    try {
+      final List<FeedbackLogPart> parts = await Future.sync(provider).timeout(
+        const Duration(seconds: 3),
+      );
+
+      if (!mounted ||
+          seq != _logCollectSeq ||
+          expectedBase != widget.config.apiBase ||
+          expectedAppId != widget.config.appId) {
+        return; // 迟到结果：丢弃
+      }
+
+      // 校验数量上限
+      if (_logs.length + parts.length > kMaxLogs) {
+        setState(() {
+          _logCollecting = false;
+          _logCollectError = '日志数量超过 $kMaxLogs 个上限（尝试添加 ${parts.length} 个）';
+        });
+        return;
+      }
+
+      // 校验总大小 (3 MiB)
+      final int existingBytes = _logs.fold(0, (acc, item) => acc + item.bytes.length);
+      final int incomingBytes = parts.fold(0, (acc, item) => acc + item.bytes.length);
+      if (existingBytes + incomingBytes > kMaxLogsTotalBytes) {
+        setState(() {
+          _logCollecting = false;
+          _logCollectError = '日志文件总大小不能超过 3 MiB';
+        });
+        return;
+      }
+
+      // 逐个文件校验
+      for (final FeedbackLogPart part in parts) {
+        final String? error = validateLogFile(name: part.name, bytes: part.bytes);
+        if (error != null) {
+          setState(() {
+            _logCollecting = false;
+            _logCollectError = '${part.name}: $error';
+          });
+          return;
+        }
+      }
+
+      // 全部通过，加入日志列表
+      setState(() {
+        _logCollecting = false;
+        _logCollectError = null;
+        for (final FeedbackLogPart part in parts) {
+          _logs.add(FeedbackPanelLogItem(
+            name: part.name.trim(),
+            bytes: part.bytes,
+            source: 'auto',
+          ));
+        }
+      });
+    } catch (e) {
+      if (!mounted ||
+          seq != _logCollectSeq ||
+          expectedBase != widget.config.apiBase ||
+          expectedAppId != widget.config.appId) {
+        return;
+      }
+      setState(() {
+        _logCollecting = false;
+        _logCollectError = '日志获取失败';
+      });
+    }
+  }
+
+  void _retryLogCollection() {
+    final FeedbackLogProvider? provider = widget.config.logProvider;
+    if (provider == null) return;
+    _collectLogs(provider);
+  }
+
+  void _ignoreLogCollection() {
+    setState(() {
+      _logCollecting = false;
+      _logCollectError = null;
+    });
+  }
+
+  Future<void> _pickManualLogFile() async {
+    if (_busy) return;
+    if (_logs.length >= kMaxLogs) {
+      setState(() {
+        _composeError = '最多只能添加 $kMaxLogs 个日志文件';
+      });
+      return;
+    }
+
+    try {
+      const XTypeGroup typeGroup = XTypeGroup(
+        label: '日志文件',
+        extensions: <String>['log', 'txt', 'json', 'jsonl'],
+      );
+      final XFile? file = await openFile(acceptedTypeGroups: <XTypeGroup>[typeGroup]);
+      if (file == null || !mounted) return;
+
+      final Uint8List bytes = await file.readAsBytes();
+      if (!mounted) return;
+
+      final String fileName = file.name;
+      final String? error = validateLogFile(name: fileName, bytes: bytes);
+      if (error != null) {
+        setState(() {
+          _composeError = error;
+        });
+        return;
+      }
+
+      final int currentTotal = _logs.fold(0, (acc, item) => acc + item.bytes.length);
+      if (currentTotal + bytes.length > kMaxLogsTotalBytes) {
+        setState(() {
+          _composeError = '日志文件总大小不能超过 3 MiB';
+        });
+        return;
+      }
+
+      setState(() {
+        _composeError = null;
+        _logs.add(FeedbackPanelLogItem(
+          name: fileName.trim(),
+          bytes: bytes,
+          source: 'manual',
+        ));
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _composeError = '读取日志文件失败: $e';
+      });
+    }
+  }
+
+  void _removeLogAt(int index) {
+    if (_busy) return;
+    if (index >= 0 && index < _logs.length) {
+      setState(() {
+        _logs.removeAt(index);
+      });
+    }
+  }
+
+  void _previewLog(FeedbackPanelLogItem item) {
+    String text;
+    try {
+      text = utf8.decode(item.bytes, allowMalformed: true);
+    } catch (_) {
+      text = '(无法解码为文本)';
+    }
+
+    showDialog<void>(
+      context: context,
+      builder: (BuildContext ctx) {
+        return AlertDialog(
+          title: Text(item.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+          content: SizedBox(
+            width: double.maxFinite,
+            height: 400,
+            child: SingleChildScrollView(
+              child: SelectableText(
+                text,
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+              ),
+            ),
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('关闭'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   // ---------------------------------------------------------------- 提交
 
   bool get _canSubmit {
@@ -398,18 +713,19 @@ class FeedbackPanelState extends State<FeedbackPanel> {
     // 产生重复工单；该视图只提供刷新状态 / 复制反馈 ID / 返回编辑开新反馈。
     if (_stage == FeedbackStage.failed) return;
     final String text = _draft.text;
-    // 冻结本次提交的完整快照（正文 + 截图字节 + 元数据）：既要保证请求发出
+    // 冻结本次提交的完整快照（正文 + 截图字节 + 元数据 + 日志列表）：既要保证请求发出
     // 后草稿变化不影响本次字节，也要作为"能否复用旧幂等键"的比较依据。
     final _FrozenSubmit snapshot = _FrozenSubmit(
       text: text,
       screenshotBytes: _screenshotBytes,
       captureInfo: _captureInfo,
+      logs: List<FeedbackPanelLogItem>.from(_logs),
     );
     final _FrozenSubmit? pending = _pendingSubmit;
     if (_idempotencyKey != null &&
         pending != null &&
         !pending.sameAs(snapshot)) {
-      // 未送达的旧提交之后快照已变化（改文案 / 重拍换图 / 移除截图）：
+      // 未送达的旧提交之后快照已变化（改文案 / 重拍换图 / 移除截图 / 增删改日志）：
       // 同 key 不同字节违反服务契约 → 换新 key 提交新快照。
       _idempotencyKey = null;
     }
@@ -420,18 +736,28 @@ class FeedbackPanelState extends State<FeedbackPanel> {
       _composeError = null;
     });
     try {
+      final List<FeedbackSubmitLogPart> submitLogs = _logs
+          .map((item) => FeedbackSubmitLogPart(
+                name: item.name,
+                bytes: item.bytes,
+                source: item.source,
+              ))
+          .toList();
+
       final FeedbackSubmitResult result = await _api.submitFeedback(
         idempotencyKey: _idempotencyKey!,
         text: text,
         captureInfo: _captureInfo,
         screenshotBytes: _screenshotBytes,
+        logs: submitLogs,
       );
       if (!mounted) return;
-      // 成功接收后才清空草稿与截图；保留 _lastSubmittedText 供失败重试。
+      // 成功接收后才清空草稿与附件；保留 _lastSubmittedText 供失败重试。
       _lastSubmittedText = text;
       _draft.clear();
       _screenshotBytes = null;
       _captureInfo = null;
+      _logs.clear();
       _pendingSubmit = null;
       setState(() {
         _busy = false;
@@ -551,6 +877,7 @@ class FeedbackPanelState extends State<FeedbackPanel> {
     if (!restoreDraft) {
       _screenshotBytes = null;
       _captureInfo = null;
+      _logs.clear();
     }
     setState(() {
       _stage = FeedbackStage.compose;
@@ -1168,6 +1495,8 @@ class FeedbackPanelState extends State<FeedbackPanel> {
             ),
           ),
           const SizedBox(height: 10),
+          _buildLogsSection(context),
+          const SizedBox(height: 10),
           Row(
             children: <Widget>[
               Text(
@@ -1192,6 +1521,196 @@ class FeedbackPanelState extends State<FeedbackPanel> {
               ),
             ],
           ),
+        ],
+      ),
+    );
+  }
+
+  String _formatByteSize(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1048576) {
+      return '${(bytes / 1024).toStringAsFixed(1)} KiB';
+    }
+    return '${(bytes / 1048576).toStringAsFixed(1)} MiB';
+  }
+
+  Widget _buildLogsSection(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    final ColorScheme scheme = theme.colorScheme;
+    final bool canModify = !_busy &&
+        (_stage == FeedbackStage.compose || _stage == FeedbackStage.notSent);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        Row(
+          children: <Widget>[
+            Icon(Icons.description_outlined, size: 16, color: scheme.onSurfaceVariant),
+            const SizedBox(width: 6),
+            Text(
+              '日志附件 (${_logs.length}/$kMaxLogs)',
+              style: theme.textTheme.labelMedium?.copyWith(
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const Spacer(),
+            if (canModify && _logs.length < kMaxLogs)
+              TextButton.icon(
+                key: const Key('feedback-add-log-btn'),
+                onPressed: _pickManualLogFile,
+                icon: const Icon(Icons.add, size: 14),
+                label: const Text('手动添加'),
+              ),
+          ],
+        ),
+        if (_logCollecting) ...<Widget>[
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            child: Row(
+              children: <Widget>[
+                const SizedBox.square(
+                  dimension: 14,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  '正在获取日志…',
+                  style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+                ),
+              ],
+            ),
+          ),
+        ],
+        if (_logCollectError != null) ...<Widget>[
+          Container(
+            key: const Key('feedback-log-collect-error'),
+            margin: const EdgeInsets.symmetric(vertical: 4),
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: scheme.errorContainer,
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Row(
+              children: <Widget>[
+                Icon(Icons.warning_amber_rounded, size: 14, color: scheme.onErrorContainer),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    _logCollectError!,
+                    style: theme.textTheme.bodySmall?.copyWith(color: scheme.onErrorContainer),
+                  ),
+                ),
+                if (canModify) ...<Widget>[
+                  TextButton(
+                    key: const Key('feedback-retry-log-btn'),
+                    onPressed: _retryLogCollection,
+                    child: const Text('重试'),
+                  ),
+                  TextButton(
+                    key: const Key('feedback-ignore-log-btn'),
+                    onPressed: _ignoreLogCollection,
+                    child: const Text('不带日志继续提交'),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+        if (_logs.isNotEmpty) ...<Widget>[
+          const SizedBox(height: 4),
+          for (int i = 0; i < _logs.length; i++) ...<Widget>[
+            _buildLogTile(context, _logs[i], i, canModify),
+            if (i < _logs.length - 1) const SizedBox(height: 4),
+          ],
+        ],
+        const SizedBox(height: 4),
+        Text(
+          '日志将附带提交并参与 AI 诊断与 Kaneo 归档。',
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: scheme.onSurfaceVariant.withValues(alpha: 0.8),
+            fontSize: 11,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildLogTile(BuildContext context, FeedbackPanelLogItem item, int index, bool canModify) {
+    final ThemeData theme = Theme.of(context);
+    final ColorScheme scheme = theme.colorScheme;
+    final isAuto = item.source == 'auto';
+
+    return Container(
+      key: Key('feedback-log-item-$index'),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: scheme.outlineVariant.withValues(alpha: 0.5)),
+      ),
+      child: Row(
+        children: <Widget>[
+          Icon(
+            isAuto ? Icons.auto_awesome_outlined : Icons.insert_drive_file_outlined,
+            size: 16,
+            color: isAuto ? scheme.primary : scheme.onSurfaceVariant,
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Row(
+              children: <Widget>[
+                Flexible(
+                  child: Text(
+                    item.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w500),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  '(${_formatByteSize(item.bytes.length)})',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                    fontSize: 10,
+                  ),
+                ),
+                const SizedBox(width: 4),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: isAuto
+                        ? scheme.primaryContainer.withValues(alpha: 0.6)
+                        : scheme.surfaceContainerHighest,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    isAuto ? '自动' : '手动',
+                    style: TextStyle(
+                      fontSize: 9,
+                      color: isAuto ? scheme.onPrimaryContainer : scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            key: Key('feedback-preview-log-$index'),
+            iconSize: 16,
+            tooltip: '预览日志',
+            icon: const Icon(Icons.visibility_outlined),
+            onPressed: () => _previewLog(item),
+          ),
+          if (canModify)
+            IconButton(
+              key: Key('feedback-remove-log-$index'),
+              iconSize: 16,
+              tooltip: '移除日志',
+              icon: const Icon(Icons.close),
+              onPressed: () => _removeLogAt(index),
+            ),
         ],
       ),
     );

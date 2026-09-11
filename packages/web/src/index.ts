@@ -1,12 +1,19 @@
-import { FeedbackWidget, type FeedbackSubmittedDetail } from './element';
+import {
+  FeedbackWidget,
+  type FeedbackSubmittedDetail,
+  type FeedbackLogPart,
+  type FeedbackLogProvider,
+} from './element';
 
 export { FeedbackWidget };
-export type { FeedbackSubmittedDetail };
+export type { FeedbackSubmittedDetail, FeedbackLogPart, FeedbackLogProvider };
 export type {
   FeedbackStatus,
   FeedbackContext,
   FeedbackRecord,
   FeedbackCaptureInfo,
+  FeedbackLogSource,
+  FeedbackLogItem,
   FeedbackSubmitPayload,
   FeedbackSubmitResponse,
 } from './api';
@@ -36,6 +43,7 @@ export interface OpenFeedbackOptions {
   launcherBottom?: string;
   launcherMode?: 'tab' | 'orb';
   captureMode?: 'off' | 'viewport';
+  logProvider?: FeedbackLogProvider;
 }
 
 /**
@@ -57,6 +65,7 @@ export function openFeedback(options: OpenFeedbackOptions = {}): FeedbackWidget 
     if (options.launcherBottom) widget.launcherBottom = options.launcherBottom;
     if (options.launcherMode) widget.launcherMode = options.launcherMode;
     if (options.captureMode) widget.captureMode = options.captureMode;
+    if (options.logProvider) widget.logProvider = options.logProvider;
     document.body.appendChild(widget);
   } else {
     if (options.apiBase) widget.apiBase = options.apiBase;
@@ -69,6 +78,7 @@ export function openFeedback(options: OpenFeedbackOptions = {}): FeedbackWidget 
     if (options.launcherBottom) widget.launcherBottom = options.launcherBottom;
     if (options.launcherMode) widget.launcherMode = options.launcherMode;
     if (options.captureMode) widget.captureMode = options.captureMode;
+    if (options.logProvider !== undefined) widget.logProvider = options.logProvider;
   }
   widget.open();
   return widget;

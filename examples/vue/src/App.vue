@@ -39,6 +39,27 @@ function openViaModuleHelper() {
 onMounted(() => {
   // 事件在元素实例上派发（bubbles + composed）；这里挂上，卸载时移除，避免泄漏。
   widget.value?.addEventListener('feedback-submitted', onSubmitted);
+
+  // 演示：导出宿主已有日志并提供给反馈组件
+  // ⚠️ 宿主负责在交给组件前去除凭据等敏感内容！
+  if (widget.value) {
+    widget.value.logProvider = async () => {
+      const vueLogs = [
+        '[VUE INFO] Application mounted',
+        '[VUE ROUTE] Navigated to current page',
+      ];
+      // 宿主脱敏处理
+      const sanitized = vueLogs
+        .map((item) => item.replace(/secret|token/gi, '***'))
+        .join('\n');
+      return [
+        {
+          name: 'vue-app.log',
+          bytes: new TextEncoder().encode(sanitized),
+        },
+      ];
+    };
+  }
 });
 
 onBeforeUnmount(() => {

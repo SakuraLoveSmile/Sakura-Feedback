@@ -25,6 +25,35 @@
   `captureMode: FeedbackCaptureMode.viewport`
   ——组件默认是 `FeedbackLauncherMode.tab` / `FeedbackCaptureMode.off`，
   升级不会改变旧宿主行为，要灵感球和自动截图必须显式写。
+- **日志自动附带（`logProvider`）与手动补充**：
+  配置中提供了 `logProvider` 回调返回 `FeedbackLogPart` 列表（最多 3 份文件、每份不超过 1 MiB、支持 `.log/.txt/.json/.jsonl`）。
+  面板支持纯文本预览与移除，并支持通过 `file_selector` 手动补充日志文件。
+  **重要安全提醒**：日志来自宿主已有系统，宿主负责在将日志交付给回调前去除令牌、密钥、密码或用户隐私等敏感数据。日志提交后会进入服务端落库、参与 AI 诊断并归档至 Kaneo。
+
+### 日志接入（`logProvider` + `file_selector`）
+
+`lib/main.dart` 里的写法（把宿主已有日志交给组件）：
+
+```dart
+FeedbackConfig(
+  apiBase,
+  appId,
+  logProvider: () async {
+    final String text = /* 宿主自己的日志来源，先脱敏 */ '';
+    return <FeedbackLogPart>[
+      FeedbackLogPart(name: 'app.log', bytes: Uint8List.fromList(utf8.encode(text))),
+    ];
+  },
+)
+```
+
+- 类型：`typedef FeedbackLogProvider = FutureOr<List<FeedbackLogPart>> Function()`；`FeedbackLogPart(name, bytes)`，`bytes` 是 `Uint8List`。**不配置就完全不自动采集**。
+- 时机与超时：每份新草稿**首次打开面板时调用一次**，超时 **3 秒**；失败/超时后面板可**重试**或**不带日志继续提交**（日志是附加排查素材，不该阻塞反馈）。
+- 限制（自动 + 手动合计）：≤ **3** 个文件、单份 ≤ **1 MiB**、合计 ≤ **3 MiB**，仅 `.log`/`.txt`/`.json`/`.jsonl`，必须是有效 UTF-8 且不含 NUL。数量/大小超限 → `413 too_large`；其余 → `400 invalid_log`，**整单拒绝**（不会只丢一份、不会截断）。
+- **手动补充走 `file_selector`**（依赖 `file_selector: ^1.1.0`）：`openFile(acceptedTypeGroups: [XTypeGroup(extensions: ['log','txt','json','jsonl'])])` → `await file.readAsBytes()` **按字节读取**（不先转字符串，避免大文件被整块转码/截断），再走与自动采集相同的校验。
+- **未验证项（如实标注）**：原生系统文件选择器弹窗在本机自动化测试下**未验证**，需真机/桌面手动点一次确认。
+- ⚠️ **脱敏在宿主侧**（组件不做过滤）：清除 Token/密钥/密码等凭据与个人数据；日志**会参与 AI 诊断并归档到 Kaneo 任务**（截图成功但某份日志未完成时，记录不会是「已归档」，而是 `failed` / `needs_review`）。
+- 状态：本轮**已落地（待体验）**（依赖 t4 的 `flutter test` / `flutter analyze` 通过记录，本轮文档未复跑；尚未完成真实设备端到端验收）。细节见 [`docs/integration.md` 第 9 章](../../docs/integration.md#9-日志接入本轮新增) 与 [`flutter/feedback/README.md`](../../flutter/feedback/README.md)。
 
 ### 为什么 builder 里还套了一层外层 Navigator
 

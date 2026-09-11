@@ -115,3 +115,25 @@ effect（mount → unmount → mount），本示例是安全的：
 
 - 原生 `<script>` 直挂 UMD 产物：见 `examples/html`；
 - 服务端渲染 + 客户端动态 `import()`：见 `examples/ssr`。
+
+## 日志接入（`logProvider`）
+
+本示例在元素 ref 可用后用 effect 赋值 `logProvider`，把宿主已有日志交给组件（返回前先脱敏）：
+
+```tsx
+useEffect(() => {
+  if (!widget) return;                       // widget 是回调 ref 提到的真实元素
+  widget.logProvider = async () => {
+    const sanitized = existingLogs
+      .map((msg) => msg.replace(/(token|password|auth)=([^\s]+)/gi, '$1=***'))
+      .join('\n');
+    return [{ name: 'react-app.log', bytes: new TextEncoder().encode(sanitized) }];
+  };
+}, [widget]);
+```
+
+- 类型可从 `@feedback/web` 导入：`FeedbackLogProvider`、`FeedbackLogPart`（`{ name: string; bytes: Uint8Array }`）。也可以用 `openFeedback({ apiBase, appId, logProvider })` 一次传入。
+- 时机与超时：每份新草稿**首次打开面板时调用一次**，超时 **3 秒**；失败/超时后面板提示「日志获取失败」，可「重试」或**不带日志继续提交**；面板里也能手动「+ 添加文件」。重新打开已有草稿不会重新采集。
+- 限制（自动 + 手动合计）：≤ **3** 个文件、单份 ≤ **1 MiB**、合计 ≤ **3 MiB**，仅 `.log`/`.txt`/`.json`/`.jsonl`，必须是有效 UTF-8 且不含 NUL。超限 → `413 too_large`，其余 → `400 invalid_log`，**整单拒绝**。
+- ⚠️ **脱敏在宿主侧**（组件不做过滤）：清除 Token/Cookie/密码等凭据与个人数据；日志**会参与 AI 诊断并归档到 Kaneo**。
+- 状态：本轮**已落地（待体验）**（代码与自动化测试就位，尚未完成真实环境验收）。细节见 [`docs/integration.md` 第 9 章](../../docs/integration.md#9-日志接入本轮新增)。

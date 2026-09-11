@@ -1,4 +1,23 @@
+import 'dart:async';
+import 'dart:typed_data';
 import 'dart:ui' show Offset;
+
+/// 单份日志附件的数据模型。
+class FeedbackLogPart {
+  const FeedbackLogPart({
+    required this.name,
+    required this.bytes,
+  });
+
+  /// 原始文件名（如 app.log）。
+  final String name;
+
+  /// 日志原始内容字节。
+  final Uint8List bytes;
+}
+
+/// 日志提供器回调类型：返回 0 到多份日志文件。
+typedef FeedbackLogProvider = FutureOr<List<FeedbackLogPart>> Function();
 
 /// 悬浮按钮停靠的侧边。
 enum FeedbackSide {
@@ -60,6 +79,7 @@ class FeedbackConfig {
     this.launcherBottom = '25%',
     this.launcherMode = FeedbackLauncherMode.tab,
     this.captureMode = FeedbackCaptureMode.off,
+    this.logProvider,
   })  : assert(apiBase.trim().isNotEmpty, 'apiBase 不能为空'),
         assert(appId.trim().isNotEmpty, 'appId 不能为空'),
         assert(_isHttpUrl(apiBase), 'apiBase 必须是 http(s) 地址'),
@@ -98,6 +118,10 @@ class FeedbackConfig {
 
   /// 截图捕获模式，默认关闭 [FeedbackCaptureMode.off]。
   final FeedbackCaptureMode captureMode;
+
+  /// 日志提供器回调。返回文件名与日志字节（Uint8List）。
+  /// 未配置时仅展示手动添加附件入口。
+  final FeedbackLogProvider? logProvider;
 
   static String _normalize(String base) {
     var b = base.trim();

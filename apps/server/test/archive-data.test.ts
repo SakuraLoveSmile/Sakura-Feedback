@@ -141,16 +141,69 @@ describe("ArchiveDataV1 严格解析", () => {
     }
   });
 
-  it("未知版本 → unsupported；损坏 JSON → corrupt", () => {
+  it("当前版本 v2 合法、v1 仍可读、未知版本 → unsupported；损坏 JSON → corrupt", () => {
+    const v2 = parseArchiveData(
+      '{"version":2,"revision":1,"target":{"apiBase":"http://a","projectId":"p","workspaceId":"w"}}',
+    );
+    expect(v2.kind).toBe("valid");
+    if (v2.kind === "valid") expect(v2.data.version).toBe(2);
+    // v1 只读兼容：旧库/旧记录仍必须可解析（不得因升版而判损坏）
+    const v1 = parseArchiveData(
+      '{"version":1,"revision":3,"target":{"apiBase":"http://a","projectId":"p","workspaceId":"w"}}',
+    );
+    expect(v1.kind).toBe("valid");
+    if (v1.kind === "valid") {
+      expect(v1.data.version).toBe(1);
+      expect(v1.data.revision).toBe(3);
+    }
     expect(
-      parseArchiveData('{"version":2,"revision":1,"target":{"apiBase":"http://a","projectId":"p","workspaceId":"w"}}'),
+      parseArchiveData('{"version":3,"revision":1,"target":{"apiBase":"http://a","projectId":"p","workspaceId":"w"}}'),
     ).toEqual({
       kind: "unsupported",
-      version: 2,
+      version: 3,
     });
     expect(parseArchiveData("{not json").kind).toBe("corrupt");
     expect(parseArchiveData('{"version":"1"}').kind).toBe("corrupt");
     expect(parseArchiveData("[1,2]")).toEqual({ kind: "corrupt", reason: "不是 JSON 对象" });
+  });
+
+  it("V2 `logs: {}` 判 corrupt，而 `logs` 键缺省为合法——`{}` 与缺省不等价（契约 :643）", () => {
+    const target = { apiBase: "http://a", projectId: "p", workspaceId: "w" };
+    const base = { version: 2, revision: 1, target };
+    const upload = { key: "k1", credentialsEnc: "v1:a:b:c", expiresAt: null, outcome: "not_sent" as const };
+
+    // 1) `logs` 键完全缺省 → 合法（V1→V2 升级后的「该反馈没有日志」表达）
+    const omitted = parseArchiveData(JSON.stringify(base));
+    expect(omitted.kind).toBe("valid");
+    if (omitted.kind === "valid") expect(Object.hasOwn(omitted.data, "logs")).toBe(false);
+
+    // 2) `"logs": {}` → corrupt（空集合必须省略该键，不得输出 "logs": {}）
+    expect(parseArchiveData(JSON.stringify({ ...base, logs: {} }))).toEqual({
+      kind: "corrupt",
+      reason: expect.any(String),
+    });
+
+    // 3) 两者结论必须不同 —— 这就是「不等价」的判别性断言
+    expect(parseArchiveData(JSON.stringify({ ...base, logs: {} })).kind).not.toBe(omitted.kind);
+
+    // 4) 至少有 1 个键才合法，且该键被保留
+    const one = parseArchiveData(JSON.stringify({ ...base, logs: { "log-1": { upload } } }));
+    expect(one.kind).toBe("valid");
+    if (one.kind === "valid" && one.data.version === 2) {
+      expect(Object.keys(one.data.logs ?? {})).toEqual(["log-1"]);
+    }
+
+    // 5) 序列化侧同规则：无日志 → 省略 `logs`；有日志 → 输出 `logs`；两者输出都必须可回读
+    const serializedWithout = serializeArchiveData({ target }, 1);
+    expect(serializedWithout).not.toContain('"logs"');
+    expect(parseArchiveData(serializedWithout).kind).toBe("valid");
+    const serializedWith = serializeArchiveData({ target, logs: { "log-1": { upload } } }, 1);
+    expect(Object.keys(JSON.parse(serializedWith).logs)).toEqual(["log-1"]);
+    expect(parseArchiveData(serializedWith).kind).toBe("valid");
+    // 空集合在序列化侧同样不生成 `"logs": {}`（否则与自己写出的内容回读即 corrupt）
+    const serializedEmptyLogs = serializeArchiveData({ target, logs: {} }, 1);
+    expect(serializedEmptyLogs).not.toContain('"logs"');
+    expect(parseArchiveData(serializedEmptyLogs).kind).toBe("valid");
   });
 });
 
@@ -168,8 +221,9 @@ describe("ArchiveDataV1 序列化与 revision 持久化", () => {
     if (parsed.kind !== "valid") return;
     expect(parsed.data.revision).toBe(4);
     expect(parsed.data.upload?.expiresAt).toBeNull();
-    // 键序固定，version/revision 在前
-    expect(json.startsWith('{"version":1,"revision":4,"target":{"apiBase"')).toBe(true);
+    // 新写入恒为 v2；键序固定，version/revision 在前
+    expect(parsed.data.version).toBe(2);
+    expect(json.startsWith('{"version":2,"revision":4,"target":{"apiBase"')).toBe(true);
   });
 
   it("revision 单调递增；并发基准过期时拒绝覆盖", () => {
@@ -190,15 +244,17 @@ describe("ArchiveDataV1 序列化与 revision 持久化", () => {
     const id = seedFeedbackRow(db);
     updateFeedback(db, id, { archive_data_json: "{broken" });
     expect(() => saveArchiveData(db, id, loadArchiveData(db, id), validNext())).toThrow(ArchiveVersionConflictError);
+    // 更高版本（未来服务端写入）绝不覆盖
     updateFeedback(db, id, {
-      archive_data_json: '{"version":2,"revision":1,"target":{"apiBase":"http://a","projectId":"p","workspaceId":"w"}}',
+      archive_data_json: '{"version":3,"revision":1,"target":{"apiBase":"http://a","projectId":"p","workspaceId":"w"}}',
     });
     expect(() => saveArchiveData(db, id, loadArchiveData(db, id), validNext())).toThrow(ArchiveVersionConflictError);
-    // legacy 之上允许首写（单记录迁移，非批量改写）
+    // legacy 之上允许首写（单记录迁移，非批量改写；新写入恒为 v2）
     updateFeedback(db, id, { archive_data_json: '{"assetUrl":"http://a/b.png"}' });
     const saved = saveArchiveData(db, id, loadArchiveData(db, id), validNext());
     expect(saved.revision).toBe(1);
-    expect(getFeedback(db, id)?.archive_data_json).toContain('"version":1');
+    expect(saved.version).toBe(2);
+    expect(getFeedback(db, id)?.archive_data_json).toContain('"version":2');
   });
 
   it("SQLite 写入失败 → ArchivePersistenceError", () => {
@@ -300,7 +356,7 @@ describe("预签名凭证加密与到期解析", () => {
 });
 
 describe("worker 集成：目标固定、凭证落盘门禁与损坏数据停止", () => {
-  it("图文反馈归档后 archive_data_json 为合法 v1：目标固定、凭证加密、上传/资产/评论结果完整", async () => {
+  it("图文反馈归档后 archive_data_json 为合法 v2：目标固定、凭证加密、上传/资产/评论结果完整", async () => {
     const h = await makeHarness();
     const png = await createTestPng(80, 60);
     const res = await submitMultipartFeedback(h.feedbackApp, h.bearer, defaultSubmitBody(), png);
@@ -314,7 +370,7 @@ describe("worker 集成：目标固定、凭证落盘门禁与损坏数据停止
     const parsed = parseArchiveData(row?.archive_data_json ?? null);
     expect(parsed.kind).toBe("valid");
     if (parsed.kind !== "valid") return;
-    expect(parsed.data.version).toBe(1);
+    expect(parsed.data.version).toBe(2);
     expect(parsed.data.revision).toBeGreaterThanOrEqual(1);
     expect(parsed.data.target).toEqual({ apiBase: "http://kaneo.test/api", projectId: "proj-1", workspaceId: "ws-1" });
     expect(parsed.data.upload?.outcome).toBe("confirmed");
@@ -365,7 +421,7 @@ describe("worker 集成：目标固定、凭证落盘门禁与损坏数据停止
       status: "received",
       archive_stage: "task_pending",
       archive_data_json: JSON.stringify({
-        version: 2,
+        version: 3,
         revision: 1,
         target: { apiBase: "http://kaneo.test/api", projectId: "proj-1", workspaceId: "ws-1" },
       }),
@@ -374,7 +430,7 @@ describe("worker 集成：目标固定、凭证落盘门禁与损坏数据停止
     await h.feedbackApp.worker.idle();
     row = getFeedback(h.feedbackApp.db, r.data.feedbackId);
     expect(row?.status).toBe("needs_review");
-    expect(row?.error_summary).toContain("v2 不受支持");
+    expect(row?.error_summary).toContain("v3 不受支持");
     expect(h.kaneo.created.length).toBe(1);
     expect(h.kaneo.uploads.length).toBe(0);
   });

@@ -23,6 +23,7 @@ export 'src/api_client.dart'
         ApiClient,
         FeedbackCaptureInfo,
         FeedbackSubmitResult,
+        FeedbackSubmitLogPart,
         FeedbackRecord,
         LoginResult;
 export 'src/capture_mask.dart' show FeedbackCaptureMask;
@@ -31,12 +32,19 @@ export 'src/config.dart'
         FeedbackConfig,
         FeedbackCaptureMode,
         FeedbackLauncherMode,
+        FeedbackLogPart,
+        FeedbackLogProvider,
         FeedbackSide,
         FeedbackThemeMode;
 export 'src/controller.dart' show FeedbackController;
 export 'src/idempotency.dart' show generateFeedbackIdempotencyKey;
 export 'src/panel.dart'
-    show FeedbackPanel, FeedbackPanelState, FeedbackStage, kFeedbackMaxTextRunes;
+    show
+        FeedbackPanel,
+        FeedbackPanelLogItem,
+        FeedbackPanelState,
+        FeedbackStage,
+        kFeedbackMaxTextRunes;
 export 'src/token_store.dart'
     show FeedbackTokenStore, MemoryTokenStore, feedbackTokenStorageKey;
 export 'src/web_handshake.dart' show WebHandshakeResult;

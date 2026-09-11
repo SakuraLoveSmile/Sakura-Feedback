@@ -124,6 +124,28 @@
       const widget = document.getElementById('widget');
       const status = document.getElementById('status');
 
+      // 宿主日志系统模拟（内存日志缓冲池）
+      const hostLogs = [
+        '[INFO] 2026-03-31T08:00:00.000Z App initialized',
+        '[DEBUG] 2026-03-31T08:00:01.200Z Loaded configuration: { theme: "system" }',
+        '[WARN] 2026-03-31T08:00:05.100Z Slow render detected on homepage',
+      ];
+
+      // 配置 logProvider 导出宿主已有日志
+      // ⚠️ 安全说明：宿主负责在交给反馈组件前，必须去除 Token、密码、Cookie 等敏感凭据！
+      widget.logProvider = async () => {
+        // 模拟对已有日志做清洗/脱敏
+        const sanitizedText = hostLogs
+          .map((line) => line.replace(/Bearer\s+[A-Za-z0-9._-]+/g, 'Bearer ***'))
+          .join('\n');
+        return [
+          {
+            name: 'client.log',
+            bytes: new TextEncoder().encode(sanitizedText),
+          },
+        ];
+      };
+
       if (!customElements.get('feedback-widget')) {
         status.style.color = '#dc2626';
         status.textContent =

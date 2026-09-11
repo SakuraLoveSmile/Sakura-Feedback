@@ -75,10 +75,47 @@ CREATE TABLE IF NOT EXISTS feedback_screenshots (
   capture_json  TEXT,
   created_at    TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS feedback_logs (
+  id          TEXT    PRIMARY KEY,
+  feedback_id TEXT    NOT NULL REFERENCES feedbacks(id) ON DELETE CASCADE,
+  seq         INTEGER NOT NULL,
+  filename    TEXT    NOT NULL,
+  source      TEXT    NOT NULL CHECK (source IN ('auto','manual')),
+  log_blob    BLOB    NOT NULL,
+  byte_size   INTEGER NOT NULL,
+  sha256      TEXT    NOT NULL,
+  created_at  TEXT    NOT NULL,
+  UNIQUE (feedback_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS idx_feedback_logs_feedback ON feedback_logs(feedback_id, seq);
 `;
 
-function migrate(db: DatabaseSync): void {
-  const v = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
+/** v3 迁移的 DDL：必须与 SCHEMA 中的 feedback_logs 段逐字一致（L5）。 */
+const FEEDBACK_LOGS_DDL = `
+CREATE TABLE IF NOT EXISTS feedback_logs (
+  id          TEXT    PRIMARY KEY,
+  feedback_id TEXT    NOT NULL REFERENCES feedbacks(id) ON DELETE CASCADE,
+  seq         INTEGER NOT NULL,
+  filename    TEXT    NOT NULL,
+  source      TEXT    NOT NULL CHECK (source IN ('auto','manual')),
+  log_blob    BLOB    NOT NULL,
+  byte_size   INTEGER NOT NULL,
+  sha256      TEXT    NOT NULL,
+  created_at  TEXT    NOT NULL,
+  UNIQUE (feedback_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS idx_feedback_logs_feedback ON feedback_logs(feedback_id, seq);
+`;
+
+/**
+ * 增量迁移：v2 → v3 只新增 feedback_logs（不重建 feedbacks、不改既有列）。
+ * 迁移在事务内完成；任一步失败 → ROLLBACK，user_version 不前进（供测试直接调用）。
+ */
+export function migrate(db: DatabaseSync): void {
+  let v = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
   if (v < 2) {
     db.exec(`
       CREATE TABLE IF NOT EXISTS feedback_screenshots (
@@ -102,6 +139,19 @@ function migrate(db: DatabaseSync): void {
       db.exec("ALTER TABLE feedbacks ADD COLUMN archive_data_json TEXT");
     }
     db.exec("PRAGMA user_version = 2;");
+    v = 2;
+  }
+  if (v < 3) {
+    // CREATE TABLE IF NOT EXISTS 幂等；DDL 与 user_version 同事务，失败整体回滚
+    db.exec("BEGIN");
+    try {
+      db.exec(FEEDBACK_LOGS_DDL);
+      db.exec("PRAGMA user_version = 3;");
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
   }
 }
 

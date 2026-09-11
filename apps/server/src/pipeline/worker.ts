@@ -2,17 +2,21 @@ import { createHash } from "node:crypto";
 import type { Db } from "../db/db.ts";
 import {
   type AppRow,
+  type FeedbackLogRow,
   type FeedbackRow,
   getApp,
   getFeedback,
+  getFeedbackLog,
   getFeedbackScreenshot,
   getFeedbackScreenshotMeta,
   getSetting,
+  listFeedbackLogs,
   resolveOutputPixels,
   updateFeedback,
 } from "../db/repos.ts";
 import { type AiClient, AiError } from "../services/ai.ts";
 import {
+  buildLogComment,
   buildScreenshotComment,
   buildTaskDescription,
   type KaneoClient,
@@ -20,20 +24,28 @@ import {
   KaneoDefiniteError,
   type KaneoSettings,
   KaneoUncertainError,
+  logContentTypeFor,
 } from "../services/kaneo.ts";
 import { normalizeKaneoApiBase } from "../services/kaneo-http.ts";
+import { decodeLogStrict, MAX_LOGS_TAIL_CODEPOINTS, takeTail } from "../services/log-text.ts";
+import type { AiLogInput } from "../types.ts";
 import {
+  type ArchiveAttachmentRecord,
+  type ArchiveData,
   type ArchiveDataNext,
   type ArchiveDataV1,
   ArchivePersistenceError,
   type ArchiveTarget,
   type ArchiveUpload,
   ArchiveVersionConflictError,
+  allAttachmentsConfirmed,
+  attachmentConfirmed,
   buildUploadRecord,
   checkArchiveTarget,
   commentMarker,
   decryptUploadCredentials,
   loadArchiveData,
+  logCommentMarker,
   MAX_SAME_KEY_RECOVERIES,
   type ParsedArchiveData,
   saveArchiveData,
@@ -43,13 +55,36 @@ import {
 const MAX_ATTEMPTS = 3; // AI 调用（含格式失败/超时/限流）单轮最多 3 次
 
 /**
+ * 从已挂载的评论正文里取回资产引用（`![...](url)`）。
+ * 仅用于「核对命中评论、但恢复数据缺 asset」的补记：URL 来自远端评论本身，不是猜测。
+ */
+function assetUrlFromComment(content: string): string | null {
+  const start = content.indexOf("](");
+  if (start < 0) return null;
+  const end = content.indexOf(")", start + 2);
+  if (end < 0) return null;
+  const url = content.slice(start + 2, end).trim();
+  return url.startsWith("http://") || url.startsWith("https://") ? url : null;
+}
+
+/**
  * 4.5 阶段矛盾检查：归档阶段 / 任务 ID / 恢复数据互相矛盾时返回描述（→待核对，不猜测重建）。
  * 只检查确定性矛盾；旧格式（legacy）记录不在 V1 字段层面检查。
  */
-function stageContradiction(row: FeedbackRow, parsed: ParsedArchiveData): string | null {
+function stageContradiction(
+  row: FeedbackRow,
+  parsed: ParsedArchiveData,
+  attachments: { hasScreenshot: boolean; logIds: string[] },
+): string | null {
   const data = parsed.kind === "valid" ? parsed.data : null;
-  if (row.archive_stage === "complete" && row.status !== "archived") {
-    return `archive_stage=complete 但 status=${row.status}`;
+  if (row.archive_stage === "complete") {
+    // L9：archive_stage=complete 只允许在集中判定为真时存在，否则一律判为矛盾 → needs_review
+    if (parsed.kind === "valid" && !allAttachmentsConfirmed(parsed.data, attachments)) {
+      return "archive_stage=complete 但附件未全部确认";
+    }
+    if (row.status !== "archived") {
+      return `archive_stage=complete 但 status=${row.status}`;
+    }
   }
   if (data && (data.upload || data.asset || data.comment) && !row.kaneo_task_id) {
     return "恢复数据含上传/资产/评论状态但缺少 Kaneo 任务 ID";
@@ -62,6 +97,20 @@ function stageContradiction(row: FeedbackRow, parsed: ParsedArchiveData): string
   }
   if (row.archive_stage === "comment_pending" && data && !data.asset) {
     return "archive_stage=comment_pending 但恢复数据缺少资产信息";
+  }
+  // 日志附件记录沿用同一组矛盾检查（L8：logs[logId] 与截图记录同形）
+  if (data && "logs" in data && data.logs) {
+    for (const [logId, rec] of Object.entries(data.logs)) {
+      if (rec.asset && rec.asset.id !== "" && !rec.upload) {
+        return `日志 ${logId} 资产已登记（id 已知）但缺少上传记录`;
+      }
+      if (row.archive_stage === "asset_finalized" && !rec.asset) {
+        return `archive_stage=asset_finalized 但日志 ${logId} 缺少资产信息`;
+      }
+      if (row.archive_stage === "comment_pending" && !rec.asset) {
+        return `archive_stage=comment_pending 但日志 ${logId} 缺少资产信息`;
+      }
+    }
   }
   return null;
 }
@@ -175,6 +224,127 @@ export function createWorker(deps: WorkerDeps) {
     }
   }
 
+  /** 归档终态写入结果：archived / 仍有附件未完成 / 本地状态写入失败。 */
+  type ArchiveFinish = "archived" | "needs_review" | "persist_failed";
+
+  /** 反馈的附件集合（截图 + 日志按 seq 升序）：L9 判定的唯一输入。 */
+  function attachmentInput(feedbackId: string): { hasScreenshot: boolean; logIds: string[] } {
+    const screenshot = getFeedbackScreenshot(deps.db, feedbackId);
+    const logs = listFeedbackLogs(deps.db, feedbackId);
+    return { hasScreenshot: !!screenshot, logIds: logs.map((l) => l.id) };
+  }
+
+  /**
+   * 归档终态的唯一出口（L9）：只有 `allAttachmentsConfirmed` 为真才写 `archived` + `complete`。
+   * 普通处理 / recheck / 人工恢复（recover）都必须经由它——任何路径都不得因为「截图已完成」而绕过未完成的日志。
+   */
+  function finishArchiveIfAllConfirmed(
+    feedbackId: string,
+    data: ArchiveData | null,
+    taskId: string | null,
+    taskUrl: string | null,
+  ): ArchiveFinish {
+    if (!allAttachmentsConfirmed(data, attachmentInput(feedbackId))) {
+      try {
+        updateFeedback(deps.db, feedbackId, {
+          status: "needs_review",
+          error_summary: "仍有附件未完成归档，已停止自动处理，待人工核对",
+        });
+      } catch {
+        /* 数据库不可写时保留原状态，由重启恢复兜底 */
+      }
+      return "needs_review";
+    }
+    try {
+      updateFeedback(deps.db, feedbackId, {
+        status: "archived",
+        archive_stage: "complete",
+        kaneo_task_id: taskId,
+        kaneo_task_url: taskUrl,
+        error_summary: null,
+        last_error: null,
+      });
+    } catch (err) {
+      stopForPersistenceFailure(feedbackId, "标记归档完成", err);
+      return "persist_failed";
+    }
+    return "archived";
+  }
+
+  /** 把单份日志的归档记录并入归档存档数据（V1 → V2 升版由 saveArchiveData 负责）。 */
+  function withLogRecord(base: ArchiveData, logId: string, record: ArchiveAttachmentRecord): ArchiveDataNext {
+    return { ...base, logs: { ...("logs" in base ? (base.logs ?? {}) : {}), [logId]: record } };
+  }
+
+  /** 归档存档数据里是否已存在任何写入类状态（截图或任一日志）。 */
+  function hasAttachmentState(data: ArchiveData | null): boolean {
+    if (!data) return false;
+    if (data.upload || data.asset || data.comment) return true;
+    const logs = "logs" in data ? data.logs : undefined;
+    if (!logs) return false;
+    return Object.values(logs).some((rec) => rec.upload || rec.asset || rec.comment);
+  }
+
+  /**
+   * 记录「某份日志无法纳入 AI 输入」的原因（L7）：只写 `seq`、安全文件名与原因，
+   * **绝不写日志内容**（L6）。痕迹落在该反馈的 `error_summary`（可查询），并打一条运行日志；
+   * 记录失败绝不影响该反馈的其余处理。
+   */
+  function recordSkippedLog(feedbackId: string, log: { seq: number; filename: string }, reason: string): void {
+    const note = `日志附件未纳入 AI 输入：seq=${log.seq}，filename=${log.filename}，原因=${reason}`;
+    try {
+      console.warn(`[server] ${note}（feedback=${feedbackId}）`);
+    } catch {
+      /* 运行日志不可用时忽略 */
+    }
+    try {
+      const prev = getFeedback(deps.db, feedbackId)?.error_summary?.trim() ?? "";
+      if (prev.includes(note)) return; // 重试/续跑不重复累积
+      updateFeedback(deps.db, feedbackId, { error_summary: (prev ? `${prev}｜${note}` : note).slice(0, 1000) });
+    } catch {
+      /* 痕迹写入失败不应让整条反馈失败（契约 L7） */
+    }
+  }
+
+  /**
+   * 构造 AI 日志输入（L7）：**只从已落库字节**解码，绝不重新向宿主索取。
+   * 无法解码 / 空白的日志跳过并记录原因（不影响该反馈的其余处理）；24000 码点总量预算按 seq 升序消耗。
+   */
+  function buildAiLogInputs(feedbackId: string): AiLogInput[] {
+    const logs = listFeedbackLogs(deps.db, feedbackId);
+    const out: AiLogInput[] = [];
+    let budget = MAX_LOGS_TAIL_CODEPOINTS;
+    for (const log of logs) {
+      const text = decodeLogStrict(log.log_blob);
+      if (text === null || text.length === 0) {
+        // 不可读的字节绝不进入提示词；跳过该份并记录原因（只记元数据，绝不记内容）
+        const reason =
+          log.log_blob == null
+            ? "落库字节缺失"
+            : text === null
+              ? "落库字节无法按严格 UTF-8 解码"
+              : "落库字节为空或仅含 BOM";
+        recordSkippedLog(feedbackId, log, reason);
+        continue;
+      }
+      // budget 只影响送出多少码点；truncated/totalCodepoints 始终由该份日志自身字节决定（L6/L7）
+      const tail = takeTail(text, budget);
+      budget -= tail.includedCodepoints;
+      out.push({
+        seq: log.seq,
+        filename: log.filename,
+        source: log.source,
+        sha256: log.sha256,
+        byteSize: log.byte_size,
+        tail: tail.tail.replaceAll("<", "＜").replaceAll(">", "＞"),
+        truncated: tail.truncated,
+        totalCodepoints: tail.totalCodepoints,
+        includedCodepoints: tail.includedCodepoints,
+      });
+    }
+    return out;
+  }
+
   // ---------- 4.4 反馈级操作锁与 revision 乐观锁 ----------
 
   function tryAcquire(feedbackId: string): boolean {
@@ -204,7 +374,7 @@ export function createWorker(deps: WorkerDeps) {
   }
 
   /** 保存恢复数据（门禁语义）：失败时尽力转待核对并返回 null。 */
-  function saveRecoveryState(feedbackId: string, next: ArchiveDataNext, what: string): ArchiveDataV1 | null {
+  function saveRecoveryState(feedbackId: string, next: ArchiveDataNext, what: string): ArchiveData | null {
     try {
       return saveArchiveData(deps.db, feedbackId, loadArchiveData(deps.db, feedbackId), next);
     } catch (err) {
@@ -247,7 +417,7 @@ export function createWorker(deps: WorkerDeps) {
    */
   async function prepareRecovery(
     row: FeedbackRow,
-    saved: ArchiveDataV1 | null,
+    saved: ArchiveData | null,
   ): Promise<{ ok: true; client: KaneoClient; apiBase: string } | { ok: false; result: WorkerOpResult }> {
     const bound = bindKaneo();
     if (!bound) {
@@ -341,6 +511,8 @@ export function createWorker(deps: WorkerDeps) {
                   outputPixels: resolveOutputPixels(screenshotMeta?.capture),
                 }
               : null,
+            // 日志只从已落库字节构造（重试不重新向宿主索取）
+            buildAiLogInputs(feedbackId),
           );
           break;
         } catch (err) {
@@ -421,10 +593,10 @@ export function createWorker(deps: WorkerDeps) {
       }
       return;
     }
-    let cur: ArchiveDataV1 | null = parsedArchive.kind === "valid" ? parsedArchive.data : null;
+    let cur: ArchiveData | null = parsedArchive.kind === "valid" ? parsedArchive.data : null;
 
     // ---- 4.5 阶段矛盾检查：阶段/任务/附件状态互相矛盾 → 待核对，不猜测重建 ----
-    const contradiction = stageContradiction(row, parsedArchive);
+    const contradiction = stageContradiction(row, parsedArchive, attachmentInput(row.id));
     if (contradiction) {
       try {
         updateFeedback(db, row.id, {
@@ -541,6 +713,10 @@ export function createWorker(deps: WorkerDeps) {
       return;
     }
 
+    /** 当前恢复数据里的日志记录表（V1 读路径没有 logs）。 */
+    const logsOf = (): Record<string, ArchiveAttachmentRecord> | undefined =>
+      cur && "logs" in cur ? cur.logs : undefined;
+
     /** 4.1 持久化门禁：保存下一版恢复数据；失败（含版本检查失败）转待核对并返回 false。 */
     function persistArchive(next: ArchiveDataNext, what: string): boolean {
       try {
@@ -638,274 +814,408 @@ export function createWorker(deps: WorkerDeps) {
       }
     }
 
-    // 检查是否有截图需要归档（已在阶段前置检查中读取）
-    if (!screenshot) {
-      // 纯文字反馈：任务创建完成即代表归档完成
-      updateFeedback(db, row.id, {
-        status: "archived",
-        archive_stage: "complete",
-        kaneo_task_id: taskId,
-        kaneo_task_url: taskUrl,
-        error_summary: null,
-        last_error: null,
-      });
-      return;
-    }
+    // 本反馈的附件集合（L9）：截图在前，日志按 seq 升序
+    const logRows = listFeedbackLogs(db, row.id);
 
-    // 阶段 2~5：图文归档（图片上传与评论挂载）
-    try {
-      // 先核对该任务下是否已有关于此 feedbackId 的截图评论（幂等）
-      const existingComments = await kaneo.listComments(taskId);
-      // 4.3：匹配用准确反馈 ID + 图片摘要 + 当前资产引用（资产已知时旧评论引用旧资产不算命中）
-      const currentAssetUrl: string | null = cur.asset?.url ?? null;
-      const commentMatches = (c: { content: string }, assetRef?: string | null): boolean =>
+    /** 归档终态：只有全部附件都确认后才 archived（唯一判定，见 finishArchiveIfAllConfirmed）。 */
+    const completeIfAllConfirmed = (): ArchiveFinish => finishArchiveIfAllConfirmed(row.id, cur, taskId, taskUrl);
+
+    /**
+     * 单份日志的归档状态机（L8）：upload → finalize → comment，每步先落盘再继续；
+     * 已确认的附件绝不重传、绝不重发评论（远端核对未命中即停止自动处理，待人工恢复）。
+     */
+    async function archiveOneLog(
+      log: FeedbackLogRow,
+      initialComments: { id: string; content: string }[],
+    ): Promise<"done" | "stop"> {
+      const current = (): ArchiveAttachmentRecord | undefined => logsOf()?.[log.id];
+      const writeRecord = (record: ArchiveAttachmentRecord): boolean =>
+        persistArchive(
+          withLogRecord(cur as ArchiveData, log.id, record),
+          `保存日志 ${log.seq}（${log.filename}）的归档记录`,
+        );
+      const marker = logCommentMarker(row.id, log.id, log.sha256);
+      const task = taskId as string; // 走到附件阶段时任务必然已创建
+      const assetRef = current()?.asset?.url ?? null;
+      const matches = (c: { content: string }, ref: string | null): boolean =>
         c.content.includes(row.id) &&
-        c.content.includes(screenshot.sha256) &&
-        (assetRef ? c.content.includes(assetRef) : true);
-      const matchedComment = existingComments.find((c) => commentMatches(c, currentAssetUrl));
-      if (matchedComment) {
-        // 已有评论：补记评论恢复信息（尽力而为，归档本身已完成，不因补记失败重开流程）
+        c.content.includes(log.id) &&
+        c.content.includes(log.sha256) &&
+        (ref ? c.content.includes(ref) : true);
+
+      // 1) 远端已有该日志评论 → 补记确认（不产生新的远端写入）
+      const remote = initialComments.find((c) => matches(c, assetRef));
+      if (remote) {
         try {
-          persistArchive(
-            {
-              ...cur,
-              comment: {
-                marker: commentMarker(row.id, screenshot.sha256),
-                id: matchedComment.id,
-                outcome: "confirmed",
-              },
-            },
-            "补记已有截图评论",
-          );
+          writeRecord({ ...current(), comment: { marker, id: remote.id, outcome: "confirmed" } });
         } catch {
           /* 补记失败不影响既有归档事实 */
         }
+        return "done";
+      }
+      // 2) 记录显示结果未知/已确认但核对未命中 → 绝不自动重发（只有人工 recover 才允许）
+      const priorOutcome = current()?.comment?.outcome ?? null;
+      if (priorOutcome === "maybe_sent" || priorOutcome === "confirmed") {
         updateFeedback(db, row.id, {
-          status: "archived",
-          archive_stage: "complete",
-          kaneo_task_id: taskId,
-          kaneo_task_url: taskUrl,
-          error_summary: null,
-          last_error: null,
+          status: "needs_review",
+          error_summary: `日志 ${log.filename}（seq=${log.seq}）的评论写入结果未知且核对未命中，已停止自动处理；请在管理页人工恢复（retry_comment）`,
+          last_error: `auto: log ${log.id} comment.outcome=${priorOutcome}，自动路径不重发评论`,
         });
-        return;
+        return "stop";
       }
 
-      // 阶段 2~4：上传（已知资产则直接复用，含旧格式迁移的 assetUrl）
-      let assetUrl: string;
-      if (cur.asset?.url) {
-        assetUrl = cur.asset.url;
-      } else {
-        if (!gateUpdate(row.id, "标记 asset_uploading", { archive_stage: "asset_uploading" })) return;
-
-        let uploadRecord = cur.upload;
-        let uploadUrl = "";
-        let uploadHeaders: Record<string, string> = {};
-        /** 本次是否复用已有 key 重传（决定是否递增恢复计数）。 */
-        let sameKeyRecovery = false;
-
-        if (uploadRecord && uploadRecord.outcome === "confirmed") {
-          // 4.2：PUT 已收到成功响应并持久化 → 只对原 key finalize，绝不重传、不申请新地址
-          const asset = await kaneo.finalizeImageUpload(taskId, {
-            key: uploadRecord.key,
-            filename: "screenshot.png",
-            contentType: "image/png",
-            size: screenshot.byte_size,
+      let record: ArchiveAttachmentRecord = current() ?? {};
+      if (!record.asset?.url) {
+        if (!gateUpdate(row.id, "标记 asset_uploading", { archive_stage: "asset_uploading" })) return "stop";
+        const pending = record.upload;
+        if (pending && pending.outcome === "confirmed") {
+          // PUT 已成功并落盘 → 只对原 key finalize，绝不重传、绝不申请第二份上传地址
+          const asset = await kaneo.finalizeBinaryUpload(task, {
+            key: pending.key,
+            filename: log.filename,
+            contentType: logContentTypeFor(log.filename),
+            size: log.byte_size,
             surface: "comment",
           });
-          assetUrl = asset.url;
-          if (!gateUpdate(row.id, "标记 asset_finalized", { archive_stage: "asset_finalized" })) return;
-          if (!persistArchive({ ...cur, asset: { id: asset.id, url: asset.url } }, "保存资产信息")) return;
+          if (!gateUpdate(row.id, "标记 asset_finalized", { archive_stage: "asset_finalized" })) return "stop";
+          record = { ...record, asset: { id: asset.id, url: asset.url } };
+          if (!writeRecord(record)) return "stop";
+        } else if (pending) {
+          // 上传结果不确定且地址可能已失效：绝不盲目创建第二份上传（待人工 replace_upload）
+          updateFeedback(db, row.id, {
+            status: "needs_review",
+            error_summary: `日志 ${log.filename}（seq=${log.seq}）的上传结果不确定，已停止自动处理；请在管理页人工恢复（replace_upload）`,
+            last_error: `auto: log ${log.id} upload.outcome=${pending.outcome}，自动路径不重复申请上传地址`,
+          });
+          return "stop";
         } else {
-          // 恢复路径：not_sent / maybe_sent → 同 key 重传相同字节（安全恢复）。
-          // 三条边界（P1）的区别在于「远端是否可能存在该次上传的对象」：
-          //   · 地址已过期 → 同 key 重传不再可能，**绝不自动申请新 key**（旧 key 与其可能的
-          //     远端对象必须保留线索），转待核对，由管理页 replace_upload 显式替换；
-          //   · 同 key 重传被业务拒绝 → 同理，绝不自动换 key；
-          //   · **完全没有 upload 记录** → 说明上传记录尚未落盘、字节从未发出（见下方 P1 注释：
-          //     上传记录与 maybe_sent 都先落盘、之后才 PUT），远端不可能存在该次上传的对象，
-          //     因此允许**重新申请地址**（被丢弃的只是一个未被使用的预签名地址，不会遗留
-          //     未被追踪的已上传对象）。对应 fault-injection「presign 返回后、本地落盘前中断」。
-          if (uploadRecord) {
-            if ((uploadRecord.recoveries ?? 0) >= MAX_SAME_KEY_RECOVERIES) {
-              updateFeedback(db, row.id, {
-                status: "needs_review",
-                error_summary: "同 key 恢复次数已达上限（3 次），待人工核对远端对象",
-                last_error: `upload.key=${uploadRecord.key.slice(0, 80)} outcome=${uploadRecord.outcome}`,
-              });
-              return;
-            }
-            let creds: UploadCredentials;
-            try {
-              creds = decryptUploadCredentials(deps.masterKey, uploadRecord.credentialsEnc);
-            } catch (err) {
-              // 凭证无法解密（主密钥不匹配/损坏）：无法同 key 恢复，也不得猜新地址写入 → 待核对
-              updateFeedback(db, row.id, {
-                status: "needs_review",
-                error_summary: "预签名凭证无法解密，无法同 key 恢复，待人工核对",
-                last_error: (err as Error).message.slice(0, 300),
-              });
-              return;
-            }
-            if (uploadRecord.expiresAt !== null && Date.parse(uploadRecord.expiresAt) <= Date.now()) {
-              // P1：地址已过期 → 同 key 重传不再可能，但绝不自动申请新 key
-              //（自动换 key 会遗留未被追踪的旧对象且未经管理员确认）。保留原 key 与全部线索，转待核对。
-              updateFeedback(db, row.id, {
-                status: "needs_review",
-                error_summary: "上传地址已过期，已停止同 key 恢复；请在管理页用“替换图片”重新上传（不自动申请新地址）",
-                last_error: `upload.key=${uploadRecord.key.slice(0, 80)} expiresAt=${uploadRecord.expiresAt} outcome=${uploadRecord.outcome}`,
-              });
-              return;
-            }
-            uploadUrl = creds.uploadUrl;
-            uploadHeaders = creds.headers;
-            sameKeyRecovery = true;
-          } else {
-            // 4.2：首次申请上传地址只分配地址；拿到地址先落盘（凭证加密）再传字节
-            const presigned = await kaneo.createImageUpload(taskId, {
-              filename: "screenshot.png",
-              contentType: "image/png",
-              size: screenshot.byte_size,
-              surface: "comment",
-            });
-            uploadRecord = buildUploadRecord(deps.masterKey, presigned, "not_sent");
-            uploadUrl = presigned.uploadUrl;
-            uploadHeaders = presigned.headers;
-            if (!persistArchive({ ...cur, upload: uploadRecord }, "保存预签名上传凭证")) return;
-          }
-
-          if (sameKeyRecovery) {
-            // 4.3：同 key 恢复——先持久化恢复计数（意图），再向同一 key 重传相同字节
-            const bumped: ArchiveUpload = { ...uploadRecord, recoveries: (uploadRecord.recoveries ?? 0) + 1 };
-            if (!persistArchive({ ...cur, upload: bumped }, "登记同 key 重传意图")) return;
-            uploadRecord = bumped;
-          }
-
-          // P1：字节发出前先落盘“结果未知”意图。持久化失败则绝不发出请求
-          //（崩溃/断连后恢复时不会把未知结果误判为“未发送”）。
-          if (
-            !persistArchive(
-              { ...cur, upload: { ...uploadRecord, outcome: "maybe_sent" } },
-              "登记上传已发出（结果未知）",
-            )
-          )
-            return;
-
-          // 阶段 3：二进制上传（仅使用 presigned 要求的 headers，绝不携带 Kaneo API Key）。
-          try {
-            await kaneo.uploadImageToPresigned(uploadUrl, uploadHeaders, Buffer.from(screenshot.png_blob));
-          } catch (err) {
-            if (err instanceof KaneoUncertainError) throw err; // 结果未知：已登记 maybe_sent，按不确定上报
-            if (!uploadRecord.recoveries || uploadRecord.recoveries <= 0) throw err; // 全新申请被拒 → 明确失败
-            // P1：同 key 重传被业务拒绝（签名失效/策略拒绝等）→ 绝不自动申请新 key，
-            // 保留原 key、结果与资产线索，转待核对由 replace_upload 显式替换。
-            updateFeedback(db, row.id, {
-              status: "needs_review",
-              error_summary: "同 key 重传被拒绝，已停止处理；请在管理页用“替换图片”重新上传（不自动申请新地址）",
-              last_error:
-                `同 key 重传被拒绝（key=${uploadRecord.key.slice(0, 60)}）：${(err as Error).message.slice(0, 200)}`.slice(
-                  0,
-                  1000,
-                ),
-            });
-            return;
-          }
-
-          // 阶段 3.5：收到成功 PUT 响应并持久化后，才允许 finalize 登记资产
-          if (!persistArchive({ ...cur, upload: { ...uploadRecord, outcome: "confirmed" } }, "登记上传成功")) return;
-
-          // 阶段 4：finalize 登记资产（仅登记，不校验存储文件）
-          const asset = await kaneo.finalizeImageUpload(taskId, {
-            key: uploadRecord.key,
-            filename: "screenshot.png",
-            contentType: "image/png",
-            size: screenshot.byte_size,
+          const presigned = await kaneo.createBinaryUpload(task, {
+            filename: log.filename,
+            contentType: logContentTypeFor(log.filename),
+            size: log.byte_size,
             surface: "comment",
           });
-          assetUrl = asset.url;
-          if (!gateUpdate(row.id, "标记 asset_finalized", { archive_stage: "asset_finalized" })) return;
-          if (!persistArchive({ ...cur, asset: { id: asset.id, url: asset.url } }, "保存资产信息")) return;
+          const newUpload = buildUploadRecord(deps.masterKey, presigned, "not_sent");
+          record = { ...record, upload: newUpload };
+          if (!writeRecord(record)) return "stop";
+          // 发出前先落盘“结果未知”意图：落盘失败则绝不发出字节
+          if (!writeRecord({ ...record, upload: { ...newUpload, outcome: "maybe_sent" } })) return "stop";
+          await kaneo.uploadToPresigned(presigned.uploadUrl, presigned.headers, Buffer.from(log.log_blob));
+          if (!writeRecord({ ...record, upload: { ...newUpload, outcome: "confirmed" } })) return "stop";
+          const asset = await kaneo.finalizeBinaryUpload(task, {
+            key: newUpload.key,
+            filename: log.filename,
+            contentType: logContentTypeFor(log.filename),
+            size: log.byte_size,
+            surface: "comment",
+          });
+          if (!gateUpdate(row.id, "标记 asset_finalized", { archive_stage: "asset_finalized" })) return "stop";
+          record = { ...record, asset: { id: asset.id, url: asset.url } };
+          if (!writeRecord(record)) return "stop";
         }
       }
 
-      // 阶段 5：添加截图评论
-      if (!gateUpdate(row.id, "标记 comment_pending", { archive_stage: "comment_pending" })) return;
-      const marker = commentMarker(row.id, screenshot.sha256);
-      const commentContent = buildScreenshotComment({
+      const assetUrl = record.asset?.url as string;
+      if (!gateUpdate(row.id, "标记 comment_pending", { archive_stage: "comment_pending" })) return "stop";
+      // 发出前先落盘“结果未知”意图：落盘失败则绝不发出评论请求
+      if (!writeRecord({ ...record, comment: { marker, id: null, outcome: "maybe_sent" } })) return "stop";
+      const content = buildLogComment({
         feedbackId: row.id,
+        logId: log.id,
+        marker,
         assetUrl,
-        sha256: screenshot.sha256,
-        width: screenshot.width,
-        height: screenshot.height,
+        sha256: log.sha256,
+        filename: log.filename,
+        byteSize: log.byte_size,
       });
-
-      // P1：进入评论阶段前先判断既有评论写入结果。
-      // 上方入口查重已确认评论**未命中**；若恢复数据显示评论结果未知（maybe_sent）
-      // 或已确认（confirmed），说明自动路径无法证明评论不存在 → 绝不自动重发，
-      // 保留全部线索转待核对，只有管理页显式 retry_comment 才允许一次发送。
-      const priorCommentOutcome = cur.comment?.outcome ?? null;
-      if (priorCommentOutcome === "maybe_sent" || priorCommentOutcome === "confirmed") {
-        updateFeedback(db, row.id, {
-          status: "needs_review",
-          error_summary:
-            priorCommentOutcome === "maybe_sent"
-              ? "截图评论写入结果未知且核对未命中，已停止自动处理；请在管理页重试评论或人工核对"
-              : "恢复数据记录评论已确认但核对未命中，已停止处理，待人工核对",
-          last_error: `auto: comment.outcome=${priorCommentOutcome}，自动路径不重发评论`,
-        });
-        return;
-      }
-
-      // 发出前先落盘“结果未知”意图：持久化失败则绝不发出评论请求
-      if (
-        !persistArchive({ ...cur, comment: { marker, id: null, outcome: "maybe_sent" } }, "登记评论已发出（结果未知）")
-      )
-        return;
       let created: { id: string };
       try {
-        created = await kaneo.createComment(taskId, { content: commentContent });
+        created = await kaneo.createComment(task, { content });
       } catch (err) {
         if (err instanceof KaneoDefiniteError) {
-          // 明确被拒绝：评论未被创建 → 记录为确定未发送，允许后续自动重试
-          persistArchive({ ...cur, comment: { marker, id: null, outcome: "not_sent" } }, "登记评论被拒绝（未创建）");
+          writeRecord({ ...record, comment: { marker, id: null, outcome: "not_sent" } });
         }
         throw err;
       }
-
-      // 核对评论是否已成功挂载（含当前资产引用）
-      const verifiedComments = await kaneo.listComments(taskId);
-      const isConfirmed = verifiedComments.some((c) => commentMatches(c, assetUrl));
-      if (!isConfirmed) {
-        // 提交成功但列表核对未见：登记评论结果未知（尽力而为），保持待核对语义
+      const verified = await kaneo.listComments(task);
+      if (!verified.some((c) => matches(c, assetUrl))) {
         try {
-          persistArchive(
-            { ...cur, comment: { marker, id: created.id || null, outcome: "maybe_sent" } },
-            "登记评论待核对",
-          );
+          writeRecord({ ...record, comment: { marker, id: created.id || null, outcome: "maybe_sent" } });
         } catch {
           /* 尽力而为 */
         }
         updateFeedback(db, row.id, {
           status: "needs_review",
-          error_summary: "截图评论已提交但核对未发现，待人工核对",
+          error_summary: `日志 ${log.filename}（seq=${log.seq}）的评论已提交但核对未发现，待人工核对`,
         });
-        return;
+        return "stop";
+      }
+      writeRecord({ ...record, comment: { marker, id: created.id || null, outcome: "confirmed" } });
+      return "done";
+    }
+
+    if (!screenshot && logRows.length === 0) {
+      // 无任何附件（纯文字反馈）：空集合视为全部完成（L9）
+      completeIfAllConfirmed();
+      return;
+    }
+
+    // 阶段 2~6：附件归档（先截图，再按 seq 升序处理全部日志）
+    try {
+      // 先核对该任务下是否已有关于此反馈的评论（幂等；含当前资产引用）
+      const existingComments = await kaneo.listComments(taskId);
+      screenshotPhase: if (screenshot) {
+        // 4.3：匹配用准确反馈 ID + 图片摘要 + 当前资产引用（资产已知时旧评论引用旧资产不算命中）
+        const currentAssetUrl: string | null = cur.asset?.url ?? null;
+        const commentMatches = (c: { content: string }, assetRef?: string | null): boolean =>
+          c.content.includes(row.id) &&
+          c.content.includes(screenshot.sha256) &&
+          (assetRef ? c.content.includes(assetRef) : true);
+        const matchedComment = existingComments.find((c) => commentMatches(c, currentAssetUrl));
+        if (matchedComment) {
+          // 已有评论：补记评论恢复信息（尽力而为，归档本身已完成，不因补记失败重开流程）；
+          // 恢复数据缺 asset 时从该评论正文取回资产引用（L9 判定要求资产 + 评论都确认）
+          const recoveredAssetUrl = cur?.asset?.url ?? assetUrlFromComment(matchedComment.content);
+          try {
+            persistArchive(
+              {
+                ...cur,
+                ...(recoveredAssetUrl && !cur?.asset?.url ? { asset: { id: "", url: recoveredAssetUrl } } : {}),
+                comment: {
+                  marker: commentMarker(row.id, screenshot.sha256),
+                  id: matchedComment.id,
+                  outcome: "confirmed",
+                },
+              },
+              "补记已有截图评论",
+            );
+          } catch {
+            /* 补记失败不影响既有归档事实 */
+          }
+          break screenshotPhase;
+        }
+
+        // 阶段 2~4：上传（已知资产则直接复用，含旧格式迁移的 assetUrl）
+        let assetUrl: string;
+        if (cur.asset?.url) {
+          assetUrl = cur.asset.url;
+        } else {
+          if (!gateUpdate(row.id, "标记 asset_uploading", { archive_stage: "asset_uploading" })) return;
+
+          let uploadRecord = cur.upload;
+          let uploadUrl = "";
+          let uploadHeaders: Record<string, string> = {};
+          /** 本次是否复用已有 key 重传（决定是否递增恢复计数）。 */
+          let sameKeyRecovery = false;
+
+          if (uploadRecord && uploadRecord.outcome === "confirmed") {
+            // 4.2：PUT 已收到成功响应并持久化 → 只对原 key finalize，绝不重传、不申请新地址
+            const asset = await kaneo.finalizeImageUpload(taskId, {
+              key: uploadRecord.key,
+              filename: "screenshot.png",
+              contentType: "image/png",
+              size: screenshot.byte_size,
+              surface: "comment",
+            });
+            assetUrl = asset.url;
+            if (!gateUpdate(row.id, "标记 asset_finalized", { archive_stage: "asset_finalized" })) return;
+            if (!persistArchive({ ...cur, asset: { id: asset.id, url: asset.url } }, "保存资产信息")) return;
+          } else {
+            // 恢复路径：not_sent / maybe_sent → 同 key 重传相同字节（安全恢复）。
+            // 三条边界（P1）的区别在于「远端是否可能存在该次上传的对象」：
+            //   · 地址已过期 → 同 key 重传不再可能，**绝不自动申请新 key**（旧 key 与其可能的
+            //     远端对象必须保留线索），转待核对，由管理页 replace_upload 显式替换；
+            //   · 同 key 重传被业务拒绝 → 同理，绝不自动换 key；
+            //   · **完全没有 upload 记录** → 说明上传记录尚未落盘、字节从未发出（见下方 P1 注释：
+            //     上传记录与 maybe_sent 都先落盘、之后才 PUT），远端不可能存在该次上传的对象，
+            //     因此允许**重新申请地址**（被丢弃的只是一个未被使用的预签名地址，不会遗留
+            //     未被追踪的已上传对象）。对应 fault-injection「presign 返回后、本地落盘前中断」。
+            if (uploadRecord) {
+              if ((uploadRecord.recoveries ?? 0) >= MAX_SAME_KEY_RECOVERIES) {
+                updateFeedback(db, row.id, {
+                  status: "needs_review",
+                  error_summary: "同 key 恢复次数已达上限（3 次），待人工核对远端对象",
+                  last_error: `upload.key=${uploadRecord.key.slice(0, 80)} outcome=${uploadRecord.outcome}`,
+                });
+                return;
+              }
+              let creds: UploadCredentials;
+              try {
+                creds = decryptUploadCredentials(deps.masterKey, uploadRecord.credentialsEnc);
+              } catch (err) {
+                // 凭证无法解密（主密钥不匹配/损坏）：无法同 key 恢复，也不得猜新地址写入 → 待核对
+                updateFeedback(db, row.id, {
+                  status: "needs_review",
+                  error_summary: "预签名凭证无法解密，无法同 key 恢复，待人工核对",
+                  last_error: (err as Error).message.slice(0, 300),
+                });
+                return;
+              }
+              if (uploadRecord.expiresAt !== null && Date.parse(uploadRecord.expiresAt) <= Date.now()) {
+                // P1：地址已过期 → 同 key 重传不再可能，但绝不自动申请新 key
+                //（自动换 key 会遗留未被追踪的旧对象且未经管理员确认）。保留原 key 与全部线索，转待核对。
+                updateFeedback(db, row.id, {
+                  status: "needs_review",
+                  error_summary:
+                    "上传地址已过期，已停止同 key 恢复；请在管理页用“替换图片”重新上传（不自动申请新地址）",
+                  last_error: `upload.key=${uploadRecord.key.slice(0, 80)} expiresAt=${uploadRecord.expiresAt} outcome=${uploadRecord.outcome}`,
+                });
+                return;
+              }
+              uploadUrl = creds.uploadUrl;
+              uploadHeaders = creds.headers;
+              sameKeyRecovery = true;
+            } else {
+              // 4.2：首次申请上传地址只分配地址；拿到地址先落盘（凭证加密）再传字节
+              const presigned = await kaneo.createImageUpload(taskId, {
+                filename: "screenshot.png",
+                contentType: "image/png",
+                size: screenshot.byte_size,
+                surface: "comment",
+              });
+              uploadRecord = buildUploadRecord(deps.masterKey, presigned, "not_sent");
+              uploadUrl = presigned.uploadUrl;
+              uploadHeaders = presigned.headers;
+              if (!persistArchive({ ...cur, upload: uploadRecord }, "保存预签名上传凭证")) return;
+            }
+
+            if (sameKeyRecovery) {
+              // 4.3：同 key 恢复——先持久化恢复计数（意图），再向同一 key 重传相同字节
+              const bumped: ArchiveUpload = { ...uploadRecord, recoveries: (uploadRecord.recoveries ?? 0) + 1 };
+              if (!persistArchive({ ...cur, upload: bumped }, "登记同 key 重传意图")) return;
+              uploadRecord = bumped;
+            }
+
+            // P1：字节发出前先落盘“结果未知”意图。持久化失败则绝不发出请求
+            //（崩溃/断连后恢复时不会把未知结果误判为“未发送”）。
+            if (
+              !persistArchive(
+                { ...cur, upload: { ...uploadRecord, outcome: "maybe_sent" } },
+                "登记上传已发出（结果未知）",
+              )
+            )
+              return;
+
+            // 阶段 3：二进制上传（仅使用 presigned 要求的 headers，绝不携带 Kaneo API Key）。
+            try {
+              await kaneo.uploadImageToPresigned(uploadUrl, uploadHeaders, Buffer.from(screenshot.png_blob));
+            } catch (err) {
+              if (err instanceof KaneoUncertainError) throw err; // 结果未知：已登记 maybe_sent，按不确定上报
+              if (!uploadRecord.recoveries || uploadRecord.recoveries <= 0) throw err; // 全新申请被拒 → 明确失败
+              // P1：同 key 重传被业务拒绝（签名失效/策略拒绝等）→ 绝不自动申请新 key，
+              // 保留原 key、结果与资产线索，转待核对由 replace_upload 显式替换。
+              updateFeedback(db, row.id, {
+                status: "needs_review",
+                error_summary: "同 key 重传被拒绝，已停止处理；请在管理页用“替换图片”重新上传（不自动申请新地址）",
+                last_error:
+                  `同 key 重传被拒绝（key=${uploadRecord.key.slice(0, 60)}）：${(err as Error).message.slice(0, 200)}`.slice(
+                    0,
+                    1000,
+                  ),
+              });
+              return;
+            }
+
+            // 阶段 3.5：收到成功 PUT 响应并持久化后，才允许 finalize 登记资产
+            if (!persistArchive({ ...cur, upload: { ...uploadRecord, outcome: "confirmed" } }, "登记上传成功")) return;
+
+            // 阶段 4：finalize 登记资产（仅登记，不校验存储文件）
+            const asset = await kaneo.finalizeImageUpload(taskId, {
+              key: uploadRecord.key,
+              filename: "screenshot.png",
+              contentType: "image/png",
+              size: screenshot.byte_size,
+              surface: "comment",
+            });
+            assetUrl = asset.url;
+            if (!gateUpdate(row.id, "标记 asset_finalized", { archive_stage: "asset_finalized" })) return;
+            if (!persistArchive({ ...cur, asset: { id: asset.id, url: asset.url } }, "保存资产信息")) return;
+          }
+        }
+
+        // 阶段 5：添加截图评论
+        if (!gateUpdate(row.id, "标记 comment_pending", { archive_stage: "comment_pending" })) return;
+        const marker = commentMarker(row.id, screenshot.sha256);
+        const commentContent = buildScreenshotComment({
+          feedbackId: row.id,
+          assetUrl,
+          sha256: screenshot.sha256,
+          width: screenshot.width,
+          height: screenshot.height,
+        });
+
+        // P1：进入评论阶段前先判断既有评论写入结果。
+        // 上方入口查重已确认评论**未命中**；若恢复数据显示评论结果未知（maybe_sent）
+        // 或已确认（confirmed），说明自动路径无法证明评论不存在 → 绝不自动重发，
+        // 保留全部线索转待核对，只有管理页显式 retry_comment 才允许一次发送。
+        const priorCommentOutcome = cur.comment?.outcome ?? null;
+        if (priorCommentOutcome === "maybe_sent" || priorCommentOutcome === "confirmed") {
+          updateFeedback(db, row.id, {
+            status: "needs_review",
+            error_summary:
+              priorCommentOutcome === "maybe_sent"
+                ? "截图评论写入结果未知且核对未命中，已停止自动处理；请在管理页重试评论或人工核对"
+                : "恢复数据记录评论已确认但核对未命中，已停止处理，待人工核对",
+            last_error: `auto: comment.outcome=${priorCommentOutcome}，自动路径不重发评论`,
+          });
+          return;
+        }
+
+        // 发出前先落盘“结果未知”意图：持久化失败则绝不发出评论请求
+        if (
+          !persistArchive(
+            { ...cur, comment: { marker, id: null, outcome: "maybe_sent" } },
+            "登记评论已发出（结果未知）",
+          )
+        )
+          return;
+        let created: { id: string };
+        try {
+          created = await kaneo.createComment(taskId, { content: commentContent });
+        } catch (err) {
+          if (err instanceof KaneoDefiniteError) {
+            // 明确被拒绝：评论未被创建 → 记录为确定未发送，允许后续自动重试
+            persistArchive({ ...cur, comment: { marker, id: null, outcome: "not_sent" } }, "登记评论被拒绝（未创建）");
+          }
+          throw err;
+        }
+
+        // 核对评论是否已成功挂载（含当前资产引用）
+        const verifiedComments = await kaneo.listComments(taskId);
+        const isConfirmed = verifiedComments.some((c) => commentMatches(c, assetUrl));
+        if (!isConfirmed) {
+          // 提交成功但列表核对未见：登记评论结果未知（尽力而为），保持待核对语义
+          try {
+            persistArchive(
+              { ...cur, comment: { marker, id: created.id || null, outcome: "maybe_sent" } },
+              "登记评论待核对",
+            );
+          } catch {
+            /* 尽力而为 */
+          }
+          updateFeedback(db, row.id, {
+            status: "needs_review",
+            error_summary: "截图评论已提交但核对未发现，待人工核对",
+          });
+          return;
+        }
+
+        // 评论确认挂载：登记评论恢复信息后标记归档完成（此后无远端写入，登记失败不阻塞终态）
+        try {
+          persistArchive({ ...cur, comment: { marker, id: created.id || null, outcome: "confirmed" } }, "登记评论成功");
+        } catch {
+          /* 尽力而为 */
+        }
       }
 
-      // 评论确认挂载：登记评论恢复信息后标记归档完成（此后无远端写入，登记失败不阻塞终态）
-      try {
-        persistArchive({ ...cur, comment: { marker, id: created.id || null, outcome: "confirmed" } }, "登记评论成功");
-      } catch {
-        /* 尽力而为 */
+      // ---- 阶段 6：日志（按 seq 升序；先截图，再日志） ----
+      for (const log of logRows) {
+        const outcome = await archiveOneLog(log, existingComments);
+        if (outcome === "stop") return;
       }
-      updateFeedback(db, row.id, {
-        status: "archived",
-        archive_stage: "complete",
-        kaneo_task_id: taskId,
-        kaneo_task_url: taskUrl,
-        error_summary: null,
-        last_error: null,
-      });
+
+      // ---- 终态：唯一出口（只有全部附件确认才 archived；截图完成不得掩盖日志未完成） ----
+      if (completeIfAllConfirmed() === "persist_failed") return;
     } catch (err) {
       if (err instanceof KaneoUncertainError) {
         updateFeedback(db, row.id, {
@@ -997,16 +1307,16 @@ export function createWorker(deps: WorkerDeps) {
         }
       }
 
-      // 2. 检查是否有截图
+      // 2. 无截图：仍可能是「只有日志」的反馈 → 统一判定（空集合视为已完成）
       const screenshot = getFeedbackScreenshot(deps.db, feedbackId);
       if (!screenshot) {
-        // 纯文字反馈，确认有 task 即归档完成
-        if (
-          !gateUpdate(feedbackId, "核对归档", { status: "archived", archive_stage: "complete", error_summary: null })
-        ) {
-          return { ok: false, reason: "persist_failed" };
-        }
-        return { ok: true, status: "archived", revision: currentRevision(feedbackId) };
+        const fin = finishArchiveIfAllConfirmed(feedbackId, saved, taskId, taskUrl);
+        if (fin === "persist_failed") return { ok: false, reason: "persist_failed" };
+        return {
+          ok: true,
+          status: fin === "archived" ? "archived" : "needs_review",
+          revision: currentRevision(feedbackId),
+        };
       }
 
       // 3. 图文反馈：核对评论是否存在（含资产引用；读取失败会抛错，绝不当“没有评论”）
@@ -1019,24 +1329,29 @@ export function createWorker(deps: WorkerDeps) {
           (assetRef ? c.content.includes(assetRef) : true),
       );
       if (matched) {
-        // 4.2：核对命中 → 补记评论确认结果（尽力而为；此后无远端写入，不阻塞终态）
+        // 4.2：核对命中 → 补记评论确认结果（尽力而为；此后无远端写入，不阻塞终态）；
+        // 恢复数据缺 asset 时从该评论正文取回资产引用（L9 判定要求资产 + 评论都确认）
+        let confirmedData: ArchiveData | null = saved;
         try {
           const base = loadArchiveData(deps.db, feedbackId);
           if (base.kind === "valid") {
-            saveArchiveData(deps.db, feedbackId, base, {
+            const recoveredAssetUrl = base.data.asset?.url ?? assetUrlFromComment(matched.content);
+            confirmedData = saveArchiveData(deps.db, feedbackId, base, {
               ...base.data,
+              ...(recoveredAssetUrl && !base.data.asset?.url ? { asset: { id: "", url: recoveredAssetUrl } } : {}),
               comment: { marker: commentMarker(feedbackId, screenshot.sha256), id: matched.id, outcome: "confirmed" },
             });
           }
         } catch {
           /* 尽力而为 */
         }
-        if (
-          !gateUpdate(feedbackId, "核对归档", { status: "archived", archive_stage: "complete", error_summary: null })
-        ) {
-          return { ok: false, reason: "persist_failed" };
-        }
-        return { ok: true, status: "archived", revision: currentRevision(feedbackId) };
+        const done = finishArchiveIfAllConfirmed(feedbackId, confirmedData, taskId, taskUrl);
+        if (done === "persist_failed") return { ok: false, reason: "persist_failed" };
+        return {
+          ok: true,
+          status: done === "archived" ? "archived" : "needs_review",
+          revision: currentRevision(feedbackId),
+        };
       }
 
       // P1：核对未命中且评论结果未知（或已记录确认）→ 绝不自动重发，维持待核对。
@@ -1104,12 +1419,12 @@ export function createWorker(deps: WorkerDeps) {
           note: "已有已知 task ID，不允许 force-create",
         };
       }
-      if (data && (data.upload || data.asset || data.comment)) {
+      if (hasAttachmentState(data)) {
         return {
           ok: false,
           reason: "invalid_state",
           status: row.status,
-          note: "存在已知附件状态，不允许 force-create",
+          note: "存在已知附件状态（截图或日志），不允许 force-create",
         };
       }
       // 保留已固定的恢复目标（同一目标的密钥轮换仍可继续），仅清空写入类状态
@@ -1149,7 +1464,11 @@ export function createWorker(deps: WorkerDeps) {
    * recover: retry_comment——显式人工入口：执行前再次查重；未命中才允许一次发送。
    * 界面必须提示：即使先查重，仍可能存在重复评论风险。
    */
-  async function recoverRetryComment(feedbackId: string, expectedRevision: number): Promise<WorkerOpResult> {
+  async function recoverRetryComment(
+    feedbackId: string,
+    expectedRevision: number,
+    logId?: string | null,
+  ): Promise<WorkerOpResult> {
     if (!tryAcquire(feedbackId)) return { ok: false, reason: "busy" };
     try {
       const row = getFeedback(deps.db, feedbackId);
@@ -1160,6 +1479,121 @@ export function createWorker(deps: WorkerDeps) {
       const parsed = loadArchiveData(deps.db, feedbackId);
       if (parsed.kind !== "valid") return { ok: false, reason: "invalid_state", status: row.status };
       const data = parsed.data;
+
+      // ---- logId 指定：只针对该份日志补记/补发评论（绝不牵连截图） ----
+      if (logId) {
+        const log = getFeedbackLog(deps.db, feedbackId, logId);
+        if (!log) return { ok: false, reason: "not_found" };
+        const record: ArchiveAttachmentRecord | undefined = "logs" in data ? data.logs?.[logId] : undefined;
+        const logAssetUrl = record?.asset?.url ?? null;
+        if (!row.kaneo_task_id || !logAssetUrl) {
+          return { ok: false, reason: "invalid_state", status: row.status };
+        }
+        const taskId = row.kaneo_task_id;
+        const prep = await prepareRecovery(row, data);
+        if (!prep.ok) return prep.result;
+        const client = prep.client;
+        const marker = logCommentMarker(feedbackId, logId, log.sha256);
+        const matches = (c: { content: string }, ref: string | null): boolean =>
+          c.content.includes(feedbackId) &&
+          c.content.includes(logId) &&
+          c.content.includes(log.sha256) &&
+          (ref ? c.content.includes(ref) : true);
+        const comments = await client.listComments(taskId);
+        const matched = comments.find((c) => matches(c, logAssetUrl));
+        if (matched) {
+          // 评论其实已挂载：补记确认（无后续远端写入）
+          const saved = saveRecoveryState(
+            feedbackId,
+            withLogRecord(data, logId, { ...record, comment: { marker, id: matched.id, outcome: "confirmed" } }),
+            "补记日志评论确认",
+          );
+          if (!saved) return { ok: false, reason: "persist_failed" };
+          const done = finishArchiveIfAllConfirmed(feedbackId, saved, taskId, row.kaneo_task_url);
+          if (done === "persist_failed") return { ok: false, reason: "persist_failed" };
+          return {
+            ok: true,
+            status: done === "archived" ? "archived" : "needs_review",
+            revision: currentRevision(feedbackId),
+          };
+        }
+        // 未命中 → 只补发该日志一条评论（发出前先落盘“结果未知”意图）
+        if (!gateUpdate(feedbackId, "标记 comment_pending", { archive_stage: "comment_pending" })) {
+          return { ok: false, reason: "persist_failed" };
+        }
+        if (
+          !saveRecoveryState(
+            feedbackId,
+            withLogRecord(data, logId, { ...record, comment: { marker, id: null, outcome: "maybe_sent" } }),
+            "登记日志评论已发出（结果未知）",
+          )
+        ) {
+          return { ok: false, reason: "persist_failed" };
+        }
+        const content = buildLogComment({
+          feedbackId,
+          logId,
+          marker,
+          assetUrl: logAssetUrl,
+          sha256: log.sha256,
+          filename: log.filename,
+          byteSize: log.byte_size,
+        });
+        let created: { id: string };
+        try {
+          created = await client.createComment(taskId, { content });
+        } catch (err) {
+          if (err instanceof KaneoDefiniteError) {
+            saveRecoveryState(
+              feedbackId,
+              withLogRecord(data, logId, { ...record, comment: { marker, id: null, outcome: "not_sent" } }),
+              "登记日志评论被拒绝（未创建）",
+            );
+          }
+          throw err;
+        }
+        const verified = await client.listComments(taskId);
+        const confirmed = verified.some((c) => matches(c, logAssetUrl));
+        const fresh = loadArchiveData(deps.db, feedbackId);
+        if (fresh.kind !== "valid") return { ok: false, reason: "persist_failed" };
+        const freshRecord: ArchiveAttachmentRecord | undefined =
+          "logs" in fresh.data ? fresh.data.logs?.[logId] : undefined;
+        if (!confirmed) {
+          try {
+            saveRecoveryState(
+              feedbackId,
+              withLogRecord(fresh.data, logId, {
+                ...freshRecord,
+                comment: { marker, id: created.id || null, outcome: "maybe_sent" },
+              }),
+              "登记日志评论待核对",
+            );
+          } catch {
+            /* 尽力而为 */
+          }
+          updateFeedback(deps.db, feedbackId, {
+            error_summary: `日志 ${log.filename}（seq=${log.seq}）重发后核对未发现，待人工核对`,
+          });
+          return { ok: true, status: "needs_review", revision: currentRevision(feedbackId) };
+        }
+        const finalSaved = saveRecoveryState(
+          feedbackId,
+          withLogRecord(fresh.data, logId, {
+            ...freshRecord,
+            comment: { marker, id: created.id || null, outcome: "confirmed" },
+          }),
+          "登记日志评论成功",
+        );
+        if (!finalSaved) return { ok: false, reason: "persist_failed" };
+        const done = finishArchiveIfAllConfirmed(feedbackId, finalSaved, taskId, row.kaneo_task_url);
+        if (done === "persist_failed") return { ok: false, reason: "persist_failed" };
+        return {
+          ok: true,
+          status: done === "archived" ? "archived" : "needs_review",
+          revision: currentRevision(feedbackId),
+        };
+      }
+
       const assetUrl = data.asset?.url ?? null;
       const screenshot = getFeedbackScreenshot(deps.db, feedbackId);
       if (!row.kaneo_task_id || !assetUrl || !screenshot) {
@@ -1178,7 +1612,7 @@ export function createWorker(deps: WorkerDeps) {
         (c) => c.content.includes(feedbackId) && c.content.includes(screenshot.sha256) && c.content.includes(assetUrl),
       );
       if (matched) {
-        // 评论其实已挂载：补记确认并归档（无后续远端写入）
+        // 评论其实已挂载：补记确认（无后续远端写入），归档终态走统一判定
         const saved = saveRecoveryState(
           feedbackId,
           {
@@ -1188,12 +1622,13 @@ export function createWorker(deps: WorkerDeps) {
           "补记评论确认",
         );
         if (!saved) return { ok: false, reason: "persist_failed" };
-        if (
-          !gateUpdate(feedbackId, "核对归档", { status: "archived", archive_stage: "complete", error_summary: null })
-        ) {
-          return { ok: false, reason: "persist_failed" };
-        }
-        return { ok: true, status: "archived", revision: currentRevision(feedbackId) };
+        const fin = finishArchiveIfAllConfirmed(feedbackId, saved, taskId, row.kaneo_task_url);
+        if (fin === "persist_failed") return { ok: false, reason: "persist_failed" };
+        return {
+          ok: true,
+          status: fin === "archived" ? "archived" : "needs_review",
+          revision: currentRevision(feedbackId),
+        };
       }
 
       // 未命中 → 重发评论（发出前先落盘“结果未知”意图；持久化失败则绝不发出请求）
@@ -1250,8 +1685,9 @@ export function createWorker(deps: WorkerDeps) {
         updateFeedback(deps.db, feedbackId, { error_summary: "retry_comment 重发后核对未发现，待人工核对" });
         return { ok: true, status: "needs_review", revision: currentRevision(feedbackId) };
       }
+      let confirmedData: ArchiveData | null = fresh.data;
       try {
-        saveRecoveryState(
+        confirmedData = saveRecoveryState(
           feedbackId,
           { ...fresh.data, comment: { marker, id: created.id || null, outcome: "confirmed" } },
           "登记评论成功",
@@ -1259,10 +1695,13 @@ export function createWorker(deps: WorkerDeps) {
       } catch {
         /* 尽力而为 */
       }
-      if (!gateUpdate(feedbackId, "核对归档", { status: "archived", archive_stage: "complete", error_summary: null })) {
-        return { ok: false, reason: "persist_failed" };
-      }
-      return { ok: true, status: "archived", revision: currentRevision(feedbackId) };
+      const fin = finishArchiveIfAllConfirmed(feedbackId, confirmedData, taskId, row.kaneo_task_url);
+      if (fin === "persist_failed") return { ok: false, reason: "persist_failed" };
+      return {
+        ok: true,
+        status: fin === "archived" ? "archived" : "needs_review",
+        revision: currentRevision(feedbackId),
+      };
     } finally {
       release(feedbackId);
     }
@@ -1273,7 +1712,11 @@ export function createWorker(deps: WorkerDeps) {
    * （一致则不替换；404/失败不能证明文件不存在，按管理员决定继续替换）；
    * 保留旧 key 恢复记录（replacedKeys），不自动删远端对象。
    */
-  async function recoverReplaceUpload(feedbackId: string, expectedRevision: number): Promise<WorkerOpResult> {
+  async function recoverReplaceUpload(
+    feedbackId: string,
+    expectedRevision: number,
+    logId?: string | null,
+  ): Promise<WorkerOpResult> {
     if (!tryAcquire(feedbackId)) return { ok: false, reason: "busy" };
     try {
       const row = getFeedback(deps.db, feedbackId);
@@ -1284,6 +1727,200 @@ export function createWorker(deps: WorkerDeps) {
       const parsed = loadArchiveData(deps.db, feedbackId);
       if (parsed.kind !== "valid") return { ok: false, reason: "invalid_state", status: row.status };
       let data = parsed.data;
+
+      // ---- logId 指定：只替换该份日志的上传（复用原任务、保留旧 key、按该日志 sha256 核对字节） ----
+      if (logId) {
+        const log = getFeedbackLog(deps.db, feedbackId, logId);
+        if (!log) return { ok: false, reason: "not_found" };
+        const record: ArchiveAttachmentRecord | undefined = "logs" in data ? data.logs?.[logId] : undefined;
+        if (!row.kaneo_task_id || !record?.asset?.url) {
+          return { ok: false, reason: "invalid_state", status: row.status };
+        }
+        const taskId = row.kaneo_task_id;
+        const oldAssetUrl = record.asset.url;
+        const oldKey = record.upload?.key ?? null;
+        const contentType = logContentTypeFor(log.filename);
+        const prep = await prepareRecovery(row, data);
+        if (!prep.ok) return prep.result;
+        const client = prep.client;
+
+        // replace 前的真实字节核对（按该日志的 sha256）：一致 → 无需替换
+        try {
+          const bytes = await client.downloadAsset(oldAssetUrl);
+          const sha = createHash("sha256").update(Buffer.from(bytes)).digest("hex");
+          if (sha === log.sha256) {
+            return {
+              ok: true,
+              status: row.status,
+              replaced: false,
+              note: "远端日志字节核对一致，未执行替换",
+              revision: currentRevision(feedbackId),
+            };
+          }
+        } catch (err) {
+          // 核对失败（404/网络）不能证明文件不存在 → 记录原因，按管理员决定继续替换
+          try {
+            updateFeedback(deps.db, feedbackId, {
+              last_error:
+                `replace 前核对未确认（不作为文件不存在的证明）：${(err as Error).message.slice(0, 200)}`.slice(
+                  0,
+                  1000,
+                ),
+            });
+          } catch {
+            /* 尽力而为 */
+          }
+        }
+
+        if (!gateUpdate(feedbackId, "标记 asset_uploading", { archive_stage: "asset_uploading" })) {
+          return { ok: false, reason: "persist_failed" };
+        }
+        const presigned = await client.createBinaryUpload(taskId, {
+          filename: log.filename,
+          contentType,
+          size: log.byte_size,
+          surface: "comment",
+        });
+        const newUpload = buildUploadRecord(deps.masterKey, presigned, "not_sent");
+        const replacedKeys = [...(oldKey ? [oldKey] : []), ...(data.replacedKeys ?? [])].slice(0, 20);
+        let saved = saveRecoveryState(
+          feedbackId,
+          { ...withLogRecord(data, logId, { ...record, upload: newUpload }), replacedKeys },
+          "保存替换用预签名凭证（日志）",
+        );
+        if (!saved) return { ok: false, reason: "persist_failed" };
+        // 发出前先落盘“结果未知”意图：落盘失败则绝不发送字节
+        saved = saveRecoveryState(
+          feedbackId,
+          {
+            ...withLogRecord(saved, logId, { ...record, upload: { ...newUpload, outcome: "maybe_sent" } }),
+            replacedKeys,
+          },
+          "登记日志上传已发出（结果未知）",
+        );
+        if (!saved) return { ok: false, reason: "persist_failed" };
+        await client.uploadToPresigned(presigned.uploadUrl, presigned.headers, Buffer.from(log.log_blob));
+        saved = saveRecoveryState(
+          feedbackId,
+          {
+            ...withLogRecord(saved, logId, { ...record, upload: { ...newUpload, outcome: "confirmed" } }),
+            replacedKeys,
+          },
+          "登记日志上传成功",
+        );
+        if (!saved) return { ok: false, reason: "persist_failed" };
+        const asset = await client.finalizeBinaryUpload(taskId, {
+          key: newUpload.key,
+          filename: log.filename,
+          contentType,
+          size: log.byte_size,
+          surface: "comment",
+        });
+        if (!gateUpdate(feedbackId, "标记 asset_finalized", { archive_stage: "asset_finalized" })) {
+          return { ok: false, reason: "persist_failed" };
+        }
+        let logRecord: ArchiveAttachmentRecord = {
+          ...record,
+          upload: { ...newUpload, outcome: "confirmed" },
+          asset: { id: asset.id, url: asset.url },
+        };
+        saved = saveRecoveryState(
+          feedbackId,
+          { ...withLogRecord(saved, logId, logRecord), replacedKeys },
+          "保存日志资产信息",
+        );
+        if (!saved) return { ok: false, reason: "persist_failed" };
+
+        // 资产已换 → 该日志补发新评论（旧评论仍引用旧资产）
+        if (!gateUpdate(feedbackId, "标记 comment_pending", { archive_stage: "comment_pending" })) {
+          return { ok: false, reason: "persist_failed" };
+        }
+        const marker = logCommentMarker(feedbackId, logId, log.sha256);
+        logRecord = { ...logRecord, comment: { marker, id: null, outcome: "maybe_sent" } };
+        saved = saveRecoveryState(
+          feedbackId,
+          { ...withLogRecord(saved, logId, logRecord), replacedKeys },
+          "登记日志评论已发出（结果未知）",
+        );
+        if (!saved) return { ok: false, reason: "persist_failed" };
+        const content = buildLogComment({
+          feedbackId,
+          logId,
+          marker,
+          assetUrl: asset.url,
+          sha256: log.sha256,
+          filename: log.filename,
+          byteSize: log.byte_size,
+        });
+        let created: { id: string };
+        try {
+          created = await client.createComment(taskId, { content });
+        } catch (err) {
+          if (err instanceof KaneoDefiniteError) {
+            saveRecoveryState(
+              feedbackId,
+              {
+                ...withLogRecord(saved, logId, { ...logRecord, comment: { marker, id: null, outcome: "not_sent" } }),
+                replacedKeys,
+              },
+              "登记日志评论被拒绝（未创建）",
+            );
+          }
+          throw err;
+        }
+        const verified = await client.listComments(taskId);
+        const confirmed = verified.some(
+          (c) =>
+            c.content.includes(feedbackId) &&
+            c.content.includes(logId) &&
+            c.content.includes(log.sha256) &&
+            c.content.includes(asset.url),
+        );
+        const fresh = loadArchiveData(deps.db, feedbackId);
+        if (fresh.kind !== "valid") return { ok: false, reason: "persist_failed" };
+        const freshRecord: ArchiveAttachmentRecord | undefined =
+          "logs" in fresh.data ? fresh.data.logs?.[logId] : undefined;
+        if (!confirmed) {
+          try {
+            saveRecoveryState(
+              feedbackId,
+              {
+                ...withLogRecord(fresh.data, logId, {
+                  ...freshRecord,
+                  comment: { marker, id: created.id || null, outcome: "maybe_sent" },
+                }),
+                replacedKeys,
+              },
+              "登记日志评论待核对",
+            );
+          } catch {
+            /* 尽力而为 */
+          }
+          updateFeedback(deps.db, feedbackId, { error_summary: "替换日志上传后评论核对未发现，待人工核对" });
+          return { ok: true, status: "needs_review", revision: currentRevision(feedbackId) };
+        }
+        const finalSaved = saveRecoveryState(
+          feedbackId,
+          {
+            ...withLogRecord(fresh.data, logId, {
+              ...freshRecord,
+              comment: { marker, id: created.id || null, outcome: "confirmed" },
+            }),
+            replacedKeys,
+          },
+          "登记日志评论成功",
+        );
+        if (!finalSaved) return { ok: false, reason: "persist_failed" };
+        const done = finishArchiveIfAllConfirmed(feedbackId, finalSaved, taskId, row.kaneo_task_url);
+        if (done === "persist_failed") return { ok: false, reason: "persist_failed" };
+        return {
+          ok: true,
+          status: done === "archived" ? "archived" : "needs_review",
+          replaced: true,
+          revision: currentRevision(feedbackId),
+        };
+      }
+
       const screenshot = getFeedbackScreenshot(deps.db, feedbackId);
       if (!row.kaneo_task_id || !screenshot) {
         return { ok: false, reason: "invalid_state", status: row.status };
@@ -1452,8 +2089,9 @@ export function createWorker(deps: WorkerDeps) {
         updateFeedback(deps.db, feedbackId, { error_summary: "替换上传后评论核对未发现，待人工核对" });
         return { ok: true, status: "needs_review", revision: currentRevision(feedbackId) };
       }
+      let confirmedData: ArchiveData | null = fresh.data;
       try {
-        saveRecoveryState(
+        confirmedData = saveRecoveryState(
           feedbackId,
           { ...fresh.data, comment: { marker, id: created.id || null, outcome: "confirmed" } },
           "登记评论成功",
@@ -1461,17 +2099,14 @@ export function createWorker(deps: WorkerDeps) {
       } catch {
         /* 尽力而为 */
       }
-      if (
-        !gateUpdate(feedbackId, "核对归档", {
-          status: "archived",
-          archive_stage: "complete",
-          error_summary: null,
-          last_error: null,
-        })
-      ) {
-        return { ok: false, reason: "persist_failed" };
-      }
-      return { ok: true, status: "archived", replaced: true, revision: currentRevision(feedbackId) };
+      const fin = finishArchiveIfAllConfirmed(feedbackId, confirmedData, taskId, row.kaneo_task_url);
+      if (fin === "persist_failed") return { ok: false, reason: "persist_failed" };
+      return {
+        ok: true,
+        status: fin === "archived" ? "archived" : "needs_review",
+        replaced: true,
+        revision: currentRevision(feedbackId),
+      };
     } finally {
       release(feedbackId);
     }

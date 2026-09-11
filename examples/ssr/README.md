@@ -105,3 +105,22 @@ curl -sI http://127.0.0.1:3000/vendor/@feedback/web/feedback-web.js | head -1   
 
 未构建组件包时：服务启动会打印警告，页面上的状态区会显示"组件未加载"，
 `/vendor/@feedback/web/feedback-web.js` 返回 404 并附带构建提示。
+
+## 日志接入（`logProvider`）
+
+日志回调**只能在客户端**赋值——组件本身只在浏览器里动态 `import()`，所以 `logProvider` 也写在页面底部的 `<script type="module">` 里：
+
+```js
+// 客户端脚本内，组件加载成功之后
+widget.logProvider = async () => {
+  const sanitized = ssrLogs.map((line) => line.replace(/token|secret/gi, '***')).join('\n');
+  return [{ name: 'ssr-client.log', bytes: new TextEncoder().encode(sanitized) }];
+};
+```
+
+- 服务端**不要**碰 `logProvider`：`page.mjs` 在服务端只渲染普通 HTML（`<feedback-widget>` 在那里只是一个未知标签），任何触碰 `HTMLElement` 的代码都会让 Node 抛 `ReferenceError`（见上文）。
+- 类型：`() => FeedbackLogPart[] | Promise<FeedbackLogPart[]>`，`FeedbackLogPart = { name, bytes: Uint8Array }`。与服务端日志（如渲染耗时）相关的信息，请由宿主在服务端采集后**随页面下发**，再由客户端回调返回。
+- 时机与超时：每份新草稿**首次打开面板时调用一次**，超时 **3 秒**；失败/超时后面板提示「日志获取失败」，可「重试」或**不带日志继续提交**；面板里也能手动「+ 添加文件」。
+- 限制（自动 + 手动合计）：≤ **3** 个文件、单份 ≤ **1 MiB**、合计 ≤ **3 MiB**，仅 `.log`/`.txt`/`.json`/`.jsonl`，必须是有效 UTF-8 且不含 NUL。超限 → `413 too_large`，其余 → `400 invalid_log`，**整单拒绝**。
+- ⚠️ **脱敏在宿主侧**（组件不做过滤）：清除 Token/Cookie/密码等凭据与个人数据；日志**会参与 AI 诊断并归档到 Kaneo**。
+- 状态：本轮**已落地（待体验）**（代码与自动化测试就位，尚未完成真实环境验收）。细节见 [`docs/integration.md` 第 9 章](../../docs/integration.md#9-日志接入本轮新增)。

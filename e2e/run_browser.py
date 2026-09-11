@@ -56,6 +56,7 @@ from playwright.sync_api import sync_playwright
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import browser_logs  # noqa: E402
 import browser_paths  # noqa: E402
 import png_probe  # noqa: E402
 
@@ -70,6 +71,9 @@ ATTACKER_ORIGIN = "http://127.0.0.1:5189"
 PAGES_DIR = os.path.join(ROOT, "e2e/pages")
 SDK_UMD = os.path.join(ROOT, "packages/web/dist/feedback-web.umd.cjs")
 APP_ID = "com.example.demo-e2e"
+
+# 一次性 server 的数据目录（main() 里创建；日志场景需要直读 feedback.db 做事实核对）
+DATA_DIR = ""
 
 results = []
 
@@ -266,7 +270,9 @@ def main():
         sys.exit(2)
 
     procs = []
+    global DATA_DIR
     data_dir = tempfile.mkdtemp(prefix="fb-e2e-")
+    DATA_DIR = data_dir
     data_dir2 = tempfile.mkdtemp(prefix="fb-e2e-b-")
     base_env = dict(os.environ)
     base_env.update(
@@ -864,9 +870,16 @@ def scenarios(page, ctx, shot, browser, shots):
         "admin_pass": ADMIN_PASS,
         "shots_dir": shots,
         "pages_dir": PAGES_DIR,
+        "data_dir": DATA_DIR,
         "pixel_results": [],
     }
-    browser_paths.run(deps)
+    # 调试用：E2E_SKIP_PATHS=1 只跑日志路径（P1–P7 跳过）
+    if os.environ.get("E2E_SKIP_PATHS") == "1":
+        print("[INFO] E2E_SKIP_PATHS=1：跳过 P1–P7（仅调试用）", flush=True)
+    else:
+        browser_paths.run(deps)
+    # T7 日志端到端取证（全链路/失败/幂等/AI/Kaneo/三态归档/管理页）
+    browser_logs.run(deps)
 
 
 if __name__ == "__main__":

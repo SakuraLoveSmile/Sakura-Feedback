@@ -24,6 +24,14 @@ export interface FeedbackCaptureInfo {
   releasePoint?: { x: number; y: number };
 }
 
+export type FeedbackLogSource = 'auto' | 'manual';
+
+export interface FeedbackLogItem {
+  name: string;
+  source: FeedbackLogSource;
+  bytes: Uint8Array;
+}
+
 export interface FeedbackSubmitPayload {
   idempotencyKey: string;
   appId: string;
@@ -31,6 +39,7 @@ export interface FeedbackSubmitPayload {
   context?: FeedbackContext;
   capture?: FeedbackCaptureInfo;
   screenshot?: Blob;
+  logs?: FeedbackLogItem[];
 }
 
 export interface FeedbackSubmitResponse {
@@ -120,7 +129,8 @@ export async function submitFeedback(
   token: string,
   payload: FeedbackSubmitPayload,
 ): Promise<FeedbackSubmitResponse> {
-  if (payload.screenshot) {
+  const hasLogs = Array.isArray(payload.logs) && payload.logs.length > 0;
+  if (payload.screenshot || hasLogs) {
     const formData = new FormData();
     const metadata: Record<string, unknown> = {
       idempotencyKey: payload.idempotencyKey,
@@ -129,9 +139,29 @@ export async function submitFeedback(
     };
     if (payload.context) metadata.context = payload.context;
     if (payload.capture) metadata.capture = payload.capture;
+    if (hasLogs) {
+      metadata.logs = payload.logs!.map((log) => ({
+        name: log.name,
+        source: log.source,
+      }));
+    }
 
     formData.append('metadata', JSON.stringify(metadata));
-    formData.append('screenshot', payload.screenshot, 'screenshot.png');
+    if (payload.screenshot) {
+      formData.append('screenshot', payload.screenshot, 'screenshot.png');
+    }
+
+    if (hasLogs) {
+      for (const log of payload.logs!) {
+        const ext = log.name.toLowerCase();
+        let mime = 'text/plain';
+        if (ext.endsWith('.json')) mime = 'application/json';
+        else if (ext.endsWith('.jsonl')) mime = 'application/x-ndjson';
+        // 构造 Blob 文件部件并传入文件名
+        const blob = new Blob([log.bytes as unknown as BlobPart], { type: mime });
+        formData.append('logs', blob, log.name);
+      }
+    }
 
     const headers: Record<string, string> = {};
     if (token) headers['Authorization'] = `Bearer ${token}`;

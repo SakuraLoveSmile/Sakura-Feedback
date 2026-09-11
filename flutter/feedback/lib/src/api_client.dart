@@ -3,6 +3,7 @@ import 'dart:typed_data' show Uint8List;
 import 'dart:ui' show Offset;
 
 import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart';
 
 import 'config.dart';
 import 'token_store.dart';
@@ -28,6 +29,19 @@ class ApiException implements Exception {
   @override
   String toString() =>
       'ApiException($statusCode, code: $code, message: $message)';
+}
+
+/// 提交时附带的日志部件信息。
+class FeedbackSubmitLogPart {
+  const FeedbackSubmitLogPart({
+    required this.name,
+    required this.bytes,
+    required this.source,
+  });
+
+  final String name;
+  final Uint8List bytes;
+  final String source; // 'auto' | 'manual'
 }
 
 /// 截图捕获元数据。
@@ -278,6 +292,7 @@ class ApiClient {
     required String text,
     FeedbackCaptureInfo? captureInfo,
     Uint8List? screenshotBytes,
+    List<FeedbackSubmitLogPart>? logs,
   }) async {
     final Map<String, Object?> context = <String, Object?>{};
     final String? appVersion = config.appVersion;
@@ -285,9 +300,12 @@ class ApiClient {
     final String? pageLabel = config.pageLabel;
     if (pageLabel != null) context['pageLabel'] = pageLabel;
 
+    final bool hasScreenshot = screenshotBytes != null;
+    final bool hasLogs = logs != null && logs.isNotEmpty;
+
     final http.Response response;
     try {
-      if (screenshotBytes != null) {
+      if (hasScreenshot || hasLogs) {
         final http.MultipartRequest req =
             http.MultipartRequest('POST', _uri('/api/feedback'));
         final String? token = await tokenStore.read();
@@ -302,15 +320,47 @@ class ApiClient {
           'text': text,
           if (context.isNotEmpty) 'context': context,
           if (captureInfo != null) 'capture': captureInfo.toJson(),
+          if (hasLogs)
+            'logs': logs.map((FeedbackSubmitLogPart log) => <String, Object?>{
+              'name': log.name,
+              'source': log.source,
+            }).toList(),
         };
         req.fields['metadata'] = jsonEncode(metadata);
-        req.files.add(
-          http.MultipartFile.fromBytes(
-            'screenshot',
-            screenshotBytes,
-            filename: 'screenshot.png',
-          ),
-        );
+
+        if (hasScreenshot) {
+          req.files.add(
+            http.MultipartFile.fromBytes(
+              'screenshot',
+              screenshotBytes,
+              filename: 'screenshot.png',
+              contentType: MediaType('image', 'png'),
+            ),
+          );
+        }
+
+        if (hasLogs) {
+          for (final FeedbackSubmitLogPart log in logs) {
+            MediaType contentType = MediaType('application', 'octet-stream');
+            final String lowerName = log.name.toLowerCase();
+            if (lowerName.endsWith('.log') || lowerName.endsWith('.txt')) {
+              contentType = MediaType('text', 'plain');
+            } else if (lowerName.endsWith('.json')) {
+              contentType = MediaType('application', 'json');
+            } else if (lowerName.endsWith('.jsonl')) {
+              contentType = MediaType('application', 'jsonl');
+            }
+            req.files.add(
+              http.MultipartFile.fromBytes(
+                'logs',
+                log.bytes,
+                filename: log.name,
+                contentType: contentType,
+              ),
+            );
+          }
+        }
+
         final http.StreamedResponse streamed =
             await _client.send(req).timeout(_requestTimeout);
         response = await http.Response.fromStream(streamed);

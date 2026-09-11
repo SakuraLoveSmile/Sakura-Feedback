@@ -97,3 +97,68 @@ docker compose up -d       # 读取 .env（主密钥与初始账号），卷 ./d
 - 限流为进程内滑动窗口（登录 10 次/15 分钟/IP+用户名；提交 60 次/小时/会话）。
 - 截图归档依赖 Kaneo 图片上传接口与资产鉴权下载；远端对象在替换后不自动删除（须人工清理）。
 - 不包含语音、系统悬浮窗、截图编辑器、公开反馈、多用户管理、任务自动拆分。截图支持范围见 `packages/web/README.md` 与 `flutter/feedback/README.md` 的「截图与敏感区遮挡」章节。
+
+## 7. 日志附件与数据库 v3（本轮新增）
+
+> **状态（如实标注）**：本节描述的迁移、接口与恢复路径均为**已落地（待体验）**——代码与自动化测试就位，但**尚未完成真实环境的端到端验收**（T7/T8 独立执行），不构成「已验收」结论。契约以 [`docs/api.md`](api.md) 的 L1–L11 / C1–C15 为准。
+
+### 7.1 升级顺序（v2 → v3）
+
+1. **停旧 worker**：`docker stop --time 30 <容器>`，或向进程发 `SIGTERM` 并等优雅退出；确认 `data/` 只剩 `feedback.db`（无 `-wal` / `-shm`）。
+2. **整目录备份 `data/`**（停机后的一致快照，见第 2 节）。
+3. **启动新版本**——迁移在服务启动时自动执行，不需要手工 SQL：
+   - `feedback_logs` 的 DDL 在「建表脚本（`SCHEMA`）」与「迁移分支」**双写且逐字一致**；
+   - `PRAGMA user_version < 3` 时，在**事务**内 `CREATE TABLE IF NOT EXISTS feedback_logs` → `PRAGMA user_version = 3` → `COMMIT`；
+   - 任一步失败 → `ROLLBACK`，`user_version` **不前进**（下次启动会重试），不会留下半张表；
+   - **不重建 `feedbacks`**、不改既有列；不提供、不执行任何批量升级脚本。
+4. **启动后抽查**：管理页能打开升级前的老记录（无日志的记录：详情不显示日志区、列表日志数为 `0`）；数据仍落在同一个 `FEEDBACK_DATA_DIR`。
+
+停机后可选验证迁移结果：
+
+```bash
+sqlite3 data/feedback.db "PRAGMA user_version;" ".schema feedback_logs"
+# 期望：先输出 3；随后输出 feedback_logs 表定义与 idx_feedback_logs_feedback 索引
+```
+
+日志字节随 `data/` 一起备份（存在 `feedback_logs.log_blob`，不落文件系统），升级本身不需要额外搬运文件。
+
+### 7.2 回退限制（重要）
+
+- **不支持把新库拿回旧版本继续跑**。旧版本只认识归档存档数据的 `version: 1`；遇到本版本写入的 `version: 2` 会判为 `unsupported` 并**拒绝覆盖**（不会静默改写数据），这些记录的后续归档写入在旧版本上无法继续。
+- 旧版本的迁移只处理 `user_version < 2`：`feedback_logs` 表与 `user_version = 3` **不会**被删除，但旧版本**不读取**日志——日志附件与逐份归档进度对旧版本不可见。
+- 旧版本也不认识本版本新增的 `recover` 的 `logId`；回退后再前进，可能出现某份日志的归档进度「停在原地」，需要人工核对（见 7.3）。
+- 结论：回退前先停服并备份当前库；**产生过 Kaneo 远端写入的记录不要简单恢复旧库重放**（与第 2 节第 3 条同理）——带日志会让"重复写入"的范围扩大到每份日志的资产与评论，用户也会看到重复评论。
+- 本轮**不做**批量升级，也**不写**降级脚本：V1 归档存档数据继续可读，V2 只在记录发生新的归档写入时写出。
+
+### 7.3 日志附件的人工核对与补归档（`needs_review` 时怎么办）
+
+「截图成功但某份日志未完成」的记录**绝不会是 `archived`**：确定性失败 → `failed`；结果不确定 → `needs_review`。管理页详情按份显示每份日志的归档进度（未开始 / 进行中 / 已完成）。
+
+1. **先核对，不要重新提交**
+   - 管理页详情点「重新核对」（`recheck`）：只读远端；命中就补记确认，未命中维持 `needs_review`。它**不会**重发评论或图片，也**不会**因为"任务存在"就把整条记录标成归档完成。
+2. **针对某一份日志补归档（带 `logId`）**
+   - `POST /api/feedback/:id/recover`，body 例如
+     `{ "action": "retry_comment", "expectedRevision": <n>, "logId": "<日志 id>" }`
+     或 `{ "action": "replace_upload", "expectedRevision": <n>, "logId": "<日志 id>" }`（契约见 [`docs/api.md`](api.md) L10）。
+   - 日志 `id` 的来源：`GET /api/admin/feedback/:id/logs`（Cookie 会话 + 同源）返回的 `LogMeta.id`，管理页详情每份日志也带 `data-log-id`。
+   - `logId` **缺省 = 既有截图行为**；`logId` 不属于该反馈 → `404 not_found`；空串 / 非字符串 → `400 invalid_request`。
+   - **UI 现状（如实标注）**：管理页当前的恢复按钮**不带 `logId`**（即针对截图）；日志级恢复目前需要按上面的接口直接调用（先用浏览器登录管理页，再复用同一会话 Cookie）。
+3. **动作选择**
+   - 评论可能已发出 / 不清楚 → `retry_comment`（先按 `feedbackId + logId + logSha256 + 当前资产引用` 查重，至多补发一条；**仍存在竞态**，事后必须到 Kaneo 复核评论条数）。
+   - 上传地址过期 / 同 key 重传被拒 → `replace_upload`（复用原任务、为该份日志字节申请新地址；旧 key 记入 `replacedKeys`，**不删除远端对象**，远端残留需人工清理）。
+4. **人工核对清单**
+   - 管理页：该记录「状态」不再是「待核对」；**每一份**日志的进度都到「已完成」（单份「已完成」≠ 整条已归档，整条只看状态列）。
+   - Kaneo 任务：日志资产与图片资产各就位；评论是否恰好一条（正文含查重标记）；有重复则人工清理。
+   - 数据库（可选，建议停机后只查元数据）：
+     ```bash
+     sqlite3 data/feedback.db \
+       "SELECT seq, filename, source, byte_size, sha256 FROM feedback_logs WHERE feedback_id='<uuid>' ORDER BY seq;"
+     ```
+     **不要**把 `log_blob` 打印到终端、写进工单或粘贴到聊天里：日志内容可能含敏感信息；需要内容请走管理页的预览 / 下载。
+5. **不要做的事**：不要为了让记录变成"已归档"而重放旧库、不要手工 UPDATE `archive_data_json` / `archive_stage`、不要让用户重新提交（会产生重复任务与重复资产）。
+
+### 7.4 容量与备份
+
+- 日志字节存在 SQLite 的 `feedback_logs.log_blob`（**不落文件系统**），因此备份 / 迁移依然只需要整个 `data/` 目录；注意每份反馈最多 3 MiB 日志，备份体积会随之增长。
+- 日志内容**不进入**运行日志 / `stdout` / 错误信息：服务端只记录文件名与大小级别的信息（错误消息也不含日志正文）。排障时同理不要打印 `log_blob`。
+- 截图的备份与回退注意事项（第 2、4 节）对日志逐条适用；逐份归档进度记录在 `feedbacks.archive_data_json`（V2）里，随 `data/` 一起备份。

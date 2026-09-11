@@ -784,9 +784,11 @@ Flutter 端见 [`flutter/feedback/README.md`](../flutter/feedback/README.md) 的
 | 缩放系数 | `scale = min(dpr, 2, 2048 / 最长逻辑边, sqrt(4_000_000 / 逻辑面积))` |
 | 超 5 MiB 时 | 按 **×0.8** 缩小重编码，最多 **3 次**（每轮重填遮挡并重新验证）；仍超限 → **截图失败，不发送超限图** |
 
-服务端会独立复测与重编码 PNG，并**再次**施加同样的上限；multipart 请求体另有 6 MiB 上限，
-超限返回 `413 too_large`。元数据区分**逻辑视口尺寸**（`viewportWidth/Height`，CSS 像素）与
+服务端会独立复测与重编码 PNG，并**再次**施加同样的上限；multipart 请求体另有 **9 MiB** 上限
+（5 MiB 截图 + 3 MiB 日志 + 协议开销，见 [`docs/api.md`](api.md) L1），超限返回 `413 too_large`。
+元数据区分**逻辑视口尺寸**（`viewportWidth/Height`，CSS 像素）与
 **输出像素尺寸**（`pixelWidth/pixelHeight`）——字段定义见 [`docs/api.md`](api.md)，本文不重复。
+带日志时的请求体上限与日志自身的限制见本文第 9 章。
 
 ### 6.4 渲染边界与自定义 `captureProvider`
 
@@ -948,7 +950,10 @@ Flutter 端只提供内置视口截图 + `FeedbackCaptureMask` 遮挡。
 | 登录窗口报 `origin_not_allowed`（403，来源写法非法时为 400），或页面提示"来源不合法" | 握手的 `cb`（宿主 origin）不在该 `appId` 的 `allowedOrigins` 内 | 同上；注意协议与端口也要完全一致 |
 | 提交返回 `404 unknown_app` | `app-id` 与服务端登记的 `appId` 不一致，或该软件配置被删 | 核对管理页「软件配置」里的 `appId`（创建后不可改）；`app-id` 必须逐字符一致 |
 | 提交返回 `409 idempotency_conflict` | 同一个幂等键被用于**不同内容**（例如手改了内容却复用旧 key） | 组件不自动换 key；修改内容后重新提交（新 key 自然生成） |
-| 提交返回 `413 too_large` | 文字 > 10,000 码点；截图超限（>5 MiB / 最长边 >2048 / 总像素 >4M）；或 multipart 体 > 6 MiB | 缩短文字；在面板里重拍截图（会自动按限制缩放重编码）；仍不行则改用纯文字反馈 |
+| 提交返回 `413 too_large` | 文字 > 10,000 码点；截图超限（>5 MiB / 最长边 >2048 / 总像素 >4M）；日志超限（> 3 个文件 / 单份 > 1 MiB / 合计 > 3 MiB）；或 multipart 体 > 9 MiB | 缩短文字；在面板里重拍截图（会自动按限制缩放重编码）；在日志区移除或换更小的日志（见 9.4）；仍不行则改用纯文字反馈 |
+| 提交返回 `400 invalid_log` | 日志不是有效 UTF-8（含 NUL / 空文件 / 只有 BOM）、扩展名不在白名单、`metadata.logs` 与部件数量或顺序不一致、部件 `filename` 缺失或与 metadata 不一致、`source` 不是 `auto`/`manual` | 用文本编辑器另存为 UTF-8（不要 UTF-16/GBK）；确认扩展名是 `.log/.txt/.json/.jsonl`；升级到本轮组件（它按面板顺序 append 且本地预检，见 9.4）；仍失败则移除该文件、不带日志提交 |
+| 日志区提示「日志获取失败（超时 3 秒）」或一直"采集中" | 宿主 `logProvider` 超过 3 秒未返回（如在读大文件、同步阻塞、抛异常） | 让 `logProvider` 走缓存/异步且尽快返回；或点「重试」；或直接**不带日志继续提交**（见 9.5）。不要为了等日志把面板卡住 |
+| 记录停在「待核对」，详情里某份日志显示「进行中 / 未开始」 | 截图已归档但**某份日志**的回执不确定（Kaneo 上传/评论超时、上传地址过期、评论可能已存在） | **不要重复提交**：管理页按 4.2 的路径处理——先「重新核对」，必要时按 [`docs/api.md`](api.md) L10 用带 `logId` 的 `retry_comment` / `replace_upload` 针对该份日志补归档；DB v3 与日志运维见 [`docs/deployment.md`](deployment.md) 第 7 节 |
 | 管理页恢复动作报 `409 target_changed` | 已保存的归档目标与**当前** Kaneo 配置不一致（Kaneo 地址 / 项目 / 工作区被改过） | 把配置改回原目标，或按 `needs_review` 人工处理该记录；该动作**不会**发出任何远端写入 |
 | 恢复动作报 `409 revision_conflict` / `409 busy` / `502 recover_failed` | 页面数据过期 / 同一反馈正被其它操作处理 / 远端读写出错 | 刷新页面重试；稍后重试；`recover_failed` 时状态未变，可重试或人工核对 |
 | 提交或登录返回 `429` | 限流：登录 10 次 / 15 分钟 / IP+用户名；提交 60 次 / 小时 / 会话 | 按 `Retry-After` 等待后重试 |
@@ -967,12 +972,129 @@ Flutter 端只提供内置视口截图 + `FeedbackCaptureMask` 遮挡。
 
 ---
 
+## 9. 日志接入（本轮新增）
+
+> **状态（如实标注）**：本章描述的 Web / Flutter 组件、服务端与管理页实现均为**已落地（待体验）**——代码与自动化测试就位、有可用入口，但**尚未完成真实环境的端到端验收**（T7/T8 独立执行）。请勿把本章读作「已验收」。契约（逐字规范）以 [`docs/api.md`](api.md) 的 L1–L11 / C1–C15 为准。
+
+### 9.1 日志是什么、会被用来做什么
+
+- 日志是**可选附件**，与截图并列：**不带日志的提交与升级前完全一样**（纯 JSON，≤64 KB，字段与错误码不变）。带日志才走 multipart（`metadata` + 0..3 个 `logs` 部件）。
+- 日志**会参与 AI 分析**：每份日志取**末尾最多 8000 个码点**送进提示词（全部日志另有 24000 码点的防御上界），超过单份上限时提示词中会标注「已截取」。
+- 提示词要求 AI 把「日志证据」**逐字摘录**原文、把任何推断放进「可能原因（推测，未证实）」并带 `confidence`（`low`/`medium`；给了 `high` 会被降级为 `low`）。服务端解析器只强制**结构**合法（`seq` 必须属于本次送出的日志、引用非空且 ≤500 码点），**不做逐字比对**——所以「日志证据」仍应视为模型输出，而不是服务端校验过的真值。
+- 日志是**不可信输入**：其中的任何指令都不会被执行，也**不得**改写或覆盖用户原话与整理规则。
+- 日志**会被归档到 Kaneo**：与截图同一条流水线——逐份「申请上传地址 → 上传字节 → 登记资产 → 在任务下发一条带查重标记的评论」。
+- **「截图成功但日志未完成」绝不会显示成"已归档"**：确定性失败 → `failed`；结果不确定 → `needs_review`（管理页「待核对」）。管理页详情逐份标注日志的归档进度（未开始 / 进行中 / 已完成），看到「已完成」只代表**那一份**。
+- 已提交的完整日志字节**始终保留、随时可下载**；送 AI 的截取只作用于提示词，**不改变落库字节**。
+
+### 9.2 Web 端：`logProvider`
+
+```ts
+// 原生 HTML / React / Vue 同理：拿到元素后赋一个回调即可
+const widget = document.querySelector('feedback-widget'); // React 里用 ref，Vue 里用模板 ref
+widget.logProvider = async () => {
+  const lines = readHostLogBuffer();            // ← 换成宿主自己的日志来源（内存缓冲、日志文件、后端拉取……）
+  const bytes = new TextEncoder().encode(redact(lines.join('\n')));
+  return [{ name: 'app.log', bytes }];
+};
+```
+
+- 类型（可从 `@feedback/web` 导入）：`FeedbackLogProvider = () => FeedbackLogPart[] | Promise<FeedbackLogPart[]>`；`FeedbackLogPart = { name: string; bytes: Uint8Array }`。
+- 也可以在建面板时传入：`openFeedback({ apiBase, appId, logProvider })`（`OpenFeedbackOptions.logProvider`）。
+- **调用时机**：每份新草稿**首次打开面板时调用一次**，超时 **3 秒**；超时或抛错 → 面板提示「日志获取失败」并给出「重试」与**不带日志继续提交**两个出路。重新打开已有草稿不会重新采集，用户移除后也不自动补回。
+- 面板内另有手动的「+ 添加文件」入口（`.log/.txt/.json/.jsonl`），自动与手动文件**共用同一套限制**（见 9.4）。
+- 各框架完整示例：§3.1–§3.4 与 [`examples/html`](../examples/html/README.md)、[`examples/react`](../examples/react/README.md)、[`examples/vue`](../examples/vue/README.md)、[`examples/ssr`](../examples/ssr/README.md)。
+
+### 9.3 去敏感内容：责任在宿主（组件不做脱敏）
+
+组件只负责把回调返回的字节提交上去，**不会**帮你过滤。请在 `logProvider` 内部、`return` 之前去掉：
+
+- 凭据类：`Authorization` / `Bearer <token>` / `Cookie` / `Set-Cookie` / API Key / `*_SECRET` / `password=`；
+- 个人身份信息：手机号、邮箱、身份证号、姓名、地址；
+- 业务敏感数据：用户/订单号明文、请求体里的个人数据、内网主机名与 IP（按你的合规要求）。
+
+示例里用的最小做法（**只是示例，不是完备方案**）：
+
+```ts
+const redact = (s: string) => s
+  .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer ***')
+  .replace(/(token|password|secret|api[_-]?key)=([^\s&]+)/gi, '$1=***');
+```
+
+- 推荐顺序是**先脱敏、再截取**：只把需要的那一段交给组件，而不是把整个日志文件原样上传。
+- 如果这段日志**确实**不能外发，正确做法是**不带日志提交**（面板里可以移除已采集的文件；也可以干脆不配置 `logProvider`）。
+
+### 9.4 限制（两端一致；服务端会再校验一遍）
+
+| 限制 | 值 |
+|---|---|
+| 文件数量 | 每份反馈 ≤ **3** 个（自动 + 手动合计） |
+| 单份大小 | ≤ **1 MiB**（1,048,576 字节） |
+| 全部合计 | ≤ **3 MiB**（3,145,728 字节） |
+| 扩展名白名单 | `.log` / `.txt` / `.json` / `.jsonl`（大小写不敏感；以 `metadata.logs[i].name` 为准） |
+| 内容 | 必须是**有效 UTF-8 文本**（可含 ANSI 转义序列），**不得含 NUL**，不得为空（只有 BOM 也算空） |
+| 整个请求体 | ≤ **9 MiB**（截图 + 日志 + 协议开销） |
+| 超限结果 | 数量/大小 → `413 too_large`；扩展名/编码/来源/数量不一致 → `400 invalid_log`。**任一失败整单拒绝**，不会「只丢这一份」、不会静默截断 |
+
+面板会在本地先做同样的预检并说明原因；即使本地漏检，服务端也会整单拒绝——不要指望服务端替你筛。
+
+### 9.5 超时与「不带日志继续提交」
+
+- `logProvider` **3 秒**超时；超时/抛错**不会**阻塞反馈：面板显示「日志获取失败（超时 3 秒）」，并提供「重试」与**直接提交**。
+- 这是刻意设计：日志只是**附加排查素材**，不该让用户因为采集失败而无法反馈。
+- 不配置 `logProvider` = 完全关闭自动采集（仍可手动添加，或完全不带日志）。
+
+### 9.6 Flutter 端：`logProvider` + `file_selector` 按字节读取
+
+```dart
+FeedbackWidget(
+  config: FeedbackConfig(
+    apiBase,
+    appId,
+    logProvider: () async {
+      final text = await readHostLog();                       // ← 宿主自己的日志来源
+      return <FeedbackLogPart>[
+        FeedbackLogPart(name: 'flutter.log', bytes: Uint8List.fromList(utf8.encode(redact(text)))),
+      ];
+    },
+  ),
+  child: const MyApp(),
+);
+```
+
+- 类型：`typedef FeedbackLogProvider = FutureOr<List<FeedbackLogPart>> Function()`；`FeedbackLogPart(name, bytes)`，其中 `bytes` 是 `Uint8List`。
+- 面板的**手动补充**走 `file_selector`：`openFile(acceptedTypeGroups: [XTypeGroup(extensions: ['log','txt','json','jsonl'])])`，随后 `await file.readAsBytes()` **按字节读取**（不先转字符串，避免大文件被整块转码/截断），再走与自动采集完全相同的校验（数量 / 1 MiB / 3 MiB / UTF-8 / NUL）。
+- 依赖：`file_selector: ^1.1.0`（见 `flutter/feedback/pubspec.yaml`、`examples/flutter/pubspec.yaml`）。
+- **未验证项（如实标注）**：原生系统文件选择器弹窗在本机自动化测试下**未验证**（t4 已标注），需真机/桌面手动点一次确认。
+- 完整示例见 [`examples/flutter`](../examples/flutter/README.md) 与 [`flutter/feedback/README.md`](../flutter/feedback/README.md)。
+
+### 9.7 提交之后：状态语义（排障时怎么读）
+
+- 提交成功 = 服务**已接收**（`201`；同 key 同内容重放为 `200 replayed`），**不等于已归档**。是否归档看管理页「状态」列。
+- 状态机与截图共用：`received → processing → archiving → archived`；结果不确定 → `needs_review`，明确失败 → `failed`。
+- 管理页详情：可对每份日志做**纯文本预览**（不执行、不渲染 HTML）与**下载**；下载由服务端下发 `Cache-Control: no-store` + `X-Content-Type-Options: nosniff` + 安全 `Content-Disposition`，**不生成任何公开链接**。AI 整理结果里的 `diagnostics` 分两块展示——「日志证据（模型摘录自日志原文，未逐字校验）」与「可能原因（推测，未证实）」，后者逐条标注「不确定」，两者在视觉上不混淆。**注意**：服务端并不逐字校验引用（见 9.1），标题只表示"该条目声称摘自日志原文"，判断证据是否属实请回到日志原文（本节 9.7 首段与 9.1 说明了数据来源）。
+- 手动恢复（截图与日志分开）：`recheck` 只读核对并补记已确认的附件；针对**某一份日志**的 `retry_comment` / `replace_upload` 需带该日志的 `logId`（见 [`docs/api.md`](api.md) L10）。**管理页当前的恢复按钮不带 `logId`（即针对截图）**，日志级恢复需要按契约直接调用接口（Cookie 会话）——此项属「实现中」，见 9.8。
+
+### 9.8 本轮状态（如实标注，勿读作「已验收」）
+
+| 交付项 | 状态 |
+|---|---|
+| 契约（[`docs/api.md`](api.md) L1–L11 / C1–C15） | 已完成 |
+| 服务端（multipart 校验 / 落库 / DB v3 / AI 诊断 / Kaneo 归档） | 已落地（待体验） |
+| Web 组件 / Flutter 包（`logProvider`、面板、提交快照） | 已落地（待体验） |
+| 管理页（日志数量、纯文本预览/下载、诊断展示） | 已落地（待体验） |
+| 管理页「按 `logId` 的日志级手动恢复」入口 | **实现中**（接口已支持，UI 未暴露；见 9.7） |
+| 真实浏览器端到端取证与最终验收 | **未完成**（T7/T8 独立执行） |
+
+「已落地（待体验）」= 代码与自动化测试就位、有可用入口；**尚未验收**。历史轮次记录（`docs/closeout.md`、[`VERIFICATION.md`](../VERIFICATION.md)）不构成本轮验证结论。
+
+---
+
 ## 相关文档
 
 | 文档 | 内容 |
 |---|---|
-| [`docs/api.md`](api.md) | HTTP 契约：认证、软件配置、连接测试、反馈接口与状态机、multipart `capture` 字段、跨源规则 |
-| [`docs/deployment.md`](deployment.md) | 部署与运维：环境变量、Docker、备份/迁移、升级与回退限制、处理与失败行为 |
+| [`docs/api.md`](api.md) | HTTP 契约：认证、软件配置、连接测试、反馈接口与状态机、multipart `capture` 字段、跨源规则，以及「日志（logs）契约（v2 追加）」L1–L11 与实现记录 |
+| [`docs/deployment.md`](deployment.md) | 部署与运维：环境变量、Docker、备份/迁移、升级与回退限制、处理与失败行为、DB v3 与日志附件运维（第 7 节） |
 | [`README.md`](../README.md) | 项目总览、仓库结构、关键设计 |
 | [`packages/web/README.md`](../packages/web/README.md) | Web 组件权威参考：属性 / 方法 / 事件 / 截图与遮挡 / `captureProvider` 契约 / 包体与懒加载 |
 | [`flutter/feedback/README.md`](../flutter/feedback/README.md) | Flutter 包权威参考：平台支持、遮挡、捕获会话、草稿与提交、登录、令牌存储键 |

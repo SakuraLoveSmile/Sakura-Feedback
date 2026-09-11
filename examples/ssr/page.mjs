@@ -134,6 +134,25 @@ ${rows}
       }
 
       if (widget) {
+        // 演示：导出宿主已有日志并提供给反馈组件
+        // ⚠️ 宿主负责在交给组件前去除凭据等敏感内容！
+        widget.logProvider = async () => {
+          const ssrLogs = [
+            '[SSR INFO] Page hydrated on client',
+            '[SSR RENDER] Server render timestamp: ' + '${escapeHtml(renderedAt)}',
+          ];
+          // 宿主脱敏处理
+          const sanitized = ssrLogs
+            .map((line) => line.replace(/token|secret/gi, '***'))
+            .join('\n');
+          return [
+            {
+              name: 'ssr-client.log',
+              bytes: new TextEncoder().encode(sanitized),
+            },
+          ];
+        };
+
         // 服务已接收提交（201/200）后派发；不是"Kaneo 已归档"通知。
         widget.addEventListener('feedback-submitted', (event) => {
           const { feedbackId, status: submitStatus, replayed } = event.detail;

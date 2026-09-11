@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>E2E 宿主页 · 日志采集（自动 + 手动）+ 真实提交</title>
+    <!--
+      e2e 专用宿主页（不是产品代码），服务于 T7 的日志端到端取证。
+
+      形态：默认贴边标签入口 + capture-mode="viewport"（呼出时自动截一张，保证
+      「截图 + 描述 + 日志」三件套都能在同一份反馈里出现）。
+
+      logProvider 由 window.__logKnobs 驱动（页面级开关，Python 侧用 evaluate 设置）：
+        plan: 按调用顺序消费的模式队列；队列空则用 mode
+        mode: 'ok'      → 1 份 app.log（含 canary 行）
+              'multi'   → 2 份（app.log + worker.log），用于「1 截图 + 2 日志」场景
+              'big'     → 1 份 9000 码点的 big.log（>8000 → 服务端标 truncated）
+              'fail'    → Promise.reject（采集失败）
+              'timeout' → 永不 resolve（组件 3 秒超时 → 提示 + 可重试/可不带日志提交）
+              'late'    → delayMs 后 resolve（迟到结果不得污染新草稿）
+              'empty'   → []
+        delayMs: 'late' 的延迟（默认 8000ms）
+      每次调用都记账到 knobs.records（call/mode/at），供"每份新草稿只调用一次"类断言。
+
+      手动补充：面板内隐藏的 input[type=file]（accept=.log,.txt,.json,.jsonl），
+      Python 侧用 set_input_files 传真实磁盘文件（含超限 1.5MiB 的用例）。
+    -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: #ffffff;
+      }
+      body {
+        position: relative;
+        width: 1280px;
+        height: 800px;
+        overflow: hidden;
+        font-family: system-ui, -apple-system, sans-serif;
+      }
+      #visible-block {
+        position: absolute;
+        left: 60px;
+        top: 60px;
+        width: 320px;
+        height: 180px;
+        background: #00ff00;
+        color: #000000;
+        font-size: 18px;
+        padding: 8px;
+        box-sizing: border-box;
+      }
+      #footer-block {
+        position: absolute;
+        left: 60px;
+        top: 400px;
+        width: 320px;
+        height: 120px;
+        background: #0000ff;
+        color: #ffffff;
+        font-size: 18px;
+        padding: 8px;
+        box-sizing: border-box;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="visible-block">LOGS-NORTH-VISIBLE</div>
+    <div id="footer-block">LOGS-SOUTH-VISIBLE</div>
+
+    <script>
+      // ---- 日志素材（仅 e2e） ----
+      const CANARY = 'E2E-LOG-CANARY-7f3a91';
+      const enc = (s) => new TextEncoder().encode(s);
+
+      const APP_LOG = [
+        '2024-05-01T10:00:00.000Z INFO  app boot ok pid=4242',
+        "2024-05-01T10:00:01.100Z ERROR TypeError: Cannot read properties of undefined (reading 'rows')",
+        `2024-05-01T10:00:01.101Z ERROR   at exportCsv (app.js:120) ${CANARY}`,
+        '2024-05-01T10:00:02.000Z WARN  retrying export (attempt 1/2)',
+      ].join('\n');
+
+      // 9000 码点（> 8000 → 服务端必须标 truncated）；确保尾部有独特片段便于断言"含末尾片段"
+      // 头部标记只出现在前 ~30 码点内：若 AI 只收到末尾 8000 码点，它必须"看不到"这个标记
+      const BIG_LOG = `HEAD-MARKER-SHOULD-BE-DROPPED\n${'x'.repeat(8980)}\nTAIL-MARKER-9000-END ${CANARY}\n`;
+
+      const WORKER_LOG = [
+        '2024-05-01T10:00:03.000Z INFO  worker queue depth=3',
+        '2024-05-01T10:00:04.000Z INFO  worker drained',
+      ].join('\n');
+
+      const LATE_LOG = `2024-05-01T10:00:09.000Z ERROR LATE-CALLBACK-SHOULD-NOT-LAND ${CANARY}`;
+
+      window.__logKnobs = {
+        plan: [],
+        mode: 'ok',
+        delayMs: 8000,
+        calls: 0,
+        records: [],
+        canary: CANARY,
+      };
+
+      // 断言口径：big.log 的真实 Unicode 码点数（>8000 → 服务端必须标 truncated）
+      window.__logExpect = { bigCodepoints: Array.from(BIG_LOG).length, canary: CANARY };
+
+      window.__makeLogs = {
+        ok: () => [{ name: 'app.log', bytes: enc(APP_LOG) }],
+        multi: () => [
+          { name: 'app.log', bytes: enc(APP_LOG) },
+          { name: 'worker.log', bytes: enc(WORKER_LOG) },
+        ],
+        big: () => [{ name: 'big.log', bytes: enc(BIG_LOG) }],
+        late: () => [{ name: 'late.log', bytes: enc(LATE_LOG) }],
+        empty: () => [],
+      };
+
+      window.__logProvider = () => {
+        const k = window.__logKnobs;
+        const mode = k.plan.length > 0 ? k.plan.shift() : k.mode;
+        k.calls += 1;
+        k.records.push({ call: k.calls, mode, at: Date.now() });
+        if (mode === 'fail') return Promise.reject(new Error('logProvider 失败（e2e 注入）'));
+        if (mode === 'timeout') return new Promise(() => {});
+        if (mode === 'late') {
+          return new Promise((resolve) => setTimeout(() => resolve(window.__makeLogs.late()), k.delayMs));
+        }
+        const make = window.__makeLogs[mode] ?? window.__makeLogs.ok;
+        return make();
+      };
+
+      // 测试脚手架：只暴露读取入口，页面内容本身是静态的。
+      window.__fbE2E = {
+        knobs: () => window.__logKnobs,
+        setKnobs(patch) {
+          Object.assign(window.__logKnobs, patch);
+          return window.__logKnobs;
+        },
+        pushPlan(plan) {
+          window.__logKnobs.plan = [...plan];
+          return window.__logKnobs.plan;
+        },
+        widget: () => document.querySelector('feedback-widget'),
+        shadow() {
+          return this.widget().shadowRoot;
+        },
+        statusText() {
+          const el = this.shadow().querySelector('.fb-status');
+          return el ? el.textContent : '';
+        },
+        logStatusText() {
+          const el = this.shadow().querySelector('.fb-log-status');
+          return el && !el.hidden ? el.textContent : '';
+        },
+        logErrorText() {
+          const el = this.shadow().querySelector('.fb-log-error');
+          return el && !el.hidden ? el.textContent : '';
+        },
+        logs() {
+          const sr = this.shadow();
+          return [...sr.querySelectorAll('.fb-log-item')].map((li) => ({
+            name: li.querySelector('.fb-log-item-name')?.textContent ?? '',
+            source: li.querySelector('.fb-log-item-source')?.textContent ?? '',
+            size: li.querySelector('.fb-log-item-size')?.textContent ?? '',
+          }));
+        },
+        previewOpen() {
+          const m = this.shadow().querySelector('.fb-log-preview-modal');
+          return !!m && m.classList.contains('is-open');
+        },
+        previewText() {
+          const pre = this.shadow().querySelector('.fb-log-preview-content');
+          return pre ? pre.textContent : null;
+        },
+        textarea() {
+          return this.shadow().querySelector('.fb-textarea').value;
+        },
+        // 点击某份日志的「预览 / 移除」按钮（按文件名精确命中）
+        clickItemAction(name, kind) {
+          const want = kind === 'preview' ? `预览日志文件 ${name}` : `移除日志文件 ${name}`;
+          const btn = [...this.shadow().querySelectorAll('.fb-log-item button')].find(
+            (b) => b.getAttribute('aria-label') === want,
+          );
+          if (!btn) return false;
+          btn.click();
+          return true;
+        },
+      };
+    </script>
+
+    <script src="/sdk/feedback-web.umd.js"></script>
+    <feedback-widget
+      id="widget"
+      api-base="http://localhost:8787"
+      app-id="com.example.demo-e2e"
+      app-version="3.1.4"
+      page-label="e2e-logs"
+      capture-mode="viewport"
+    ></feedback-widget>
+    <script>
+      // 面板由宿主页注入日志提供者（宿主真实用法：widget.logProvider = fn）
+      document.querySelector('feedback-widget').logProvider = window.__logProvider;
+    </script>
+  </body>
+</html>

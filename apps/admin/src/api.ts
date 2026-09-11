@@ -50,6 +50,8 @@ export interface FeedbackListItem {
   title?: string | null;
   kaneoUrl?: string | null;
   errorSummary?: string | null;
+  /** 该反馈的日志份数（服务端列表项提供；无日志为 0）。 */
+  logCount?: number;
 }
 
 export interface FeedbackScreenshotMeta {
@@ -91,12 +93,68 @@ export interface FeedbackDetail extends FeedbackListItem {
   processed: {
     title: string;
     sections: { experience: string; problems: string; suggestions: string; questions: string };
+    /** 日志诊断（可选）：旧记录与未参与日志整理的记录缺省，展示层必须兼容缺省。 */
+    diagnostics?: FeedbackDiagnostics | null;
   } | null;
   kaneoTaskId: string | null;
   attemptCount: number;
   lastError: string | null;
   recovery?: FeedbackRecovery | null;
   screenshot?: FeedbackScreenshotMeta | null;
+  /** 日志份数（恒存在；无日志为 0）。 */
+  logCount: number;
+  /** 日志元数据（按 `seq` 升序；无日志为 `[]`）。 */
+  logs: FeedbackLogMeta[];
+}
+
+/** 日志来源：`auto` = 宿主回调自动采集；`manual` = 用户在面板手动补充。 */
+export type FeedbackLogSource = "auto" | "manual";
+
+/** 单份日志的归档确认进度（`allAttachmentsConfirmed` 按日志拆开的展示投影）。 */
+export type FeedbackLogArchiveState = "not_started" | "partial" | "confirmed";
+
+/** `GET /api/admin/feedback/:id` 的 `logs[]` 项（绝不包含任何公开链接）。 */
+export interface FeedbackLogMeta {
+  id: string;
+  feedbackId: string;
+  /** 0 起序号，等于提交顺序与归档顺序。 */
+  seq: number;
+  /** 服务端清洗后的安全文件名。 */
+  filename: string;
+  source: FeedbackLogSource;
+  byteSize: number;
+  sha256: string;
+  createdAt: string;
+  /** 按「末尾 8000 码点」规则该份日志送 AI 时是否会被截取（与是否真送过 AI 无关）。 */
+  truncated: boolean;
+  /** 该份日志按解码规则得到的总 Unicode 码点数。 */
+  totalCodepoints: number;
+  /** 该份日志在归档存档数据中的附件确认进度。 */
+  archiveState: FeedbackLogArchiveState;
+}
+
+/** 模型摘录的日志证据：提示词要求逐字摘录，但服务端不逐字校验。 */
+export interface LogEvidenceItem {
+  /** 归属用的 0 起日志序号（同名日志据此区分）；`filename` 仅作展示。 */
+  seq?: number;
+  filename: string;
+  quote: string;
+}
+
+/** 未证实的可能原因：必须带 confidence（只允许 low / medium）。 */
+export interface LogSpeculationItem {
+  hypothesis: string;
+  confidence: "low" | "medium";
+  basedOn?: string;
+}
+
+/**
+ * 日志诊断。`logEvidence` 与 `possibleCauses` 分属两个字段，展示层必须视觉分开。
+ * 两个数组在读取侧都按可选处理：旧记录（或字段非法被丢弃的记录）不得导致渲染报错。
+ */
+export interface FeedbackDiagnostics {
+  logEvidence?: LogEvidenceItem[] | null;
+  possibleCauses?: LogSpeculationItem[] | null;
 }
 
 export interface AppItem {
@@ -132,4 +190,23 @@ export const STATUS_LABELS: Record<string, string> = {
   needs_review: "待核对",
   archived: "已归档",
   failed: "失败",
+};
+
+/** 日志来源展示串（数据属性里始终保留原始值 auto / manual）。 */
+export const LOG_SOURCE_LABELS: Record<string, string> = {
+  auto: "自动采集",
+  manual: "手动补充",
+};
+
+/** 单份日志归档进度展示串（数据属性里始终保留原始值 not_started / partial / confirmed）。 */
+export const LOG_ARCHIVE_STATE_LABELS: Record<string, string> = {
+  not_started: "未开始",
+  partial: "进行中",
+  confirmed: "已完成",
+};
+
+/** 推测置信度展示串（只允许 low / medium）。 */
+export const CONFIDENCE_LABELS: Record<string, string> = {
+  low: "低",
+  medium: "中",
 };

@@ -37,13 +37,20 @@ export function makeProcessed(title = "整理后的标题"): ProcessedFeedback {
 export function makeMockAi(behavior: MockAiBehavior = {}): AiClient & {
   calls: number;
   lastImage: Parameters<AiClient["organize"]>[1];
+  lastLogs: Parameters<AiClient["organize"]>[2];
 } {
   const outcomes = behavior.outcomes ?? ["ok"];
   const ai = {
     calls: 0,
     lastImage: null as Parameters<AiClient["organize"]>[1],
-    async organize(_text: string, image?: Parameters<AiClient["organize"]>[1]): Promise<ProcessedFeedback> {
+    lastLogs: null as Parameters<AiClient["organize"]>[2],
+    async organize(
+      _text: string,
+      image?: Parameters<AiClient["organize"]>[1],
+      logs?: Parameters<AiClient["organize"]>[2],
+    ): Promise<ProcessedFeedback> {
       ai.lastImage = image ?? null;
+      ai.lastLogs = logs ?? null;
       const outcome = outcomes[Math.min(ai.calls, outcomes.length - 1)] ?? "ok";
       ai.calls++;
       switch (outcome) {
@@ -221,6 +228,29 @@ export function makeMockKaneo(opts: MockKaneoOptions = {}): MockKaneo {
       countWrite();
       finalizes.push({ taskId, key: input.key });
       return { id: `asset-${taskId}`, url: `http://kaneo.test/assets/asset-${taskId}.png` };
+    },
+    // 通用二进制上传（日志附件用）：与图片方法同一计数口径，注入钩子可分别替换
+    async createBinaryUpload(taskId, input) {
+      countWrite();
+      const seq = (mock.presignSeq.get(taskId) ?? 0) + 1;
+      mock.presignSeq.set(taskId, seq);
+      const suffix = seq === 1 ? "" : `-${seq}`;
+      return {
+        key: `key-${taskId}${suffix}`,
+        uploadUrl: `http://kaneo.test/upload/${taskId}${suffix}`,
+        headers: { "content-type": input.contentType },
+      };
+    },
+    async uploadToPresigned(uploadUrl, _headers, bytes) {
+      countWrite();
+      mock.uploads.push({ taskId: uploadUrl, bytes });
+    },
+    async finalizeBinaryUpload(taskId, input) {
+      countWrite();
+      finalizes.push({ taskId, key: input.key });
+      const dot = input.filename.lastIndexOf(".");
+      const ext = dot >= 0 ? input.filename.slice(dot) : "";
+      return { id: `asset-${taskId}-${input.key}`, url: `http://kaneo.test/assets/asset-${taskId}-${input.key}${ext}` };
     },
     async createComment(taskId, input) {
       countWrite();

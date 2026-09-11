@@ -11,7 +11,7 @@ import { getFeedback, updateFeedback } from "../db/repos.ts";
  * 绝不猜测重建，也绝不批量改写现有数据库。
  */
 
-export const ARCHIVE_DATA_VERSION = 1;
+export const ARCHIVE_DATA_VERSION = 2;
 
 /** 远端写入结果分类：尚未发送 / 已发出但结果未知 / 已确认成功响应。 */
 export type WriteOutcome = "not_sent" | "maybe_sent" | "confirmed";
@@ -65,15 +65,48 @@ export interface ArchiveDataV1 {
   replacedKeys?: string[];
 }
 
-/** 保存时输入的新数据（version/revision 由 saveArchiveData 统一设置）。 */
-export type ArchiveDataNext = Omit<ArchiveDataV1, "version" | "revision">;
+/** 单份附件的归档记录（V2 中每份日志一份；顶层三个字段就是截图那一份）。 */
+export interface ArchiveAttachmentRecord {
+  upload?: ArchiveUpload;
+  asset?: ArchiveAsset;
+  comment?: ArchiveComment;
+}
+
+/**
+ * 归档存档数据 V2（docs/api.md L8）：
+ * - 顶层 `upload`/`asset`/`comment` 与 V1 逐字段同形，表示**截图**记录；
+ * - `logs` 按 `feedback_logs.id` 索引每份日志的独立记录；
+ * - 空集合必须省略 `logs` 键；不存在的 logId 不得出现在结构里。
+ */
+export interface ArchiveDataV2 {
+  version: 2;
+  revision: number;
+  target: ArchiveTarget;
+  upload?: ArchiveUpload;
+  asset?: ArchiveAsset;
+  comment?: ArchiveComment;
+  logs?: Record<string, ArchiveAttachmentRecord>;
+  replacedKeys?: string[];
+}
+
+/** 读路径的归档数据（V1 继续可读，V2 为当前写入形态）。 */
+export type ArchiveData = ArchiveDataV1 | ArchiveDataV2;
+
+/** 保存时输入的新数据（version/revision 由 saveArchiveData 统一设置为 V2）。 */
+export type ArchiveDataNext = Omit<ArchiveDataV2, "version" | "revision">;
 
 export type ParsedArchiveData =
   | { kind: "empty" }
   | { kind: "legacy"; assetUrl?: string }
-  | { kind: "valid"; data: ArchiveDataV1 }
+  | { kind: "valid"; data: ArchiveData }
   | { kind: "corrupt"; reason: string }
   | { kind: "unsupported"; version: number };
+
+/** 该反馈本次归档需要的附件集合（L9）：截图在前，日志按 seq 升序。 */
+export type AttachmentRef = { kind: "screenshot" } | { kind: "log"; logId: string };
+
+/** 单份日志在 V2 中的展示进度投影（types.ts FeedbackLogArchiveState）。 */
+export type FeedbackLogArchiveState = "not_started" | "partial" | "confirmed";
 
 /** 持久化前版本检查失败（损坏 / 未知版本 / revision 冲突）：拒绝覆盖，调用方必须转入待核对。 */
 export class ArchiveVersionConflictError extends Error {}
@@ -102,93 +135,187 @@ function fail(reason: string): { kind: "corrupt"; reason: string } {
   return { kind: "corrupt", reason };
 }
 
+/** 解析结果包装：区分「非法」与「缺省」。 */
+type ParsedField<T> = { ok: true; value: T } | { ok: false };
+
+function parseTarget(t: unknown): ParsedField<ArchiveTarget> {
+  if (!isRecord(t)) return { ok: false };
+  if (Object.keys(t).length !== 3) return { ok: false };
+  if (typeof t.apiBase !== "string" || !t.apiBase || !isHttpUrl(t.apiBase)) return { ok: false };
+  if (typeof t.projectId !== "string" || !t.projectId || t.projectId.length > 200) return { ok: false };
+  if (typeof t.workspaceId !== "string" || !t.workspaceId || t.workspaceId.length > 200) return { ok: false };
+  return { ok: true, value: { apiBase: t.apiBase, projectId: t.projectId, workspaceId: t.workspaceId } };
+}
+
+/** 校验 upload 字段（4 键 = t3 之前写入；5 键 = 带 recoveries）。 */
+function parseUpload(u: unknown): ParsedField<ArchiveUpload> {
+  if (!isRecord(u)) return { ok: false };
+  const uKeys = Object.keys(u);
+  if (uKeys.length !== 4 && uKeys.length !== 5) return { ok: false };
+  if (uKeys.length === 5 && !uKeys.includes("recoveries")) return { ok: false };
+  if (typeof u.key !== "string" || !u.key || u.key.length > 1024) return { ok: false };
+  if (typeof u.credentialsEnc !== "string" || !u.credentialsEnc || u.credentialsEnc.length > 64 * 1024) {
+    return { ok: false };
+  }
+  if (
+    u.expiresAt !== null &&
+    (typeof u.expiresAt !== "string" || !u.expiresAt || Number.isNaN(Date.parse(u.expiresAt)))
+  ) {
+    return { ok: false };
+  }
+  if (!isWriteOutcome(u.outcome)) return { ok: false };
+  if (
+    u.recoveries !== undefined &&
+    (typeof u.recoveries !== "number" || !Number.isInteger(u.recoveries) || u.recoveries < 0 || u.recoveries > 1000)
+  ) {
+    return { ok: false };
+  }
+  return {
+    ok: true,
+    value: {
+      key: u.key,
+      credentialsEnc: u.credentialsEnc,
+      expiresAt: u.expiresAt as string | null,
+      outcome: u.outcome,
+      ...(u.recoveries !== undefined ? { recoveries: u.recoveries as number } : {}),
+    },
+  };
+}
+
+function parseAsset(a: unknown): ParsedField<ArchiveAsset> {
+  if (!isRecord(a)) return { ok: false };
+  if (Object.keys(a).length !== 2) return { ok: false };
+  if (typeof a.id !== "string" || a.id.length > 200) return { ok: false };
+  if (typeof a.url !== "string" || !a.url || !isHttpUrl(a.url) || a.url.length > 2048) return { ok: false };
+  return { ok: true, value: { id: a.id, url: a.url } };
+}
+
+function parseComment(c: unknown): ParsedField<ArchiveComment> {
+  if (!isRecord(c)) return { ok: false };
+  if (Object.keys(c).length !== 3) return { ok: false };
+  if (typeof c.marker !== "string" || !c.marker || c.marker.length > 400) return { ok: false };
+  if (c.id !== null && (typeof c.id !== "string" || c.id.length > 200)) return { ok: false };
+  if (!isWriteOutcome(c.outcome)) return { ok: false };
+  return { ok: true, value: { marker: c.marker, id: c.id as string | null, outcome: c.outcome } };
+}
+
+function parseReplacedKeys(v: unknown): ParsedField<string[]> {
+  if (!Array.isArray(v)) return { ok: false };
+  if (v.length > 20) return { ok: false };
+  for (const k of v) {
+    if (typeof k !== "string" || !k || k.length > 1024) return { ok: false };
+  }
+  return { ok: true, value: v as string[] };
+}
+
+/** V1/V2 共有的字段（除 version 与 V2 的 logs 外）。 */
+interface ArchiveCommonFields {
+  revision: number;
+  target: ArchiveTarget;
+  upload?: ArchiveUpload;
+  asset?: ArchiveAsset;
+  comment?: ArchiveComment;
+  replacedKeys?: string[];
+}
+
+function validateCommon(v: Record<string, unknown>): ArchiveCommonFields | null {
+  if (typeof v.revision !== "number" || !Number.isInteger(v.revision) || v.revision < 1) return null;
+  const t = parseTarget(v.target);
+  if (!t.ok) return null;
+  const out: ArchiveCommonFields = { revision: v.revision, target: t.value };
+  if (v.upload !== undefined) {
+    const p = parseUpload(v.upload);
+    if (!p.ok) return null;
+    out.upload = p.value;
+  }
+  if (v.asset !== undefined) {
+    const p = parseAsset(v.asset);
+    if (!p.ok) return null;
+    out.asset = p.value;
+  }
+  if (v.comment !== undefined) {
+    const p = parseComment(v.comment);
+    if (!p.ok) return null;
+    out.comment = p.value;
+  }
+  if (v.replacedKeys !== undefined) {
+    const p = parseReplacedKeys(v.replacedKeys);
+    if (!p.ok) return null;
+    out.replacedKeys = p.value;
+  }
+  return out;
+}
+
+/** 单份附件记录（顶层三个键同形；用于截图与每份日志）。 */
+function validateAttachmentRecord(rec: unknown): ArchiveAttachmentRecord | null {
+  if (!isRecord(rec)) return null;
+  const allowed = new Set(["upload", "asset", "comment"]);
+  for (const key of Object.keys(rec)) {
+    if (!allowed.has(key)) return null;
+  }
+  const out: ArchiveAttachmentRecord = {};
+  if (rec.upload !== undefined) {
+    const p = parseUpload(rec.upload);
+    if (!p.ok) return null;
+    out.upload = p.value;
+  }
+  if (rec.asset !== undefined) {
+    const p = parseAsset(rec.asset);
+    if (!p.ok) return null;
+    out.asset = p.value;
+  }
+  if (rec.comment !== undefined) {
+    const p = parseComment(rec.comment);
+    if (!p.ok) return null;
+    out.comment = p.value;
+  }
+  return out;
+}
+
 /** 严格校验一段 V1 结构；任何不符都返回 null（由调用方归类为损坏）。 */
 function validateV1(v: Record<string, unknown>): ArchiveDataV1 | null {
   const allowed = new Set(["version", "revision", "target", "upload", "asset", "comment", "replacedKeys"]);
   for (const key of Object.keys(v)) {
     if (!allowed.has(key)) return null; // 未知字段：宁可当损坏也不静默丢弃
   }
-  if (v.version !== ARCHIVE_DATA_VERSION) return null;
-  if (typeof v.revision !== "number" || !Number.isInteger(v.revision) || v.revision < 1) return null;
+  if (v.version !== 1) return null;
+  const common = validateCommon(v);
+  if (!common) return null;
+  return { version: 1, ...common };
+}
 
-  const t = v.target;
-  if (!isRecord(t)) return null;
-  if (Object.keys(t).length !== 3) return null;
-  if (typeof t.apiBase !== "string" || !t.apiBase || !isHttpUrl(t.apiBase)) return null;
-  if (typeof t.projectId !== "string" || !t.projectId || t.projectId.length > 200) return null;
-  if (typeof t.workspaceId !== "string" || !t.workspaceId || t.workspaceId.length > 200) return null;
-
-  let upload: ArchiveUpload | undefined;
-  if (v.upload !== undefined) {
-    const u = v.upload;
-    if (!isRecord(u)) return null;
-    const uKeys = Object.keys(u);
-    // 4 键 = t3 之前写入的记录；5 键 = 带 recoveries 计数
-    if (uKeys.length !== 4 && uKeys.length !== 5) return null;
-    if (uKeys.length === 5 && !uKeys.includes("recoveries")) return null;
-    if (typeof u.key !== "string" || !u.key || u.key.length > 1024) return null;
-    if (typeof u.credentialsEnc !== "string" || !u.credentialsEnc || u.credentialsEnc.length > 64 * 1024) return null;
-    if (
-      u.expiresAt !== null &&
-      (typeof u.expiresAt !== "string" || !u.expiresAt || Number.isNaN(Date.parse(u.expiresAt)))
-    ) {
-      return null;
+/** 严格校验一段 V2 结构；logs 只允许 upload/asset/comment 三键，空集合必须省略。 */
+function validateV2(v: Record<string, unknown>): ArchiveDataV2 | null {
+  const allowed = new Set(["version", "revision", "target", "upload", "asset", "comment", "logs", "replacedKeys"]);
+  for (const key of Object.keys(v)) {
+    if (!allowed.has(key)) return null;
+  }
+  if (v.version !== 2) return null;
+  const common = validateCommon(v);
+  if (!common) return null;
+  let logs: Record<string, ArchiveAttachmentRecord> | undefined;
+  if (v.logs !== undefined) {
+    if (!isRecord(v.logs)) return null;
+    const keys = Object.keys(v.logs);
+    if (keys.length === 0) return null; // 空集合必须省略 logs 键，不得输出 "logs": {}
+    if (keys.length > 100) return null;
+    logs = {};
+    for (const key of keys) {
+      if (!key || key.length > 200) return null;
+      const rec = validateAttachmentRecord(v.logs[key]);
+      if (!rec) return null;
+      logs[key] = rec;
     }
-    if (!isWriteOutcome(u.outcome)) return null;
-    if (
-      u.recoveries !== undefined &&
-      (typeof u.recoveries !== "number" || !Number.isInteger(u.recoveries) || u.recoveries < 0 || u.recoveries > 1000)
-    ) {
-      return null;
-    }
-    upload = {
-      key: u.key,
-      credentialsEnc: u.credentialsEnc,
-      expiresAt: u.expiresAt as string | null,
-      outcome: u.outcome,
-      ...(u.recoveries !== undefined ? { recoveries: u.recoveries as number } : {}),
-    };
   }
-
-  let asset: ArchiveAsset | undefined;
-  if (v.asset !== undefined) {
-    const a = v.asset;
-    if (!isRecord(a)) return null;
-    if (Object.keys(a).length !== 2) return null;
-    if (typeof a.id !== "string" || a.id.length > 200) return null;
-    if (typeof a.url !== "string" || !a.url || !isHttpUrl(a.url) || a.url.length > 2048) return null;
-    asset = { id: a.id, url: a.url };
-  }
-
-  let replacedKeys: string[] | undefined;
-  if (v.replacedKeys !== undefined) {
-    if (!Array.isArray(v.replacedKeys)) return null;
-    if (v.replacedKeys.length > 20) return null;
-    for (const k of v.replacedKeys) {
-      if (typeof k !== "string" || !k || k.length > 1024) return null;
-    }
-    replacedKeys = v.replacedKeys as string[];
-  }
-
-  let comment: ArchiveComment | undefined;
-  if (v.comment !== undefined) {
-    const c = v.comment;
-    if (!isRecord(c)) return null;
-    if (Object.keys(c).length !== 3) return null;
-    if (typeof c.marker !== "string" || !c.marker || c.marker.length > 400) return null;
-    if (c.id !== null && (typeof c.id !== "string" || c.id.length > 200)) return null;
-    if (!isWriteOutcome(c.outcome)) return null;
-    comment = { marker: c.marker, id: c.id as string | null, outcome: c.outcome };
-  }
-
   return {
-    version: 1,
-    revision: v.revision as number,
-    target: { apiBase: t.apiBase, projectId: t.projectId, workspaceId: t.workspaceId },
-    ...(upload ? { upload } : {}),
-    ...(asset ? { asset } : {}),
-    ...(comment ? { comment } : {}),
-    ...(replacedKeys ? { replacedKeys } : {}),
+    version: 2,
+    revision: common.revision,
+    target: common.target,
+    ...(common.upload ? { upload: common.upload } : {}),
+    ...(common.asset ? { asset: common.asset } : {}),
+    ...(common.comment ? { comment: common.comment } : {}),
+    ...(logs ? { logs } : {}),
+    ...(common.replacedKeys ? { replacedKeys: common.replacedKeys } : {}),
   };
 }
 
@@ -196,8 +323,8 @@ function validateV1(v: Record<string, unknown>): ArchiveDataV1 | null {
  * 解析 archive_data_json：
  * - 空/空白 → empty；
  * - 旧格式（无 version，仅 { assetUrl? }）→ legacy（assetUrl 供迁移，不猜其他信息）；
- * - version:1 且严格合法 → valid；
- * - version 存在但不是 1 → unsupported（可能由更新版本的服务端写入，绝不覆盖）；
+ * - version:1 / version:2 且严格合法 → valid（V1 继续可读，只读不改写）；
+ * - version 存在但既非 1 也非 2 → unsupported（可能由更新版本的服务端写入，绝不覆盖）；
  * - 其余（JSON 损坏、类型不符、缺字段、未知字段）→ corrupt。
  */
 export function parseArchiveData(raw: string | null | undefined): ParsedArchiveData {
@@ -219,12 +346,17 @@ export function parseArchiveData(raw: string | null | undefined): ParsedArchiveD
     const assetUrl = typeof parsed.assetUrl === "string" ? parsed.assetUrl : undefined;
     return { kind: "legacy", ...(assetUrl !== undefined ? { assetUrl } : {}) };
   }
-  if (version !== ARCHIVE_DATA_VERSION) {
+  if (version !== 1 && version !== 2) {
     if (typeof version !== "number" || !Number.isInteger(version)) return fail(`version 不是整数: ${String(version)}`);
     return { kind: "unsupported", version };
   }
-  const data = validateV1(parsed);
-  if (!data) return fail("v1 结构校验失败（字段缺失/类型不符/未知字段）");
+  if (version === 1) {
+    const data = validateV1(parsed);
+    if (!data) return fail("v1 结构校验失败（字段缺失/类型不符/未知字段）");
+    return { kind: "valid", data };
+  }
+  const data = validateV2(parsed);
+  if (!data) return fail("v2 结构校验失败（字段缺失/类型不符/未知字段）");
   return { kind: "valid", data };
 }
 
@@ -233,13 +365,15 @@ export function serializeArchiveData(next: ArchiveDataNext, revision: number): s
   if (!Number.isInteger(revision) || revision < 1) {
     throw new ArchiveVersionConflictError(`revision 非法: ${String(revision)}`);
   }
-  const probe = validateV1({
-    version: ARCHIVE_DATA_VERSION,
+  const logs = next.logs && Object.keys(next.logs).length > 0 ? next.logs : undefined;
+  const probe = validateV2({
+    version: 2,
     revision,
     target: next.target,
     ...(next.upload !== undefined ? { upload: next.upload } : {}),
     ...(next.asset !== undefined ? { asset: next.asset } : {}),
     ...(next.comment !== undefined ? { comment: next.comment } : {}),
+    ...(logs !== undefined ? { logs } : {}),
     ...(next.replacedKeys !== undefined ? { replacedKeys: next.replacedKeys } : {}),
   });
   if (!probe) throw new ArchiveVersionConflictError("归档数据未通过写前严格校验，拒绝保存");
@@ -256,7 +390,8 @@ export function loadArchiveData(db: Db, feedbackId: string): ParsedArchiveData {
  * 保存下一版归档数据（4.1 持久化）：
  * - 保存前重新读取磁盘数据做版本检查：损坏 / 未知版本 → 拒绝覆盖（ArchiveVersionConflictError）；
  * - 期间被并发修改（revision 与调用方基准不一致）→ 拒绝覆盖；
- * - 仅从 empty / legacy / 合法 v1 之上写入；revision 单调递增，version 恒为 1；
+ * - 仅从 empty / legacy / 合法 v1 / 合法 v2 之上写入；revision 单调递增，version 恒为 2
+ *   （V1 记录只读，只有该记录发生新的归档写入时才升为 V2，不做批量升级）；
  * - SQLite 写入失败抛 ArchivePersistenceError，调用方不得继续下一步远端写入。
  */
 export function saveArchiveData(
@@ -264,7 +399,7 @@ export function saveArchiveData(
   feedbackId: string,
   base: ParsedArchiveData,
   next: ArchiveDataNext,
-): ArchiveDataV1 {
+): ArchiveDataV2 {
   if (base.kind === "corrupt") {
     throw new ArchiveVersionConflictError(`归档数据损坏，拒绝覆盖: ${base.reason}`);
   }
@@ -303,7 +438,7 @@ export function saveArchiveData(
   } catch (err) {
     throw new ArchivePersistenceError(`归档恢复信息写入 SQLite 失败: ${(err as Error).message?.slice(0, 150)}`);
   }
-  return JSON.parse(json) as ArchiveDataV1;
+  return JSON.parse(json) as ArchiveDataV2;
 }
 
 // ---------- 恢复目标固定与变更检测 ----------
@@ -314,7 +449,7 @@ export type TargetCheck =
   | { status: "changed"; field: "apiBase" | "projectId" | "workspaceId" };
 
 /** 比较已固定目标与当前解析出的目标。 */
-export function checkArchiveTarget(existing: ArchiveDataV1 | null, target: ArchiveTarget): TargetCheck {
+export function checkArchiveTarget(existing: ArchiveData | null, target: ArchiveTarget): TargetCheck {
   if (!existing) return { status: "fresh" };
   const pinned = existing.target;
   if (pinned.apiBase !== target.apiBase) return { status: "changed", field: "apiBase" };
@@ -417,4 +552,61 @@ export function buildUploadRecord(
 /** 评论定位标记：反馈 ID + 图片摘要足以唯一确定截图评论。 */
 export function commentMarker(feedbackId: string, screenshotSha256: string): string {
   return `${feedbackId}|${screenshotSha256}`;
+}
+
+/**
+ * 日志评论定位标记（L8.6）：`feedbackId|logId|logSha256` 三段固定、`|` 分隔。
+ * 每份日志的 Kaneo 评论正文必须包含该标记，用于按「反馈 ID + 日志 ID + 摘要 + 当前资产引用」查重。
+ */
+export function logCommentMarker(feedbackId: string, logId: string, logSha256: string): string {
+  return `${feedbackId}|${logId}|${logSha256}`;
+}
+
+/**
+ * 单份附件「已确认」的**唯一**谓词（L9）：资产已登记（asset.url 非空）且评论已确认。
+ * 截图取顶层记录，日志取 logs[logId]；两者共用本函数，禁止各写一套。
+ */
+export function attachmentConfirmed(record: ArchiveAttachmentRecord | undefined | null): boolean {
+  if (!record) return false;
+  return typeof record.asset?.url === "string" && record.asset.url !== "" && record.comment?.outcome === "confirmed";
+}
+
+/** 本次归档需要的附件集合：截图在前，日志按 seq 升序（L9）。 */
+export function requiredAttachments(input: { hasScreenshot: boolean; logIds: string[] }): AttachmentRef[] {
+  const refs: AttachmentRef[] = input.hasScreenshot ? [{ kind: "screenshot" }] : [];
+  for (const logId of input.logIds) refs.push({ kind: "log", logId });
+  return refs;
+}
+
+/**
+ * 「所有附件是否都已完成」的集中判定（L9，五条路径共用）：
+ * 处理 / retry / recheck / recoverRetryComment / recoverReplaceUpload 都必须通过它决定 archived。
+ * 集合为空（纯文字反馈）→ true。
+ */
+export function allAttachmentsConfirmed(
+  data: ArchiveData | null | undefined,
+  input: { hasScreenshot: boolean; logIds: string[] },
+): boolean {
+  const refs = requiredAttachments(input);
+  if (refs.length === 0) return true;
+  const logs = data && "logs" in data ? data.logs : undefined;
+  for (const ref of refs) {
+    if (ref.kind === "screenshot") {
+      if (!data || !attachmentConfirmed(data)) return false;
+      continue;
+    }
+    if (!logs || !attachmentConfirmed(logs[ref.logId])) return false;
+  }
+  return true;
+}
+
+/**
+ * 单份日志在归档存档数据中的进度投影（L6 `archiveState`）：
+ * 只从 archive_data_json 派生，是 `allAttachmentsConfirmed` 的同一份谓词的拆解，不另立判定。
+ */
+export function logArchiveState(data: ArchiveData | null | undefined, logId: string): FeedbackLogArchiveState {
+  const logs = data && "logs" in data ? data.logs : undefined;
+  const record = logs?.[logId];
+  if (!record) return "not_started";
+  return attachmentConfirmed(record) ? "confirmed" : "partial";
 }

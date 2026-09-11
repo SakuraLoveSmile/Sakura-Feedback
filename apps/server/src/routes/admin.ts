@@ -8,21 +8,25 @@ import {
   type FeedbackStatus,
   getAppByAppId,
   getFeedback,
+  getFeedbackLog,
   getFeedbackScreenshot,
   getFeedbackScreenshotMeta,
   getSetting,
   insertApp,
   listApps,
+  listFeedbackLogs,
   listFeedbacks,
   setSetting,
   toAdminListItem,
+  toFeedbackLogMeta,
   updateApp,
 } from "../db/repos.ts";
 import type { ServerConfig } from "../env.ts";
 import { checkSameOrigin, type Err, err, fail, isErr, readJson, requireSession } from "../http.ts";
-import { parseArchiveData } from "../pipeline/archive-data.ts";
+import { logArchiveState, parseArchiveData } from "../pipeline/archive-data.ts";
 import type { AiClient } from "../services/ai.ts";
 import type { KaneoClient } from "../services/kaneo.ts";
+import { logCodepointStats } from "../services/log-text.ts";
 import type { PublicApp } from "../types.ts";
 
 export interface AdminDeps {
@@ -256,8 +260,12 @@ export function adminRoutes(deps: AdminDeps): Hono {
       }
     }
     const screenshotMeta = getFeedbackScreenshotMeta(db, row.id);
+    const logRows = listFeedbackLogs(db, row.id);
+    const logMetas = logMetaList(row.archive_data_json, logRows);
     return c.json({
       ...toAdminListItem(row),
+      logCount: logMetas.length,
+      logs: logMetas,
       text: row.text,
       context,
       processed,
@@ -291,7 +299,66 @@ export function adminRoutes(deps: AdminDeps): Hono {
     });
   });
 
+  // ---------- 日志：元数据列表 + 单份读取（仅 cookie 会话 + 同源检查） ----------
+
+  routes.get("/feedback/:id/logs", (c) => {
+    const row = getFeedback(db, c.req.param("id"));
+    if (!row) return fail(c, err("not_found", "反馈不存在", 404));
+    c.header("cache-control", "no-store");
+    return c.json({ logs: logMetaList(row.archive_data_json, listFeedbackLogs(db, row.id)) });
+  });
+
+  routes.get("/feedback/:id/logs/:logId", (c) => {
+    const row = getFeedback(db, c.req.param("id"));
+    if (!row) return fail(c, err("not_found", "反馈不存在", 404));
+    const log = getFeedbackLog(db, row.id, c.req.param("logId"));
+    if (!log) return fail(c, err("not_found", "日志不存在", 404));
+    const download = c.req.query("download") === "1";
+    return new Response(log.log_blob as unknown as BodyInit, {
+      status: 200,
+      headers: {
+        "content-type": download ? "application/octet-stream" : "text/plain; charset=utf-8",
+        "cache-control": "no-store",
+        "x-content-type-options": "nosniff",
+        "content-length": String(log.byte_size),
+        "content-disposition": contentDisposition(log.filename, log.seq, download),
+      },
+    });
+  });
+
   return routes;
+}
+
+/**
+ * LogMeta 投影（L6）：`truncated` / `totalCodepoints` 由已落库字节按 L7 计算；
+ * `archiveState` 由 `archive_data_json` 经 `logArchiveState`（L9 同一谓词的拆解）派生。
+ */
+function logMetaList(
+  archiveDataJson: string | null,
+  rows: ReturnType<typeof listFeedbackLogs>,
+): ReturnType<typeof toFeedbackLogMeta>[] {
+  const parsed = parseArchiveData(archiveDataJson);
+  const data = parsed.kind === "valid" ? parsed.data : null;
+  return rows.map((row) =>
+    toFeedbackLogMeta(row, { ...logCodepointStats(row.log_blob), archiveState: logArchiveState(data, row.id) }),
+  );
+}
+
+/**
+ * 安全 Content-Disposition（L6）：
+ * - ascii 仅保留 [A-Za-z0-9._-]，其余替换为 _，截断 100，去掉开头 .，空则 log-<seq>.txt；
+ * - filename* 用 RFC 5987 百分号编码（UTF-8）；
+ * - 两者都不得含 `"`、`\`、CR、LF。
+ */
+function contentDisposition(filename: string, seq: number, download: boolean): string {
+  let ascii = filename.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 100);
+  ascii = ascii.replace(/^\.+/, "");
+  if (ascii === "") ascii = `log-${seq}.txt`;
+  const pct = encodeURIComponent(filename).replace(
+    /['()*!]/g,
+    (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+  return `${download ? "attachment" : "inline"}; filename="${ascii}"; filename*=UTF-8''${pct}`;
 }
 
 const STATUSES: string[] = ["received", "processing", "archiving", "needs_review", "archived", "failed"];
