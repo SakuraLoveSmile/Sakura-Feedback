@@ -188,6 +188,55 @@ tags:   v0.1.0 | sha-d326c19ff9a18ce79ae16e64481f7bac767e01f8 | latest
 Flutter 侧的对应验证：Comic 宿主的 Git 依赖已实际 `pub get` 成功，且 `pubspec.lock` 的
 `resolved-ref` 等于 `ref` 指定的 sha（不是分支浮动解析）。
 
+## 需要你完成（这些我无法代做）
+
+### 1) 服务端登记两个软件身份（T2 的最后一环）
+
+客户端只持有接入配置；Kaneo 项目与目标列由**服务端**登记。在管理页「软件」里各建一条：
+
+| appId | 名称 | 允许来源（精确匹配 origin，不带路径） |
+|---|---|---|
+| `rag` | RAG 备考助手 | 开发入口 `http://127.0.0.1:5174` **+** 部署后的真实 origin（如 `https://rag.example.com`） |
+| `comic-android` | Comic（Android） | 原生端不带 Origin 头，同源校验对非 Cookie 会话放行；仍建议登记以便管理与排查 |
+
+每条还要选固定的 **Kaneo 项目 + 目标列**——这就是「各自 Kaneo 项目找到原文/图片/整理结果」的落点。
+
+登记完，RAG 本地起法：
+
+```bash
+cd RAG/frontend
+printf 'VITE_FEEDBACK_API_BASE=http://127.0.0.1:8787\nVITE_FEEDBACK_APP_ID=rag\n' > .env.local
+npm run dev   # http://127.0.0.1:5174
+```
+
+Comic 构建/安装（含真实 Rust 核心，不用 Stub 界面）：
+
+```bash
+cd Comic/android/app
+flutter build apk --debug \
+  --dart-define=FEEDBACK_API_BASE=https://<你的反馈服务域名> \
+  --dart-define=FEEDBACK_APP_ID=comic-android
+```
+
+### 2) 多模态模型与真实闭环
+
+管理页填入 AI 的 baseUrl / model / apiKey（服务端加密保存）。之后：
+
+1. 先点「AI 图像识别测试」——现在它会用**随机色块图**要求模型报出颜色顺序，答错即判失败；
+2. 再走真实截图 `organize → Kaneo`，核对 Kaneo 里的原文、图片与整理结果
+   （整理结果应包含**只存在于图片中**的可观察信息）。
+   能力探针通过**不等于**业务闭环通过，两者都要看。
+
+### 3) 云端上线（域名/证书/入口）
+
+`deploy/compose.prod.yml` 与 Nginx 模板已就绪但**未部署**——填好域名、证书路径与
+`FEEDBACK_IMAGE`（用上面那个 digest）后再上线；在此之前不声称云端已上线。
+
+### 4) 真实 Android 实机验收
+
+安装上面的 debug APK，在书库 / 阅读页 / 设置页验证：灵感球呼出、截图、键盘、
+应用返回键，以及**重启后登录存储**仍在。执行时重新确认设备在线状态。
+
 ## 剩余问题 / 未验证（不得读作已通过）
 
 1. **仓库可见性已确认可接受**：目标文档假设仓库为 private，实际为 **public**。已与你确认
