@@ -249,11 +249,6 @@ def main():
         choices=("chromium", "firefox", "webkit"),
         help="浏览器引擎；默认 chromium",
     )
-    ap.add_argument(
-        "--smoke",
-        action="store_true",
-        help="轻量跨引擎模式：只验「截图 / 弹窗 / 提交」三条引擎敏感路径",
-    )
     args = ap.parse_args()
 
     # 预检端口：上一次运行被强杀会留下孤儿进程继续占着 8787/5189 等端口。
@@ -322,9 +317,8 @@ def main():
         assert wait_http(f"{PAGES_ORIGIN}/orb.html") and wait_http(f"{ATTACKER_ORIGIN}/attacker.html")
         assert wait_http(f"{PAGES_ORIGIN}/sdk/feedback-web.umd.js")
 
-        mode = "smoke（截图/弹窗/提交）" if args.smoke else "全量"
-        step(f"Playwright {args.browser} 场景 · {mode}")
-        run_browser(shots, kind=args.browser, smoke=args.smoke)
+        step(f"Playwright {args.browser} 场景 · 全量")
+        run_browser(shots, kind=args.browser)
 
     finally:
         for p in procs:
@@ -357,7 +351,7 @@ def launch_engine(pw, kind):
     raise last
 
 
-def run_browser(shots, kind="chromium", smoke=False):
+def run_browser(shots, kind="chromium"):
     with sync_playwright() as pw:
         browser = launch_engine(pw, kind)
         ctx = browser.new_context(viewport={"width": 1280, "height": 800})
@@ -370,59 +364,9 @@ def run_browser(shots, kind="chromium", smoke=False):
                 pass
 
         try:
-            if smoke:
-                smoke_scenarios(page, ctx, shot, shots, kind)
-            else:
-                scenarios(page, ctx, shot, browser, shots)
+            scenarios(page, ctx, shot, browser, shots)
         finally:
             browser.close()
-
-
-def smoke_scenarios(page, ctx, shots, kind):
-    """跨引擎轻量验证：只覆盖「截图 / 弹窗 / 提交」三条引擎敏感路径。
-
-    存在的理由：全量套件只在 Chromium 上跑；这三条路径最容易因引擎差异而失效
-    （canvas 截图、window.open 弹窗、multipart 提交）。其余分支仍由 Chromium 全量套件覆盖。
-    """
-    tag = f"[{kind}]"
-    before = len(admin_records())
-
-    step(f"{tag} S1 组件启动：自定义元素与灵感球在该引擎可用")
-    page.goto(f"{PAGES_ORIGIN}/orb.html")
-    page.wait_for_selector("feedback-widget")
-    check(f"{tag} 灵感球可见（launcher-mode=orb）", page.locator(".fb-orb").is_visible())
-
-    step(f"{tag} S2 截图路径：呼出即截图，字节可解码")
-    open_panel(page)
-    check(f"{tag} 点按后反馈面板打开", page.locator(".fb-panel").is_visible())
-    b64 = page.evaluate("() => window.__fbE2E.blobBase64()")
-    check(f"{tag} 草稿里有可读取的截图字节（blob URL 可取回）", bool(b64), "blobBase64 返回空")
-    if b64:
-        raw = browser_paths.b64_to_bytes(b64)
-        arr = png_probe.decode(raw)
-        w, h = png_probe.size(arr)
-        check(f"{tag} 截图是合法 PNG 且像素非空", w > 0 and h > 0, f"{w}x{h}")
-
-    step(f"{tag} S3 弹窗路径：未登录点提交 → 打开真实登录弹窗并完成登录")
-    page.evaluate("(t) => window.__fbE2E.setText(t)", f"{kind}-smoke")
-    with ctx.expect_page() as pop_info:
-        page.locator(".fb-submit").click()
-    popup = pop_info.value
-    used_form = finish_login(popup)
-    check(f"{tag} 未登录点提交打开了登录弹窗", True)
-    check(f"{tag} 弹窗内完成登录（密码表单或 Cookie 静默握手）", True, f"used_form={used_form}")
-
-    step(f"{tag} S4 提交路径：提交到达服务端并落库")
-    try:
-        page.locator(".fb-submit").click(timeout=8000)
-    except Exception:
-        # 登录完成后组件可能已自动提交；下面以服务端记录数为准
-        pass
-    deadline = time.time() + 60
-    while time.time() < deadline and len(admin_records()) <= before:
-        time.sleep(0.5)
-    after = len(admin_records())
-    check(f"{tag} 提交到达服务端（服务端记录 +1）", after > before, f"{before} -> {after}")
 
 
 def widget(page):
