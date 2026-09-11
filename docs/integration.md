@@ -159,18 +159,31 @@ dependencies:
 dependencies:
   feedback_widget:
     git:
-      url: https://<你的仓库地址>.git
+      url: git@github.com:SakuraLoveSmile/Sakura-Feedback.git
       ref: <固定的 commit sha>      # 不要用分支名，避免"昨天能编、今天不能编"
       path: flutter/feedback        # 包在仓库的子目录里
 ```
 
-> 上面是 Dart pub 的标准 git 依赖写法（`url` / `ref` / `path`）。本仓库内没有任何文件使用该形式，
-> 仓库内的示例走的是 `path` 依赖——跨仓库写法属于**未在本仓库验证**的配置。
+> **已验证**（Comic Android 宿主实际接入）：上面这种「SSH url + 固定 `ref` + 子目录 `path`」形式
+> 已真实跑通 `flutter pub get` / `flutter analyze` / `flutter test`，宿主的 `pubspec.lock` 已提交，
+> 其中 `resolved-ref` 与 `ref` 同为该 sha。认证走开发机/CI 的 SSH 配置，**URL 内不写任何访问令牌**。
+>
+> 若本机 SSH 到 GitHub 不可用（例如 22 端口被网络策略关闭），**只为本地验证**可用一次性 env 覆盖改走
+> HTTPS；不要改 `pubspec.yaml`，也不要改全局 git config：
+>
+> ```bash
+> GIT_CONFIG_COUNT=1 \
+>   GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf \
+>   GIT_CONFIG_VALUE_0=git@github.com: \
+>   flutter pub get
+> ```
+>
+> CI / 生产环境必须让 SSH 可用（key 已注册到账号），否则 `pub get` 会失败。
 
 拉依赖：
 
 ```bash
-cd your_app && /Users/sakurasep/flutter/bin/flutter pub get
+cd your_app && flutter pub get
 ```
 
 ### 2.5 工具版本要求
@@ -189,8 +202,64 @@ cd your_app && /Users/sakurasep/flutter/bin/flutter pub get
 
 - ❌ **不发布 `@feedback/web` 到 npm registry**：只在本仓库 `build` + `pack`，由宿主安装本地 tgz。
 - ❌ **不发布 `feedback_widget` 到 pub.dev**（包内 `publish_to: none`）。
-- ❌ **不做 Git push / tag / 发布流水线**：跨仓库引用所需的 commit sha 由你自行提交后取得。
-- ❌ **不做真实部署**：Docker 镜像构建与上线见 [`docs/deployment.md`](deployment.md)，由你自行执行。
+- ❌ **不发布公共 npm / pub.dev 包**，也不发布到公共容器仓库以外的任何 registry。
+- ✅ **已有发布流水线**（本轮新增）：见 §2.7。跨仓库引用所需的 commit sha 由标签构建产出并回填。
+- ⏳ **云端上线**：生产 compose 与 Nginx 模板已交付（[`deploy/`](../deploy)），但域名/证书/入口尚待填写，
+  因此**尚未声称云端已上线**，也没有加入 SSH 自动部署。
+
+### 2.7 服务端镜像：拉取、私有仓库认证、升级（本轮新增）
+
+组件（Web tgz / Flutter 包）与服务端镜像**一起**出自同一轮 Actions，见
+[`.github/workflows/release.yml`](../.github/workflows/release.yml)。PR 只跑检查、**不发布**；
+推送 `v*` 标签或手动触发才构建并推送镜像。
+
+**镜像坐标与标签**
+
+| 项 | 值 |
+|---|---|
+| 镜像名 | `ghcr.io/sakuralovesmile/sakura-feedback` |
+| 平台 | 仅 **linux/amd64** |
+| 标签 | 版本标签（`v*`）、提交 SHA 标签（`sha-<40位>`）、以及 digest |
+| 生产引用 | **固定 digest**（`@sha256:...`），不使用 `latest` |
+
+一次发布的产物（同一轮构建）：Web `.tgz`、完整浏览器 `dist` 压缩包、管理页 `dist` 压缩包、
+`SHA256SUMS` 清单、`SOURCE.txt`（含来源提交），以及 `image-digest.txt`（镜像 digest）。
+标签推送时这些还会挂到 GitHub Release。
+
+**在生产机拉取（私有 GHCR，只读凭据）**
+
+```bash
+# 只读 PAT（仅 read:packages）。凭证由 docker 保存，不要写进任何仓库文件。
+echo "$GHCR_READ_TOKEN" | docker login ghcr.io -u <你的用户名> --password-stdin
+docker pull ghcr.io/sakuralovesmile/sakura-feedback@sha256:<digest>
+```
+
+**部署**
+
+```bash
+cp deploy/.env.prod.example deploy/.env.prod   # 填 MASTER_KEY / FEEDBACK_PUBLIC_URL / FEEDBACK_IMAGE
+docker compose --env-file deploy/.env.prod -f deploy/compose.prod.yml up -d
+```
+
+该 compose 已保证：端口只绑 `127.0.0.1:8787`（公网入口一律走 Nginx TLS）、`FEEDBACK_COOKIE_SECURE=true`、
+`/data` 用命名卷持久化、`FEEDBACK_PUBLIC_URL` 必填（它决定 Cookie 写操作的同源校验基准）。
+Nginx TLS 模板见 [`deploy/nginx/feedback.conf.template`](../deploy/nginx/feedback.conf.template)。
+
+**升级**
+
+1. 取新版本 digest（Actions 的 `image-digest.txt` 产物或 Release 说明）。
+2. 改 `deploy/.env.prod` 的 `FEEDBACK_IMAGE=...@sha256:<新 digest>`。
+3. `docker compose --env-file deploy/.env.prod -f deploy/compose.prod.yml up -d`。
+
+**回退**：把 digest 改回上一个值再 `up -d`。`/data` 不在镜像里，回退镜像不会丢反馈数据。
+
+**客户端如何跟上同一版本**
+
+- Web：下载该版本产物的 `feedback-web-<version>.tgz`，放进宿主项目的版本化目录（如 `vendor/`），
+  `package.json` 写成 `"@feedback/web": "file:vendor/feedback-web-<version>.tgz"`——
+  **不要**引用本机绝对路径。
+- Flutter：把 `pubspec.yaml` 的 `ref` 改成该轮构建的**来源提交 SHA**（`SOURCE.txt` 里的 `commit=`），
+  然后 `flutter pub get` 并提交宿主 `pubspec.lock`。
 
 ---
 
