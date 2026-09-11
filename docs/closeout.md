@@ -90,6 +90,31 @@ tags:   v0.1.0 | sha-d326c19ff9a18ce79ae16e64481f7bac767e01f8 | latest
 （`latest` 标签由 docker metadata-action 在标签构建时自动附加，指向同一 digest；
 后续发布是否刷新它取决于是否再推版本标签，生产侧不依赖它。）
 
+**Release 资产（同轮构建上传，已核对）**
+
+`gh release view v0.1.0` 共 5 个资产：
+
+| 资产 | 大小 |
+|---|---|
+| `feedback-web-0.1.0.tgz` | 205,300 B（与本机 `pnpm pack` 产物字节数一致） |
+| `feedback-web-dist.zip` | 199,672 B |
+| `feedback-admin-dist.zip` | 70,158 B |
+| `SHA256SUMS` | 273 B（覆盖上面三个） |
+| `SOURCE.txt` | 112 B |
+
+`SOURCE.txt` 内容：
+
+```
+commit=d326c19ff9a18ce79ae16e64481f7bac767e01f8
+ref=refs/tags/v0.1.0
+run=34602966331
+node=v22.23.2
+pnpm=11.23.0
+```
+
+其中 `commit=` 与 `git rev-parse v0.1.0^{commit}` **完全一致**——这正是"Flutter 使用同一个提交 SHA"
+所要引用的值（Comic 的 `ref` 也指向该提交）。
+
 
 
 `/api/admin/connection/ai/test-vision` 保持 `{ok, reply?, reason?}` 响应结构，但实现改为：
@@ -241,8 +266,9 @@ flutter build apk --debug \
 
 1. **仓库可见性已确认可接受**：目标文档假设仓库为 private，实际为 **public**。已与你确认
    "仓库可开源、无隐私泄露风险"，因此按现有配置发布 **public** GHCR 包属于预期行为，不再是阻塞项。
-2. **release.yml 运行状态**：已推 `v0.1.0` 标签触发真实运行（见下节"发布实跑"）；
-   若下方无 digest 记录，说明该次运行未完成或失败，须按未验证处理。
+2. **release.yml 已真实验证通过**（见上文"发布实跑"）：镜像已推送并可从 registry 取回 manifest，
+   Release 上的 5 个资产齐全，`SOURCE.txt` 的 `commit=` 与 `v0.1.0` 指向的提交**完全一致**。
+   此项不再是未验证。
 3. **Nginx 模板未做 `nginx -t`**：本机 Docker daemon 未运行，无法起 nginx 容器校验语法；模板占位符替换已实测无残留。
 4. **视觉探针只做了能力层验证**：真实多模态模型未配置，`test-vision` 未对真实模型跑过；
    「能力探针不能替代业务验收」——`organize → Kaneo` 的真实截图闭环仍待你配置模型后进行。
@@ -251,4 +277,14 @@ flutter build apk --debug \
 6. **真实 Android 实机未验收**：未在 Mi 10 上安装含真实 Rust 核心的构建，未验证书库/阅读页/设置页呼出、
    截图、键盘、返回键与重启后登录存储。
 7. **RAG 运行时未在浏览器实测**：仅做了构建与条件打包验证，未在 `127.0.0.1:5174` 打开面板提交。
-8. **Comic 改动未提交**：宿主已有 115 项未提交改动，本轮改动与它们混在工作区，未擅自提交。
+8. **Comic 改动未提交**：宿主已有 115 项未提交改动，本轮改动与它们混在工作区，未擅自提交（按你选择保留）。
+9. **浏览器 E2E 本次未取得完整汇总**：本轮两次尝试重跑 `e2e/run_browser.py`，
+   两次都在运行中被 SIGKILL 中断（`E2E_PY_EXIT=137`），且脚本在异常路径下未回收子进程，
+   留下 `preview.py` / `mock-external.mjs` / tsx server / 静态服务器占用 8787、5187-5189、8898-8899
+   （已手动清理）。第二次中断前观察到 **77 PASS / 0 FAIL**，属**部分记录，不作为通过结论**。
+   因此本轮的浏览器证据仍以**历史 237/237** 为准，本次未重跑成功。
+10. **Firefox / WebKit 未覆盖**：现有 E2E runner 是 **Chromium-only**（`launch_chromium`），
+    而检查项要求补 Chromium、Firefox、WebKit。本机已装 `firefox-1509` / `webkit-2248`
+    Playwright 浏览器，但把 runner 参数化属独立改动，本轮未做——**此项未完成**。
+11. **Docker 套件未跑**：本机 Docker daemon 未运行，`e2e/run_docker.py` 未执行；
+    因此「停服备份 → 保留主密钥 → 恢复到隔离实例」与「Docker 套件清空测试表」未取得本轮证据。
