@@ -322,12 +322,36 @@ WebKit 上 P1/P2/P6 各有一条「上传的截图字节 == 本地做像素断�
   取图 `packages/web/src/capture.ts:533`（`canvas.toBlob`）。
 - 已排除：`toBlobPng` 返回 null 会 reject（预览存在说明没 reject）；元数据分支正常说明 multipart 分支确实进入。
   怀疑点在 WebKit 下该 Blob 经 FormData 序列化后为空，或 `frozen.blob` 在冻结/提交时被清空（尚未定位到确切一行）。
-- **处置**：先按「未修缺陷」如实记录，未擅自改产品行为；修复需单独诊断（见下一条"待办"）。
-  我先前提交过一个"断言过严"的改动（`b1caa49`），其解释**是错的**，已 **revert**（`c92e69d`），
-  避免留下"放宽断言掩盖问题"的先例。
+- **处置**：先按「未修缺陷」如实记录，未擅自改产品行为，也**未放宽断言**。
+  我先前提交过一个"断言过严"的改动（`b1caa49`），其解释**是错的**，已 **revert**（`c92e69d`）。
 
-待办：在 WebKit 上用最小复现定位（页内 `new FormData(); fd.append('screenshot', blob); new Response(fd).arrayBuffer()` 比长度），
-确认是 Blob 序列化问题还是 `frozen.blob` 生命周期问题，再决定修组件还是修调用点；修完重跑 WebKit 全量。
+#### 最小复现已定位到「引擎发送阶段」，并暴露一处**归因不确定**
+
+用独立复现脚本（`/tmp/fb-wk-repro.py`，不进仓库）在 WebKit 上劫持 `FormData.prototype.append`
+与 `window.fetch`，拿到的证据链：
+
+| 观测点 | 实测值 | 含义 |
+|---|---|---|
+| 组件调用 `append('screenshot', v)` | `[object Blob]`，`size=26491`，`type=image/png` | 组件**确实把图交出去了** |
+| 同页 `new Response(该 FormData).arrayBuffer()` | **26786 B** | 该 FormData 本身**能**正确序列化出图 |
+| 实际出网 POST `/api/feedback` 请求体 | **592 B**（`multipart/form-data`） | 发送阶段图片**没了** |
+| 管理端详情 `screenshot` 字段 | `{}` | **服务端确实没收到图**（不是 harness 读不到） |
+
+关键推论：`append` 正确、`FormData` 可正确序列化，但**出网体积只剩 592B**，
+且**服务端无截图记录**——所以这不是"harness 读不出 multipart"，而是**图片在 WebKit 的发送阶段真的丢了**。
+
+**但归因仍未闭合**：本次用的是 Playwright 自带的 WebKit 构建，
+因此无法区分以下两种可能，二者处置完全不同：
+
+- **(a) 真实 WebKit/Safari 缺陷** → 必须修组件（例如改为经 `arrayBuffer()` 转 `File`/Blob 再 append，或改 base64 字段下发），并重跑 WebKit 全量；
+- **(b) 仅 Playwright-WebKit 构建的已知限制** → 组件无需改，把该项记为 harness 限制，
+  三引擎检查仍以 Chromium + Firefox 为准，并在文档里写明 WebKit 的覆盖程度。
+
+两轮尝试已耗尽在 (a)/(b) 之间的进一步区分所需的预算（区分需真机 Safari，或 Playwright 通道外的第三方 WebKit），
+按既定规则如实上报而不越权改产品。
+
+**一行下一步**：用真机 Safari 打开 `e2e/pages/orb.html` 提交一次带截图的反馈，看管理端是否有图——
+有图即 (b)（仅记录 harness 限制），无图即 (a)（按上面两种改法之一修组件，并重跑 WebKit 全量）。
 
 Firefox 那次是**真实完整跑完**的：`=== E2E 结果：237/237 通过 ===`，退出码 0，
 覆盖了灵感球拖拽/落点、遮罩像素级校验、遮挡失败规则、登录握手（真实弹窗 + 异源/nonce 负例）、
