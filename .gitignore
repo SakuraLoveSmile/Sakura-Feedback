@@ -31,3 +31,6 @@ __pycache__/
 *.pyc
 # flutter pub get 生成的插件清单
 .flutter-plugins-dependencies
+
+# 会话期 agent-teams 运行记录（保留供追溯，不入库）
+.agent-teams-preserved/
