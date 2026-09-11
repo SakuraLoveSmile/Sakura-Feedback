@@ -29,6 +29,9 @@ services:
       # 命名卷持久化 SQLite 与截图；不要用匿名卷，否则容器重建会丢数据
       - feedback-data:/data
     restart: unless-stopped
+    # 停机备份依赖优雅退出（SIGTERM → 排空队列 → checkpoint WAL 并关闭 SQLite）。
+    # 默认 10s 会早于应用自身的 20s 排空预算触发 SIGKILL，导致 WAL 残留。
+    stop_grace_period: 30s
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8787/healthz"]
       interval: 30s

@@ -21,7 +21,21 @@ docker build -t feedback-service .
 docker compose up -d       # 读取 .env（主密钥与初始账号），卷 ./data:/data
 ```
 
-备份/迁移：**先停旧 worker**（优雅退出会关闭 SQLite WAL 并完成 checkpoint），随后整目录拷贝 `data/` 即可（WAL 模式下趁运行拷贝 `feedback.db` 单文件会得到不一致快照；如必须在线备份，用 `sqlite3 data/feedback.db ".backup '<目标>'"` 或等价 WAL 安全备份）。
+备份/迁移：**先停旧 worker**，随后整目录拷贝 `data/` 即可。停机方式与前置条件：
+
+- 用 `docker stop <容器>`（`deploy/compose.prod.yml` 已设 `stop_grace_period: 30s`）或向进程发 `SIGTERM`。
+  服务收到信号后停止接受新请求 → 等处理队列排空 → `PRAGMA wal_checkpoint(TRUNCATE)` → 关闭 SQLite。
+  停机完成后 `data/` 只应剩 `feedback.db`（无 `-wal` / `-shm`），此时整目录拷贝是一致快照。
+- **必须留足优雅退出时间**：`docker stop` 默认只给 10s 就会 `SIGKILL`，早于应用自身的 20s 排空预算，
+  会把 WAL 留在盘上（数据不丢，但单文件 `feedback.db` 快照会缺最近写入）。要么用 `docker stop --time 30`，
+  要么依赖 compose 里的 `stop_grace_period`。
+- WAL 模式下趁运行只拷 `feedback.db` 单文件会得到不一致快照；如必须在线备份，用
+  `sqlite3 data/feedback.db ".backup '<目标>'"` 或等价 WAL 安全备份（连 `-wal` / `-shm` 一起拷也可）。
+- 停服后 `data/` 仍有 `-wal` 残留，说明没有走优雅退出（如被 `SIGKILL`）。此时**不要只拷 `feedback.db`**：
+  连 `feedback.db-wal` 一起拷贝，或先按上面的停机步骤重来一次。
+
+一致性验证：`e2e/run_backup_restore.py` 会自动断言「停机后 `data/` 无 WAL/SHM 残留」，并验证同主密钥恢复、
+不同主密钥无法解密、以及隔离恢复不向 Kaneo 重放。
 
 验证持久化：`docker compose restart` 后未处理反馈自动恢复队列（详见下）。
 

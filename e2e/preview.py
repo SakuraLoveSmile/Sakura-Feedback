@@ -34,6 +34,7 @@ import os
 import signal
 import sys
 import tempfile
+import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -42,6 +43,9 @@ import run_browser as rb  # noqa: E402  复用 e2e 的常量 / 启动 / 托管 /
 
 # 与 e2e 相同的主密钥（仅本地预览用，不是任何真实环境的密钥）
 MASTER_KEY = "bG9jYWwtZTJlLW1hc3Rlci1rZXktMzItYnl0ZXMhIQ=="
+
+# 自己的 PID 落盘，方便随时停掉（守护方式启动时尤其需要）
+PID_FILE = "/tmp/fb-preview.pid"
 
 # 示例宿主页：端口 / appId 与 e2e/run_browser.py 一致（(目录名, 端口, appId, 说明)）
 EXAMPLES = [
@@ -63,6 +67,11 @@ def main():
     origin = f"http://localhost:{args.port}"
     if not os.path.exists(rb.SDK_UMD):
         sys.exit("缺少组件产物：先跑 pnpm --filter @feedback/web build")
+    try:
+        with open(PID_FILE, "w") as f:
+            f.write(str(os.getpid()))
+    except OSError:
+        pass
 
     procs = []
     data_dir = tempfile.mkdtemp(prefix="fb-preview-")
@@ -134,10 +143,15 @@ def main():
 
    登录（点提交时弹窗）：{args.user} / {args.password}
    服务日志：/tmp/fb-preview-server.log     mock 日志：/tmp/fb-preview-mock.log
-   Ctrl-C 结束（会停掉上面这些子进程）
+   停止：kill $(cat {PID_FILE})      （Ctrl-C 也行）
 """
         )
-        signal.pause()
+        # 前台常驻。必须**显式**处理 SIGTERM：默认动作会立刻终止进程，
+        # `finally` 不执行 → 服务 / mock / 静态托管全变成孤儿继续占端口。
+        stop = threading.Event()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(sig, lambda *_: stop.set())
+        stop.wait()
     except KeyboardInterrupt:
         print("\n结束预览…")
     finally:
