@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createApp } from "../src/app.ts";
 import { getFeedback, updateFeedback } from "../src/db/repos.ts";
 import {
-  type ArchiveDataV1,
+  type ArchiveData,
   type ArchiveUpload,
   loadArchiveData,
   saveArchiveData,
@@ -61,7 +61,7 @@ async function buildRig(wrap?: (inner: MockKaneo) => Partial<MockKaneo>): Promis
   return { app: app as unknown as Rig["app"], inner, cookie, bearer };
 }
 
-function state(rig: Rig, id: string): ArchiveDataV1 {
+function state(rig: Rig, id: string): ArchiveData {
   const parsed = loadArchiveData(rig.app.db, id);
   if (parsed.kind !== "valid") throw new Error(`期望合法归档数据，实际 ${parsed.kind}`);
   return parsed.data;
@@ -379,6 +379,8 @@ describe("归档一致性：上传 key 不自动更换", () => {
     const { id } = await submitScreenshot(rig);
     const base = state(rig, id);
     toNeedsReview(rig, id);
+    // 远端对象字节与本地不一致（一致时按设计不替换，另行覆盖）
+    rig.inner.uploads[0]!.bytes = Buffer.from("stale-remote-bytes");
 
     const res = await jsonReq(rig.app.app, "POST", `/api/feedback/${id}/recover`, {
       cookie: rig.cookie,

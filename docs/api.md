@@ -78,9 +78,28 @@ Cookie 或 Bearer。`200 { "authenticated": true, "kind": "cookie"|"client", "ex
 - `201 { "feedbackId": string, "status": "received" }`
 - `200 { "feedbackId", "status", "replayed": true }`（同 key 同内容，幂等重放）
 - `409 "idempotency_conflict"`（同 key 不同内容）
-- `401` / `400 "invalid_request"` / `404 "unknown_app"` / `413 "too_large"` / `429`
+- `401` / `400 "invalid_request"` / `400 "invalid_log"` / `404 "unknown_app"` / `413 "too_large"` / `429`
 
-**multipart 变体**（携带截图）：`Content-Type: multipart/form-data`，字段 `metadata`（同上 JSON，另加可选 `capture`）与 `screenshot`（PNG 文件）。`capture` 仅接受白名单字段，全部可选：
+**multipart 变体**（携带截图或日志）：`Content-Type: multipart/form-data`，字段：
+- `metadata`：同上 JSON，另加可选 `capture` 与可选 `logs`；
+- `screenshot`：可选 PNG 文件（0..1）；
+- `logs`：**可重复**的日志文件部件（0..3），出现顺序即 `metadata.logs` 的下标顺序。
+
+有截图**或**有日志时必须用 multipart；两者都没有时保持原 JSON 请求（逐字节兼容）。
+`metadata.logs` 每项为 `{ "name": string, "source": "auto"|"manual", "byteSize"?: number }`：
+
+| 规则 | 取值 | 违反时 |
+|---|---|---|
+| 日志文件数 | ≤ 3 | `413 "too_large"` |
+| 单个日志大小 | ≤ 1 MiB | `413 "too_large"` |
+| 扩展名白名单 | `.log` / `.txt` / `.json` / `.jsonl`（大小写不敏感） | `400 "invalid_log"` |
+| 内容 | 非空、严格合法 UTF-8、无 NUL 字节 | `400 "invalid_log"` |
+| `metadata.logs` 与 `logs` 部件 | 数量一致、逐项来源与名称可解析；`byteSize` 出现时必须与实际一致；部件 filename（若存在）basename 必须与 `name` 一致 | `400 "invalid_log"` |
+| 请求体总大小 | ≤ 9 MiB（content-length 预检 + 流式累计双重判定） | `413 "too_large"` |
+
+日志只接受宿主**显式导出**的内容：服务端不扫盘、不拦截 console、不自行收集网络请求；脱敏（凭据等）由宿主在交给组件前完成。服务端**不截断、不静默丢弃**超限文件，一律整单拒绝并给出明确 message。
+
+`capture` 仅接受白名单字段，全部可选：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
@@ -127,28 +146,49 @@ Body 可选 `{ "expectedRevision": number }`。`202 { "ok": true, "status": ...,
 
 ### POST /api/feedback/:id/recover （仅 Cookie 会话，管理页；针对 needs_review 的分阶段恢复）
 ```jsonc
-{ "action": "retry_comment",  "expectedRevision": number }  // 针对评论：先查重；命中→补记确认并归档，未命中→发送**至多一条**评论
-{ "action": "replace_upload", "expectedRevision": number }  // 针对图片：先经鉴权资产下载核对真实字节（一致则不替换）；替换复用原 task、保留旧 key 恢复记录（replacedKeys）、不自动删远端对象；替换成功后才发新评论
+{ "action": "retry_comment",  "expectedRevision": number, "logId"?: string }  // 针对评论：先查重；命中→补记确认并按完成条件收尾，未命中→发送**至多一条**评论
+{ "action": "replace_upload", "expectedRevision": number, "logId"?: string }  // 针对附件：先经鉴权资产下载核对真实字节（一致则不替换）；替换复用原 task、保留旧 key 恢复记录（replacedKeys）、不自动删远端对象；替换成功后才发新评论
 ```
-`expectedRevision` 必填。`202 { "ok": true, "status": ..., "revision": number, "replaced"?: boolean, "note"?: string }`；
-`400 "invalid_request"`（缺 expectedRevision / 非法 action）；`409 "busy"` / `"revision_conflict"` / `"invalid_state"` / `"target_changed"`；远端读取/写入失败 → `502 "recover_failed"`（状态不变，不触发替代写入）。
+`expectedRevision` 必填。**`logId` 可选：缺省 = 原有截图行为（旧管理页完全兼容）；提供时针对该份日志附件执行同一动作**；`logId` 不属于该反馈 → `400 "invalid_request"`。
+`202 { "ok": true, "status": ..., "revision": number, "replaced"?: boolean, "note"?: string }`；
+`400 "invalid_request"`（缺 expectedRevision / 非法 action / 非法或不存在的 logId）；`409 "busy"` / `"revision_conflict"` / `"invalid_state"` / `"target_changed"`；远端读取/写入失败 → `502 "recover_failed"`（状态不变，不触发替代写入）。
+
+**收尾统一走集中完成条件**：只有该记录的**全部附件**（截图，以及每份日志）都已确认挂载评论时才置 `archived`；只完成其中一部分时返回 `202` 且状态维持 `needs_review`（`error_summary` 提示尚有附件未完成）。任何自动路径（后台处理、`retry`、`recheck`、进程重启恢复）都经同一判定，**禁止仅因截图完成就标记 `archived`**。
 
 **`retry_comment`（唯一允许重发评论的动作）**
-- 发送前先按「反馈 ID + 截图摘要 + 当前资产引用」查询远端评论：命中 → 只补记 `comment.outcome = "confirmed"` 并归档（**零远端写入**）；未命中 → 发送**至多一条**评论。
+- 发送前先按「反馈 ID + 附件摘要 + 当前资产引用」查询远端评论（日志再加日志 ID）：命中 → 只补记 `comment.outcome = "confirmed"` 并按完成条件收尾（**零远端写入**）；未命中 → 发送**至多一条**评论。
 - 发出前先落盘 `comment.outcome = "maybe_sent"`，落盘失败则绝不发出请求；发送后再次查重，命中即记 `confirmed` 并归档，未命中则记 `maybe_sent` 并维持 `needs_review`。
 - **仍可能产生重复评论**：查重（读取远端列表）与写入之间存在竞态，两个操作人同时重发、或上一次写入已到达 Kaneo 但列表尚未可见时都会漏判。操作人必须在 Kaneo 中复核评论数量。管理页在确认框中提示同一风险。
 - `retry`、`recheck`、后台恢复等自动路径**绝不**因为“查重没查到”就重发评论：遇到 `maybe_sent` / `confirmed` 一律停止并维持 `needs_review`。`recheck` 本身只读取远端并确认（零远端写入）；仅当恢复数据记录评论**确实从未发送**（`not_sent` 或缺失）且核对未命中时，才交回正常归档流程从断点继续（见下方结果语义）。
 
-**`replace_upload`（唯一可以替换图片的动作）**
-- 复用**原 Kaneo 任务**，向 Kaneo 申请**新**上传地址并上传本地原图，然后 `finalize` 新 key 为资产并发送新评论。
+**`replace_upload`（唯一可以替换附件的动作）**
+- 复用**原 Kaneo 任务**，向 Kaneo 申请**新**上传地址并上传本地原图（截图或该份日志字节），然后 `finalize` 新 key 为资产并发送新评论。
 - 替换前若资产已知，会经鉴权下载比对真实字节：**一致 → 不替换**（返回 `replaced: false`），仅核对；核对失败（含 404）不能证明文件不存在，按管理员决定继续替换。
 - 被替换的旧 key 记入 `replacedKeys`（最多保留 20 条），旧 key 与旧资产线索保留可追溯；**不删除远端对象**，远端残留文件需人工清理。
 - **上传地址过期**（`upload.expiresAt` 已过）与**同 key 重传被业务拒绝**这两种情况，自动路径**不会**申请新上传地址：记录转入 `needs_review`，`error_summary` 分别含“过期”“同 key”，原始 key 与 `expiresAt` 完好保留；`replace_upload` 是唯一出路。自动路径对同一 key 只做「重传相同字节」的安全恢复，累计上限 3 次。
 - **第三种情况：完全没有 upload 记录**（申请地址的请求在途时进程中断，本地还没来得及落盘）。此时自动路径**会**重新申请一个上传地址，不转 `needs_review`。这是安全的，判据是**落盘顺序**：上传记录与 `maybe_sent` 都先落盘、之后才发 PUT 字节，所以“没有记录”蕴含“字节从未发出”，远端不可能存在该次上传的对象——被丢弃的只是一个未被使用过的预签名地址（该地址本身可能在 Kaneo 侧被分配过，但没有对象产生）。因此三种情形的分界是「**远端是否可能已存在该次上传的对象**」：可能（有记录）→ 绝不换 key；不可能（无记录）→ 允许重新申请。
 
+### 恢复数据结构（`archive_data_json`，version 2）
+
+```jsonc
+{
+  "version": 2,                       // 当前写入版本；version 1 仍可读（读取时不做批量改写）
+  "revision": number,                 // 乐观锁，单调递增
+  "target": { "apiBase", "projectId", "workspaceId" },
+  "upload"?: {...}, "asset"?: {...}, "comment"?: {...}, "replacedKeys"?: [...],  // 截图附件（字段含义同历史版本）
+  "logs"?: [{ "logId": string, "upload"?, "asset"?, "comment"?, "replacedKeys"? }]  // 按日志 ID 索引的独立附件记录
+}
+```
+
+- 截图的四个字段语义与 V1 完全一致，**V1 记录继续可读**、不会因新增版本被拒绝或改写。
+- 每份日志拥有**独立**的上传、资产与评论记录，互不覆盖；`logId` 对应 `feedback_logs.id`。
+- 归档顺序固定为「先截图，再按日志 `ordinal` 升序」。日志评论标记为 `<feedbackId>|<logId>|<sha256>`；截图标记仍为 `<feedbackId>|<sha256>`。
+- 评论正文含可下载附件链接，复用既有评论区挂载与鉴权下载机制；每份日志一条评论，便于单独重试与核对。
+- 已完成（`confirmed`）的附件不会重复上传；远端结果不确定时进入 `needs_review`，先用评论列表 + 鉴权下载字节摘要核对，再决定是否推进，**不盲目创建第二份**。
+
 ### 恢复数据写入结果语义（`upload.outcome` / `comment.outcome`）
 
-`archive_data_json` 的 `upload.outcome` 与 `comment.outcome` 取值恒为下列三者之一（管理页对应 `recovery.uploadOutcome` / `recovery.commentOutcome`）：
+`archive_data_json` 的 `upload.outcome` 与 `comment.outcome` 取值恒为下列三者之一（管理页对应 `recovery.uploadOutcome` / `recovery.commentOutcome`，日志级对应 `recovery.logs[].uploadOutcome` / `recovery.logs[].commentOutcome`）：
 
 | 取值 | 含义 | 可再自动发送？ |
 |---|---|---|
@@ -162,8 +202,11 @@ Body 可选 `{ "expectedRevision": number }`。`202 { "ok": true, "status": ...,
 
 ### 管理页允许动作
 `GET /api/admin/feedback/:id` 详情返回
-`recovery: { revision, stage, uploadOutcome, assetKnown, commentOutcome, hasScreenshot, allowedActions, actionTargets, actionNotes }`：
+`recovery: { revision, stage, uploadOutcome, assetKnown, commentOutcome, hasScreenshot, hasLogs, logs, allowedActions, actionTargets, actionNotes }`：
 - `hasScreenshot`：该记录是否存有本地截图（等价于 `screenshot !== null`）。列表项 `GET /api/admin/feedback` 也返回该字段；
+- `hasLogs`：是否存在日志附件；`logs: [{ logId, name, revision, stage, uploadOutcome, assetKnown, commentOutcome, allowedActions }]`：**日志级**恢复状态（与截图同一套语义，按日志 ID 索引），管理页据此渲染日志级 `retry_comment` / `replace_upload` 按钮并携带该 `logId`。旧服务端/旧记录缺少这些字段时管理页安全降级（只展示截图级动作）；
+- `logCount`：列表项返回该记录已保存的日志份数（无日志为 `0`）；
+- `logEntryPoints` 与截图的 `allowedActions` 规则一致：`needs_review` 且任务已知时，资产已知 → `retry_comment`；始终允许 `replace_upload`（过期/被拒上传的唯一出路，不要求资产已知）；
 - `actionTargets: Record<string, string>`：动作目标说明（`retry` 处理流程、`recheck` 任务核对、`force-create` 任务创建、`retry_comment` 评论、`replace_upload` 图片）；
 - `actionNotes: Record<string, string>`：动作风险说明（人类可读，供管理页在点击前展示），当前为 `retry_comment`（查重后仍可能重复的竞态）、`replace_upload`（申请新地址替换、旧对象不自动删除）、`recheck`（只读确认，不重发）、`force-create`（可能产生重复任务）。
 管理页只渲染 `allowedActions` 中的按钮并在标题注明动作目标与风险；`retry_comment` 必须附带上述重复风险提示。放行条件：
@@ -211,8 +254,10 @@ App 对象：
 ## 管理列表组（仅 Cookie 会话）
 
 - `GET /api/admin/feedback?status=&appId=&cursor=&limit=50` →
-  `{ "items": [{ "id", "appId", "status", "createdAt", "updatedAt", "title"?: string|null, "kaneoUrl"?: string|null, "errorSummary"?: string|null, "archiveStage"?: string|null, "hasScreenshot": boolean }], "nextCursor": string|null }`
-- `GET /api/admin/feedback/:id` → 详情：以上字段 + `{ "text", "processed"?: { "title", "sections": { "experience", "problems", "suggestions", "questions" } }, "kaneoTaskId"?, "attemptCount", "lastError"?, "context"?, "screenshot"?, "recovery"? }`，其中 `screenshot` 为截图元数据（`width`/`height`/`byteSize`/`sha256`/`capture`/`createdAt`，无截图则为 `null`；PNG 本体经 `GET /api/admin/feedback/:id/screenshot` 取回），`recovery` 见「管理页允许动作」。
+  `{ "items": [{ "id", "appId", "status", "createdAt", "updatedAt", "title"?: string|null, "kaneoUrl"?: string|null, "errorSummary"?: string|null, "archiveStage"?: string|null, "hasScreenshot": boolean, "logCount": number }], "nextCursor": string|null }`
+- `GET /api/admin/feedback/:id` → 详情：以上字段 + `{ "text", "processed"?: { "title", "sections": { "experience", "problems", "suggestions", "questions" }, "diagnostics"?: { "logEvidence", "possibleCauses", "speculation" } }, "kaneoTaskId"?, "attemptCount", "lastError"?, "context"?, "screenshot"?, "logs", "recovery"? }`，其中 `screenshot` 为截图元数据（`width`/`height`/`byteSize`/`sha256`/`capture`/`createdAt`，无截图则为 `null`；PNG 本体经 `GET /api/admin/feedback/:id/screenshot` 取回），`recovery` 见「管理页允许动作」。
+- `logs: [{ "id", "name", "source": "auto"|"manual", "byteSize", "sha256", "createdAt", "ordinal" }]`：日志元数据（按 `ordinal` 升序，**不含内容字节**；无日志为 `[]`）。`processed.diagnostics` 仅在 AI 结合日志给出诊断时出现，旧结果缺少该字段（管理页必须兼容）。
+- `GET /api/admin/feedback/:id/logs/:logId` → 该日志的**原始 UTF-8 文本**（cookie 管理鉴权 + 同源检查，与其余管理接口一致）。响应头固定 `content-type: text/plain; charset=utf-8`、`cache-control: no-store`、`x-content-type-options: nosniff`、`content-disposition: inline; filename="<安全名>"; filename*=UTF-8''<编码名>`；`?download=1` 时 disposition 改为 `attachment`。日志不存在或不属于该反馈 → `404 "not_found"`。**不产生公开链接**，响应内容也绝不写入运行日志。
 
 ## Web 登录握手时序
 
@@ -232,8 +277,17 @@ App 对象：
 | `appId` | 是 | 服务端软件配置中登记的标识 |
 | `appVersion` | 否 | 展示在 Kaneo 任务来源信息 |
 | `pageLabel` | 否 | 宿主显式传入的页面标识 |
+| `logProvider` | 否 | 宿主日志回调（Web JS 属性 / Flutter 构造参数）；返回文件名 + 日志字节。未配置时面板只显示「手动添加日志」入口 |
 
 目标 Kaneo 项目由服务端按 appId 决定，客户端不可指定。
+
+### `logProvider` 行为约定（两端一致）
+
+1. 新草稿**首次打开**时调用一次，采集时点固定为该次打开时间；重新打开已有草稿**不重新采集**；用户移除后**不自动补回**。
+2. **3 秒超时**即视为失败：显示「日志获取失败」，提供「重试」与「不带日志继续提交」；失败与超时**不阻塞**截图与描述提交。
+3. 上限与提交规则同提交线格式（3 个 / 每个 1 MiB / 扩展名白名单 / 严格 UTF-8）；自动与手动文件共用上限，超限逐个给出明确原因，**不静默删除或截断**。
+4. 关闭面板、卸载组件、切换 `apiBase`/`appId` 后，迟到的采集结果**不得写回**；提交与状态轮询期间锁定附件修改，提交失败保留原快照，**修改附件后生成新的幂等键**。
+5. 日志来自宿主既有日志系统：组件**不拦截全局 console、不扫描磁盘、不自行收集网络请求**；宿主负责在交给组件前去除凭据等敏感内容。
 
 ## 跨源（CORS）
 

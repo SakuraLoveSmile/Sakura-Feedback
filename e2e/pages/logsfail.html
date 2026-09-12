@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>E2E 宿主页 · 日志采集失败 / 超时</title>
+    <!--
+      e2e 专用宿主页（不是产品代码）。
+
+      验证 T1 的失败边界：`logProvider` **首次**返回一个一直不结束的 Promise（模拟采集超时），
+      面板必须在 3 秒后显示「日志获取失败」并给出「重试」与「不带日志继续提交」，
+      且**不阻塞**截图与描述提交。点「重试」后宿主改为正常返回 → 日志必须真的出现。
+    -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: #ffffff;
+      }
+      body {
+        position: relative;
+        width: 1280px;
+        height: 800px;
+        overflow: hidden;
+        font-family: system-ui, -apple-system, sans-serif;
+      }
+      #visible-block {
+        position: absolute;
+        left: 60px;
+        top: 60px;
+        width: 320px;
+        height: 180px;
+        background: #00ff00;
+        font-size: 18px;
+        padding: 8px;
+        box-sizing: border-box;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="visible-block">VISIBLE-NORTH</div>
+
+    <script>
+      const encoder = new TextEncoder();
+      const logText = '[boot] 重试后成功导出\n[fail] 第一次采集挂起，用于验证 3 秒超时\n';
+
+      window.__fbE2E = {
+        widget: () => document.querySelector('feedback-widget'),
+        shadow() {
+          return this.widget().shadowRoot;
+        },
+        providerCalls: 0,
+        /** 首次挂起（永不 settle），之后正常返回。 */
+        hang: true,
+        logItems() {
+          const sr = this.shadow();
+          return Array.from(sr.querySelectorAll('.fb-log-item')).map((li) => {
+            const name = li.querySelector('.fb-log-name');
+            const meta = li.querySelector('.fb-log-meta');
+            return { name: name ? name.textContent.trim() : null, meta: meta ? meta.textContent.trim() : null };
+          });
+        },
+        logArea() {
+          const sr = this.shadow();
+          const vis = (sel) => {
+            const el = sr.querySelector(sel);
+            if (!el) return null;
+            const b = el.getBoundingClientRect();
+            return { hidden: el.hidden, display: getComputedStyle(el).display,
+                     visible: b.width > 0 && b.height > 0, disabled: el.disabled === true,
+                     text: (el.textContent || '').trim() };
+          };
+          return {
+            status: vis('.fb-log-status'),
+            retry: vis('.fb-log-retry'),
+            skip: vis('.fb-log-skip'),
+            add: vis('.fb-log-add'),
+            submit: vis('.fb-submit'),
+          };
+        },
+        textareaEditable() {
+          const t = this.shadow().querySelector('.fb-textarea');
+          return t ? !t.disabled && !t.readOnly : null;
+        },
+      };
+
+      window.addEventListener('DOMContentLoaded', () => {
+        const widget = document.querySelector('feedback-widget');
+        widget.logProvider = () => {
+          window.__fbE2E.providerCalls += 1;
+          if (window.__fbE2E.hang) {
+            // 永不 settle：模拟宿主日志导出卡住（真实系统里可能是同步 IO 或远端拉取）
+            return new Promise(() => {});
+          }
+          return { name: 'retry-ok.log', bytes: encoder.encode(logText) };
+        };
+      });
+    </script>
+
+    <script src="/sdk/feedback-web.umd.js"></script>
+    <feedback-widget
+      id="widget"
+      api-base="http://localhost:8787"
+      app-id="com.example.demo-e2e"
+      app-version="3.1.4"
+      page-label="e2e-logs-fail"
+    ></feedback-widget>
+  </body>
+</html>

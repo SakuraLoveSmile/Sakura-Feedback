@@ -13,6 +13,7 @@ import 'api_client.dart' show FeedbackCaptureInfo;
 import 'capture_mask.dart';
 import 'config.dart';
 import 'controller.dart';
+import 'logs.dart' show FeedbackLogFilePicker;
 import 'panel.dart';
 import 'token_store.dart';
 
@@ -90,6 +91,7 @@ class FeedbackWidget extends StatefulWidget {
     this.controller,
     @visibleForTesting this.httpClient,
     @visibleForTesting this.tokenStore,
+    @visibleForTesting this.pickLogFiles,
   });
 
   /// 被包裹的宿主内容。
@@ -109,6 +111,10 @@ class FeedbackWidget extends StatefulWidget {
   @visibleForTesting
   final FeedbackTokenStore? tokenStore;
 
+  /// 测试注入的手动日志文件选择器（省略时使用 `file_selector`）。
+  @visibleForTesting
+  final FeedbackLogFilePicker? pickLogFiles;
+
   @override
   State<FeedbackWidget> createState() => _FeedbackWidgetState();
 }
@@ -127,8 +133,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget> {
   final FeedbackCaptureScope _captureScope = FeedbackCaptureScope();
 
   final GlobalKey _repaintBoundaryKey = GlobalKey();
-  final GlobalKey<FeedbackPanelState> _panelKey =
-      GlobalKey<FeedbackPanelState>();
+  GlobalKey<FeedbackPanelState> _panelKey = GlobalKey<FeedbackPanelState>();
 
   // 灵感球拖拽状态
   Offset _dragOffset = Offset.zero;
@@ -147,6 +152,14 @@ class _FeedbackWidgetState extends State<FeedbackWidget> {
   @override
   void didUpdateWidget(FeedbackWidget oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.config.apiBase != widget.config.apiBase ||
+        oldWidget.config.appId != widget.config.appId) {
+      // 服务 / 应用身份切换：换掉面板的 GlobalKey，整棵面板状态重建。
+      // 旧身份的草稿、日志与**进行中的日志采集**都随旧 State 一起作废
+      // （旧 State 已 dispose，迟到的采集结果无法写回、也不污染新草稿）；
+      // 新面板挂载即新草稿首次打开，按契约重新采集一次。
+      _panelKey = GlobalKey<FeedbackPanelState>();
+    }
     if (oldWidget.controller != widget.controller) {
       // 控制器替换：旧会话立即失效，旧请求不得再影响新控制器的 UI。
       _invalidateCaptureSession();
@@ -171,14 +184,19 @@ class _FeedbackWidgetState extends State<FeedbackWidget> {
     if (!mounted) return;
     if (_controller.isOpen) {
       _everOpened = true;
-      // 呼出时把焦点请求到输入区。
+      // 呼出时把焦点请求到输入区，并通知面板「已打开」——新草稿的自动
+      // 日志采集发生在这一刻（已有草稿不重新采集，见 FeedbackPanelState）。
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        _panelKey.currentState?.requestInputFocus();
+        final FeedbackPanelState? panel = _panelKey.currentState;
+        panel?.requestInputFocus();
+        panel?.handlePanelOpened();
       });
     } else {
       // 面板关闭（含宿主直接调用 controller.close()）：进行中的捕获会话
-      // 一并失效，捕获完成后不再挂载 / 恢复面板 UI。
+      // 一并失效，捕获完成后不再挂载 / 恢复面板 UI；进行中的日志采集
+      // 结果同样不得写回。
       _invalidateCaptureSession();
+      _panelKey.currentState?.handlePanelClosed();
     }
     setState(() {
       // 关闭时同时复位"截图期间隐藏覆盖层"状态：重拍中途关闭面板后再次
@@ -817,6 +835,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget> {
           onRetakeScreenshot: _retakeScreenshot,
           httpClient: widget.httpClient,
           tokenStore: widget.tokenStore,
+          pickLogFiles: widget.pickLogFiles,
         ),
       ),
     );

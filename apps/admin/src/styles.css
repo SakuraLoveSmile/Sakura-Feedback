@@ -224,6 +224,71 @@ code {
   pointer-events: none;
   animation: pulse-pin 1.8s infinite;
 }
+.log-item {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: #fafbfc;
+}
+.log-preview-backdrop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 24px;
+}
+.log-preview-content {
+  background: #fff;
+  border-radius: 12px;
+  padding: 16px;
+  width: min(760px, 92vw);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.log-preview-pre {
+  margin: 0;
+  padding: 10px;
+  background: #f3f4f6;
+  border-radius: 8px;
+  overflow: auto;
+  max-height: 58vh;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.diag-block {
+  background: #f9fafb;
+  border-left: 3px solid #9ca3af;
+  border-radius: 0 6px 6px 0;
+  padding: 6px 10px;
+  margin: 6px 0;
+}
+.diag-label {
+  font-size: 12px;
+  color: #666;
+  margin-bottom: 2px;
+}
+.diag-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.diag-warn {
+  background: #fef3c7;
+  color: #92400e;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+}
 @keyframes pulse-pin {
   0% {
     box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);

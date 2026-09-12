@@ -24,6 +24,30 @@ export interface FeedbackCaptureInfo {
   releasePoint?: { x: number; y: number };
 }
 
+/** 日志来源：`auto` = 首次打开自动采集，`manual` = 用户手动添加（docs/logs-plan.md §1）。 */
+export type FeedbackLogSource = 'auto' | 'manual';
+
+/** 宿主提供的日志文件：文件名 + **原始字节**（组件按字节上传，不做文本转换）。 */
+export interface FeedbackLogFile {
+  name: string;
+  bytes: Uint8Array;
+}
+
+/** 实际提交的日志部件：字节 + 来源（自动 / 手动），顺序即 `metadata.logs` 顺序。 */
+export interface FeedbackLogPart extends FeedbackLogFile {
+  source: FeedbackLogSource;
+}
+
+/**
+ * 宿主日志回调（`FeedbackWidget.logProvider` / `openFeedback({ logProvider })`）：
+ * 返回文件名 + **原始字节**；同步或异步、单个或数组、`null`（宿主本次没有日志）都接受。
+ */
+export type LogProvider = () =>
+  | FeedbackLogFile
+  | FeedbackLogFile[]
+  | null
+  | Promise<FeedbackLogFile | FeedbackLogFile[] | null>;
+
 export interface FeedbackSubmitPayload {
   idempotencyKey: string;
   appId: string;
@@ -31,6 +55,7 @@ export interface FeedbackSubmitPayload {
   context?: FeedbackContext;
   capture?: FeedbackCaptureInfo;
   screenshot?: Blob;
+  logs?: FeedbackLogPart[];
 }
 
 export interface FeedbackSubmitResponse {
@@ -120,7 +145,9 @@ export async function submitFeedback(
   token: string,
   payload: FeedbackSubmitPayload,
 ): Promise<FeedbackSubmitResponse> {
-  if (payload.screenshot) {
+  const logs = payload.logs ?? [];
+  // 有截图**或**有日志 → multipart/form-data；都没有 → 保持原 JSON 请求（逐字节兼容）
+  if (payload.screenshot || logs.length > 0) {
     const formData = new FormData();
     const metadata: Record<string, unknown> = {
       idempotencyKey: payload.idempotencyKey,
@@ -129,9 +156,22 @@ export async function submitFeedback(
     };
     if (payload.context) metadata.context = payload.context;
     if (payload.capture) metadata.capture = payload.capture;
+    // metadata.logs 与 logs 部件按下标一一对应（顺序敏感），byteSize 必须等于实际字节数
+    if (logs.length > 0) {
+      metadata.logs = logs.map((log) => ({
+        name: log.name,
+        source: log.source,
+        byteSize: log.bytes.byteLength,
+      }));
+    }
 
     formData.append('metadata', JSON.stringify(metadata));
-    formData.append('screenshot', payload.screenshot, 'screenshot.png');
+    if (payload.screenshot) formData.append('screenshot', payload.screenshot, 'screenshot.png');
+    for (const log of logs) {
+      // filename 用日志文件名、type 用 text/plain；
+      // slice() → 独立的 ArrayBuffer 视图，Blob 字节不受宿主后续改动影响
+      formData.append('logs', new File([log.bytes.slice()], log.name, { type: 'text/plain' }));
+    }
 
     const headers: Record<string, string> = {};
     if (token) headers['Authorization'] = `Bearer ${token}`;
@@ -154,7 +194,9 @@ export async function submitFeedback(
     }
     return data as FeedbackSubmitResponse;
   }
-  return request<FeedbackSubmitResponse>(apiBase, 'POST', '/api/feedback', { body: payload, token });
+  // 无附件：提交体必须与历史客户端逐字节一致（绝不出现空的 logs 字段）
+  const { logs: _logs, ...rest } = payload;
+  return request<FeedbackSubmitResponse>(apiBase, 'POST', '/api/feedback', { body: rest, token });
 }
 
 export function getFeedback(apiBase: string, token: string, id: string): Promise<FeedbackRecord> {

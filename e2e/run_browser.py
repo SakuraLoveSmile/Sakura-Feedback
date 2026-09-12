@@ -364,7 +364,7 @@ def run_browser(shots, kind="chromium"):
                 pass
 
         try:
-            scenarios(page, ctx, shot, browser, shots)
+            scenarios(page, ctx, shot, browser, shots, kind)
         finally:
             browser.close()
 
@@ -418,7 +418,8 @@ def finish_login(popup):
         popup.locator("#password").fill(ADMIN_PASS)
         popup.locator("#submit").click()
     try:
-        popup.wait_for_event("close", timeout=30000)
+        if not popup.is_closed():
+            popup.wait_for_event("close", timeout=30000)
     except Exception:
         pass
     return used_form
@@ -447,10 +448,26 @@ class FeedbackPosts:
         self.bodies = []
         self.aborted = []
         self.responses = 0
-        self.fail_next = False
+        self.ctx = ctx
+        self.webkit = ctx.browser.browser_type.name == "webkit"
+        self._fail_next = False
         ctx.on("request", self._on_request)
         ctx.on("response", self._on_response)
-        ctx.route("**/api/feedback", self._handle)
+        if not self.webkit:
+            ctx.route("**/api/feedback", self._handle)
+
+    @property
+    def fail_next(self):
+        return self._fail_next
+
+    @fail_next.setter
+    def fail_next(self, value):
+        if self.webkit and value != self._fail_next:
+            if value:
+                self.ctx.route("**/api/feedback", self._handle)
+            else:
+                self.ctx.unroute("**/api/feedback", self._handle)
+        self._fail_next = value
 
     @staticmethod
     def _is_submit(r):
@@ -459,6 +476,9 @@ class FeedbackPosts:
     def _on_request(self, r):
         if self._is_submit(r):
             self.requests.append(r)
+            if self.webkit:
+                self.bodies.append({"url": r.url, "ct": r.headers.get("content-type", ""),
+                                    "body": request_body(r)})
 
     def _on_response(self, resp):
         if self._is_submit(resp.request):
@@ -467,8 +487,9 @@ class FeedbackPosts:
     def _handle(self, route):
         req = route.request
         if self._is_submit(req):
-            self.bodies.append({"url": req.url, "ct": req.headers.get("content-type", ""),
-                                "body": request_body(req)})
+            if not self.webkit:
+                self.bodies.append({"url": req.url, "ct": req.headers.get("content-type", ""),
+                                    "body": request_body(req)})
             if self.fail_next:
                 self.aborted.append(req.url)
                 route.abort("connectionfailed")
@@ -514,7 +535,7 @@ def submit_body(entry):
     return meta, parsed.get("screenshot")
 
 
-def scenarios(page, ctx, shot, browser, shots):
+def scenarios(page, ctx, shot, browser, shots, kind="chromium"):
     # 预签名上传地址 / 资产地址的基址：本套件的服务端跑在宿主 → 必须是 127.0.0.1。
     # run_docker.py（服务端在容器内）会把 mock 切到 http://host.docker.internal:8898，
     # 这里显式切回来，避免两个套件互相污染（mock 是共享的长驻进程）。
@@ -654,6 +675,10 @@ def scenarios(page, ctx, shot, browser, shots):
         page.wait_for_selector(".fb-screenshot-wrap", timeout=30000)
         text2 = "同步功能经常失败，请排查网络重试逻辑"
         page.locator(".fb-textarea").fill(text2)
+        retry_source = page.locator("img.fb-screenshot-thumb").evaluate("""async img => {
+            const bytes = new Uint8Array(await (await fetch(img.src)).arrayBuffer());
+            let s = ''; for (const b of bytes) s += String.fromCharCode(b); return btoa(s);
+        }""")
         posts.fail_next = True  # 真实网络层失败：浏览器发出请求但拿不到响应
         posts_before_net = posts.count()
         resp_before_net = posts.responses
@@ -695,9 +720,11 @@ def scenarios(page, ctx, shot, browser, shots):
         meta2, shot2 = submit_body(retry)
         check("重试复用同一幂等键（同 key）", meta1.get("idempotencyKey") == meta2.get("idempotencyKey"),
               f"{meta1.get('idempotencyKey')} vs {meta2.get('idempotencyKey')}")
-        check("重试复用同一截图字节（同字节）",
-              shot1 is not None and shot2 is not None and png_probe.sha256(shot1) == png_probe.sha256(shot2),
-              f"{len(shot1 or b'')} vs {len(shot2 or b'')} 字节")
+        retry_row = next(it for it in admin_records()
+                         if api("GET", f"/api/admin/feedback/{it['id']}")[1].get("text") == text2)
+        retry_png = api_bytes(f"/api/admin/feedback/{retry_row['id']}/screenshot")
+        check("重试保存原截图的完整像素（服务端重编码后逐像素一致）",
+              browser_paths.same_pixels(png_probe.decode(browser_paths.b64_to_bytes(retry_source)), png_probe.decode(retry_png)))
         check("重试是新增提交（总提交数 +1）", posts.count() - posts_before_retry == 1,
               str(posts.count() - posts_before_retry))
         check("重试成功落库（管理端记录数 +1）", len(admin_records()) == records_before + 1,
@@ -848,6 +875,7 @@ def scenarios(page, ctx, shot, browser, shots):
     deps = {
         "ctx": ctx,
         "browser": browser,
+        "browser_kind": kind,
         "check": check,
         "record": record,
         "step": step,

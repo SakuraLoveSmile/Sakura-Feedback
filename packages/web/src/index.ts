@@ -1,4 +1,5 @@
 import { FeedbackWidget, type FeedbackSubmittedDetail } from './element';
+import type { LogProvider } from './api';
 
 export { FeedbackWidget };
 export type { FeedbackSubmittedDetail };
@@ -9,6 +10,10 @@ export type {
   FeedbackCaptureInfo,
   FeedbackSubmitPayload,
   FeedbackSubmitResponse,
+  FeedbackLogFile,
+  FeedbackLogPart,
+  FeedbackLogSource,
+  LogProvider,
 } from './api';
 
 /** 元素标签名。 */
@@ -36,6 +41,11 @@ export interface OpenFeedbackOptions {
   launcherBottom?: string;
   launcherMode?: 'tab' | 'orb';
   captureMode?: 'off' | 'viewport';
+  /**
+   * 宿主日志回调（JS 属性，不是 attribute）：返回文件名 + 原始字节。
+   * 新草稿首次打开时调用一次（3 秒超时 → 面板给出「重试 / 不带日志继续提交」）。
+   */
+  logProvider?: LogProvider;
 }
 
 /**
@@ -57,6 +67,8 @@ export function openFeedback(options: OpenFeedbackOptions = {}): FeedbackWidget 
     if (options.launcherBottom) widget.launcherBottom = options.launcherBottom;
     if (options.launcherMode) widget.launcherMode = options.launcherMode;
     if (options.captureMode) widget.captureMode = options.captureMode;
+    // 先配置 logProvider 再 appendChild/open：新草稿首次打开即采集
+    if (options.logProvider !== undefined) widget.logProvider = options.logProvider;
     document.body.appendChild(widget);
   } else {
     if (options.apiBase) widget.apiBase = options.apiBase;
@@ -69,6 +81,7 @@ export function openFeedback(options: OpenFeedbackOptions = {}): FeedbackWidget 
     if (options.launcherBottom) widget.launcherBottom = options.launcherBottom;
     if (options.launcherMode) widget.launcherMode = options.launcherMode;
     if (options.captureMode) widget.captureMode = options.captureMode;
+    if (options.logProvider !== undefined) widget.logProvider = options.logProvider;
   }
   widget.open();
   return widget;

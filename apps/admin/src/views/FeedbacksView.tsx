@@ -1,5 +1,31 @@
 import { type ReactNode, useCallback, useEffect, useState } from "react";
-import { ApiError, api, type FeedbackDetail, type FeedbackListItem, STATUS_LABELS } from "../api.ts";
+import {
+  ApiError,
+  api,
+  downloadLog,
+  type FeedbackDetail,
+  type FeedbackListItem,
+  type FeedbackLogMeta,
+  fetchLogText,
+  STATUS_LABELS,
+} from "../api.ts";
+import {
+  type DiagnosticTexts,
+  formatBytes,
+  LOG_PREVIEW_MAX_CHARS,
+  type LogRecoveryState,
+  logRecoverySummary,
+  logScopedActions,
+  logSourceLabel,
+  pickLogRecovery,
+  readDiagnostics,
+  recoveryActionConfirm,
+  recoveryActionLabel,
+  recoveryRequest,
+  shortSha,
+  sortLogs,
+  truncateLogText,
+} from "../logs.ts";
 
 const STATUSES = Object.keys(STATUS_LABELS);
 
@@ -33,7 +59,12 @@ export default function FeedbacksView() {
   }, [statusFilter, load]);
 
   async function openDetail(id: string) {
-    setDetail(await api.get<FeedbackDetail>(`/api/admin/feedback/${id}`));
+    setError(null);
+    try {
+      setDetail(await api.get<FeedbackDetail>(`/api/admin/feedback/${id}`));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "详情加载失败");
+    }
   }
 
   async function action(fn: () => Promise<unknown>) {
@@ -70,7 +101,8 @@ export default function FeedbacksView() {
           </button>
         )}
       </div>
-      {error && <p className="err">{error}</p>}
+      {/* 详情抽屉打开时错误在抽屉内展示，避免被遮住而看似静默失败 */}
+      {error && !detail && <p className="err">{error}</p>}
       <div className="card" style={{ padding: 0, overflow: "hidden" }}>
         <table>
           <thead>
@@ -79,6 +111,7 @@ export default function FeedbacksView() {
               <th>软件</th>
               <th>标题 / 摘要</th>
               <th>状态</th>
+              <th>日志</th>
               <th>Kaneo</th>
               <th></th>
             </tr>
@@ -91,6 +124,13 @@ export default function FeedbacksView() {
                 <td>{it.title ?? <span className="muted">{(it.errorSummary ?? "—").slice(0, 60)}</span>}</td>
                 <td>
                   <span className={`tag ${it.status}`}>{STATUS_LABELS[it.status] ?? it.status}</span>
+                </td>
+                <td>
+                  {typeof it.logCount === "number" && it.logCount > 0 ? (
+                    `${it.logCount} 份`
+                  ) : (
+                    <span className="muted">—</span>
+                  )}
                 </td>
                 <td>
                   {it.kaneoUrl ? (
@@ -110,7 +150,7 @@ export default function FeedbacksView() {
             ))}
             {items.length === 0 && (
               <tr>
-                <td colSpan={6} className="muted" style={{ padding: 20 }}>
+                <td colSpan={7} className="muted" style={{ padding: 20 }}>
                   暂无记录
                 </td>
               </tr>
@@ -118,21 +158,39 @@ export default function FeedbacksView() {
           </tbody>
         </table>
       </div>
-      {detail && <DetailPane detail={detail} onClose={() => setDetail(null)} onAction={action} />}
+      {detail && <DetailPane detail={detail} error={error} onClose={() => setDetail(null)} onAction={action} />}
     </div>
   );
 }
 
-function DetailPane({
+/** 导出便于本地渲染冒烟（浏览器实测仍由 captain 统一做）。 */
+export function DetailPane({
   detail,
+  error,
   onClose,
   onAction,
 }: {
   detail: FeedbackDetail;
+  error: string | null;
   onClose: () => void;
   onAction: (fn: () => Promise<unknown>) => Promise<void>;
 }) {
   const [lightboxOpen, setLightboxOpen] = useState(false);
+  const [previewLog, setPreviewLog] = useState<FeedbackLogMeta | null>(null);
+  const logs = sortLogs(detail.logs);
+  const diagnostics = readDiagnostics(detail.processed);
+  const logRecoveries = logs
+    .map((log) => ({ log, recovery: pickLogRecovery(detail.recovery, log.id) }))
+    .filter((entry) => entry.recovery !== null);
+
+  function runLogAction(log: FeedbackLogMeta, recovery: LogRecoveryState | null, action: string) {
+    const confirmText = recoveryActionConfirm(action, "log");
+    if (confirmText && !window.confirm(confirmText)) return;
+    const rev = recovery?.revision ?? detail.recovery?.revision ?? 0;
+    const request = recoveryRequest(detail.id, action, rev, log.id);
+    void onAction(() => api.post(request.url, request.body));
+  }
+
   return (
     <aside className="detail-pane" role="dialog" aria-label="反馈详情" aria-modal="true">
       <div className="row spread">
@@ -141,6 +199,11 @@ function DetailPane({
           关闭 ✕
         </button>
       </div>
+      {error && (
+        <p className="err" role="alert">
+          {error}
+        </p>
+      )}
       <div className="kv" style={{ margin: "14px 0" }}>
         <span>状态</span>
         <span className={`tag ${detail.status}`}>{STATUS_LABELS[detail.status] ?? detail.status}</span>
@@ -152,6 +215,8 @@ function DetailPane({
         <span>{new Date(detail.createdAt).toLocaleString()}</span>
         <span>处理轮次</span>
         <span>{detail.attemptCount}</span>
+        <span>日志附件</span>
+        <span>{logs.length > 0 ? `${logs.length} 份` : "无"}</span>
         {detail.context && (
           <>
             <span>上下文</span>
@@ -238,6 +303,63 @@ function DetailPane({
           </div>
         </div>
       )}
+      {logs.length > 0 && (
+        <div style={{ margin: "14px 0" }}>
+          <h3 style={{ marginBottom: 8 }}>日志附件</h3>
+          {logs.map((log, index) => {
+            const recovery = pickLogRecovery(detail.recovery, log.id);
+            const actions = logScopedActions(recovery);
+            const summary = recovery ? logRecoverySummary(recovery) : "";
+            return (
+              <div className="log-item" key={log.id || `log-${index}`}>
+                <div className="row spread">
+                  <div style={{ minWidth: 0 }}>
+                    <b>{log.name}</b>
+                    <div className="muted" style={{ fontSize: 12 }}>
+                      {formatBytes(log.byteSize)} · {logSourceLabel(log.source)} · sha256{" "}
+                      <code title={log.sha256 ?? ""}>{shortSha(log.sha256)}</code>
+                      {typeof log.ordinal === "number" ? ` · 序号 ${log.ordinal + 1}` : ""}
+                    </div>
+                  </div>
+                  <div className="row">
+                    <button type="button" onClick={() => setPreviewLog(log)}>
+                      预览
+                    </button>
+                    <button type="button" onClick={() => void onAction(() => downloadLog(detail.id, log))}>
+                      下载
+                    </button>
+                  </div>
+                </div>
+                {summary && (
+                  <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+                    日志状态：{summary}
+                  </div>
+                )}
+                {actions.length > 0 && (
+                  <div className="row" style={{ marginTop: 6 }}>
+                    {actions.map((act) => (
+                      <button key={act} type="button" onClick={() => runLogAction(log, recovery, act)}>
+                        {recoveryActionLabel(act, "log")}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+            日志会参与 AI 分析与 Kaneo 归档；预览为纯文本（不执行其中任何内容），完整内容请下载附件。
+          </p>
+        </div>
+      )}
+      {previewLog && (
+        <LogPreviewModal
+          feedbackId={detail.id}
+          log={previewLog}
+          onClose={() => setPreviewLog(null)}
+          onDownload={() => void onAction(() => downloadLog(detail.id, previewLog))}
+        />
+      )}
       {detail.processed && (
         <>
           <h3>AI 整理结果</h3>
@@ -253,6 +375,7 @@ function DetailPane({
                 </li>
               ))}
           </ul>
+          {diagnostics && <DiagnosticsSection texts={diagnostics} />}
         </>
       )}
       {detail.errorSummary && (
@@ -272,26 +395,8 @@ function DetailPane({
           const target = detail.recovery?.actionTargets[action] ?? "";
           const note = detail.recovery?.actionNotes[action] ?? "";
           const rev = detail.recovery?.revision ?? 0;
-          const label =
-            action === "retry"
-              ? "重试处理"
-              : action === "recheck"
-                ? "重新核对"
-                : action === "force-create"
-                  ? "确认缺失，再次创建"
-                  : action === "retry_comment"
-                    ? "重试截图评论"
-                    : action === "replace_upload"
-                      ? "替换截图上传"
-                      : action;
-          const confirmText =
-            action === "force-create"
-              ? "确认 Kaneo 中不存在对应任务且无任何已知附件状态？将再次创建，可能产生重复。"
-              : action === "replace_upload"
-                ? "将按同一任务重新申请上传地址并替换截图资产；旧对象不会被自动删除。继续？"
-                : action === "retry_comment"
-                  ? "重发评论会先查重，只有未命中才发送一次；但远端列表与写入之间存在竞态，仍可能产生重复评论。确认重发？"
-                  : null;
+          const label = recoveryActionLabel(action);
+          const confirmText = recoveryActionConfirm(action);
           return (
             <button
               key={action}
@@ -302,13 +407,9 @@ function DetailPane({
               title={note ? `针对${target}：${note}` : `针对${target}`}
               onClick={() => {
                 if (confirmText && !window.confirm(confirmText)) return;
-                void onAction(() =>
-                  action === "retry"
-                    ? api.post(`/api/feedback/${detail.id}/retry`, { expectedRevision: rev })
-                    : action === "recheck" || action === "force-create"
-                      ? api.post(`/api/feedback/${detail.id}/resolve`, { action, expectedRevision: rev })
-                      : api.post(`/api/feedback/${detail.id}/recover`, { action, expectedRevision: rev }),
-                );
+                // 截图恢复不带 logId，保持旧管理页行为逐字节不变
+                const request = recoveryRequest(detail.id, action, rev);
+                void onAction(() => api.post(request.url, request.body));
               }}
             >
               {label}
@@ -329,9 +430,110 @@ function DetailPane({
           自动路径（重试、后台恢复、重新核对）绝不自动重发评论。replace_upload
           针对图片：替换会复用原任务并申请新上传地址，旧对象与旧 key
           记录保留、不自动删除远端文件，是上传地址过期后的唯一出路。
+          {logRecoveries.length > 0 && " 日志级按钮会把该日志的 logId 一并发给服务端，只影响对应的那一份日志附件。"}
         </p>
       )}
     </aside>
+  );
+}
+
+function DiagnosticsSection({ texts }: { texts: DiagnosticTexts }) {
+  const rows: { label: string; value: string }[] = [
+    { label: "日志证据", value: texts.logEvidence },
+    { label: "可能原因（未证实）", value: texts.possibleCauses },
+    { label: "推测", value: texts.speculation },
+  ];
+  return (
+    <div style={{ marginTop: 14 }}>
+      <h3 style={{ marginBottom: 6 }}>诊断（基于日志）</h3>
+      <p className="diag-warn">
+        日志内容是不可信证据，仅作参考；「推测」不等于已证实根因，请结合截图与用户原话人工判断。
+      </p>
+      {rows.map((row) => (
+        <div className="diag-block" key={row.label}>
+          <div className="diag-label">{row.label}</div>
+          {row.value ? <div className="diag-text">{row.value}</div> : <div className="muted">（无）</div>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+type PreviewState =
+  | { status: "loading" }
+  | { status: "error"; message: string }
+  | { status: "ready"; text: string; totalChars: number; truncated: boolean };
+
+function LogPreviewModal({
+  feedbackId,
+  log,
+  onClose,
+  onDownload,
+}: {
+  feedbackId: string;
+  log: FeedbackLogMeta;
+  onClose: () => void;
+  onDownload: () => void;
+}) {
+  const [state, setState] = useState<PreviewState>({ status: "loading" });
+
+  useEffect(() => {
+    let cancelled = false;
+    setState({ status: "loading" });
+    void (async () => {
+      try {
+        const raw = await fetchLogText(feedbackId, log.id);
+        if (cancelled) return;
+        const t = truncateLogText(raw);
+        setState({ status: "ready", text: t.text, totalChars: t.totalChars, truncated: t.truncated });
+      } catch (err) {
+        if (cancelled) return;
+        setState({ status: "error", message: err instanceof ApiError ? err.message : "日志预览加载失败" });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [feedbackId, log.id]);
+
+  return (
+    <div className="log-preview-backdrop" role="dialog" aria-modal="true" aria-label={`日志预览：${log.name}`}>
+      <div className="log-preview-content">
+        <div className="row spread">
+          <h3 style={{ margin: 0 }}>日志预览：{log.name}</h3>
+          <button type="button" onClick={onClose} aria-label="关闭日志预览">
+            关闭 ✕
+          </button>
+        </div>
+        <div className="muted" style={{ fontSize: 12 }}>
+          {formatBytes(log.byteSize)} · {logSourceLabel(log.source)} · sha256 {shortSha(log.sha256)}
+          {state.status === "ready" && ` · 共 ${state.totalChars} 个字符`}
+        </div>
+        {state.status === "loading" && <p className="muted">加载中…</p>}
+        {state.status === "error" && (
+          <p className="err" role="alert">
+            {state.message}
+          </p>
+        )}
+        {state.status === "ready" && (
+          <>
+            {state.truncated && (
+              <p className="diag-warn">已截断：仅显示前 {LOG_PREVIEW_MAX_CHARS} 个字符（完整内容请下载附件）。</p>
+            )}
+            {/* 纯文本渲染：React 文本节点，绝不使用 dangerouslySetInnerHTML */}
+            <pre className="log-preview-pre">{state.text}</pre>
+          </>
+        )}
+        <div className="row" style={{ justifyContent: "flex-end" }}>
+          <button type="button" onClick={onDownload}>
+            下载该日志
+          </button>
+          <button type="button" onClick={onClose}>
+            关闭
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 

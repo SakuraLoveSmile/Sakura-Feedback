@@ -37,13 +37,20 @@ export function makeProcessed(title = "整理后的标题"): ProcessedFeedback {
 export function makeMockAi(behavior: MockAiBehavior = {}): AiClient & {
   calls: number;
   lastImage: Parameters<AiClient["organize"]>[1];
+  lastLogs: Parameters<AiClient["organize"]>[2];
 } {
   const outcomes = behavior.outcomes ?? ["ok"];
   const ai = {
     calls: 0,
     lastImage: null as Parameters<AiClient["organize"]>[1],
-    async organize(_text: string, image?: Parameters<AiClient["organize"]>[1]): Promise<ProcessedFeedback> {
+    lastLogs: null as Parameters<AiClient["organize"]>[2],
+    async organize(
+      _text: string,
+      image?: Parameters<AiClient["organize"]>[1],
+      logs?: Parameters<AiClient["organize"]>[2],
+    ): Promise<ProcessedFeedback> {
       ai.lastImage = image ?? null;
+      ai.lastLogs = logs ?? null;
       const outcome = outcomes[Math.min(ai.calls, outcomes.length - 1)] ?? "ok";
       ai.calls++;
       switch (outcome) {
@@ -87,6 +94,8 @@ export interface MockKaneo extends KaneoClient {
   comments: Array<{ taskId: string; content: string }>;
   uploads: Array<{ taskId: string; bytes: Buffer | Uint8Array }>;
   finalizes: Array<{ taskId: string; key: string }>;
+  /** 每次 finalize 的完整入参（断言日志文件名/大小走上同一条资产链路）。 */
+  finalizeInputs: Array<{ taskId: string; key: string; filename: string; contentType: string; size: number }>;
   /** 每 task 的预签名申请序号（生成唯一 key/地址）。 */
   presignSeq: Map<string, number>;
   /** findByFeedbackId 搜索调用次数（断言“优先已有 task ID 时不搜索”）。 */
@@ -108,6 +117,9 @@ export function makeMockKaneo(opts: MockKaneoOptions = {}): MockKaneo {
   const comments: MockKaneo["comments"] = [];
   const uploads: MockKaneo["uploads"] = [];
   const finalizes: MockKaneo["finalizes"] = [];
+  const finalizeInputs: MockKaneo["finalizeInputs"] = [];
+  /** assetUrl → uploadUrl：同一 task 上多份附件（截图/日志）各自独立。 */
+  const assetUploadUrl = new Map<string, string>();
   const presignSeq = new Map<string, number>();
   let searches = 0;
   const columns = opts.columns ?? [{ id: "col-db-id", slug: "triage", name: "待筛选" }];
@@ -127,6 +139,7 @@ export function makeMockKaneo(opts: MockKaneoOptions = {}): MockKaneo {
     comments,
     uploads,
     finalizes,
+    finalizeInputs,
     presignSeq,
     boundSettings,
     get remoteCalls() {
@@ -220,7 +233,19 @@ export function makeMockKaneo(opts: MockKaneoOptions = {}): MockKaneo {
     async finalizeImageUpload(taskId, input) {
       countWrite();
       finalizes.push({ taskId, key: input.key });
-      return { id: `asset-${taskId}`, url: `http://kaneo.test/assets/asset-${taskId}.png` };
+      finalizeInputs.push({
+        taskId,
+        key: input.key,
+        filename: input.filename,
+        contentType: input.contentType,
+        size: input.size,
+      });
+      // 首份附件保持历史命名（asset-<taskId>），后续附件按预签名序号区分，
+      // 使同一 task 上的截图与多份日志各自拥有独立资产（可分别核对字节）。
+      const suffix = input.key.replace(`key-${taskId}`, "");
+      const assetUrl = `http://kaneo.test/assets/asset-${taskId}${suffix}.png`;
+      assetUploadUrl.set(assetUrl, `http://kaneo.test/upload/${taskId}${suffix}`);
+      return { id: `asset-${taskId}${suffix}`, url: assetUrl };
     },
     async createComment(taskId, input) {
       countWrite();
@@ -233,7 +258,8 @@ export function makeMockKaneo(opts: MockKaneoOptions = {}): MockKaneo {
     },
     async downloadAsset(assetUrl: string): Promise<Uint8Array> {
       count();
-      const hit = mock.uploads.find((u) => u.taskId === assetUrl);
+      const uploadUrl = assetUploadUrl.get(assetUrl) ?? assetUrl;
+      const hit = mock.uploads.find((u) => u.taskId === uploadUrl) ?? mock.uploads.find((u) => u.taskId === assetUrl);
       if (!hit) throw new KaneoDefiniteError("资产下载返回 404（不能直接证明文件不存在）");
       return new Uint8Array(hit.bytes);
     },
@@ -439,19 +465,58 @@ export async function createTestPng(width = 100, height = 100): Promise<Buffer> 
     .toBuffer();
 }
 
+export interface MultipartLogPart {
+  name: string;
+  bytes: Buffer | Uint8Array | string;
+  /** 覆盖 metadata.logs 里的 source（默认 auto；仅测试非法来源时改动）。 */
+  source?: unknown;
+  /** 覆盖 metadata.logs 里的 name（默认取 name）。 */
+  metaName?: string;
+  /** 覆盖部件 filename（默认取 name；传 null 表示不带 filename）。 */
+  partFilename?: string | null;
+  /** 覆盖 metadata.logs 里的 byteSize（默认按字节数；传 null 表示省略该字段）。 */
+  metaByteSize?: number | null;
+}
+
+/**
+ * 构造 multipart 提交。metadata.logs 在提供 logs 时自动生成，
+ * 也可用 metadataLogsRaw 完全接管（用于构造数量/结构不匹配的非法请求）。
+ */
 export async function submitMultipartFeedback(
   feedbackApp: FeedbackApp,
   bearer: string,
   metadata: Record<string, unknown>,
   screenshotBuffer?: Buffer,
+  logs?: MultipartLogPart[],
+  metadataLogsRaw?: unknown,
 ) {
-  const boundary = "----FeedbackTestBoundary" + Math.random().toString(36).slice(2);
+  const boundary = `----FeedbackTestBoundary${Math.random().toString(36).slice(2)}`;
   const parts: Buffer[] = [];
+
+  const meta: Record<string, unknown> = { ...metadata };
+  if (logs) {
+    meta.logs =
+      metadataLogsRaw !== undefined
+        ? metadataLogsRaw
+        : logs.map((l) => {
+            const entry: Record<string, unknown> = {
+              name: l.metaName ?? l.name,
+              source: l.source ?? "auto",
+            };
+            if (l.metaByteSize !== null) {
+              entry.byteSize =
+                l.metaByteSize ?? (typeof l.bytes === "string" ? Buffer.byteLength(l.bytes) : l.bytes.byteLength);
+            }
+            return entry;
+          });
+  } else if (metadataLogsRaw !== undefined) {
+    meta.logs = metadataLogsRaw;
+  }
 
   parts.push(
     Buffer.from(
       `--${boundary}\r\nContent-Disposition: form-data; name="metadata"\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(
-        metadata,
+        meta,
       )}\r\n`,
     ),
   );
@@ -463,6 +528,17 @@ export async function submitMultipartFeedback(
       ),
     );
     parts.push(screenshotBuffer);
+    parts.push(Buffer.from("\r\n"));
+  }
+
+  for (const log of logs ?? []) {
+    const filename = log.partFilename === undefined ? log.name : log.partFilename;
+    const disposition =
+      filename === null
+        ? `Content-Disposition: form-data; name="logs"`
+        : `Content-Disposition: form-data; name="logs"; filename="${filename}"`;
+    parts.push(Buffer.from(`--${boundary}\r\n${disposition}\r\nContent-Type: text/plain\r\n\r\n`));
+    parts.push(typeof log.bytes === "string" ? Buffer.from(log.bytes, "utf8") : Buffer.from(log.bytes));
     parts.push(Buffer.from("\r\n"));
   }
 

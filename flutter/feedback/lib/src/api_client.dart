@@ -3,8 +3,10 @@ import 'dart:typed_data' show Uint8List;
 import 'dart:ui' show Offset;
 
 import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart' show MediaType;
 
 import 'config.dart';
+import 'logs.dart';
 import 'token_store.dart';
 
 /// 服务返回的 API 错误（契约统一错误体 `{error:{code,message}}`）。
@@ -273,11 +275,16 @@ class ApiClient {
   ///
   /// context 仅携带显式配置的值（[FeedbackConfig.appVersion] /
   /// [FeedbackConfig.pageLabel]），绝不自动抓取。
+  ///
+  /// 编码（契约 §1）：有截图**或**有日志 → `multipart/form-data`；
+  /// 都没有 → 保持原 JSON 请求（完全兼容）。[logs] 顺序即
+  /// `metadata.logs` 顺序，也即 `logs` 文件部件的 append 顺序。
   Future<FeedbackSubmitResult> submitFeedback({
     required String idempotencyKey,
     required String text,
     FeedbackCaptureInfo? captureInfo,
     Uint8List? screenshotBytes,
+    List<FeedbackLogAttachment>? logs,
   }) async {
     final Map<String, Object?> context = <String, Object?>{};
     final String? appVersion = config.appVersion;
@@ -285,9 +292,13 @@ class ApiClient {
     final String? pageLabel = config.pageLabel;
     if (pageLabel != null) context['pageLabel'] = pageLabel;
 
+    final List<FeedbackLogAttachment> logParts =
+        logs ?? const <FeedbackLogAttachment>[];
+    final bool hasLogs = logParts.isNotEmpty;
+
     final http.Response response;
     try {
-      if (screenshotBytes != null) {
+      if (screenshotBytes != null || hasLogs) {
         final http.MultipartRequest req =
             http.MultipartRequest('POST', _uri('/api/feedback'));
         final String? token = await tokenStore.read();
@@ -302,15 +313,33 @@ class ApiClient {
           'text': text,
           if (context.isNotEmpty) 'context': context,
           if (captureInfo != null) 'capture': captureInfo.toJson(),
+          // 长度必须等于 logs 部件数，逐项按下标对应。
+          if (hasLogs)
+            'logs': logParts
+                .map((FeedbackLogAttachment log) => log.toMetadataJson())
+                .toList(growable: false),
         };
         req.fields['metadata'] = jsonEncode(metadata);
-        req.files.add(
-          http.MultipartFile.fromBytes(
-            'screenshot',
-            screenshotBytes,
-            filename: 'screenshot.png',
-          ),
-        );
+        if (screenshotBytes != null) {
+          req.files.add(
+            http.MultipartFile.fromBytes(
+              'screenshot',
+              screenshotBytes,
+              filename: 'screenshot.png',
+            ),
+          );
+        }
+        // 顺序敏感：与 metadata.logs 逐项对应。
+        for (final FeedbackLogAttachment log in logParts) {
+          req.files.add(
+            http.MultipartFile.fromBytes(
+              'logs',
+              log.bytes,
+              filename: log.name,
+              contentType: MediaType('text', 'plain'),
+            ),
+          );
+        }
         final http.StreamedResponse streamed =
             await _client.send(req).timeout(_requestTimeout);
         response = await http.Response.fromStream(streamed);

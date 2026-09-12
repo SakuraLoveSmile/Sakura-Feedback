@@ -47,6 +47,7 @@ import { FeedbackWidget, openFeedback } from '@feedback/web';
   - 已有草稿（文字或截图）时**恢复草稿、不重拍**；有捕获进行中时**合并**到该会话，不重复发起。
   - 这是**呼出**语义：草稿一脏就不再重拍。面板内的手动截图入口（「截取当前页面」/「重新截图」）走显式重拍流程，**不受草稿影响**。
 - `cancelCapture()`：取消进行中的捕获：失效会话序号 → abort → 释放 Pointer Capture → 恢复 UI。迟到的结果被静默丢弃。
+- `logProvider`（**JS 属性，不是 attribute**）：宿主日志回调，返回文件名 + 原始字节；`openFeedback({ logProvider })` 等价。详见下一节。
 - `startLogin()`：主动开始 Web 登录握手，返回登录页 URL。
 - `feedback-submitted`（CustomEvent，bubbles + composed）：提交被服务端接收（201/200）后在元素上派发，`detail = { feedbackId, status, replayed }`。
 
@@ -101,11 +102,40 @@ widget.captureProvider = async (ctx) => {
 
 组件统一校验返回值：PNG 类型、`0 < size ≤ 5MiB`、边 ≤ 2048、像素 ≤ 4M、遮挡坐标有限/为正/在输出范围内。**页面存在可见敏感区域而 provider 未提供同帧遮挡证明时，拒绝使用该截图**（按遮挡失败规则处理）。无敏感标记的页面上，只返回 `{blob,width,height}` 的旧式回调保持兼容。`signal` abort 后本会话结果被丢弃且不报错。替换 `captureProvider`（含置空）会使进行中的旧捕获立即失效。
 
+## logProvider（宿主日志，T1）
+
+宿主把**自己已经掌握的日志**交给组件；组件不扫盘、不拦截 console、不读系统日志。
+
+```ts
+import type { FeedbackWidget, LogProvider } from '@feedback/web';
+
+// 1) 元素属性（JS 属性，不是 attribute；改 attribute 无效）
+widget.logProvider = () => ({
+  name: 'host-app.log',                          // 文件名（扩展名白名单：.log/.txt/.json/.jsonl）
+  bytes: new TextEncoder().encode(myLogDump()),  // 原始字节（宿主自行去除凭据等敏感内容）
+});
+
+// 等价：openFeedback({ logProvider })（新建或复用页面上的 <feedback-widget>）
+openFeedback({ apiBase: '…', appId: '…', logProvider });
+```
+
+- 返回值可以是**单个** `{name, bytes}`、**数组**或 `null`（本次没有日志），同步 / 异步均可；实现里带 3 秒超时。
+- **采集时机**：**新草稿首次打开**面板时调用一次（采集时点即该次打开）；关闭重开已有草稿**不重新采集**；用户移除日志后**不自动补回**（只能点「重试」或手动添加）。`capture-mode="viewport"` 的呼出在截图开始时即发起采集。
+- **超时 / 失败**：3 秒未返回或回调抛错 → 面板显示「日志获取失败」并提供「重试」与「不带日志继续提交」；**绝不阻塞**截图与描述提交，采集期间描述仍可编辑、可直接提交。
+- **上限（自动与手动共用）**：最多 3 个、每个 ≤ 1 MiB、扩展名仅 `.log/.txt/.json/.jsonl`（大小写不敏感）、内容必须是非空的**严格 UTF-8** 文本。任何超限**逐个给出明确原因**后不带入请求——**不静默删除、不截断文件**。
+- **面板**：逐条显示文件名 / 人类可读大小 / 来源（自动 / 手动），支持纯文本预览（按 4000 码点截断并在正文里说明）与移除；无 `logProvider` 时只显示「手动添加日志」入口。
+- **手动添加**：`<input type="file" multiple accept=".log,.txt,.json,.jsonl">`，用 `arrayBuffer()` 按字节读取。
+- **迟到结果保护**：关闭面板、元素卸载、切换 `api-base` / `app-id`、替换 provider、提交冻结后，迟到的采集结果**一律不写回**草稿（实例内采集序号 + 身份世代双重校验）。
+- **提交**：有截图**或**有日志 → `multipart/form-data`；`metadata.logs = [{ name, source, byteSize }]` 与 `logs` 部件**同序**一一对应（部件 filename = 日志文件名，type = `text/plain`）。只有文字时仍是原 JSON 请求（逐字节兼容）。
+- **幂等**：日志属于附件快照的一部分；附件（含日志）被修改后生成**新的幂等键**，附件未变的重试复用同一幂等键与同一字节（与截图行为一致）。
+- **草稿**：日志与截图一样**只活在组件实例内存**里（`Uint8Array`，可结构化克隆的序列化形态）：关闭重开仍在，刷新即弃，不写 localStorage——因此不存在配额 / 半写失败破坏草稿的路径。
+
 ## 行为摘要（对齐契约）
 
 - 呼出流程：`capture-mode="viewport"` 时**先截图后开面板**（截图中隐藏组件自身 UI）→ 遮挡与编码全部完成、会话仍有效 → 写入草稿并打开面板。
 - 手动截图（默认 `capture-mode="off"` 宿主唯一的截图方式）：面板的截图区**预览与操作分离**——无截图时显示「截取当前页面」，此时缩略图 / 放大 / 「重新截图 / 移除截图」都不出现；有截图时显示预览与「重新截图 / 移除截图」；移除后回到首个入口并**保留文字**。手动入口复用显式重拍流程（不受文字草稿影响、可替换旧图、**失败不丢旧图与文字**，首次失败保留重试入口），捕获期间三个操作全部禁用并给出加载态——面板在捕获期间整体不可见，因此加载态与组件 UI 都不可能进入截图；截图结束后焦点回到面板内（原控件已隐藏时回到输入框）。提交与轮询期间禁止截图与移除。
-- 草稿：**组件实例单一所有者**——同实例关闭再打开保留；从 DOM 断开重连保留截图字节并重建预览 URL；仅存内存，刷新即弃，绝不用 localStorage；`app-id` 变化时旧草稿与旧捕获整体废弃。重拍是唯一替换旧截图的入口，重拍失败不丢旧图；移除截图同时移除落点与捕获时间。有文字或截图的草稿再次呼出时恢复草稿不重拍。
+- 草稿：**组件实例单一所有者**——同实例关闭再打开保留；从 DOM 断开重连保留截图字节并重建预览 URL；仅存内存，刷新即弃，绝不用 localStorage；`app-id` 变化时旧草稿与旧捕获整体废弃。重拍是唯一替换旧截图的入口，重拍失败不丢旧图；移除截图同时移除落点与捕获时间。有文字或截图的草稿再次呼出时恢复草稿不重拍。日志附件同样属于实例草稿（关面板不丢、不写 localStorage、不自动补回）。
+- 日志与提交：有截图或日志走 `multipart/form-data`（`metadata.logs` 与 `logs` 部件同序），只有文字仍走原 JSON；提交与轮询期间日志的添加 / 移除与截图三件套一并禁用；提交失败保留原快照（含日志字节）；修改附件后生成新幂等键。
 - 提交流程：提交瞬间**冻结快照**（幂等键 / 应用与来源 / 原话 / 截图字节 / 元数据 / 草稿版本），HTTP 只读快照；提交期间禁用编辑、重拍、移除与重复提交。POST `/api/feedback` → 已接收（201/200 后才清空草稿）→ 轮询 `GET /api/feedback/:id`（2s 起指数退避封顶 5s，最长约 2 分钟）→ 已归档（展示任务链接）/ 服务端处理失败（原话已保存：提供「刷新状态 / 复制标识」与找回提示，**绝不重复提交**）/ 提交未到达服务（保留草稿，展示 errorSummary 与「重试提交」，复用同一幂等键与同一字节）。
 - **服务身份与凭据隔离（P1）**：`api-base` 与 `app-id` 共同构成服务身份，任一变化都会递增实例内的**身份世代**；所有异步操作（提交、轮询、捕获会话、登录握手回调）在开始时捕获世代，恢复后世代不符即整体 no-op——**旧服务 / 旧身份的迟到结果绝不写入新身份的状态**（不写 `lastFeedbackId`、不改相位、不清草稿、不派发 `feedback-submitted`、不启动轮询）。
 - `api-base` 变化 = **完整身份切换**：取消捕获会话 / 提交快照 / 幂等键 / 登录握手，停止轮询（复位 `polling` / `pollDelay` / `pollStartedAt`），清空**访问令牌**（`accessToken = null`、`tokenExpiresAt = 0`）与任务态（`lastFeedbackId` / `lastRecord` / `lastErrorSummary` / `unconfirmedRequest` / 登录降级链接，相位复位 `idle`）与草稿（含 textarea），并 `syncUi()` 重渲染。**新服务必须重新登录**：旧服务的 `Authorization` 绝不随请求发送给新基址（切换后未重新登录时组件不会发出任何请求）。
@@ -131,6 +161,6 @@ pnpm --filter @feedback/web typecheck
 pnpm --filter @feedback/web lint
 ```
 
-测试架构提示：`test/pixel-fixture.ts` 提供内存帧缓冲 FakeCanvas 与真实 PNG 编解码（node:zlib），`test/masking.test.ts` 以"泄漏模式"假渲染器断言最终 PNG 字节中敏感区确为不透明覆盖色、周围像素不误伤；`test/lifecycle.test.ts` 用可控 Promise（deferred）验证捕获会话交错与提交快照冻结，并以 `vi.mock('html2canvas-pro')` 覆盖内置路径；`test/capture-entry.test.ts` 覆盖面板内**手动截图入口**（默认 `off` 宿主、先写文字再截图、首次失败重试、移除后补拍、重拍失败留旧图、连击防重入、关闭/卸载/换身份后的迟到结果丢弃、焦点与提交期禁用）。
+测试架构提示：`test/pixel-fixture.ts` 提供内存帧缓冲 FakeCanvas 与真实 PNG 编解码（node:zlib），`test/masking.test.ts` 以"泄漏模式"假渲染器断言最终 PNG 字节中敏感区确为不透明覆盖色、周围像素不误伤；`test/lifecycle.test.ts` 用可控 Promise（deferred）验证捕获会话交错与提交快照冻结，并以 `vi.mock('html2canvas-pro')` 覆盖内置路径；`test/capture-entry.test.ts` 覆盖面板内**手动截图入口**（默认 `off` 宿主、先写文字再截图、首次失败重试、移除后补拍、重拍失败留旧图、连击防重入、关闭/卸载/换身份后的迟到结果丢弃、焦点与提交期禁用）；`test/logs.test.ts` 覆盖日志（自动采集时机、3 秒超时与重试、手动添加、扩展名/大小/数量/UTF-8 超限提示、预览截断与移除、不自动补回、迟到结果不写回、multipart 顺序与幂等键、无日志时 JSON 表单逐字段不变）。
 
 真实浏览器回归（`[hidden]` 的样式级联、焦点与触屏尺寸只有真机浏览器能验）：`python3 e2e/run_browser.py`，其中 P5（默认 `off` 下截图区必须真的隐藏 + 手动入口可用）、P6（侧边标签 → 不自动截图 → 手动截图 → 像素/放大/重拍 → multipart 落库）、P7（窄屏 + 键盘 Enter 激活 + 焦点不掉到隐藏控件）对应本轮改动。

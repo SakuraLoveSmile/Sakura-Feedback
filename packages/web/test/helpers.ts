@@ -22,6 +22,16 @@ export interface Mounted {
   retakeBtn: HTMLButtonElement;
   removeBtn: HTMLButtonElement;
   zoomModal: HTMLDivElement;
+  /** 日志区（docs/logs-plan.md §4.5 / §4.6） */
+  logArea: HTMLDivElement;
+  logList: HTMLUListElement;
+  logStatusLine: HTMLDivElement;
+  logActions: HTMLDivElement;
+  logRetryBtn: HTMLButtonElement;
+  logSkipBtn: HTMLButtonElement;
+  logInput: HTMLInputElement;
+  logAddLabel: HTMLLabelElement;
+  logPreview: HTMLPreElement;
 }
 
 export function mount(attrs: Record<string, string> = {}): Mounted {
@@ -51,6 +61,15 @@ export function mount(attrs: Record<string, string> = {}): Mounted {
     retakeBtn: root.querySelector<HTMLButtonElement>('.fb-btn-retake') as HTMLButtonElement,
     removeBtn: root.querySelector<HTMLButtonElement>('.fb-btn-remove') as HTMLButtonElement,
     zoomModal: root.querySelector<HTMLDivElement>('.fb-zoom-modal') as HTMLDivElement,
+    logArea: root.querySelector<HTMLDivElement>('.fb-log-area') as HTMLDivElement,
+    logList: root.querySelector<HTMLUListElement>('.fb-log-list') as HTMLUListElement,
+    logStatusLine: root.querySelector<HTMLDivElement>('.fb-log-status') as HTMLDivElement,
+    logActions: root.querySelector<HTMLDivElement>('.fb-log-actions') as HTMLDivElement,
+    logRetryBtn: root.querySelector<HTMLButtonElement>('.fb-log-retry') as HTMLButtonElement,
+    logSkipBtn: root.querySelector<HTMLButtonElement>('.fb-log-skip') as HTMLButtonElement,
+    logInput: root.querySelector<HTMLInputElement>('.fb-log-input') as HTMLInputElement,
+    logAddLabel: root.querySelector<HTMLLabelElement>('.fb-log-add') as HTMLLabelElement,
+    logPreview: root.querySelector<HTMLPreElement>('.fb-log-preview') as HTMLPreElement,
   };
   // 模块级草稿跨用例存活：每次 mount 先清空。
   setTextarea(m, '');
@@ -60,6 +79,30 @@ export function mount(attrs: Record<string, string> = {}): Mounted {
 export function setTextarea(m: Mounted, text: string): void {
   m.textarea.value = text;
   m.textarea.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+/** `File` 字节（手写日志附件的真实读取路径与 `<input type="file">` 一致）。 */
+export function logBytes(text: string): Uint8Array {
+  return new TextEncoder().encode(text);
+}
+
+/** 宿主日志回调返回值（单个文件）。 */
+export function logFile(name: string, text: string): { name: string; bytes: Uint8Array } {
+  return { name, bytes: logBytes(text) };
+}
+
+/**
+ * 模拟用户在 `<input type="file" multiple>` 里选中文件：
+ * happy-dom 的 `files` 是只读访问器，这里在实例上定义同名属性再派发 change。
+ */
+export function pickLogFiles(m: Mounted, files: File[]): void {
+  Object.defineProperty(m.logInput, 'files', { value: files, configurable: true });
+  m.logInput.dispatchEvent(new Event('change'));
+}
+
+/** 当前面板里的日志条目（文件名 / 大小 / 来源）。 */
+export function logItems(m: Mounted): HTMLLIElement[] {
+  return Array.from(m.logList.querySelectorAll<HTMLLIElement>('.fb-log-item'));
 }
 
 /** 最小 fetch Response 桩（组件用 status/ok/json）。 */

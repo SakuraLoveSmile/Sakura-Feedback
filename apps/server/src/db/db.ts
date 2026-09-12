@@ -75,9 +75,11 @@ CREATE TABLE IF NOT EXISTS feedback_screenshots (
   capture_json  TEXT,
   created_at    TEXT NOT NULL
 );
+
 `;
 
-function migrate(db: DatabaseSync): void {
+/** 增量迁移（导出以便测试直接验证失败回滚语义）。 */
+export function migrate(db: DatabaseSync): void {
   const v = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
   if (v < 2) {
     db.exec(`
@@ -103,14 +105,47 @@ function migrate(db: DatabaseSync): void {
     }
     db.exec("PRAGMA user_version = 2;");
   }
+  if (v < 3) {
+    // v3：日志附件子表。事务内建表；**成功后才写版本号**，失败回滚且版本不变。
+    // 绝不重建 feedbacks，也不改写历史记录。
+    db.exec("BEGIN");
+    try {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS feedback_logs (
+          id           TEXT PRIMARY KEY,
+          feedback_id  TEXT NOT NULL REFERENCES feedbacks(id) ON DELETE CASCADE,
+          ordinal      INTEGER NOT NULL,
+          name         TEXT NOT NULL,
+          source       TEXT NOT NULL CHECK (source IN ('auto','manual')),
+          content      BLOB NOT NULL,
+          byte_size    INTEGER NOT NULL,
+          sha256       TEXT NOT NULL,
+          created_at   TEXT NOT NULL,
+          UNIQUE(feedback_id, ordinal)
+        );
+        CREATE INDEX IF NOT EXISTS idx_feedback_logs_feedback ON feedback_logs(feedback_id, ordinal);
+      `);
+      db.exec("PRAGMA user_version = 3;");
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
+  }
 }
 
 export function openDb(dataDir: string): DatabaseSync {
   mkdirSync(dataDir, { recursive: true });
   const db = new DatabaseSync(path.join(dataDir, "feedback.db"));
-  db.exec(SCHEMA);
-  migrate(db);
-  return db;
+  try {
+    db.exec(SCHEMA);
+    // Versioned additions run only inside migrate's transaction, including on a fresh database.
+    migrate(db);
+    return db;
+  } catch (error) {
+    db.close();
+    throw error;
+  }
 }
 
 export type Db = DatabaseSync;

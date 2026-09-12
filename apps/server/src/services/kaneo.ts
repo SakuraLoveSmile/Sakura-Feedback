@@ -119,6 +119,24 @@ export function buildScreenshotComment(meta: {
   ].join("\n\n");
 }
 
+/** 日志评论内容：附可下载附件链接 + 反馈 ID / 日志 ID / 内容摘要定位标记。 */
+export function buildLogComment(meta: {
+  feedbackId: string;
+  logId: string;
+  assetUrl: string;
+  sha256: string;
+  byteSize: number;
+  name: string;
+}): string {
+  return [
+    `[${meta.name}](${meta.assetUrl})`,
+    "---",
+    `**反馈ID**：${meta.feedbackId}`,
+    `**日志ID**：${meta.logId}`,
+    `**日志摘要**：\`${meta.sha256}\` · ${meta.byteSize} 字节`,
+  ].join("\n\n");
+}
+
 /** 归档任务描述：AI 整理结果在前，来源与原话由服务端追加，AI 不可改写。 */
 export function buildTaskDescription(
   feedbackId: string,
@@ -140,6 +158,18 @@ export function buildTaskDescription(
   section("问题", processed.sections.problems);
   section("建议", processed.sections.suggestions);
   section("待确认事项", processed.sections.questions);
+
+  // 日志诊断：证据、可能原因与推测分别标注，绝不把错误日志直接当成已证实根因
+  const diag = processed.diagnostics;
+  if (diag && (diag.logEvidence || diag.possibleCauses || diag.speculation)) {
+    parts.push("## 诊断（基于日志）");
+    const sub = (name: string, body: string) => {
+      if (body) parts.push(`### ${name}\n\n${body}`);
+    };
+    sub("日志证据", diag.logEvidence);
+    sub("可能原因（未证实）", diag.possibleCauses);
+    sub("推测（需人工确认）", diag.speculation);
+  }
 
   const sourceBits = [`${meta.appName}（${meta.appId}）`];
   if (meta.appVersion) sourceBits.push(`版本 ${meta.appVersion}`);

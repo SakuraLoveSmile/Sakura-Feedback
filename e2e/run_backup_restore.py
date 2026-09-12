@@ -16,6 +16,7 @@
 不依赖 run_docker.py 的模块级常量，独立管理自己的容器/卷，便于单独运行。
 """
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -109,6 +110,12 @@ class Client:
             except Exception:
                 return e.code, {"raw": raw}
 
+    def bytes(self, path):
+        req = urllib.request.Request(self.base + path, method="GET")
+        req.add_header("origin", self.base)
+        with self.opener.open(req, timeout=20) as r:
+            return r.read()
+
     def login(self):
         return self.call("POST", "/api/auth/login", ADMIN)[0]
 
@@ -126,9 +133,15 @@ class Client:
         except urllib.error.HTTPError:
             return None
 
-    def submit(self, key, text, bearer):
+    def submit(self, key, text, bearer, logs=None):
         boundary = "----BR" + str(int(time.time() * 1000))
+        logs = logs or []
         meta = {"idempotencyKey": key, "appId": APP_ID, "text": text}
+        if logs:
+            meta["logs"] = [
+                {"name": name, "source": source, "byteSize": len(content)}
+                for name, source, content in logs
+            ]
         body = (
             f"--{boundary}\r\nContent-Disposition: form-data; name=\"metadata\"\r\n"
             f"Content-Type: application/json\r\n\r\n{json.dumps(meta)}\r\n"
@@ -138,6 +151,23 @@ class Client:
             f"filename=\"screenshot.png\"\r\nContent-Type: image/png\r\n\r\n"
         ).encode()
         body += _png(24, 24, (200, 60, 60)) + b"\r\n" + f"--{boundary}--\r\n".encode()
+        # metadata.logs and logs parts must stay in the same order.
+        if logs:
+            head = (
+                f"--{boundary}\r\nContent-Disposition: form-data; name=\"metadata\"\r\n"
+                f"Content-Type: application/json\r\n\r\n{json.dumps(meta)}\r\n"
+            ).encode()
+            image = (
+                f"--{boundary}\r\nContent-Disposition: form-data; name=\"screenshot\"; "
+                f"filename=\"screenshot.png\"\r\nContent-Type: image/png\r\n\r\n"
+            ).encode() + _png(24, 24, (200, 60, 60)) + b"\r\n"
+            body = head + image
+            for name, _source, content in logs:
+                body += (
+                    f"--{boundary}\r\nContent-Disposition: form-data; name=\"logs\"; "
+                    f"filename=\"{name}\"\r\nContent-Type: text/plain\r\n\r\n"
+                ).encode() + content + b"\r\n"
+            body += f"--{boundary}--\r\n".encode()
         req = urllib.request.Request(self.base + "/api/feedback", data=body, method="POST")
         req.add_header("content-type", f"multipart/form-data; boundary={boundary}")
         req.add_header("origin", self.base)
@@ -239,7 +269,12 @@ def main():
         # 让 createTask(task) 在**远端已写入**后挂起不响应 → 本地结果未知 → 重启后 needs_review。
         # （mock 的 uncertain 是在写入前直接掐断连接，远端不会留下任务，不是我们要的取证场景）
         mock("/__mock/fail", {"stage": "task", "mode": "hold", "once": True, "afterWrite": True})
-        st, body = ca.submit("br-key-1", "备份恢复验证：远端已写入但结果未知", bearer)
+        log_payload = [
+            ("server.log", "auto", b"2026-09-12T01:02:03Z ERROR upstream ECONNRESET\n"),
+            ("manual.txt", "manual", "人工补充：仅在隔离恢复后核对字节摘要。\n".encode("utf-8")),
+        ]
+        expected_log_hashes = {name: hashlib.sha256(content).hexdigest() for name, _source, content in log_payload}
+        st, body = ca.submit("br-key-1", "备份恢复验证：远端已写入但结果未知", bearer, log_payload)
         check("A 提交被接受", st == 201, f"{st} {body}")
         fid = (body or {}).get("feedbackId")
         held = wait_held("task")
@@ -266,6 +301,12 @@ def main():
         tasks_after_submit = mock_tasks()
         check("A 重启后没有重复创建任务", tasks_after_submit == remote_tasks == 1,
               f"{remote_tasks} -> {tasks_after_submit}")
+        s, detail_after_restart = ca.call("GET", f"/api/admin/feedback/{fid}")
+        logs_a = (detail_after_restart or {}).get("logs") or []
+        check("A 备份前详情保留日志元数据（顺序与摘要）",
+              s == 200 and [x.get("name") for x in logs_a] == [x[0] for x in log_payload]
+              and [x.get("sha256") for x in logs_a] == [expected_log_hashes[x[0]] for x in log_payload],
+              json.dumps(logs_a, ensure_ascii=False))
 
         step("停服（docker stop）并观察 data/ 内容，实测文档的 checkpoint 说法")
         docker("stop", "--time", "30", A)
@@ -293,6 +334,22 @@ def main():
         s, d = cb.call("GET", f"/api/admin/feedback/{fid}")
         check("B 该记录仍是 needs_review（未被自动补发）", (d or {}).get("status") == "needs_review",
               str((d or {}).get("status")))
+        logs_b = (d or {}).get("logs") or []
+        check("B 恢复出全部日志元数据且 logId 唯一",
+              len(logs_b) == len(log_payload) and len({x.get("id") for x in logs_b}) == len(logs_b)
+              and [x.get("name") for x in logs_b] == [x[0] for x in log_payload],
+              json.dumps(logs_b, ensure_ascii=False))
+        for log_meta in logs_b:
+            raw = cb.bytes(f"/api/admin/feedback/{fid}/logs/{log_meta['id']}")
+            expected = next(content for name, _source, content in log_payload if name == log_meta["name"])
+            check(f"B 隔离恢复日志 {log_meta['name']} 字节与 SHA-256 一致",
+                  raw == expected and hashlib.sha256(raw).hexdigest() == log_meta.get("sha256"),
+                  f"bytes={len(raw)} sha={hashlib.sha256(raw).hexdigest()[:16]}")
+        foreign_log = "log-from-another-feedback"
+        s, bad = cb.call("POST", f"/api/feedback/{fid}/recover",
+                         {"action": "retry_comment", "expectedRevision": (d or {}).get("recovery", {}).get("revision", 0),
+                          "logId": foreign_log})
+        check("B 恢复接口拒绝不属于该反馈的 logId", s == 400, f"{s} {bad}")
         s, kt = cb.call("POST", "/api/admin/connection/kaneo/test", {"projectId": "p-docker"})
         check("B 用保留的主密钥能解密 Kaneo 凭据（连接测试 ok）", s == 200 and (kt or {}).get("ok") is True,
               f"{s} {json.dumps(kt, ensure_ascii=False)[:160]}")

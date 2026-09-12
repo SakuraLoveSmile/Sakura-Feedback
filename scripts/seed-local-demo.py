@@ -45,6 +45,15 @@ if s != 200:
     print("登录失败", s, "——检查 .env 与服务是否已启动")
     sys.exit(1)
 
+# 只允许初始化空配置或既有 mock；不能把真实服务连接覆盖成演示值。
+for kind, expected in [("kaneo", "http://127.0.0.1:8898"), ("ai", "http://127.0.0.1:8899/v1")]:
+    status, current = call("GET", f"/api/admin/connection/{kind}")
+    if status != 200 or not isinstance(current, dict):
+        sys.exit(f"无法核对 {kind} 连接，停止演示初始化（未改写配置）")
+    base = current.get("baseUrl")
+    if base and base.rstrip("/") != expected:
+        sys.exit(f"{kind} 已配置非 mock 连接，拒绝覆盖；请使用独立演示数据目录")
+
 call("PUT", "/api/admin/connection/kaneo", {"baseUrl": "http://127.0.0.1:8898", "apiKey": "mock-key"})
 call("PUT", "/api/admin/connection/ai", {"baseUrl": "http://127.0.0.1:8899/v1", "model": "mock", "apiKey": "mock-key"})
 

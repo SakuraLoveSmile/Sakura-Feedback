@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 本地一键启动：mock 外部服务 + 反馈服务(dev tsx watch) + React/Vue 示例静态站。
+# mock 演示一键启动：真实服务请用 start-service.sh，本脚本不能证明真实归档。
 # 停止：scripts/stop-local.sh。日志：/tmp/fb-local-*.log
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -10,11 +10,41 @@ if [ ! -f .env ]; then
   exit 1
 fi
 set -a; source .env; set +a
-export FEEDBACK_DATA_DIR="${FEEDBACK_DATA_DIR:-$ROOT/data}"
-export FEEDBACK_ADMIN_DIST="${FEEDBACK_ADMIN_DIST:-$ROOT/apps/admin/dist}"
-export FEEDBACK_PORT="${FEEDBACK_PORT:-8787}"
+# 不继承真实服务的 FEEDBACK_DATA_DIR；worker 启动即可能处理旧记录。
+export FEEDBACK_DATA_DIR="$ROOT/data/mock-demo"
+export FEEDBACK_ADMIN_DIST="$ROOT/apps/admin/dist"
+# 示例与 seed 约定本机 8787；不继承真实 HTTPS 入口及 Cookie 配置。
+export FEEDBACK_PORT=8787
+export FEEDBACK_COOKIE_SECURE=false
+unset FEEDBACK_PUBLIC_URL
+
+# 在启动 worker 之前检查演示库，防止曾被手动配置成真实连接的库产生外部写入。
+node --input-type=commonjs <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const file = path.join(process.env.FEEDBACK_DATA_DIR, 'feedback.db');
+if (fs.existsSync(file)) {
+  const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(file, { readOnly: true });
+  try {
+    if (db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='settings'").get()) {
+      for (const [key, expected] of [['kaneo.baseUrl', 'http://127.0.0.1:8898'], ['ai.baseUrl', 'http://127.0.0.1:8899/v1']]) {
+        const value = db.prepare('SELECT value FROM settings WHERE key = ?').get(key)?.value;
+        if (value && value.replace(/\/+$/, '') !== expected) {
+          throw new Error('演示库存在非 mock 连接，拒绝启动；请保留该库并使用真实服务入口');
+        }
+      }
+    }
+  } finally { db.close(); }
+}
+NODE
 
 mkdir -p "$FEEDBACK_DATA_DIR"
+
+if [ ! -f "$ROOT/apps/server/dist/index.js" ] || [ ! -f "$FEEDBACK_ADMIN_DIST/index.html" ]; then
+  echo "缺少构建产物，请先运行 corepack pnpm build" >&2
+  exit 1
+fi
 
 launch() { # name, log, cmd...
   local name="$1" log="$2"; shift 2
@@ -28,7 +58,7 @@ launch() { # name, log, cmd...
 }
 
 launch mock /tmp/fb-local-mock.log node "$ROOT/e2e/mock-external.mjs"
-( cd "$ROOT/apps/server" && launch server /tmp/fb-local-server.log npx tsx watch src/index.ts )
+launch server /tmp/fb-local-server.log node "$ROOT/apps/server/dist/index.js"
 launch react /tmp/fb-local-react.log python3 -m http.server 5187 --bind 127.0.0.1 --directory "$ROOT/examples/react/dist"
 launch vue /tmp/fb-local-vue.log python3 -m http.server 5188 --bind 127.0.0.1 --directory "$ROOT/examples/vue/dist"
 

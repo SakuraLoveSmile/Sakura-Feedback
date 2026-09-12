@@ -79,9 +79,16 @@ ${rows}
       <div class="row">
         <button id="btn-open" type="button">打开面板（不截图）</button>
         <button id="btn-capture" type="button">截图并打开</button>
+        <button id="btn-log" type="button">写一条日志</button>
       </div>
       <p class="hint">
         <code>open()</code> 只打开面板；截图要用元素的 <code>captureAndOpen()</code>。
+      </p>
+      <p class="hint">
+        宿主内存日志环形缓冲：<strong id="log-count">0</strong> 行。
+        <code>logProvider</code> 是元素的 <strong>JS 属性</strong>（不是 attribute）：
+        新草稿首次打开面板时调用一次，导出为 <code>host-app.log</code>（面板显示「来源：自动」）。
+        示例<strong>不扫盘、不拦截 console</strong>。
       </p>
       <p id="status" class="status" role="status"></p>
 
@@ -142,6 +149,47 @@ ${rows}
 
         document.getElementById('btn-open').addEventListener('click', () => widget.open());
         document.getElementById('btn-capture').addEventListener('click', () => widget.captureAndOpen());
+
+        // ---- 宿主内存日志环形缓冲（示例不扫盘、不拦截 console）----
+        const createHostLogBuffer = (capacity) => {
+          const lines = [
+            '[boot] host demo started',
+            '[boot] logProvider 读取的就是本内存缓冲区（不落盘）',
+          ];
+          return {
+            push(line) {
+              lines.push(new Date().toISOString() + ' ' + line);
+              while (lines.length > capacity) lines.shift(); // 环形：丢最旧的行
+            },
+            dump() {
+              return lines.join('\\n') + '\\n';
+            },
+            size() {
+              return lines.length;
+            },
+          };
+        };
+
+        const hostLogs = createHostLogBuffer(200);
+        const logCount = document.getElementById('log-count');
+
+        // logProvider 是组件实例的 JS 属性：新草稿首次打开面板时调用一次，
+        // 返回文件名 + 原始字节（组件负责 3 秒超时与 3 个 / 1 MiB / UTF-8 校验）。
+        widget.logProvider = () => ({
+          name: 'host-app.log',
+          bytes: new TextEncoder().encode(hostLogs.dump()),
+        });
+
+        const renderLogCount = () => {
+          logCount.textContent = String(hostLogs.size());
+        };
+
+        document.getElementById('btn-log').addEventListener('click', () => {
+          hostLogs.push('[ui] 用户点击了「写一条日志」');
+          renderLogCount();
+        });
+
+        renderLogCount();
       }
     </script>
   </body>

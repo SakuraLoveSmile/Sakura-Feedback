@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>E2E 宿主页 · 日志附件（自动采集 + 手动补充）</title>
+    <!--
+      e2e 专用宿主页（不是产品代码）。
+
+      存在的理由：验证 T1「打开反馈面板自动带上最近日志，也能手动补充」在**真实浏览器**
+      里的完整行为——组件不做任何 mock：
+        · 宿主用自己已有的内存日志环形缓冲（不扫盘、不拦截 console）导出文本；
+        · `logProvider` 是**组件实例的 JS 属性**（不是 attribute），新草稿首次打开时调用一次。
+
+      版面沿用 manual.html（1280x800、dpr=1），方便复用同一套坐标与断言。
+    -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: #ffffff;
+      }
+      body {
+        position: relative;
+        width: 1280px;
+        height: 800px;
+        overflow: hidden;
+        font-family: system-ui, -apple-system, sans-serif;
+      }
+      .block {
+        position: absolute;
+        color: #000000;
+        font-size: 18px;
+        padding: 8px;
+        box-sizing: border-box;
+      }
+      #visible-block {
+        left: 60px;
+        top: 60px;
+        width: 320px;
+        height: 180px;
+        background: #00ff00;
+      }
+      #log-panel {
+        position: absolute;
+        left: 60px;
+        top: 300px;
+        width: 700px;
+        height: 320px;
+        border: 1px solid #94a3b8;
+        padding: 12px;
+        box-sizing: border-box;
+        font-size: 13px;
+        color: #0f172a;
+        background: #f8fafc;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="visible-block" class="block">VISIBLE-NORTH</div>
+    <div id="log-panel">
+      <p>宿主内存日志环形缓冲（容量 200 行）：<span id="line-count">0</span> 行</p>
+      <p>组件打开面板时调用 <code>logProvider</code> 导出 <code>host-app.log</code>。</p>
+    </div>
+
+    <script>
+      // ---- 宿主自己的日志缓冲：只有宿主已经掌握的内存数据 ----
+      const CAPACITY = 200;
+      const lines = ['[boot] host e2e page started', '[boot] logProvider 读取本内存缓冲区'];
+      const encoder = new TextEncoder();
+      const dumpLog = () => `${lines.join('\n')}\n`;
+      const pushLine = (line) => {
+        lines.push(`${new Date().toISOString()} ${line}`);
+        while (lines.length > CAPACITY) lines.shift();
+        document.getElementById('line-count').textContent = String(lines.length);
+        return lines.length;
+      };
+      document.getElementById('line-count').textContent = String(lines.length);
+
+      // 测试脚手架（仅 e2e）：只暴露读取/驱动入口
+      window.__fbE2E = {
+        widget: () => document.querySelector('feedback-widget'),
+        shadow() {
+          return this.widget().shadowRoot;
+        },
+        pushLine,
+        pushBulk(count) {
+          for (let i = 0; i < count; i++) pushLine(`[bulk] 第 ${i} 行：用于触发预览截断的真实日志内容`);
+          return lines.length;
+        },
+        dumpLog,
+        providerCalls: 0,
+        /** 面板里的日志条目：文件名、来源文案、大小文案、是否有预览按钮。 */
+        logItems() {
+          const sr = this.shadow();
+          return Array.from(sr.querySelectorAll('.fb-log-item')).map((li) => {
+            const name = li.querySelector('.fb-log-name');
+            const meta = li.querySelector('.fb-log-meta');
+            return {
+              name: name ? name.textContent.trim() : null,
+              meta: meta ? meta.textContent.trim() : null,
+              hasPreview: !!li.querySelector('.fb-log-preview-btn'),
+              hasRemove: !!li.querySelector('.fb-log-remove-btn'),
+            };
+          });
+        },
+        logArea() {
+          const sr = this.shadow();
+          const area = sr.querySelector('.fb-log-area');
+          if (!area) return null;
+          const title = sr.querySelector('.fb-log-title');
+          const note = sr.querySelector('.fb-log-note');
+          const status = sr.querySelector('.fb-log-status');
+          const addLabel = sr.querySelector('.fb-log-add');
+          const retry = sr.querySelector('.fb-log-retry');
+          const skip = sr.querySelector('.fb-log-skip');
+          const preview = sr.querySelector('.fb-log-preview');
+          const vis = (el) => {
+            if (!el) return null;
+            const b = el.getBoundingClientRect();
+            return { hidden: el.hidden, display: getComputedStyle(el).display,
+                     visible: b.width > 0 && b.height > 0, text: (el.textContent || '').trim() };
+          };
+          return {
+            areaDisplay: getComputedStyle(area).display,
+            title: title ? title.textContent.trim() : null,
+            note: note ? note.textContent.trim() : null,
+            status: status ? status.textContent.trim() : null,
+            add: vis(addLabel),
+            retry: vis(retry),
+            skip: vis(skip),
+            preview: preview ? { hidden: preview.hidden, text: preview.textContent || '' } : null,
+            inputAccept: (() => { const i = sr.querySelector('.fb-log-input'); return i ? i.getAttribute('accept') : null; })(),
+          };
+        },
+        submitDisabled() {
+          const b = this.shadow().querySelector('.fb-submit');
+          return b ? b.disabled : null;
+        },
+        textarea() {
+          return this.shadow().querySelector('.fb-textarea');
+        },
+      };
+
+      // 组件注册（UMD 顶层副作用）
+      window.addEventListener('DOMContentLoaded', () => {
+        const widget = document.querySelector('feedback-widget');
+        widget.logProvider = () => {
+          window.__fbE2E.providerCalls += 1;
+          return { name: 'host-app.log', bytes: encoder.encode(dumpLog()) };
+        };
+      });
+    </script>
+
+    <script src="/sdk/feedback-web.umd.js"></script>
+    <!-- 默认形态：未声明 launcher-mode（贴边标签）、未声明 capture-mode（off，不自动截图） -->
+    <feedback-widget
+      id="widget"
+      api-base="http://localhost:8787"
+      app-id="com.example.demo-e2e"
+      app-version="3.1.4"
+      page-label="e2e-logs"
+    ></feedback-widget>
+  </body>
+</html>

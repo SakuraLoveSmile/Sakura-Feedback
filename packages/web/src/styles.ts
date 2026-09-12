@@ -775,6 +775,214 @@ export const STYLES = /* css */ `
   }
 }
 
+/* ---- 日志区（docs/logs-plan.md §4.5 / §4.6）----
+   与截图区并列的附件区：始终可见（未配置 logProvider 时就是「手动添加日志」入口）。
+   列表逐条展示 文件名 / 大小 / 来源，并提供只读预览与移除；状态行承载
+   「正在获取日志…」「日志获取失败 + 重试 / 不带日志继续提交」与被拒文件的明确原因。 */
+.fb-log-area {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--fb-border);
+  border-radius: 10px;
+  background: var(--fb-bg-subtle);
+}
+
+.fb-log-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.fb-log-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fb-text);
+}
+
+.fb-log-note {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fb-text-secondary);
+}
+
+.fb-log-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.fb-log-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--fb-bg);
+  border: 1px solid var(--fb-border);
+}
+
+.fb-log-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.fb-log-name {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fb-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fb-log-meta {
+  font-size: 11px;
+  color: var(--fb-text-secondary);
+}
+
+.fb-log-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.fb-log-preview-btn,
+.fb-log-remove-btn,
+.fb-log-retry,
+.fb-log-skip,
+.fb-log-add {
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 6px;
+  border: 1px solid var(--fb-border-strong);
+  background: var(--fb-bg);
+  color: var(--fb-text);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.fb-log-preview-btn:hover,
+.fb-log-retry:hover,
+.fb-log-skip:hover,
+.fb-log-add:hover {
+  background: var(--fb-bg-subtle-hover);
+}
+
+.fb-log-remove-btn {
+  color: var(--fb-status-error-text);
+  border-color: var(--fb-status-error-border);
+}
+
+.fb-log-remove-btn:hover:not(:disabled) {
+  background: var(--fb-status-error-bg);
+}
+
+.fb-log-remove-btn:disabled,
+.fb-log-retry:disabled,
+.fb-log-skip:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.fb-log-add {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  user-select: none;
+}
+
+.fb-log-add.is-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 原生 input[type=file][multiple][accept=".log,.txt,.json,.jsonl"]：
+   视觉上隐藏但仍可通过键盘聚焦（label 的 accessible name 就是「添加日志」）。 */
+.fb-log-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+  opacity: 0;
+}
+
+.fb-log-input:focus-visible + .fb-log-add {
+  outline: 2px solid var(--fb-accent);
+  outline-offset: 2px;
+}
+
+.fb-log-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.fb-log-status {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fb-text-secondary);
+}
+
+.fb-log-status.is-error {
+  color: var(--fb-status-error-text);
+}
+
+.fb-log-status.is-warn {
+  color: var(--fb-status-warn-text);
+}
+
+.fb-log-preview {
+  margin: 0;
+  max-height: 160px;
+  overflow: auto;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid var(--fb-border);
+  background: var(--fb-bg);
+  color: var(--fb-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.fb-log-preview-btn:focus-visible,
+.fb-log-remove-btn:focus-visible,
+.fb-log-retry:focus-visible,
+.fb-log-skip:focus-visible,
+.fb-log-add:focus-visible {
+  outline: 2px solid var(--fb-accent);
+  outline-offset: 2px;
+}
+
+@media (max-width: 767.98px) {
+  .fb-log-preview-btn,
+  .fb-log-remove-btn,
+  .fb-log-retry,
+  .fb-log-skip,
+  .fb-log-add {
+    padding: 7px 12px;
+    font-size: 13px;
+  }
+}
+
 /* ---- 截图大图弹窗 (Zoom Modal) ---- */
 .fb-zoom-modal {
   position: fixed;

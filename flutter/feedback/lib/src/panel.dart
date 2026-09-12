@@ -10,6 +10,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'api_client.dart';
 import 'config.dart';
 import 'idempotency.dart';
+import 'logs.dart';
 import 'platform.dart';
 import 'token_store.dart';
 
@@ -47,16 +48,17 @@ enum FeedbackStage {
 }
 
 /// 结果未知（[FeedbackStage.notSent]）提交冻结的完整快照：
-/// 正文 + 截图字节 + 截图元数据。
+/// 正文 + 截图字节 + 截图元数据 + 日志附件。
 ///
 /// 复用同一幂等键的前提是快照**完全一致**（服务契约要求同 key 必须同字节，
-/// 同 key 不同内容会被判为 409 冲突）。因此改文案、重拍（新截图字节）或移除
-/// 截图都属于新快照，必须换新 key 重新提交。
+/// 同 key 不同内容会被判为 409 冲突）。因此改文案、重拍（新截图字节）、移除
+/// 截图或增删/替换任何日志都属于新快照，必须换新 key 重新提交。
 class _FrozenSubmit {
   const _FrozenSubmit({
     required this.text,
     this.screenshotBytes,
     this.captureInfo,
+    this.logs = const <FeedbackLogAttachment>[],
   });
 
   /// 提交时的正文。
@@ -68,12 +70,33 @@ class _FrozenSubmit {
   /// 提交时的截图元数据（无截图为 null）。
   final FeedbackCaptureInfo? captureInfo;
 
+  /// 提交时的日志附件（**顺序敏感**：提交顺序即 metadata.logs 顺序）。
+  final List<FeedbackLogAttachment> logs;
+
   /// 与 [other] 是否属于同一份提交快照：
-  /// 正文逐字符、截图逐字节、元数据按序列化结果比较。
+  /// 正文逐字符、截图逐字节、日志逐项（名称 / 来源 / 字节 + 顺序）、
+  /// 元数据按序列化结果比较。
   bool sameAs(_FrozenSubmit other) =>
       text == other.text &&
       listEquals(screenshotBytes, other.screenshotBytes) &&
-      _captureSignature(captureInfo) == _captureSignature(other.captureInfo);
+      _captureSignature(captureInfo) == _captureSignature(other.captureInfo) &&
+      _sameLogs(logs, other.logs);
+
+  static bool _sameLogs(
+    List<FeedbackLogAttachment> a,
+    List<FeedbackLogAttachment> b,
+  ) {
+    if (identical(a, b)) return true;
+    if (a.length != b.length) return false;
+    for (int i = 0; i < a.length; i++) {
+      if (a[i].name != b[i].name ||
+          a[i].source != b[i].source ||
+          !listEquals(a[i].bytes, b[i].bytes)) {
+        return false;
+      }
+    }
+    return true;
+  }
 
   static String? _captureSignature(FeedbackCaptureInfo? info) =>
       info == null ? null : jsonEncode(info.toJson());
@@ -117,6 +140,7 @@ class FeedbackPanel extends StatefulWidget {
     this.onRetakeScreenshot,
     this.httpClient,
     this.tokenStore,
+    this.pickLogFiles,
   });
 
   /// 连接与展示配置。
@@ -134,6 +158,10 @@ class FeedbackPanel extends StatefulWidget {
   /// 注入的令牌仓库（主要面向测试）。
   final FeedbackTokenStore? tokenStore;
 
+  /// 手动添加日志的文件选择器（注入点，主要面向测试）；
+  /// 省略时使用 `file_selector` 的 [pickFeedbackLogFiles]。
+  final FeedbackLogFilePicker? pickLogFiles;
+
   @override
   State<FeedbackPanel> createState() => FeedbackPanelState();
 }
@@ -141,7 +169,10 @@ class FeedbackPanel extends StatefulWidget {
 /// 面板状态（暴露为 public 仅供测试驱动内部状态机）。
 class FeedbackPanelState extends State<FeedbackPanel> {
   late final FeedbackTokenStore _tokenStore;
-  late final ApiClient _api;
+  late ApiClient _api;
+
+  /// 自动采集超时（契约 §4.3）：3 秒未返回即提示「日志获取失败」。
+  static const Duration logCollectTimeout = Duration(seconds: 3);
 
   final TextEditingController _draft = TextEditingController();
   final FocusNode _draftFocus = FocusNode();
@@ -206,6 +237,51 @@ class FeedbackPanelState extends State<FeedbackPanel> {
   String? _errorSummary;
   String? _composeError;
 
+  // ---------------------------------------------------------------- 日志附件
+
+  /// 当前草稿附加的日志（自动 + 手动，顺序即提交顺序）。
+  final List<FeedbackLogAttachment> _logs = <FeedbackLogAttachment>[];
+
+  /// 本份草稿是否已发起过自动采集（契约 §4.2：每份新草稿只采集一次）。
+  ///
+  /// 在**发起**采集时置位：即使采集途中面板被关闭而使结果作废，
+  /// 重新打开也不会再次调用 `logProvider`（调用一次，绝不重复打扰宿主）。
+  bool _autoLogCollected = false;
+
+  /// 自动采集进行中。
+  bool _logCollecting = false;
+
+  /// 采集失败说明（超时 / 宿主抛错 / 超限或校验不通过）。
+  String? _logFailure;
+
+  /// 失败补充说明（如超时详情）。
+  String? _logFailureDetail;
+
+  /// 用户已选择「不带日志继续提交」：隐藏失败提示，但仍可重试。
+  bool _logFailureDismissed = false;
+
+  /// 采集会话序号：面板关闭 / 身份切换后递增，使迟到的结果失效。
+  int _logSeq = 0;
+
+  /// 采集超时计时器（可取消，避免关闭后留下悬挂定时器）。
+  Timer? _logTimer;
+
+  /// 服务身份世代（apiBase / appId 切换时递增），迟到结果不得跨身份写回。
+  int _identityEpoch = 0;
+
+  /// 当前附加的日志列表（只读；测试可见）。
+  List<FeedbackLogAttachment> get logs =>
+      List<FeedbackLogAttachment>.unmodifiable(_logs);
+
+  /// 自动采集是否进行中（只读；测试可见）。
+  bool get isCollectingLogs => _logCollecting;
+
+  /// 最近一次采集是否失败（只读；测试可见）。
+  bool get hasLogFailure => _logFailure != null;
+
+  /// 是否已为当前草稿发起过自动采集（只读；测试可见）。
+  bool get hasCollectedLogs => _autoLogCollected;
+
   /// Class B（服务端已接收但处理失败）视图上的操作反馈
   /// （复制反馈 ID / 刷新状态的结果提示）。
   String? _failedNotice;
@@ -232,14 +308,64 @@ class FeedbackPanelState extends State<FeedbackPanel> {
   void initState() {
     super.initState();
     _tokenStore = widget.tokenStore ?? createDefaultTokenStore(widget.config);
-    _api = ApiClient(
-      config: widget.config,
-      tokenStore: _tokenStore,
-      httpClient: widget.httpClient,
-      onUnauthorized: _onUnauthorized,
-    );
+    _api = _createApi();
     _draft.addListener(_onDraftChanged);
     unawaited(_restoreSession());
+    // 面板**首次挂载**即首次打开（FeedbackWidget 只在呼出后才挂载面板）：
+    // 在这一帧为这份新草稿发起一次自动日志采集（契约 §4.2）。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _maybeStartAutoLogCollect();
+    });
+  }
+
+  ApiClient _createApi() => ApiClient(
+        config: widget.config,
+        tokenStore: _tokenStore,
+        httpClient: widget.httpClient,
+        onUnauthorized: _onUnauthorized,
+      );
+
+  @override
+  void didUpdateWidget(FeedbackPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.config.apiBase == widget.config.apiBase &&
+        oldWidget.config.appId == widget.config.appId) {
+      return;
+    }
+    // 服务 / 应用身份切换：旧身份的采集结果一律作废（不写回），旧身份的日志
+    // 也绝不提交给新服务——清空并允许新草稿重新采集。
+    _identityEpoch++;
+    _logSeq++;
+    _logTimer?.cancel();
+    _logTimer = null;
+    _logs.clear();
+    _autoLogCollected = false;
+    _logCollecting = false;
+    _logFailure = null;
+    _logFailureDetail = null;
+    _logFailureDismissed = false;
+    _pendingSubmit = null;
+    _idempotencyKey = null;
+    _api.dispose();
+    _api = _createApi();
+  }
+
+  /// 面板被呼出（含首次呼出）时由 [FeedbackWidget] 调用。
+  ///
+  /// 只在新草稿尚未采集过时发起采集：重新打开已有草稿不重新采集，
+  /// 用户移除日志后也不自动补回。
+  void handlePanelOpened() => _maybeStartAutoLogCollect();
+
+  /// 面板关闭时由 [FeedbackWidget] 调用：进行中的采集结果不得再写回
+  /// （不 setState、不污染下次打开的草稿）。
+  void handlePanelClosed() {
+    _logSeq++;
+    _logTimer?.cancel();
+    _logTimer = null;
+    if (_logCollecting && mounted) {
+      setState(() => _logCollecting = false);
+    }
   }
 
   Future<void> _restoreSession() async {
@@ -279,6 +405,10 @@ class FeedbackPanelState extends State<FeedbackPanel> {
 
   @override
   void dispose() {
+    // 迟到保护：先让进行中的采集结果失效，再释放资源。
+    _logSeq++;
+    _logTimer?.cancel();
+    _logTimer = null;
     _pollTimer?.cancel();
     _draft.removeListener(_onDraftChanged);
     _api.dispose();
@@ -380,6 +510,215 @@ class FeedbackPanelState extends State<FeedbackPanel> {
     });
   }
 
+  // ---------------------------------------------------------------- 日志附件
+
+  /// 提交 / 轮询期间锁定附件修改（含日志），与截图同一时机。
+  bool get _attachmentsLocked => _busy || _isPollable(_stage);
+
+  /// 清空本份草稿的日志状态（提交成功 / 回到撰写开新反馈时调用）。
+  ///
+  /// 使进行中的采集结果失效；新草稿在**下次打开**面板时重新采集一次。
+  void _resetLogDraftState() {
+    _logSeq++;
+    _logTimer?.cancel();
+    _logTimer = null;
+    _logs.clear();
+    _autoLogCollected = false;
+    _logCollecting = false;
+    _logFailure = null;
+    _logFailureDetail = null;
+    _logFailureDismissed = false;
+  }
+
+  /// 新草稿首次打开时发起一次自动采集；已采集过则什么都不做。
+  void _maybeStartAutoLogCollect() {
+    if (_autoLogCollected) return;
+    _autoLogCollected = true;
+    if (widget.config.logProvider == null) return;
+    _startLogCollect();
+  }
+
+  /// 发起一次日志采集（自动首次采集与「重试」共用）。
+  void _startLogCollect() {
+    final FeedbackLogProvider? provider = widget.config.logProvider;
+    if (provider == null || !mounted) return;
+    final int seq = ++_logSeq;
+    final int epoch = _identityEpoch;
+    _logTimer?.cancel();
+    setState(() {
+      _logCollecting = true;
+      _logFailure = null;
+      _logFailureDetail = null;
+      _logFailureDismissed = false;
+    });
+    // 3 秒未返回即提示「日志获取失败」。计时器可取消：面板关闭 / 销毁 /
+    // 身份切换时不留下悬挂定时器，也不会把迟到结果写回。
+    _logTimer = Timer(logCollectTimeout, () {
+      if (!mounted || seq != _logSeq || epoch != _identityEpoch) return;
+      setState(() {
+        _logCollecting = false;
+        _logFailure = '日志获取失败';
+        _logFailureDetail = '请求超过 3 秒未返回';
+        _logFailureDismissed = false;
+      });
+    });
+    unawaited(_runLogCollect(provider, seq, epoch));
+  }
+
+  Future<void> _runLogCollect(
+    FeedbackLogProvider provider,
+    int seq,
+    int epoch,
+  ) async {
+    List<FeedbackLogFile>? files;
+    try {
+      files = await provider();
+    } catch (_) {
+      // 宿主回调抛错：按失败处理，绝不阻塞提交。
+    }
+    // 迟到保护：面板已关闭 / 已销毁 / 身份已切换 / 已超时 → 结果一律丢弃。
+    if (!mounted || seq != _logSeq || epoch != _identityEpoch) return;
+    if (!_logCollecting) return;
+    _logTimer?.cancel();
+    _logTimer = null;
+    final List<FeedbackLogFile>? result = files;
+    if (result == null) {
+      setState(() {
+        _logCollecting = false;
+        _logFailure = '日志获取失败';
+        _logFailureDetail = null;
+        _logFailureDismissed = false;
+      });
+      return;
+    }
+    final String? error = _validateLogBatch(result);
+    setState(() {
+      _logCollecting = false;
+      if (error != null) {
+        // 自动采集同样受数量 / 大小 / 扩展名 / UTF-8 校验约束：
+        // 超限明确提示，绝不静默删除或截断。
+        _logFailure = error;
+        _logFailureDetail = null;
+        _logFailureDismissed = false;
+        return;
+      }
+      _appendLogs(result, FeedbackLogSource.auto);
+    });
+  }
+
+  /// 校验一批待添加的日志；返回错误说明或 null（整批校验，不做部分添加）。
+  String? _validateLogBatch(List<FeedbackLogFile> files) {
+    if (_logs.length + files.length > kFeedbackMaxLogs) {
+      return '日志数量超过 $kFeedbackMaxLogs 个上限'
+          '（已有 ${_logs.length} 个，尝试添加 ${files.length} 个）';
+    }
+    for (final FeedbackLogFile file in files) {
+      final String? error = validateFeedbackLogFile(file.name, file.bytes);
+      if (error != null) return error;
+    }
+    return null;
+  }
+
+  /// 追加日志（调用方需处于 setState 中或随后自行刷新）。
+  void _appendLogs(List<FeedbackLogFile> files, FeedbackLogSource source) {
+    for (final FeedbackLogFile file in files) {
+      _logs.add(FeedbackLogAttachment(
+        name: file.name.trim(),
+        source: source,
+        bytes: file.bytes,
+      ));
+    }
+  }
+
+  /// 手动添加日志：`file_selector.openFiles` + 按字节读取。
+  Future<void> _pickManualLogs() async {
+    if (_attachmentsLocked || _logs.length >= kFeedbackMaxLogs) return;
+    final FeedbackLogFilePicker pick = widget.pickLogFiles ?? pickFeedbackLogFiles;
+    List<FeedbackLogFile> files;
+    try {
+      files = await pick();
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _logFailure = '日志文件读取失败，请重试');
+      return;
+    }
+    if (!mounted || _attachmentsLocked) return; // 迟到结果不写回。
+    // 用户取消选择（空列表）：什么都不做，保留原有提示与列表。
+    if (files.isEmpty) return;
+    setState(() {
+      final String? error = _validateLogBatch(files);
+      if (error != null) {
+        _logFailure = error;
+        _logFailureDetail = null;
+        _logFailureDismissed = false;
+        return;
+      }
+      _appendLogs(files, FeedbackLogSource.manual);
+      _logFailure = null;
+      _logFailureDetail = null;
+      _logFailureDismissed = false;
+    });
+  }
+
+  /// 移除一份日志；**不自动补回**（自动采集只发生一次）。
+  void _removeLog(int index) {
+    if (_attachmentsLocked) return;
+    if (index < 0 || index >= _logs.length) return;
+    setState(() => _logs.removeAt(index));
+  }
+
+  /// 「不带日志继续提交」：仅收起失败提示，提交流程不受任何阻塞。
+  void _continueWithoutLogs() {
+    setState(() => _logFailureDismissed = true);
+  }
+
+  /// 在提交视图中打开日志的纯文本预览。
+  Future<void> _openLogPreview(FeedbackLogAttachment log) {
+    final String text = feedbackLogPreviewText(log.bytes);
+    final int runeCount = text.runes.length;
+    final bool truncated = runeCount > kFeedbackLogPreviewMaxRunes;
+    final String shown = truncated
+        ? String.fromCharCodes(text.runes.take(kFeedbackLogPreviewMaxRunes))
+        : text;
+    return showDialog<void>(
+      context: context,
+      builder: (BuildContext ctx) {
+        final ThemeData theme = Theme.of(ctx);
+        return AlertDialog(
+          key: const Key('feedback-log-preview-dialog'),
+          title: Text(log.name, overflow: TextOverflow.ellipsis),
+          content: SizedBox(
+            width: 520,
+            child: SingleChildScrollView(
+              child: SelectableText(
+                shown,
+                key: const Key('feedback-log-preview-content'),
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(fontFamily: 'monospace'),
+              ),
+            ),
+          ),
+          actions: <Widget>[
+            if (truncated)
+              Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: Text(
+                  '预览仅显示前 $kFeedbackLogPreviewMaxRunes 个字符（提交内容不受影响）',
+                  key: const Key('feedback-log-preview-truncated'),
+                  style: theme.textTheme.bodySmall,
+                ),
+              ),
+            TextButton(
+              key: const Key('feedback-log-preview-close'),
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('关闭'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   // ---------------------------------------------------------------- 提交
 
   bool get _canSubmit {
@@ -398,18 +737,20 @@ class FeedbackPanelState extends State<FeedbackPanel> {
     // 产生重复工单；该视图只提供刷新状态 / 复制反馈 ID / 返回编辑开新反馈。
     if (_stage == FeedbackStage.failed) return;
     final String text = _draft.text;
-    // 冻结本次提交的完整快照（正文 + 截图字节 + 元数据）：既要保证请求发出
-    // 后草稿变化不影响本次字节，也要作为"能否复用旧幂等键"的比较依据。
+    // 冻结本次提交的完整快照（正文 + 截图字节 + 元数据 + 日志）：既要保证请求
+    // 发出后草稿变化不影响本次字节，也要作为"能否复用旧幂等键"的比较依据。
+    // 日志列表按值复制：提交后增删日志不得改变本次请求的字节。
     final _FrozenSubmit snapshot = _FrozenSubmit(
       text: text,
       screenshotBytes: _screenshotBytes,
       captureInfo: _captureInfo,
+      logs: List<FeedbackLogAttachment>.unmodifiable(_logs),
     );
     final _FrozenSubmit? pending = _pendingSubmit;
     if (_idempotencyKey != null &&
         pending != null &&
         !pending.sameAs(snapshot)) {
-      // 未送达的旧提交之后快照已变化（改文案 / 重拍换图 / 移除截图）：
+      // 未送达的旧提交之后快照已变化（改文案 / 重拍换图 / 移除截图 / 增删日志）：
       // 同 key 不同字节违反服务契约 → 换新 key 提交新快照。
       _idempotencyKey = null;
     }
@@ -422,9 +763,10 @@ class FeedbackPanelState extends State<FeedbackPanel> {
     try {
       final FeedbackSubmitResult result = await _api.submitFeedback(
         idempotencyKey: _idempotencyKey!,
-        text: text,
-        captureInfo: _captureInfo,
-        screenshotBytes: _screenshotBytes,
+        text: snapshot.text,
+        captureInfo: snapshot.captureInfo,
+        screenshotBytes: snapshot.screenshotBytes,
+        logs: snapshot.logs,
       );
       if (!mounted) return;
       // 成功接收后才清空草稿与截图；保留 _lastSubmittedText 供失败重试。
@@ -441,6 +783,8 @@ class FeedbackPanelState extends State<FeedbackPanel> {
         _errorSummary = null;
         _failedNotice = null;
         _stage = _stageForStatus(result.status);
+        // 本份草稿已提交：日志随反馈归档，新草稿将重新采集。
+        _resetLogDraftState();
       });
       _schedulePollingIfNeeded();
     } on ApiException catch (e) {
@@ -552,6 +896,9 @@ class FeedbackPanelState extends State<FeedbackPanel> {
       _screenshotBytes = null;
       _captureInfo = null;
     }
+    // 「继续反馈 / 返回编辑」都是开一条**新**反馈：日志不随还原
+    // （与截图一致，避免让人误以为在改旧单），并允许新草稿重新采集。
+    _resetLogDraftState();
     setState(() {
       _stage = FeedbackStage.compose;
       _ticketId = null;
@@ -1046,151 +1393,402 @@ class FeedbackPanelState extends State<FeedbackPanel> {
     final ThemeData theme = Theme.of(context);
     final int runes = _draft.text.runes.length;
     final bool nearLimit = runes >= kFeedbackMaxTextRunes;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: <Widget>[
-          if (_composeError != null) ...<Widget>[
-            Container(
-              key: const Key('feedback-compose-error'),
-              margin: const EdgeInsets.only(bottom: 12),
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: theme.colorScheme.errorContainer,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Row(
-                children: <Widget>[
-                  Icon(Icons.warning_amber_rounded,
-                      size: 18, color: theme.colorScheme.onErrorContainer),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      _composeError!,
-                      style:
-                          TextStyle(color: theme.colorScheme.onErrorContainer),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-          if (_screenshotBytes != null) ...<Widget>[
-            Container(
-              key: const Key('feedback-screenshot-wrap'),
-              height: 120,
-              margin: const EdgeInsets.only(bottom: 12),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: theme.colorScheme.outlineVariant),
-              ),
-              clipBehavior: Clip.antiAlias,
-              child: Stack(
-                fit: StackFit.expand,
-                children: <Widget>[
-                  GestureDetector(
-                    key: const Key('feedback-screenshot-thumb'),
-                    onTap: () => _openZoomDialog(context),
-                    child: Image.memory(
-                      _screenshotBytes!,
-                      fit: BoxFit.cover,
-                    ),
-                  ),
-                  Positioned(
-                    top: 6,
-                    left: 6,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 6, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: Colors.black54,
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      child: const Text(
-                        '当前截图 (点击放大)',
-                        style: TextStyle(color: Colors.white, fontSize: 10),
-                      ),
-                    ),
-                  ),
-                  Positioned(
-                    bottom: 6,
-                    right: 6,
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
+    final Widget input = TextField(
+      key: const Key('feedback-input'),
+      controller: _draft,
+      focusNode: _draftFocus,
+      expands: true,
+      maxLines: null,
+      minLines: null,
+      textAlignVertical: TextAlignVertical.top,
+      keyboardType: TextInputType.multiline,
+      inputFormatters: <TextInputFormatter>[
+        const _RuneLimitFormatter(kFeedbackMaxTextRunes),
+      ],
+      decoration: const InputDecoration(
+        hintText: '刚才哪里不顺手？你希望它怎样改进？',
+        border: OutlineInputBorder(),
+        isDense: true,
+      ),
+    );
+    final Widget counterRow = Row(
+      children: <Widget>[
+        Text(
+          '$runes / $kFeedbackMaxTextRunes',
+          key: const Key('feedback-counter'),
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: nearLimit
+                ? theme.colorScheme.error
+                : theme.colorScheme.onSurfaceVariant,
+          ),
+        ),
+        const Spacer(),
+        FilledButton.icon(
+          key: const Key('feedback-submit'),
+          onPressed: _canSubmit ? _submit : null,
+          icon: const Icon(Icons.send_outlined, size: 18),
+          // Class A（未送达）时按钮语义是重试：同 key 同字节重发，
+          // 快照变化（改文案 / 换图 / 移图 / 增删日志）则自动换新 key。
+          label: Text(
+            _stage == FeedbackStage.notSent ? '重试提交' : '提交',
+          ),
+        ),
+      ],
+    );
+    return LayoutBuilder(
+      builder: (BuildContext ctx, BoxConstraints constraints) {
+        // 面板高度不足以同时容纳截图 + 日志区 + 至少 120px 输入框时，
+        // 整体改为可滚动布局：任何视口都不会出现溢出（内容不丢）。
+        final bool tight = constraints.maxHeight < _composeFixedHeight() + 120;
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              if (tight)
+                Expanded(
+                  child: SingleChildScrollView(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: <Widget>[
-                        if (widget.onRetakeScreenshot != null)
-                          IconButton.filledTonal(
-                            key: const Key('feedback-retake-btn'),
-                            visualDensity: VisualDensity.compact,
-                            tooltip: '重新截图',
-                            icon: const Icon(Icons.refresh, size: 16),
-                            onPressed: widget.onRetakeScreenshot,
-                          ),
-                        const SizedBox(width: 4),
-                        IconButton.filledTonal(
-                          key: const Key('feedback-remove-screenshot-btn'),
-                          visualDensity: VisualDensity.compact,
-                          tooltip: '移除截图',
-                          icon: const Icon(Icons.delete_outline, size: 16),
-                          onPressed: () {
-                            setState(() {
-                              _screenshotBytes = null;
-                              _captureInfo = null;
-                            });
-                          },
-                        ),
+                        ..._composeLeading(context, theme),
+                        SizedBox(height: 140, child: input),
+                        const SizedBox(height: 10),
+                        _buildLogsSection(context, theme),
+                        const SizedBox(height: 10),
+                        counterRow,
                       ],
                     ),
                   ),
-                ],
-              ),
-            ),
-          ],
-          Expanded(
-            child: TextField(
-              key: const Key('feedback-input'),
-              controller: _draft,
-              focusNode: _draftFocus,
-              expands: true,
-              maxLines: null,
-              minLines: null,
-              textAlignVertical: TextAlignVertical.top,
-              keyboardType: TextInputType.multiline,
-              inputFormatters: <TextInputFormatter>[
-                const _RuneLimitFormatter(kFeedbackMaxTextRunes),
+                )
+              else ...<Widget>[
+                ..._composeLeading(context, theme),
+                Expanded(child: input),
+                const SizedBox(height: 10),
+                _buildLogsSection(context, theme),
+                const SizedBox(height: 10),
+                counterRow,
               ],
-              decoration: const InputDecoration(
-                hintText: '刚才哪里不顺手？你希望它怎样改进？',
-                border: OutlineInputBorder(),
-                isDense: true,
-              ),
-            ),
+            ],
           ),
-          const SizedBox(height: 10),
-          Row(
+        );
+      },
+    );
+  }
+
+  /// 撰写视图顶部固定块（错误横幅 + 截图预览）。
+  List<Widget> _composeLeading(BuildContext context, ThemeData theme) {
+    return <Widget>[
+      if (_composeError != null) ...<Widget>[
+        Container(
+          key: const Key('feedback-compose-error'),
+          margin: const EdgeInsets.only(bottom: 12),
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: theme.colorScheme.errorContainer,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(
             children: <Widget>[
-              Text(
-                '$runes / $kFeedbackMaxTextRunes',
-                key: const Key('feedback-counter'),
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: nearLimit
-                      ? theme.colorScheme.error
-                      : theme.colorScheme.onSurfaceVariant,
-                ),
-              ),
-              const Spacer(),
-              FilledButton.icon(
-                key: const Key('feedback-submit'),
-                onPressed: _canSubmit ? _submit : null,
-                icon: const Icon(Icons.send_outlined, size: 18),
-                // Class A（未送达）时按钮语义是重试：同 key 同字节重发，
-                // 快照变化（改文案 / 换图 / 移图）则自动换新 key。
-                label: Text(
-                  _stage == FeedbackStage.notSent ? '重试提交' : '提交',
+              Icon(Icons.warning_amber_rounded,
+                  size: 18, color: theme.colorScheme.onErrorContainer),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  _composeError!,
+                  style: TextStyle(color: theme.colorScheme.onErrorContainer),
                 ),
               ),
             ],
+          ),
+        ),
+      ],
+      if (_screenshotBytes != null) ...<Widget>[
+        Container(
+          key: const Key('feedback-screenshot-wrap'),
+          height: 120,
+          margin: const EdgeInsets.only(bottom: 12),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: theme.colorScheme.outlineVariant),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: Stack(
+            fit: StackFit.expand,
+            children: <Widget>[
+              GestureDetector(
+                key: const Key('feedback-screenshot-thumb'),
+                onTap: () => _openZoomDialog(context),
+                child: Image.memory(
+                  _screenshotBytes!,
+                  fit: BoxFit.cover,
+                ),
+              ),
+              Positioned(
+                top: 6,
+                left: 6,
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: Colors.black54,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: const Text(
+                    '当前截图 (点击放大)',
+                    style: TextStyle(color: Colors.white, fontSize: 10),
+                  ),
+                ),
+              ),
+              Positioned(
+                bottom: 6,
+                right: 6,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    if (widget.onRetakeScreenshot != null)
+                      IconButton.filledTonal(
+                        key: const Key('feedback-retake-btn'),
+                        visualDensity: VisualDensity.compact,
+                        tooltip: '重新截图',
+                        icon: const Icon(Icons.refresh, size: 16),
+                        onPressed: _attachmentsLocked
+                            ? null
+                            : widget.onRetakeScreenshot,
+                      ),
+                    const SizedBox(width: 4),
+                    IconButton.filledTonal(
+                      key: const Key('feedback-remove-screenshot-btn'),
+                      visualDensity: VisualDensity.compact,
+                      tooltip: '移除截图',
+                      icon: const Icon(Icons.delete_outline, size: 16),
+                      onPressed: _attachmentsLocked
+                          ? null
+                          : () {
+                              setState(() {
+                                _screenshotBytes = null;
+                                _captureInfo = null;
+                              });
+                            },
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    ];
+  }
+
+  /// 撰写视图固定块的估算高度（用于决定是否需要滚动兜底）。
+  double _composeFixedHeight() {
+    double height = 20; // 两处 SizedBox(10)
+    if (_composeError != null) height += 64;
+    if (_screenshotBytes != null) height += 132;
+    height += 36; // 日志区标题行
+    if (_logCollecting || _logFailure != null) height += 34;
+    if (_logs.isEmpty) {
+      height += 20;
+    } else {
+      height += 44.0 * _logs.length;
+    }
+    height += 26; // 归档说明
+    height += 40; // 计数行 + 提交按钮
+    return height;
+  }
+
+  /// 日志附件区：标题行（含手动添加入口）+ 自动采集状态 + 列表 + 归档说明。
+  Widget _buildLogsSection(BuildContext context, ThemeData theme) {
+    final bool locked = _attachmentsLocked;
+    final bool canAdd = !locked && _logs.length < kFeedbackMaxLogs;
+    final bool showRetry =
+        widget.config.logProvider != null && !_logCollecting && _logFailure != null;
+    return Column(
+      key: const Key('feedback-logs-area'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        Row(
+          children: <Widget>[
+            Icon(Icons.description_outlined,
+                size: 16, color: theme.colorScheme.onSurfaceVariant),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                '运行日志（可选，最多 $kFeedbackMaxLogs 个，每个 ≤ 1MiB）',
+                key: const Key('feedback-log-title'),
+                style: theme.textTheme.bodySmall,
+              ),
+            ),
+            TextButton.icon(
+              key: const Key('feedback-log-add'),
+              onPressed: canAdd ? _pickManualLogs : null,
+              icon: const Icon(Icons.attach_file, size: 16),
+              label: const Text('添加文件'),
+              style: TextButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+              ),
+            ),
+          ],
+        ),
+        if (_logCollecting) ...<Widget>[
+          Padding(
+            padding: const EdgeInsets.only(top: 2, bottom: 6),
+            child: Row(
+              children: <Widget>[
+                const SizedBox.square(
+                  dimension: 12,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  '正在获取运行日志…',
+                  key: const Key('feedback-log-status'),
+                  style: theme.textTheme.bodySmall,
+                ),
+              ],
+            ),
+          ),
+        ] else if (_logFailure != null && !_logFailureDismissed) ...<Widget>[
+          Padding(
+            padding: const EdgeInsets.only(top: 2, bottom: 6),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  _logFailure!,
+                  key: const Key('feedback-log-status'),
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.error,
+                  ),
+                ),
+                if (_logFailureDetail != null)
+                  Text(
+                    _logFailureDetail!,
+                    key: const Key('feedback-log-status-detail'),
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                Row(
+                  children: <Widget>[
+                    if (showRetry)
+                      TextButton(
+                        key: const Key('feedback-log-retry'),
+                        onPressed: _startLogCollect,
+                        child: const Text('重试'),
+                      ),
+                    if (showRetry)
+                      TextButton(
+                        key: const Key('feedback-log-continue'),
+                        onPressed: _continueWithoutLogs,
+                        child: const Text('不带日志继续提交'),
+                      ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ] else if (_logFailureDismissed && showRetry) ...<Widget>[
+          // 已选择「不带日志继续提交」：提示收起，但重试入口仍可达。
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton(
+              key: const Key('feedback-log-retry'),
+              onPressed: _startLogCollect,
+              child: const Text('重试获取日志'),
+            ),
+          ),
+        ],
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 132),
+          child: _logs.isEmpty
+              ? Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Text(
+                    '暂无附加日志文件',
+                    key: const Key('feedback-log-empty'),
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                )
+              : SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: <Widget>[
+                      for (int i = 0; i < _logs.length; i++)
+                        _buildLogRow(context, theme, i, _logs[i], locked),
+                    ],
+                  ),
+                ),
+        ),
+        Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: Text(
+            '日志会参与 AI 分析并随反馈归档；请在导出前自行去除凭据等敏感内容。',
+            key: const Key('feedback-log-notice'),
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildLogRow(
+    BuildContext context,
+    ThemeData theme,
+    int index,
+    FeedbackLogAttachment log,
+    bool locked,
+  ) {
+    final String size = log.byteSize > 1024
+        ? '${(log.byteSize / 1024).toStringAsFixed(1)} KB'
+        : '${log.byteSize} B';
+    return Padding(
+      key: Key('feedback-log-item-$index'),
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        children: <Widget>[
+          Expanded(
+            child: Text(
+              log.name,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.bodySmall,
+            ),
+          ),
+          const SizedBox(width: 6),
+          Text(
+            size,
+            key: Key('feedback-log-size-$index'),
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(width: 6),
+          Text(
+            log.source.label,
+            key: Key('feedback-log-source-$index'),
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.primary,
+            ),
+          ),
+          IconButton(
+            key: Key('feedback-log-preview-$index'),
+            visualDensity: VisualDensity.compact,
+            tooltip: '预览',
+            icon: const Icon(Icons.visibility_outlined, size: 16),
+            onPressed: () => _openLogPreview(log),
+          ),
+          IconButton(
+            key: Key('feedback-log-remove-$index'),
+            visualDensity: VisualDensity.compact,
+            tooltip: '移除',
+            icon: const Icon(Icons.delete_outline, size: 16),
+            onPressed: locked ? null : () => _removeLog(index),
           ),
         ],
       ),

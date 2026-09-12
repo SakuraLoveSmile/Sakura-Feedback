@@ -78,6 +78,32 @@ export interface ScreenshotRow {
   created_at: string;
 }
 
+export type LogSource = "auto" | "manual";
+
+export interface FeedbackLogRow {
+  id: string;
+  feedback_id: string;
+  ordinal: number;
+  name: string;
+  source: LogSource;
+  content: Uint8Array;
+  byte_size: number;
+  sha256: string;
+  created_at: string;
+}
+
+/** 管理页/列表用的日志元数据（不含内容字节）。 */
+export type FeedbackLogMeta = Omit<FeedbackLogRow, "content">;
+
+/** 日志写入输入（id/ordinal/createdAt 由仓库层统一生成）。 */
+export interface FeedbackLogInput {
+  name: string;
+  source: LogSource;
+  content: Uint8Array;
+  byteSize: number;
+  sha256: string;
+}
+
 export interface ScreenshotMeta {
   feedback_id: string;
   width: number;
@@ -120,6 +146,7 @@ export function contentHash(
   text: string,
   context: unknown,
   screenshot?: { sha256: string; releasePoint?: { x: number; y: number } } | null,
+  logs?: { name: string; sha256: string }[] | null,
 ): string {
   const payload: Record<string, unknown> = { appId, text, context: context ?? null };
   if (screenshot) {
@@ -127,6 +154,11 @@ export function contentHash(
     if (screenshot.releasePoint) {
       payload.releasePoint = screenshot.releasePoint;
     }
+  }
+  // 有日志才加入 logs 键（有序清单 + 内容摘要）；没有日志时 payload 与旧算法逐字节一致，
+  // 保证旧客户端的重试仍能命中同一幂等摘要。
+  if (logs && logs.length > 0) {
+    payload.logs = logs.map((l) => ({ name: l.name, sha256: l.sha256 }));
   }
   return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
 }
@@ -293,6 +325,7 @@ export function insertFeedbackWithScreenshot(
     sha256: string;
     captureJson: string | null;
   } | null,
+  logs?: FeedbackLogInput[] | null,
 ): FeedbackRow {
   const now = nowIso();
   const row: FeedbackRow = {
@@ -350,6 +383,17 @@ export function insertFeedbackWithScreenshot(
         screenshot.captureJson,
         now,
       );
+    }
+
+    // 日志与反馈、截图在同一事务写入：任一条失败整体回滚（不留下半截附件）
+    if (logs && logs.length > 0) {
+      const stmt = db.prepare(
+        `INSERT INTO feedback_logs (id, feedback_id, ordinal, name, source, content, byte_size, sha256, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      logs.forEach((log, ordinal) => {
+        stmt.run(randomUUID(), row.id, ordinal, log.name, log.source, log.content, log.byteSize, log.sha256, now);
+      });
     }
     db.exec("COMMIT");
     return row;
@@ -427,6 +471,30 @@ export function getFeedbackScreenshotMeta(db: Db, feedbackId: string): Screensho
   };
 }
 
+/** 某反馈的全部日志（按 ordinal 升序，含内容字节）。 */
+export function listFeedbackLogs(db: Db, feedbackId: string): FeedbackLogRow[] {
+  return db
+    .prepare("SELECT * FROM feedback_logs WHERE feedback_id = ? ORDER BY ordinal")
+    .all(feedbackId) as unknown as FeedbackLogRow[];
+}
+
+/** 某反馈的全部日志元数据（按 ordinal 升序，不含内容字节）。 */
+export function listFeedbackLogsMeta(db: Db, feedbackId: string): FeedbackLogMeta[] {
+  return db
+    .prepare(
+      "SELECT id, feedback_id, ordinal, name, source, byte_size, sha256, created_at FROM feedback_logs WHERE feedback_id = ? ORDER BY ordinal",
+    )
+    .all(feedbackId) as unknown as FeedbackLogMeta[];
+}
+
+/** 单条日志（含内容字节）；logId 不属于该反馈时返回 null。 */
+export function getFeedbackLog(db: Db, feedbackId: string, logId: string): FeedbackLogRow | null {
+  const row = db
+    .prepare("SELECT * FROM feedback_logs WHERE id = ? AND feedback_id = ?")
+    .get(logId, feedbackId) as unknown as FeedbackLogRow | undefined;
+  return row ?? null;
+}
+
 export function updateFeedback(
   db: Db,
   id: string,
@@ -453,10 +521,12 @@ export function updateFeedback(
   db.prepare(`UPDATE feedbacks SET ${sets}, updated_at = ? WHERE id = ?`).run(...values, nowIso(), id);
 }
 
+export type FeedbackListRow = FeedbackRow & { has_screenshot?: number; log_count?: number };
+
 export function listFeedbacks(
   db: Db,
   filter: { status?: FeedbackStatus; appId?: string; cursor?: string; limit: number },
-): { items: (FeedbackRow & { has_screenshot?: number })[]; nextCursor: string | null } {
+): { items: FeedbackListRow[]; nextCursor: string | null } {
   const where: string[] = [];
   const params: (string | number)[] = [];
   if (filter.status) {
@@ -480,10 +550,11 @@ export function listFeedbacks(
   const w = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const rows = db
     .prepare(
-      `SELECT f.*, (SELECT 1 FROM feedback_screenshots s WHERE s.feedback_id = f.id) AS has_screenshot
+      `SELECT f.*, (SELECT 1 FROM feedback_screenshots s WHERE s.feedback_id = f.id) AS has_screenshot,
+         (SELECT COUNT(*) FROM feedback_logs l WHERE l.feedback_id = f.id) AS log_count
        FROM feedbacks f ${w} ORDER BY f.created_at DESC, f.id DESC LIMIT ?`,
     )
-    .all(...params, filter.limit + 1) as unknown as (FeedbackRow & { has_screenshot?: number })[];
+    .all(...params, filter.limit + 1) as unknown as FeedbackListRow[];
   const hasMore = rows.length > filter.limit;
   const items = hasMore ? rows.slice(0, filter.limit) : rows;
   const last = items[items.length - 1];
@@ -502,7 +573,7 @@ export function findResumable(db: Db): { requeue: FeedbackRow[]; uncertain: Feed
 }
 
 /** 管理列表用的轻量字段。 */
-export function toAdminListItem(r: FeedbackRow & { has_screenshot?: number }) {
+export function toAdminListItem(r: FeedbackListRow) {
   return {
     id: r.id,
     appId: r.app_id,
@@ -514,5 +585,19 @@ export function toAdminListItem(r: FeedbackRow & { has_screenshot?: number }) {
     errorSummary: r.error_summary,
     archiveStage: r.archive_stage,
     hasScreenshot: Boolean(r.has_screenshot),
+    logCount: Number(r.log_count ?? 0),
+  };
+}
+
+/** 管理详情用的日志元数据 DTO。 */
+export function toAdminLogItem(l: FeedbackLogMeta) {
+  return {
+    id: l.id,
+    name: l.name,
+    source: l.source,
+    byteSize: l.byte_size,
+    sha256: l.sha256,
+    createdAt: l.created_at,
+    ordinal: l.ordinal,
   };
 }

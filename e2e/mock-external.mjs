@@ -135,6 +135,10 @@ let kaneoBase = process.env.E2E_KANEO_PUBLIC_BASE || "http://127.0.0.1:8898";
 function takeInjection(stage) {
   const f = state.fail;
   if (!f.stage || !f.mode || f.stage !== stage) return null;
+  if (f.skip && f.skip > 0) {
+    f.skip -= 1;
+    return null;
+  }
   const out = { mode: f.mode, afterWrite: f.afterWrite !== false };
   f.fired += 1;
   if (f.once !== false) {
@@ -240,7 +244,8 @@ http
     if (url.pathname === "/__health") return json(res, 200, { ok: true });
     json(res, 404, { error: "not found" });
   })
-  .listen(8899, "127.0.0.1", () => console.log("[mock-ai] :8899"));
+  .listen(Number(process.env.E2E_AI_PORT || 8899), "127.0.0.1", () =>
+    console.log(`[mock-ai] :${process.env.E2E_AI_PORT || 8899}`));
 
 // ---------- Kaneo mock ----------
 http
@@ -298,6 +303,7 @@ http
       }
       if ("once" in body) state.fail.once = Boolean(body.once);
       if ("afterWrite" in body) state.fail.afterWrite = Boolean(body.afterWrite);
+      if ("skip" in body) state.fail.skip = Number.isInteger(body.skip) && body.skip > 0 ? body.skip : 0;
       if (body.mode === null || body.stage === null) state.fail.fired = 0;
       if ("expire" in body) state.expireNextPresign = Boolean(body.expire);
       return json(res, 200, failState());
@@ -317,7 +323,7 @@ http
       state.commentSeq = 0;
       state.uploadAuthLeaks = [];
       // 新增状态一并复位
-      state.fail = { stage: null, mode: null, once: true, afterWrite: true, fired: 0 };
+      state.fail = { stage: null, mode: null, once: true, afterWrite: true, skip: 0, fired: 0 };
       state.expireNextPresign = false;
       state.calls = emptyCalls();
       state.presigns = [];
@@ -600,4 +606,5 @@ http
     }
     json(res, 404, { error: "not found" });
   })
-  .listen(8898, "127.0.0.1", () => console.log("[mock-kaneo] :8898"));
+  .listen(Number(process.env.E2E_KANEO_PORT || 8898), "127.0.0.1", () =>
+    console.log(`[mock-kaneo] :${process.env.E2E_KANEO_PORT || 8898}`));

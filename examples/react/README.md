@@ -104,6 +104,31 @@ effect（mount → unmount → mount），本示例是安全的：
 没有系统悬浮窗、不跨应用截图。`data-feedback-capture-mask` 标注的区域
 （见 `src/App.tsx` 的敏感数据演示区）在截图中会被中性遮罩覆盖。
 
+## 宿主日志演示（`logProvider`）
+
+示例多了一个按钮「写一条日志」：宿主自己维护**内存日志环形缓冲**
+（`src/host-logs.ts`，200 行上限，超出丢最旧的行），`logProvider` 返回它的导出文本：
+
+```tsx
+// logProvider 是元素实例的 JS 属性；useMemo 保证引用稳定，StrictMode
+// 双调用 effect 时第二次赋值是 no-op，不会打断在途采集。
+const logProvider = useMemo<LogProvider>(() => () => exportHostLog(hostLogs), [hostLogs]);
+useEffect(() => {
+  if (!widget) return;
+  widget.logProvider = logProvider;
+}, [widget, logProvider]);
+```
+
+- `logProvider` 是**元素实例的 JS 属性**（不是 attribute，写在 JSX 上无效）；
+  也可以经 `openFeedback({ logProvider })` 传入。
+- 组件只在**新草稿首次打开**面板时调用一次（3 秒超时 → 面板给出
+  「重试 / 不带日志继续提交」）；关闭重开已有草稿、或用户移除日志后都**不会**自动重新采集。
+- 上限：3 个 / 每个 1 MiB / 扩展名 `.log/.txt/.json/.jsonl` / 严格 UTF-8；
+  超限会**逐个给出明确原因**（不静默丢弃、不截断）。面板里可预览（截断并说明）、
+  移除，也能用原生 `<input type="file" multiple>` 手动补充。
+- 示例**不扫盘、不拦截 console**：交给组件的只是宿主本来就有的那点内存日志；
+  真实项目请先在宿主侧去掉凭据等敏感内容。
+
 ## 连你本地的服务
 
 - `api-base` 改成你的服务地址，`app-id` 必须是服务端登记过的软件标识。

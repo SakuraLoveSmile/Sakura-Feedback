@@ -1,6 +1,6 @@
 name: feedback_widget
 description: 个人反馈组件——将反馈悬浮按钮与面板嵌入 Flutter 应用，对接 Feedback 服务。
-version: 0.1.0
+version: 0.2.0
 publish_to: none
 
 environment:
@@ -12,7 +12,11 @@ dependencies:
     sdk: flutter
 
   http: ^1.2.0
+  # 日志文件部件需要显式声明 text/plain 内容类型（http 的 MultipartFile 参数）。
+  http_parser: ^4.0.0
   url_launcher: ^6.3.0
+  # 手动添加日志：跨端文件选择（Web 与原生端同一套 openFiles + readAsBytes）。
+  file_selector: ^1.1.0
   # 原生平台的 flutter_secure_storage 仅通过条件导入使用；
   # web 端令牌仅存内存（见 src/token_store/_web 实现）。
   flutter_secure_storage: ^9.2.2
