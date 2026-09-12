@@ -12,12 +12,26 @@
   4. 反证：换成**不同主密钥**启动同一份恢复数据 → 密文无法解密，连接按"未配置"处理。
      以此证明"保留主密钥"是硬前提，而不是可选项。
 
-前置：宿主 mock 已在 8898/8899；镜像 feedback-service:local 已构建；Docker daemon 可用。
+前置：宿主 mock 已在 8898/8899；Docker daemon 可用；被测镜像可由 `docker image inspect` 解析。
 不依赖 run_docker.py 的模块级常量，独立管理自己的容器/卷，便于单独运行。
+
+环境变量（全部可选，不设置时保持既有行为）：
+  * `FEEDBACK_E2E_IMAGE`    被测镜像引用，默认 `feedback-service:local`。
+                            可直接给候选 digest（`repo@sha256:...`）：本脚本用
+                            `docker image inspect` 解析引用，不要求镜像有本地标签。
+  * `FEEDBACK_E2E_PLATFORM` 强制 `docker run --platform`。默认 auto：镜像架构与本机
+                            daemon 架构不一致时自动用 `linux/<镜像架构>`（例如 ARM 主机
+                            上跑 amd64 候选镜像，属于模拟环境，不作为性能证据）。
+  * `FEEDBACK_E2E_RUN_ID`   本次运行标识。默认按时间+pid 生成，用于给容器/卷起专属名称。
+  * `FEEDBACK_E2E_PORT_A/B/C` 三个测试端口，默认 8791/8792/8793。
+
+资源归属：容器与卷一律带本次 RUN_ID 后缀，退出时只删除**本次运行创建**的资源，
+不按固定名称删除其它实例的数据；端口被占用时直接报错，不抢占。
 """
 import json
 import hashlib
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -25,18 +39,27 @@ import urllib.error
 import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-IMAGE = "feedback-service:local"
+IMAGE = os.environ.get("FEEDBACK_E2E_IMAGE") or "feedback-service:local"
 MOCK = "http://127.0.0.1:8898"
 MOCK_AI = "http://127.0.0.1:8899"
 MOCK_IN_DOCKER = "http://host.docker.internal:8898"
 MOCK_AI_IN_DOCKER = "http://host.docker.internal:8899/v1"
 ADMIN = {"username": "admin", "password": "backup-e2e-pass"}
 
-VOL_SRC = "fb-br-src"
-VOL_DST = "fb-br-dst"
-A, B, C = "fb-br-a", "fb-br-b", "fb-br-c"
-PORT_A, PORT_B, PORT_C = 8791, 8792, 8793
+# 本次运行专属标识与资源名：绝不复用固定名称，避免误删上一次运行留下的容器/卷。
+RUN_ID = os.environ.get("FEEDBACK_E2E_RUN_ID") or f"{time.strftime('%m%d%H%M%S')}-{os.getpid()}"
+VOL_SRC = f"fb-br-src-{RUN_ID}"
+VOL_DST = f"fb-br-dst-{RUN_ID}"
+A, B, C = (f"fb-br-a-{RUN_ID}", f"fb-br-b-{RUN_ID}", f"fb-br-c-{RUN_ID}")
+PORT_A = int(os.environ.get("FEEDBACK_E2E_PORT_A") or 8791)
+PORT_B = int(os.environ.get("FEEDBACK_E2E_PORT_B") or 8792)
+PORT_C = int(os.environ.get("FEEDBACK_E2E_PORT_C") or 8793)
 APP_ID = "com.br.test"
+
+PLATFORM = ""       # 由 resolve_platform() 决定
+IMAGE_IDENT = None  # (image_id, architecture, repo_digests_json)
+CREATED_CONTAINERS = []
+CREATED_VOLUMES = []
 
 results = []
 
@@ -57,20 +80,87 @@ def docker(*args, timeout=180, check_rc=True):
     return p.stdout.strip()
 
 
-def rm(name):
-    subprocess.run(["docker", "rm", "-f", name], capture_output=True, text=True)
-    subprocess.run(["docker", "volume", "rm", name], capture_output=True, text=True)
+def _norm_arch(arch):
+    return {"aarch64": "arm64", "x86_64": "amd64", "amd64": "amd64", "arm64": "arm64"}.get(
+        (arch or "").strip(), (arch or "").strip()
+    )
+
+
+def image_inspect(ref):
+    """用 `docker image inspect` 解析镜像引用。
+
+    digest 引用（repo@sha256:...）没有本地标签，旧写法 `docker images --format
+    {{.Repository}}:{{.Tag}}` 会把它当成“不存在”而误拒。inspect 对两种引用都有效。
+
+    返回 (image_id, architecture, repo_digests_json)；不可解析时返回 None。
+    """
+    p = subprocess.run(
+        ["docker", "image", "inspect", "--format",
+         "{{.Id}}|{{.Architecture}}|{{json .RepoDigests}}", ref],
+        capture_output=True, text=True, timeout=60,
+    )
+    if p.returncode != 0:
+        return None
+    parts = p.stdout.strip().split("|", 2)
+    return tuple(parts) if len(parts) == 3 else None
+
+
+def daemon_arch():
+    p = subprocess.run(["docker", "info", "--format", "{{.Architecture}}"],
+                       capture_output=True, text=True, timeout=60)
+    return _norm_arch(p.stdout.strip()) if p.returncode == 0 else ""
+
+
+def resolve_platform():
+    """镜像架构与本机 daemon 不一致时显式 `--platform`（ARM 主机跑 amd64 候选镜像）。"""
+    forced = (os.environ.get("FEEDBACK_E2E_PLATFORM") or "").strip()
+    if forced and forced.lower() != "auto":
+        return forced
+    if not IMAGE_IDENT:
+        return ""
+    img_arch = _norm_arch(IMAGE_IDENT[1])
+    host_arch = daemon_arch()
+    if img_arch and host_arch and img_arch != host_arch:
+        return f"linux/{img_arch}"
+    return ""
+
+
+def platform_args():
+    return ["--platform", PLATFORM] if PLATFORM else []
+
+
+def cleanup():
+    """只清理本次运行创建的资源：绝不按固定名称删除其它实例的容器/卷。"""
+    for n in CREATED_CONTAINERS:
+        subprocess.run(["docker", "rm", "-f", n], capture_output=True, text=True)
+    for v in CREATED_VOLUMES:
+        subprocess.run(["docker", "volume", "rm", v], capture_output=True, text=True)
+
+
+def port_free(port):
+    with socket.socket() as s:
+        s.settimeout(0.5)
+        return s.connect_ex(("127.0.0.1", port)) != 0
+
+
+def check_ports_free():
+    busy = [p for p in (PORT_A, PORT_B, PORT_C) if not port_free(p)]
+    if busy:
+        raise RuntimeError(
+            f"测试端口被占用：{busy}。请释放端口，或用 FEEDBACK_E2E_PORT_A/B/C 指定其它端口。"
+        )
 
 
 def start(name, port, volume, master_key):
     docker(
-        "run", "-d", "--name", name, "-p", f"{port}:8787",
+        "run", "-d", "--name", name, *platform_args(), "-p", f"{port}:8787",
         "-e", f"FEEDBACK_MASTER_KEY={master_key}",
         "-e", f"FEEDBACK_ADMIN_USER={ADMIN['username']}",
         "-e", f"FEEDBACK_ADMIN_PASSWORD={ADMIN['password']}",
         "-e", "FEEDBACK_COOKIE_SECURE=false",
         "-v", f"{volume}:/data", IMAGE,
     )
+    CREATED_CONTAINERS.append(name)
 
 
 def wait_health(port, timeout=60):
@@ -220,31 +310,48 @@ def wait_held(stage, timeout=60):
 
 
 def volume_list(volume):
-    out = docker("run", "--rm", "-v", f"{volume}:/data", "--entrypoint", "sh", IMAGE,
-                 "-c", "ls -1 /data")
+    out = docker("run", "--rm", *platform_args(), "-v", f"{volume}:/data",
+                 "--entrypoint", "sh", IMAGE, "-c", "ls -1 /data")
     return [x for x in out.splitlines() if x.strip()]
 
 
 def main():
+    global PLATFORM, IMAGE_IDENT
     key_a = subprocess.run(["node", "-e", 'console.log(require("crypto").randomBytes(32).toString("base64"))'],
                            capture_output=True, text=True).stdout.strip()
     key_b = subprocess.run(["node", "-e", 'console.log(require("crypto").randomBytes(32).toString("base64"))'],
                            capture_output=True, text=True).stdout.strip()
     assert key_a and key_b and key_a != key_b
 
-    for n in (A, B, C):
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True)
-    for v in (VOL_SRC, VOL_DST):
-        docker("volume", "create", v, check_rc=False)
-        subprocess.run(["docker", "volume", "rm", v], capture_output=True)
-        docker("volume", "create", v)
+    IMAGE_IDENT = image_inspect(IMAGE)
+    PLATFORM = resolve_platform()
+    check_ports_free()
 
     try:
-        step("准备：宿主 mock 可达、镜像存在")
+        for v in (VOL_SRC, VOL_DST):
+            docker("volume", "create", v)
+            CREATED_VOLUMES.append(v)
+        step("准备：本次资源身份、宿主 mock 可达、镜像可解析")
+        print(f"       RUN_ID={RUN_ID} 容器={[A, B, C]} 卷={[VOL_SRC, VOL_DST]} 端口={[PORT_A, PORT_B, PORT_C]}",
+              flush=True)
+        print(f"       镜像={IMAGE}", flush=True)
+        if IMAGE_IDENT:
+            print(f"       image_id={IMAGE_IDENT[0]} architecture={IMAGE_IDENT[1]} "
+                  f"repo_digests={IMAGE_IDENT[2]}", flush=True)
+        print(f"       daemon_arch={daemon_arch()} → docker run 平台={PLATFORM or '（本机默认）'}"
+              + ("（跨架构模拟运行，不作为性能证据）" if PLATFORM else ""), flush=True)
+        check("镜像可由 docker image inspect 解析（digest 引用不被当作不存在）",
+              IMAGE_IDENT is not None, (IMAGE_IDENT or ("", "", ""))[0][:26])
+        if IMAGE_IDENT and "@sha256:" in IMAGE:
+            check("本地镜像 RepoDigests 与请求的 digest 一致",
+                  IMAGE.split("@", 1)[1] in IMAGE_IDENT[2], IMAGE.split("@", 1)[1])
+        if IMAGE_IDENT:
+            free = docker("run", "--rm", *platform_args(), "--entrypoint", "sh", IMAGE,
+                          "-c", "df -h / | tail -1")
+            print(f"       Docker VM 空间: {free}", flush=True)
         check("宿主 mock Kaneo :8898 可达", mock("/__health").get("ok") is True)
         ai_calls = urllib.request.urlopen(f"{MOCK_AI}/__mock/ai-calls", timeout=5).read().decode()
         check("宿主 mock AI :8899 可达", "ai" in ai_calls or ai_calls.strip().startswith(("{", "[")))
-        check(f"镜像 {IMAGE} 存在", IMAGE in docker("images", "--format", "{{.Repository}}:{{.Tag}}"))
         mock("/__mock/reset", {})
         # 容器内的预签名/资产地址必须指向容器可达的宿主名，否则上传阶段必然失败
         mock("/__mock/state", {"publicBase": MOCK_IN_DOCKER})
@@ -319,7 +426,7 @@ def main():
               not wal_after_stop, str(wal_after_stop))
 
         step("整目录拷贝 data/ 到隔离卷")
-        docker("run", "--rm", "-v", f"{VOL_SRC}:/from", "-v", f"{VOL_DST}:/to",
+        docker("run", "--rm", *platform_args(), "-v", f"{VOL_SRC}:/from", "-v", f"{VOL_DST}:/to",
                "--entrypoint", "sh", IMAGE, "-c", "cp -a /from/. /to/ && ls -1 /to")
         check("隔离卷已获得数据副本", "feedback.db" in volume_list(VOL_DST))
 
@@ -371,10 +478,7 @@ def main():
         check("错误主密钥下同样不会向 Kaneo 写入", tasks_after_wrong_key == tasks_after_submit,
               f"{tasks_after_submit} -> {tasks_after_wrong_key}")
     finally:
-        for n in (A, B, C):
-            subprocess.run(["docker", "rm", "-f", n], capture_output=True)
-        for v in (VOL_SRC, VOL_DST):
-            subprocess.run(["docker", "volume", "rm", v], capture_output=True)
+        cleanup()
 
     passed = sum(1 for _, ok in results if ok)
     failed = [n for n, ok in results if not ok]
