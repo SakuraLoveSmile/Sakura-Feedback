@@ -9,7 +9,7 @@
 |---|---|---|
 | T1 本地服务真实保存并归档 | 实现中 | 真实纯文字已归档；日志保存/管理下载通过，Kaneo 申请附件上传地址返回 503，图文日志仍待核对 |
 | T2 独立 Web／Android 示例可用 | 实现中 | Chromium/Firefox 日志流程通过；WebKit 正常上传被动观测修复后全流程通过；Mi 10 安装启动成功，锁屏/输入权限阻止 UI 操作 |
-| T3 固定版本安装 | 实现中 | 已统一 0.2.0，独立 Web 安装通过；候选源码验证中，未打正式标签或发布镜像 |
+| T3 固定版本安装 | 实现中 | 已统一 0.2.0，干净候选检查、独立 Web/Flutter 安装及远端候选镜像核验通过；未打正式标签/Release |
 
 ### 本轮代码与修复
 
@@ -64,6 +64,21 @@ Chromium 首次及 WebKit 早期测试受共享 mock 重置/退出干扰，废�
   `/tmp/feedback-closeout-docker-build.log`。宿主仍有约 67 GiB，但 Docker 自身存储不足；
   未清理其他项目镜像/卷/缓存。不得把较早 33/33 说成最终镜像重跑。
 
+### 最终候选与远端产物核验（T3）
+
+候选源码提交：`366349209e50e931731aa7e21f6bac5b119b2895`，已推送分支 `codex/closeout-v0.2.0`。
+后续记录/截图提交不改变该候选来源。本次未合并 main、未创建 v0.2.0 标签或正式 Release。
+
+- 干净工作树 `/tmp/feedback-v020-clean-3663492`：按顺序 frozen install → build → typecheck → lint → test 全通过，检查后无跟踪文件变化；server 170、Web 145。记录 `/tmp/feedback-clean-{install,build,typecheck,lint,test}.log`。
+- 最终浏览器：Chromium 288/288、Firefox 288/288；加入 P8 等待真实归档完成断言后，两者各定向重跑 P8 42/42。WebKit 最终完整脚本 290/290。日志位于 `/tmp/feedback-closeout-browser/`：`chromium-candidate.log`、`firefox-candidate.log`、`chromium-p8-final.log`、`firefox-p8-final.log`、`webkit-candidate.log`。
+- 干净候选 Web 包在仓库外全新目录 npm install → build → tsc 退出 0；目录指针 `/tmp/feedback-closeout-clean-install-path`，日志 `/tmp/feedback-clean-package-install.log`。
+- Flutter 仓库外项目从 HTTPS Git 固定上述 SHA，`flutter pub get` 和 `flutter analyze` 通过；lock 的 resolved-ref 完全匹配，包来自 `.pub-cache/git` 而非 workspace。目录指针 `/tmp/feedback-closeout-flutter-path`。
+- [远端候选工作流 34676698322](https://github.com/SakuraLoveSmile/Sakura-Feedback/actions/runs/34676698322)：Node、Flutter、secret guard、artifacts、publish 全部 success。手动分支构建只发布 SHA 候选镜像，不代表正式版本发布。
+- 已下载 `feedback-web-0.2.0.tgz`、完整 Web/admin dist ZIP、`SHA256SUMS`、`SOURCE.txt` 到 `/tmp/feedback-remote-final/web`；执行 `shasum -a 256 -c SHA256SUMS` 三项全部 OK，SOURCE commit 与候选一致。
+- 远端 tarball SHA-256：`1e47e8292a8394e0e350e07e88c6bbe7b392f32cf950847ed4d089b3ab667e82`。本地干净打包 SHA-256：`a9f1a8f75c259ea4ae48a0402ec97a9937d04f56ff4df83516c2071b5c68bf89`。归档字节不同，逐文件比较 12 个文件的 SHA-256 完全相同，不能混用两个包的归档校验和。
+- 镜像：`ghcr.io/sakuralovesmile/sakura-feedback@sha256:1d72d8a04ff8a1717e5f62a7da1fe77324fc5d82f77dede24e8b15a3b83f609d`。已下载 image-digest.txt，并用 `docker buildx imagetools inspect` 从远端核对 digest；平台 linux/amd64。
+- 远端构建成功只补齐最终镜像构建证据，不能替代上述因本地 Docker 存储不足尚未重跑的最终候选停服恢复验证。
+
 ### 真实服务证据与阻塞（T1）
 
 隔离数据：`/tmp/fb-real-agent/data`，服务 `http://192.168.0.23:8798`，健康路径 `/healthz`。
@@ -103,7 +118,7 @@ ADB 输入曾返回 INJECT_EVENTS 权限拒绝。未绕过设备保护。
 
 ### 剩余执行与状态规则
 
-WebKit 与管理恢复路径已修复并验证；继续完成最终隔离源码检查。外部 503、设备锁屏和 Docker 存储不足分别阻塞对应验收。
+WebKit 与管理恢复路径已修复并验证，最终干净候选检查完成。外部 503、设备锁屏和 Docker 存储不足分别阻塞对应验收。
 正式 v0.2.0 发布保留门禁，不把候选 tarball 当已发布版本；远端产物校验和、来源 SHA、镜像 digest 必须发布后核验。
 
 状态只用未开始／实现中／待体验／已验收；适用必要验证完成才待体验，用户确认后才已验收。
