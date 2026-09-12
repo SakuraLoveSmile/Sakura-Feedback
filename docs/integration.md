@@ -13,6 +13,9 @@
 ## v0.2.0 接入入口（截图、描述与日志）
 
 当前收尾版本为 **0.2.0**，发布及验证状态以 [`closeout.md`](closeout.md) 为准；旧 v0.1.0 产物不含本轮日志能力。
+**当前尚无正式 v0.2.0 Release。** 可测试候选提交 `366349209e50e931731aa7e21f6bac5b119b2895`：
+从 [候选工作流](https://github.com/SakuraLoveSmile/Sakura-Feedback/actions/runs/34676698322) 下载 Web 产物，Flutter 固定该 SHA；候选镜像 digest 和未完成验收见 `closeout.md`。
+下文 Release 安装步骤用于正式发布后，不能把旧版本资产替代为日志版本。
 先部署新服务，再升级客户端；无日志的旧客户端仍可使用原 JSON／截图提交。
 
 1. **真实本地服务**：`corepack pnpm install --frozen-lockfile && corepack pnpm build`。
