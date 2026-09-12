@@ -7,9 +7,9 @@
 
 | 任务 | 当前状态 | 结果与缺口 |
 |---|---|---|
-| T1 本地服务真实保存并归档 | 实现中 | 真实纯文字已归档；日志保存/管理下载通过，Kaneo 申请附件上传地址返回 503，图文日志仍待核对 |
-| T2 独立 Web／Android 示例可用 | 实现中 | Chromium/Firefox 日志流程通过；WebKit 正常上传被动观测修复后全流程通过；Mi 10 安装启动成功，锁屏/输入权限阻止 UI 操作 |
-| T3 固定版本安装 | 实现中 | 已统一 0.2.0，干净候选检查、独立 Web/Flutter 安装及远端候选镜像核验通过；未打正式标签/Release |
+| T1 本地服务真实保存并归档 | 实现中（外部阻塞） | 真实纯文字已归档；日志保存/管理下载通过；附件 503 根因已用**线上证据**定位为 Kaneo 部署实例未配置 `S3_ENDPOINT`／`S3_BUCKET`，修复指引见下文；图文日志仍待核对 |
+| T2 独立 Web／Android 示例可用 | 实现中（设备阻塞） | Chromium/Firefox 日志流程通过；WebKit 正常上传被动观测修复后全流程通过；Mi 10 安装启动成功，仍处锁屏/Doze，等待用户正常解锁后完成真机操作 |
+| T3 固定版本安装 | 实现中 | 新候选 `a29c0dc` 干净树 Node/Flutter 检查全通过，候选镜像**停服备份/恢复 34/34** 通过；正式标签/Release 与发布后产物核验待 T1、T2 缺口关闭 |
 
 ### 本轮代码与修复
 
@@ -68,6 +68,8 @@ Chromium 首次及 WebKit 早期测试受共享 mock 重置/退出干扰，废�
 
 候选源码提交：`366349209e50e931731aa7e21f6bac5b119b2895`，已推送分支 `codex/closeout-v0.2.0`。
 后续记录/截图提交不改变该候选来源。本次未合并 main、未创建 v0.2.0 标签或正式 Release。
+（随后另有 `a29c0dc` 只改 e2e 脚本，见下一节“最终候选镜像的停服备份／恢复验证”；
+正式发布以最终提交为准。）
 
 - 干净工作树 `/tmp/feedback-v020-clean-3663492`：按顺序 frozen install → build → typecheck → lint → test 全通过，检查后无跟踪文件变化；server 170、Web 145。记录 `/tmp/feedback-clean-{install,build,typecheck,lint,test}.log`。
 - 最终浏览器：Chromium 288/288、Firefox 288/288；加入 P8 等待真实归档完成断言后，两者各定向重跑 P8 42/42。WebKit 最终完整脚本 290/290。日志位于 `/tmp/feedback-closeout-browser/`：`chromium-candidate.log`、`firefox-candidate.log`、`chromium-p8-final.log`、`firefox-p8-final.log`、`webkit-candidate.log`。
@@ -78,6 +80,42 @@ Chromium 首次及 WebKit 早期测试受共享 mock 重置/退出干扰，废�
 - 远端 tarball SHA-256：`1e47e8292a8394e0e350e07e88c6bbe7b392f32cf950847ed4d089b3ab667e82`。本地干净打包 SHA-256：`a9f1a8f75c259ea4ae48a0402ec97a9937d04f56ff4df83516c2071b5c68bf89`。归档字节不同，逐文件比较 12 个文件的 SHA-256 完全相同，不能混用两个包的归档校验和。
 - 镜像：`ghcr.io/sakuralovesmile/sakura-feedback@sha256:1d72d8a04ff8a1717e5f62a7da1fe77324fc5d82f77dede24e8b15a3b83f609d`。已下载 image-digest.txt，并用 `docker buildx imagetools inspect` 从远端核对 digest；平台 linux/amd64。
 - 远端构建成功只补齐最终镜像构建证据，不能替代上述因本地 Docker 存储不足尚未重跑的最终候选停服恢复验证。
+
+### 最终候选镜像的停服备份／恢复验证（T3 补齐，2026-09-12）
+
+新候选提交：`a29c0dca70d8c8a89a3763222fd8f2c23b5d0eb0`
+（`test(e2e): 备份恢复脚本支持候选镜像 digest 与运行专属资源`，仅改 `e2e/run_backup_restore.py`）。
+
+脚本改动（对应计划的三项要求）：镜像可用 `FEEDBACK_E2E_IMAGE` 指定、默认仍是
+`feedback-service:local`；镜像存在性改用 `docker image inspect` 判定，digest 引用不再被标签列表误拒；
+镜像架构与 daemon 架构不一致时自动加 `--platform`；容器/卷改为带 RUN_ID 的专属名称，
+退出只清理本次创建的资源；端口被占用直接报错，不抢占也不误删其它实例数据。
+
+- **镜像**：`ghcr.io/sakuralovesmile/sakura-feedback@sha256:1d72d8a04ff8a1717e5f62a7da1fe77324fc5d82f77dede24e8b15a3b83f609d`
+  按 digest 拉取成功。`docker image inspect`：`image_id=sha256:edf2909b6a82…`、`architecture=amd64`、
+  `RepoDigests` 与请求 digest 一致、**`RepoTags` 为空**——这正是旧标签列表检查会误判“镜像不存在”的形态。
+- **模拟环境**：本机 daemon 为 `arm64`，镜像是 `linux/amd64`。Docker Desktop 配置里虽已开 Rosetta，
+  但 VM 内未注册 binfmt 处理，直接运行报 `exec format error`（`alpine` 的 amd64 镜像同样报错，
+  可排除镜像自身问题）；用 `docker run --privileged --rm tonistiigi/binfmt --install amd64`
+  注册 QEMU 处理器后 `uname -m` 返回 `x86_64`。**该注册在 Docker Desktop 重启后失效**；
+  跨架构结果只作功能验证，**不作性能证据**。
+- **空间证据（不是推测）**：拉取前 Docker VM `7.8G` 总 / `1.8G` 可用（79% 使用），宿主另有 56 GiB 可用；
+  拉取并运行后 `5.8G` 已用 / `1.6G` 可用；镜像 204434819 B。全程**未做任何全局 prune**，
+  未清理其它项目的镜像/卷/缓存。早前的 ENOSPC 发生在**构建**（Docker 内 pnpm install）而非拉取，两者资源需求不同。
+- **结果**：从干净工作树 `/tmp/feedback-clean-a29c0dc`（该提交，`git status` 为空）运行
+  `FEEDBACK_E2E_IMAGE=<上述 digest> python3 e2e/run_backup_restore.py` → **34/34 通过**，
+  日志 `/tmp/feedback-closeout-backup-restore.log`；运行后无 `fb-br-*` 容器/卷残留。
+  覆盖：两份日志写入（auto `server.log` 47 B、manual `manual.txt` 58 B）、`docker stop` 停服备份
+  （`data/` 无 WAL/SHM 残留）、原主密钥恢复后两份日志字节与 SHA-256 一致、错误主密钥不可解密
+  （连接测试 502 / `ok=false`）、待核对记录不重复创建任务（1 → 1）、隔离恢复不自动重放。
+- 同一干净提交的 Node／Flutter 检查全通过：`frozen install → build → typecheck → lint → test`
+  （server 170、Web 145；lint 仅 8 条既有警告，退出码 0；检查后工作树 `dirty=0`），
+  Flutter 组件 `flutter/feedback` analyze 无问题、测试 105/105，示例 `examples/flutter`
+  analyze 无问题、测试 9/9。日志 `/tmp/feedback-clean-{install,build,typecheck,lint,test}.log`
+  与 `/tmp/feedback-clean-flutter-{widget,example}-{analyze,test}.log`。
+- 数据库相关代码本轮无改动，未重跑迁移回归；旧库迁移证据沿用历史记录。
+- **发布后仍须做的事**：正式 Release 会由 CI 重新构建镜像，digest 必然与候选不同；
+  发布后必须用同一脚本对**实际发布 digest** 再跑一次恢复验证（计划已明确要求）。
 
 ### 真实服务证据与阻塞（T1）
 
@@ -92,12 +130,66 @@ Chromium 首次及 WebKit 早期测试受共享 mock 重置/退出干扰，废�
 - 管理页下载 `host.log` 94 B，与输入逐字节一致，SHA-256：
   `8a529167f4453d32b9c64c34da8b9047a9686509e4c68568ccf7429baf28e558`。
   真实 AI 将日志事实、未确认原因和推测分开返回。
-- 远端阻塞：`POST /api/task/{taskId}/image-upload` 申请预签名上传地址返回 **503**；
-  尚未进入 PUT/finalize，截图及日志替换均不能完成。已停止重复写入尝试。
+- 远端阻塞：`PUT /api/task/{taskId}/image-upload` 申请预签名上传地址返回 **503**
+  （旧记录写成 `POST`，已按线上证据更正，见下一节）；尚未进入 PUT/finalize，
+  截图及日志替换均不能完成。已停止重复写入尝试。
   不改 Kaneo 仓库／配置；需该实例恢复附件上传能力后继续使用现有反馈恢复。
 - 验证限制：本次真实请求只含一份自动日志；截图是已有 E2E 图片夹具，不是本轮真实 UI 截图。
   **截图＋自动/手动日志在真实 Kaneo 的最终下载及摘要比对仍未完成**，不能称完整业务验收。
   完整脱敏证据位于 `/tmp/fb-real-agent/evidence.json`；该运行目录权限 0700。
+
+### T1 附件 503 根因：线上证据与外部修复指引（2026-09-12 补充）
+
+部署实例：`https://kaneo.xn--fhqths51enha.cn`（响应头 `server: openresty`，`/api/health` → `{"status":"ok"}`）。
+以下结论**全部取自线上证据**；本地 Kaneo 源码只用于解释成因与对照，不作为线上事实。
+
+**1）请求方法：线上注册的是 PUT，不是 POST。** 旧记录里的 `POST /api/task/{taskId}/image-upload` 是错的。
+
+- 直接取部署实例自身的规范：`curl -sS https://kaneo.xn--fhqths51enha.cn/api/openapi`（185473 B）。
+  其中 `/task/image-upload/{id}` **只有 `put`**，`/task/image-upload/{id}/finalize` 为 `post`。
+- 同一路径、同一 API Key 实测对照：`PUT` → **503**；`POST` → **404 Not Found**。
+  404 说明部署实例根本没有注册 POST 路由——方法写错会在路由层被拒，不会走到存储配置。
+- Feedback 客户端（`apps/server/src/services/kaneo-http.ts` 的 `createTaskImageUpload`）
+  与本地 Kaneo 源码（`apps/api/src/task/index.ts` 的 `createTaskImageUploadRoute`，`method: "put"`）
+  用的都是 PUT，与线上一致。
+
+```sh
+# API Key 经 curl 配置文件传入，不出现在命令行、shell 历史或本文档中
+curl -K /tmp/fb-real-agent/.curl-probe.conf -o probe-body.txt -w 'http_status=%{http_code}\n'
+```
+
+**2）响应正文（线上原样，193 B，`text/plain;charset=UTF-8`）：**
+
+```
+S3 uploads are not configured. Set S3_ENDPOINT and S3_BUCKET (and either both S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY, or neither to use the default AWS credential provider chain / IAM role).
+```
+
+**3）部署版本证据。** 该实例没有版本端点（`/api/version`、`/api/instance` 均为 404），
+也没有这台部署主机的访问权限，因此拿不到镜像标签。可用的最强证据是**线上 API 面与本地源码逐项一致**：
+
+- 线上 `/api/openapi` 共 115 路径 / 160 操作；本地 `apps/api`（HEAD `64bf65c5`，package version 2.23.2）
+  用仓库自带 `npx tsx scripts/export-openapi.ts` 导出同样 115 路径 / 160 操作，两侧路径与方法差集均为空。
+- 上传路由定义两侧完全相同；503 文案与本地 `apps/api/src/storage/s3.ts` 的 `getStorageConfig()` 逐字一致。
+- 口径：**部署实例的 API 面与 `64bf65c5`（2.23.2）一致**。这是“面一致”，不是读到了版本号，
+  不宣称部署镜像必然等于该提交。
+
+**4）只能判定到哪一步（不夸大）。** 同版本 `getStorageConfig()` 的顺序是先校验
+`S3_ENDPOINT`/`S3_BUCKET`、再校验凭据是否成对。线上返回的是前者文案，因此只能判定
+**`S3_ENDPOINT` 与 `S3_BUCKET` 至少一项未设置或为空**；凭据是否成对、签名配置是否有效
+**尚未被求值**，不能断言。503 也不能证明存储服务宕机：请求从未到达任何存储服务，
+PUT 上传与 finalize 两个后续阶段从未开始。
+
+**5）外部修复指引（需部署方执行；本轮不修改 Kaneo 仓库、部署或存储）。**
+
+| 项 | 内容 |
+|---|---|
+| 失败组件 | Kaneo 部署实例的附件预签名分配（`PUT /api/task/image-upload/{id}`） |
+| 需调整配置 | 在该实例运行环境中设置 `S3_ENDPOINT` 与 `S3_BUCKET`；凭据要么**同时**设置 `S3_ACCESS_KEY_ID` + `S3_SECRET_ACCESS_KEY`，要么两者都不设以走默认凭据链/IAM 角色；改完重启 API 服务 |
+| 复验方式 | 用同一 API Key 对真实任务再发一次 PUT（命令同上），期望 200 且返回 `{key, uploadUrl, headers}`；随后在管理页恢复 `b2d73aa3-867b-48c0-9120-7dec593a9006`，Kaneo 任务 ID 必须仍是 `pbmgnm9t69a3ko4xltps66ym`（恢复不得新建任务） |
+
+**6）缺失证据（如实记录，不再重复申请上传地址）。** 未取得该部署实例的服务端日志与运行环境变量：
+`~/.ssh/config` 里没有这台主机，域名经本地 fake-IP 代理解析到 `198.18.0.72`，没有直达主机的通道。
+“关联服务日志”一项因此**未取得**，以线上 503 正文替代。
 
 ### Android 真机证据与阻塞（T2）
 
@@ -116,10 +208,23 @@ ADB 输入曾返回 INJECT_EVENTS 权限拒绝。未绕过设备保护。
 因此尚未验证拖球截图、文件选择添加/取消、原生日志提交、页面/草稿切换。
 需要用户正常解锁设备，并在系统设置中允许所需调试输入后继续；不是服务或 APK 启动失败。
 
+**2026-09-12 重查（执行前检查，未推动 UI）：** ADB `192.168.0.19:40029` 仍 `device`；
+`dumpsys window` → `isKeyguardShowing=true`、`mScreenOn=false`、`mWakefulness=Dozing`
+（`dumpsys display` 最近一次事件为 `screen_off`），即设备仍锁屏且息屏；示例包
+`dev.example.feedback_example` 已安装；服务 `http://192.168.0.23:8798/healthz` → 200。
+阻塞原因未变，且本轮**未**尝试唤醒、解锁或注入输入（不绕过锁屏）。
+
 ### 剩余执行与状态规则
 
-WebKit 与管理恢复路径已修复并验证，最终干净候选检查完成。外部 503、设备锁屏和 Docker 存储不足分别阻塞对应验收。
-正式 v0.2.0 发布保留门禁，不把候选 tarball 当已发布版本；远端产物校验和、来源 SHA、镜像 digest 必须发布后核验。
+Docker 存储缺口已关闭：改为按 digest 拉取候选镜像（不重复本地构建），
+`e2e/run_backup_restore.py` 已能直接吃 digest 并在干净候选上 34/34 通过。
+**剩余两个缺口都在外部**：(1) Kaneo 部署实例未配置 `S3_ENDPOINT`/`S3_BUCKET`，
+需部署方设置后恢复 `b2d73aa3` 并做图文验收；(2) Mi 10 仍锁屏，需用户正常解锁后完成真机操作。
+两者都不是本仓库源码缺陷，本轮不再重复试错同一阻塞。
+
+正式 v0.2.0 发布保留门禁：三项缺口全部关闭后，从最终干净提交发布，
+不把候选 tarball 当已发布版本；发布后必须重新核验远端产物校验和、来源 SHA、镜像 digest，
+并对**实际发布镜像 digest** 重跑停服备份/恢复验证。
 
 状态只用未开始／实现中／待体验／已验收；适用必要验证完成才待体验，用户确认后才已验收。
 普通局部偏差可自行处理并记录；重要接口、兼容、数据或范围变化须停止受影响步骤。
