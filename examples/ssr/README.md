@@ -87,6 +87,26 @@ const FeedbackWidgetLazy = dynamic(() => import('./FeedbackWidgetClient'), { ssr
 `launcher-mode="orb"` 与 `capture-mode="viewport"` 显式写在标记上
 ——组件默认是 `tab` / `off`。
 
+## 宿主日志演示（`logProvider`）
+
+按钮「写一条日志」往宿主自己的**内存日志环形缓冲**（200 行上限）里追加一行；
+`logProvider` 把它的导出文本交给组件——但**只在客户端**赋值（元素在服务端只是未知标签）：
+
+```js
+// 客户端内联模块脚本里（page.mjs）
+widget.logProvider = () => ({
+  name: 'host-app.log',
+  bytes: new TextEncoder().encode(hostLogs.dump()),
+});
+```
+
+- `logProvider` 是**元素实例的 JS 属性**（不是 attribute，服务端渲染标记里写无效）。
+- 组件只在**新草稿首次打开**面板时调用一次（3 秒超时 → 面板给出
+  「重试 / 不带日志继续提交」）；关闭重开已有草稿、或用户移除日志后都**不会**自动重新采集。
+- 上限：3 个 / 每个 1 MiB / 扩展名 `.log/.txt/.json/.jsonl` / 严格 UTF-8；
+  超限会**逐个给出明确原因**（不静默丢弃、不截断）。
+- 示例**不扫盘、不拦截 console**：交给组件的只是宿主本来就有的那点内存日志。
+
 ## 连你本地的服务
 
 页面与反馈服务通常跨源：服务端只对**软件配置里登记的 `allowedOrigins`**

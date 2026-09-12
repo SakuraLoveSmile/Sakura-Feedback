@@ -8,14 +8,17 @@ import {
   type FeedbackStatus,
   getAppByAppId,
   getFeedback,
+  getFeedbackLog,
   getFeedbackScreenshot,
   getFeedbackScreenshotMeta,
   getSetting,
   insertApp,
   listApps,
+  listFeedbackLogsMeta,
   listFeedbacks,
   setSetting,
   toAdminListItem,
+  toAdminLogItem,
   updateApp,
 } from "../db/repos.ts";
 import type { ServerConfig } from "../env.ts";
@@ -23,6 +26,7 @@ import { checkSameOrigin, type Err, err, fail, isErr, readJson, requireSession }
 import { parseArchiveData } from "../pipeline/archive-data.ts";
 import type { AiClient } from "../services/ai.ts";
 import type { KaneoClient } from "../services/kaneo.ts";
+import { sanitizeLogName } from "../services/logs.ts";
 import type { PublicApp } from "../types.ts";
 
 export interface AdminDeps {
@@ -256,6 +260,7 @@ export function adminRoutes(deps: AdminDeps): Hono {
       }
     }
     const screenshotMeta = getFeedbackScreenshotMeta(db, row.id);
+    const logs = listFeedbackLogsMeta(db, row.id).map(toAdminLogItem);
     return c.json({
       ...toAdminListItem(row),
       text: row.text,
@@ -264,6 +269,7 @@ export function adminRoutes(deps: AdminDeps): Hono {
       kaneoTaskId: row.kaneo_task_id,
       attemptCount: row.attempt_count,
       lastError: row.last_error,
+      logs,
       recovery: recoveryInfo(db, row),
       screenshot: screenshotMeta
         ? {
@@ -287,6 +293,31 @@ export function adminRoutes(deps: AdminDeps): Hono {
         "content-type": "image/png",
         "cache-control": "no-store",
         "content-length": String(screenshot.byte_size),
+      },
+    });
+  });
+
+  /**
+   * 日志读取 / 下载：与其余管理接口同一 cookie 鉴权 + 同源检查。
+   * - 默认 inline（管理页纯文本预览）；`?download=1` 改为 attachment。
+   * - 始终 no-store + nosniff，文件名经安全化（不含路径/控制字符/引号）；
+   * - 不产生公开链接，也不把附件内容写进运行日志。
+   */
+  routes.get("/feedback/:id/logs/:logId", (c) => {
+    const log = getFeedbackLog(db, c.req.param("id"), c.req.param("logId"));
+    if (!log) return fail(c, err("not_found", "日志不存在", 404));
+    const name = sanitizeLogName(log.name) ?? "log.txt";
+    // HTTP 头只允许 latin-1：`filename=` 用 ASCII 兜底，真实（可能含中文）文件名走 RFC 5987 的 filename*。
+    const asciiName = name.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_") || "log.txt";
+    const download = c.req.query("download") === "1";
+    return new Response(log.content as unknown as BodyInit, {
+      status: 200,
+      headers: {
+        "content-type": "text/plain; charset=utf-8",
+        "cache-control": "no-store",
+        "x-content-type-options": "nosniff",
+        "content-disposition": `${download ? "attachment" : "inline"}; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(name)}`,
+        "content-length": String(log.byte_size),
       },
     });
   });
@@ -326,13 +357,13 @@ const ACTION_NOTES: Record<string, string> = {
  */
 function recoveryInfo(db: Db, row: FeedbackRow) {
   const parsed = parseArchiveData(row.archive_data_json);
-  const revision = parsed.kind === "valid" ? parsed.data.revision : 0;
-  const uploadOutcome = parsed.kind === "valid" ? (parsed.data.upload?.outcome ?? null) : null;
-  const assetKnown = parsed.kind === "valid" ? Boolean(parsed.data.asset?.url) : false;
-  const commentOutcome = parsed.kind === "valid" ? (parsed.data.comment?.outcome ?? null) : null;
+  const data = parsed.kind === "valid" ? parsed.data : null;
+  const revision = data ? data.revision : 0;
+  const uploadOutcome = data?.upload?.outcome ?? null;
+  const assetKnown = Boolean(data?.asset?.url);
+  const commentOutcome = data?.comment?.outcome ?? null;
   const hasKnownTask = Boolean(row.kaneo_task_id);
-  const knownAttachment =
-    parsed.kind === "valid" && Boolean(parsed.data.upload || parsed.data.asset || parsed.data.comment);
+  const knownAttachment = Boolean(data && (data.upload || data.asset || data.comment));
   const hasScreenshot = getFeedbackScreenshotMeta(db, row.id) !== null;
 
   const allowedActions: string[] = [];
@@ -343,6 +374,28 @@ function recoveryInfo(db: Db, row: FeedbackRow) {
     if (hasKnownTask && assetKnown) allowedActions.push("retry_comment");
     if (hasKnownTask && hasScreenshot) allowedActions.push("replace_upload");
   }
+
+  // 日志级恢复状态：与截图同一套语义，按 logId 索引（管理页据此展示日志级按钮）。
+  const logEntries = listFeedbackLogsMeta(db, row.id).map((log) => {
+    const entry = data && data.version === 2 ? data.logs?.find((l) => l.logId === log.id) : undefined;
+    const logAssetKnown = Boolean(entry?.asset?.url);
+    const logActions: string[] = [];
+    if (row.status === "needs_review" && hasKnownTask) {
+      if (logAssetKnown) logActions.push("retry_comment");
+      logActions.push("replace_upload");
+    }
+    return {
+      logId: log.id,
+      name: log.name,
+      revision,
+      stage: row.archive_stage,
+      uploadOutcome: entry?.upload?.outcome ?? null,
+      assetKnown: logAssetKnown,
+      commentOutcome: entry?.comment?.outcome ?? null,
+      allowedActions: logActions,
+    };
+  });
+
   return {
     revision,
     stage: row.archive_stage,
@@ -350,6 +403,8 @@ function recoveryInfo(db: Db, row: FeedbackRow) {
     assetKnown,
     commentOutcome,
     hasScreenshot,
+    hasLogs: logEntries.length > 0,
+    logs: logEntries,
     allowedActions,
     actionTargets: ACTION_TARGETS,
     actionNotes: ACTION_NOTES,

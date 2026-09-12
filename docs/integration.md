@@ -10,6 +10,33 @@
 本文只描述**可直接观察到的黑盒行为**（属性、方法、事件、HTTP 状态、管理页动作），
 不展开服务端内部的阶段机。
 
+## v0.2.0 接入入口（截图、描述与日志）
+
+当前收尾版本为 **0.2.0**，发布及验证状态以 [`closeout.md`](closeout.md) 为准；旧 v0.1.0 产物不含本轮日志能力。
+先部署新服务，再升级客户端；无日志的旧客户端仍可使用原 JSON／截图提交。
+
+1. **真实本地服务**：`corepack pnpm install --frozen-lockfile && corepack pnpm build`。
+   从 `.env.example` 准备独立环境文件（例如 `.env.real.local`），填写主密钥和初始管理员，
+   明确设置 `FEEDBACK_DATA_DIR=/绝对路径/feedback-real`、`FEEDBACK_PORT=8787`。
+   本地 HTTP 设置 `FEEDBACK_COOKIE_SECURE=false`；使用局域网固定入口时设置
+   `FEEDBACK_PUBLIC_URL=http://<电脑局域网IP>:8787`，管理页也用该地址打开。
+   运行 `FEEDBACK_ENV_FILE="$PWD/.env.real.local" bash scripts/start-service.sh`。
+   此入口前台运行，Ctrl-C 优雅停止，不启动 mock、不改连接配置。主密钥首次生成后必须保留，重启不能重新生成。
+2. 打开该服务的 `/admin/`，配置真实 AI／Kaneo，并按下文登记独立 `appId`、精确 Web origin 和归档项目／列。
+3. **固定安装**：从 `v0.2.0` Release 获取 `feedback-web-0.2.0.tgz`、`SHA256SUMS`、`SOURCE.txt`；
+   下载的资产执行 `shasum -a 256 -c SHA256SUMS`（完整清单需下载其全部资产），Web 安装至宿主 `vendor/`。
+   Flutter 使用 `SOURCE.txt` 的 `commit=` 作为 Git `ref`，不要指向 main；具体安装形式见第 2 节。
+4. Web 把 `logProvider` 设为组件的 **JS 属性**（不是 HTML 字符串属性）；Flutter 使用
+   `FeedbackConfig.logProvider`。返回脱敏后的文件名和 UTF-8 字节，参考仓库内宿主日志示例。
+   组件不代替宿主脱敏、不扫描系统日志；未配置回调时仍能手动添加，采集失败仍可提交。
+5. Android 示例通过 `--dart-define=FEEDBACK_API_BASE=http://<电脑局域网IP>:8787`
+   和 `--dart-define=FEEDBACK_APP_ID=<已登记ID>` 指定入口；手机上的 localhost 是手机自己。
+   示例调试构建允许 HTTP，正式宿主按自己的 HTTPS 配置接入。
+
+**演示入口**：`scripts/start-local.sh` 会启动 AI／Kaneo mock，默认使用 `data/mock-demo`；
+`scripts/seed-local-demo.py` 只初始化空或既有 mock 连接，检测到真实连接即拒绝覆盖。
+它们只用于演示，不能作为真实归档证据。真实服务与演示不能共用数据目录或端口。
+
 ---
 
 ## 1. 接入前准备
@@ -82,14 +109,14 @@
 
 ### 2.1 Web：通过构建出的 npm tarball 安装（打包器宿主推荐）
 
-包名 `@feedback/web`，当前版本 `0.1.0`，因此 tarball 文件名为 **`feedback-web-0.1.0.tgz`**（版本变了文件名跟着变）。
+包名 `@feedback/web`，当前版本 `0.2.0`，因此 tarball 文件名为 **`feedback-web-0.2.0.tgz`**（版本变了文件名跟着变）。
 
 ```bash
 # ① 在仓库根构建组件包
 pnpm install
 pnpm --filter @feedback/web build
 
-# ② 打成 tarball（真实产物：/tmp/fbpack/feedback-web-0.1.0.tgz）
+# ② 打成 tarball（真实产物：/tmp/fbpack/feedback-web-0.2.0.tgz）
 mkdir -p /tmp/fbpack
 pnpm --filter @feedback/web pack --pack-destination /tmp/fbpack
 ```
@@ -98,8 +125,8 @@ tarball 内含 `dist/` 全部产物（含 ESM 懒加载分块）、`package.json
 
 ```bash
 # ③ 在你的宿主项目里安装这个 tgz
-pnpm add /tmp/fbpack/feedback-web-0.1.0.tgz
-# 等价写法：npm install /tmp/fbpack/feedback-web-0.1.0.tgz
+pnpm add /tmp/fbpack/feedback-web-0.2.0.tgz
+# 等价写法：npm install /tmp/fbpack/feedback-web-0.2.0.tgz
 ```
 
 ```ts
@@ -143,7 +170,7 @@ ESM 构建 `dist/feedback-web.js`（约 80 KB）把 `html2canvas-pro` 拆成**�
 ### 2.4 Flutter：`path` 依赖或固定 Git commit
 
 包名 `feedback_widget`，**该包 `publish_to: none`——不发布到 pub.dev**（见 [`flutter/feedback/pubspec.yaml`](../flutter/feedback/pubspec.yaml)），
-因此**不能**写 `feedback_widget: ^0.1.0`。
+因此**不能**写 `feedback_widget: ^0.2.0`。
 
 本地 / 同仓（仓库内示例的写法，[`examples/flutter/pubspec.yaml`](../examples/flutter/pubspec.yaml)）：
 
@@ -206,6 +233,10 @@ cd your_app && flutter pub get
 - ✅ **已有发布流水线**（本轮新增）：见 §2.7。跨仓库引用所需的 commit sha 由标签构建产出并回填。
 - ⏳ **云端上线**：生产 compose 与 Nginx 模板已交付（[`deploy/`](../deploy)），但域名/证书/入口尚待填写，
   因此**尚未声称云端已上线**，也没有加入 SSH 自动部署。
+- ❌ **日志附件不做的事**：不支持压缩包（`.zip`/`.gz` 等一律拒绝）、不做系统日志扫描或落盘读取、
+  不接入长期日志平台（ELK/Loki 等）、不拦截全局 `console`、不自行收集网络请求。
+  日志**只来自宿主已有日志系统**并由宿主通过 `logProvider` 显式导出（见 §4.2.1），
+  脱敏由宿主在交给组件**之前**完成；组件与服务端都不做敏感信息识别。
 
 ### 2.7 服务端镜像：拉取、私有仓库认证、升级（本轮新增）
 
@@ -251,7 +282,7 @@ Nginx TLS 模板见 [`deploy/nginx/feedback.conf.template`](../deploy/nginx/feed
 2. 改 `deploy/.env.prod` 的 `FEEDBACK_IMAGE=...@sha256:<新 digest>`。
 3. `docker compose --env-file deploy/.env.prod -f deploy/compose.prod.yml up -d`。
 
-**回退**：把 digest 改回上一个值再 `up -d`。`/data` 不在镜像里，回退镜像不会丢反馈数据。
+**回退**：v0.2.0 含 schema v3 与归档数据 V2，不能只切回旧镜像继续处理新库。停服并保留当前完整数据，按部署文档核对远端写入后再恢复升级前备份；不得重放旧库中结果未知的记录。见 [`deployment.md`](deployment.md) 的「升级与回退限制」。
 
 **客户端如何跟上同一版本**
 
@@ -557,6 +588,7 @@ MaterialApp(
 | `launcher-bottom` | `launcherBottom` | CSS 长度字符串（百分比或像素，如 `25%` / `80px`） | `25%` | 入口距底部的垂直位置 | 纯展示 |
 | `launcher-mode` | `launcherMode` | `tab`（贴边标签） \| `orb`（**灵感球**，可拖拽指出位置并截图） | **`tab`** | 入口形态 | 纯展示；切到 `orb` 时标签隐藏、切到 `tab` 时灵感球隐藏。**不影响草稿与截图开关** |
 | `capture-mode` | `captureMode` | `off` \| `viewport` | **`off`** | 呼出时是否**自动**截取当前应用视口 | 只改下一次呼出的行为；**不清空草稿**。`off` 只关闭**自动**截图：面板里始终有手动的「截取当前页面」 |
+| — | `logProvider` | `() => FeedbackLogFile \| FeedbackLogFile[] \| null`（可返回 Promise） | 无（仅属性，无 attribute） | 宿主日志回调：返回 `{ name, bytes }` 或数组 | 替换回调会取消在途采集（迟到结果不写回）；**不清空草稿**。未配置时面板只显示「手动添加日志」入口 |
 
 **明确结论（易踩坑）**：
 
@@ -583,6 +615,7 @@ MaterialApp(
 | `launcherBottom` | `String` | `'25%'` | 入口距可用区域底部的位置；支持百分比（`25%`）、像素（`80px`）或裸数字；**解析失败回落 25%** |
 | `launcherMode` | `FeedbackLauncherMode.tab` \| `.orb` | **`.tab`** | 经典侧边悬浮按钮 / 灵感球 |
 | `captureMode` | `FeedbackCaptureMode.off` \| `.viewport` | **`.off`** | 关闭截图 / 呼出时捕获当前视口完整截图 |
+| `logProvider` | `Future<List<FeedbackLogFile>> Function()?` | `null` | 宿主日志回调：返回文件名 + 日志字节；未配置时面板只显示「手动添加日志」入口。需要重建 `FeedbackWidget` 才能更换 |
 
 **`position` 的优先级规则**（[`flutter/feedback/lib/src/widget.dart`](../flutter/feedback/lib/src/widget.dart)）：
 
@@ -593,6 +626,44 @@ MaterialApp(
 运行中改变**服务身份**（`apiBase` / `appId`）：Flutter 端**未定义也未验证**热切换语义——
 `FeedbackConfig` 是构造参数，包内未导出运行时替换配置的入口。要换服务或换软件，请**重建 `FeedbackWidget` 实例**。
 （Web 端有明确的身份切换语义，见 4.1 与 5.3。）
+
+### 4.2.1 日志附件（`logProvider`，T1）
+
+反馈面板支持「截图＋描述＋日志」。日志**只来自宿主已有的日志系统**：组件不拦截全局 console、不扫描磁盘、不自行收集网络请求；宿主把要提交的日志导出成文本交给 `logProvider`，并**负责在交给组件前去除凭据等敏感内容**（令牌、密码、个人信息）。
+
+```ts
+// Web：属性（无 attribute），可在元素上赋值或经 openFeedback 传入
+const widget = openFeedback({
+  apiBase: 'https://fb.example.com',
+  appId: 'com.example.app',
+  logProvider: () => [{ name: 'app.log', bytes: new TextEncoder().encode(hostLogs.exportText()) }],
+});
+```
+
+```dart
+// Flutter：FeedbackConfig 构造参数
+FeedbackConfig(
+  'https://fb.example.com',
+  'com.example.app',
+  logProvider: () async => [
+    FeedbackLogFile(name: 'app.log', bytes: utf8.encode(hostLogs.exportText())),
+  ],
+)
+```
+
+两端语义一致：
+
+| 约定 | 行为 |
+|---|---|
+| 采集时机 | 新草稿**首次打开**时调用一次，采集时点固定为该次打开时间；重新打开已有草稿**不重新采集**；用户移除后**不自动补回** |
+| 超时 | **3 秒**未返回 → 显示「日志获取失败」，提供「重试」与「不带日志继续提交」；失败/超时**不阻塞**截图与描述提交 |
+| 上限 | 最多 3 个文件、每个 ≤ 1 MiB、扩展名仅 `.log`/`.txt`/`.json`/`.jsonl`、内容须为合法 UTF-8；自动与手动共用上限，超限逐个给出明确原因，**不静默删除或截断** |
+| 手动补充 | Web 用原生文件选择（`accept` 限定扩展名）；Flutter 用 `file_selector`，按字节读取，Web 与原生端一致 |
+| 面板 | 展示文件名、大小、来源（自动/手动），支持纯文本预览与移除，并说明日志会参与 AI 分析并在归档时随反馈保存 |
+| 迟到结果 | 关闭面板、卸载组件、切换服务（`apiBase`/`appId`）后，迟到的采集结果**不得写回** |
+| 提交期间 | 提交与状态轮询期间锁定附件修改；提交失败保留原快照；**修改附件后生成新的幂等键**（与截图一致） |
+
+日志随反馈一起保存，分析时参与 AI 诊断，并作为可下载附件归档到 Kaneo；**管理页可查看与下载日志**（见 [`docs/api.md`](api.md) 的管理列表组）。完整示例见 [`examples/vue`](../examples/vue)、[`examples/react`](../examples/react)、[`examples/html`](../examples/html)、[`examples/ssr`](../examples/ssr) 与 [`examples/flutter`](../examples/flutter)。
 
 ### 4.3 方法
 
@@ -660,8 +731,8 @@ widget.open();     // ← 只有这一句
 ### 5.1 单页应用路由切换（Web）
 
 - **组件实例应由宿主顶层持有**：把 `<feedback-widget>` 放在应用壳（root layout / App 组件）里，
-  而不是某个会被卸载的路由页面组件内。草稿（文字 + 截图字节）**只存在元素实例内存中**，
-  元素被销毁后再新建一个，草稿就没了。
+  而不是某个会被卸载的路由页面组件内。草稿（文字 + 截图字节 + 日志字节）**只存在元素实例内存中**，
+  元素被销毁后再新建一个，草稿就没了（含已采集的日志列表——新实例会重新调用 `logProvider` 采集）。
 - **从 DOM 断开重连的草稿语义**：元素被移除后重新插入（同一实例），
   文字与**截图字节保留在实例上**，重连时重建预览 URL（`connectedCallback`）；
   但断开会使**进行中的捕获会话失效、停止轮询、取消登录握手**（`disconnectedCallback`）。
@@ -864,7 +935,7 @@ Flutter 端只提供内置视口截图 + `FeedbackCaptureMask` 遮挡。
 
 | 能力 | 代码支持（本仓库文件） | 构建 / 自动化验证（真实运行） | 实机闭环 |
 |---|---|---|---|
-| Web 组件构建与打包 | `packages/web` | ✅ `pnpm --filter @feedback/web build`、`pnpm --filter @feedback/web pack`（本轮实跑，产出 `feedback-web-0.1.0.tgz`） | —（构建产物本身无需闭环） |
+| Web 组件构建与打包 | `packages/web` | 历史构建记录；v0.2.0 的实际检查与产物见 `docs/closeout.md` | —（构建产物本身无需闭环） |
 | 原生 HTML / UMD | [`examples/html`](../examples/html) | ✅ 本轮：`copy:bundle` exit 0；`serve` 后 `/` 与 `/feedback-web.umd.js` 均 `HTTP/1.1 200 OK` | ❌ **未验证**（未在真实宿主机 + 真实服务端联调提交） |
 | React + TS | [`examples/react`](../examples/react) | ✅ 本轮：`pnpm -C examples/react build` exit 0（vite 产物含懒加载分块）；`typecheck` exit 0 | ✅ 真实浏览器加载该示例产物 + 真实服务端跑通「登录 → 截图 → 反馈 → 归档」（Kaneo / AI 为 mock） |
 | Vue 3 + Vite | [`examples/vue`](../examples/vue) | ✅ 本轮：`pnpm -C examples/vue build` exit 0；`typecheck` exit 0；`isCustomElement` 已证明（产物中 `resolveComponent` 计数 0） | ✅ 真实浏览器加载该示例产物 + 真实服务端跑通完整链路（Kaneo / AI 为 mock） |
@@ -887,8 +958,8 @@ Flutter 端只提供内置视口截图 + `FeedbackCaptureMask` 遮挡。
 |---|---|---|
 | 判据 | 网络异常 / 超时 / 未拿到任何 HTTP 响应（Flutter 为 `FeedbackStage.notSent`；Web 端是 `failed` 相位下**没有**任何反馈记录的分支） | 已经拿到 `feedbackId`；`GET /api/feedback/:id` 返回 `failed` 或 `needs_review`（Web 端为 `failed` 相位下**已有记录**的分支；面板把它显示为"失败，已记录，可在管理页处理"） |
 | 客户端该做什么 | **保留草稿**；提供「重试提交」 | **绝不重新提交**；改用「刷新状态」/「复制反馈标识」，并把标识交给管理员在管理页找回 |
-| 幂等键 | 重试**复用同一幂等键与同一字节**（正文 + 截图字节 + 元数据）；只有当冻结快照**变化**（改文案、重拍得到新截图、移除截图）时才换新 key | 不适用。面板「返回编辑」后用户再次提交的是**全新反馈（新 key）**，不是重发旧工单 |
-| 服务端视角 | 没有该记录 | 已有原话与截图；同 key 不同内容会返回 `409 idempotency_conflict`（组件**不自动换 key**） |
+| 幂等键 | 重试**复用同一幂等键与同一字节**（正文 + 截图字节 + 日志字节 + 元数据）；只有当冻结快照**变化**（改文案、重拍得到新截图、增删/更换日志）时才换新 key | 不适用。面板「返回编辑」后用户再次提交的是**全新反馈（新 key）**，不是重发旧工单 |
+| 服务端视角 | 没有该记录 | 已有原话与附件；同 key 不同内容（含**换了日志**）会返回 `409 idempotency_conflict`（组件**不自动换 key**） |
 | 典型错误码 | 网络错误 / `5xx`（结果未知） | `failed` / `needs_review`（详情见 8.2） |
 
 配套约束：`409 idempotency_conflict` 显示冲突、**不自动换 key**；结果未知的提交（网络错误 / 5xx）
@@ -907,7 +978,8 @@ Flutter 端只提供内置视口截图 + `FeedbackCaptureMask` 遮挡。
 - 服务在发送中崩溃 / 重启（`archiving` 中断）；
 - 恢复数据损坏、版本未知，或阶段与恢复数据互相矛盾；
 - 上传地址已过期，或同 key 重传被业务拒绝；
-- 已保存的归档目标（Kaneo 地址 / 项目 / 工作区）与当前配置不一致。
+- 已保存的归档目标（Kaneo 地址 / 项目 / 工作区）与当前配置不一致；
+- **部分附件已完成、尚有日志或截图未确认挂载**（集中完成条件未满足）。
 
 **管理页各恢复动作做什么、风险是什么**（管理页只渲染服务端 `allowedActions` 里允许的动作）：
 
@@ -916,8 +988,8 @@ Flutter 端只提供内置视口截图 + `FeedbackCaptureMask` 遮挡。
 | `retry`（重试处理） | 处理流程 | 把 `failed` 重新入队；已有 AI 整理结果时跳过 AI 直接再归档 | 会继续产生远端写入 |
 | `recheck`（重新核对） | 任务 | 优先使用**已有 task ID**（不重复搜索、不重置阶段）；没有 task ID 才按任务描述中的 `反馈ID：<uuid>` 搜索；命中 → 关联为已归档；未命中 → **维持 `needs_review`** | 只读，**不会重发任何评论或图片** |
 | `force-create`（再次创建任务） | 任务创建 | 仅允许"任务创建结果未知且无任何已知 task / 附件 / 评论状态"的记录（否则 `409`）；清空写入类状态后重建 | **可能产生重复任务**，仅在确认 Kaneo 中确实没有对应任务时使用 |
-| `retry_comment`（针对评论） | 评论 | 执行前**再次查重**（反馈 ID + 图片摘要 + 当前资产引用）：命中 → 补记确认并归档（**零远端写入**）；未命中 → **重发一次**评论 | 远端列表与写入之间存在竞态，**仍可能产生重复评论**，请在 Kaneo 中复核 |
-| `replace_upload`（针对图片） | 图片 | 先经鉴权资产下载核对真实字节（一致 → 仅补记，不替换）；替换时**复用原 task**、申请新上传地址、保留旧 key 记录（`replacedKeys`）、**不自动删除远端对象**；替换后重发评论 | 远端旧对象须**人工清理**；这是"上传地址过期 / 被拒"的唯一出路 |
+| `retry_comment`（针对评论） | 评论 | 执行前**再次查重**（反馈 ID + 附件摘要 + 当前资产引用；日志再加日志 ID）：命中 → 补记确认并按完成条件收尾（**零远端写入**）；未命中 → **重发一次**评论。可携带 `logId` 只针对某份日志 | 远端列表与写入之间存在竞态，**仍可能产生重复评论**，请在 Kaneo 中复核 |
+| `replace_upload`（针对附件） | 截图或某份日志 | 先经鉴权资产下载核对真实字节（一致 → 仅补记，不替换）；替换时**复用原 task**、申请新上传地址、保留旧 key 记录（`replacedKeys`）、**不自动删除远端对象**；替换后重发评论。可携带 `logId` 只替换某份日志 | 远端旧对象须**人工清理**；这是"上传地址过期 / 被拒"的唯一出路 |
 
 **两条硬性语义（务必记住）**：
 
@@ -927,6 +999,10 @@ Flutter 端只提供内置视口截图 + `FeedbackCaptureMask` 遮挡。
 2. **上传地址过期或被拒时不会自动换新地址**。同 key 重传次数有上限（3 次）；
    超过上限 / 地址过期 / 被拒绝 → 转 `needs_review`，由管理员显式执行 `replace_upload` 才申请新地址
    （自动换 key 会遗留未被追踪的旧对象，因此被有意禁止）。
+3. **只有全部附件完成才叫归档完成**。截图与每份日志各自独立上传、登记资产并挂载评论；
+   服务端在**同一个集中检查**里确认所有附件都已挂载，才会把记录置为 `archived`。
+   仅截图完成而日志未完成时，记录保持 `needs_review`（`error_summary` 会说明尚有附件未完成），
+   管理页也**不会**显示"全部归档完成"。已确认的附件不会重复上传。
 
 其他相关语义：
 

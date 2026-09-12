@@ -1,11 +1,12 @@
 import { Hono } from "hono";
 import type { RateLimiter } from "../auth/ratelimit.ts";
-import type { Db, FeedbackRow, FeedbackStatus, SessionRow } from "../db/repos.ts";
+import type { Db, FeedbackLogInput, FeedbackRow, FeedbackStatus, SessionRow } from "../db/repos.ts";
 import {
   contentHash,
   getAppByAppId,
   getFeedback,
   getFeedbackByKey,
+  getFeedbackLog,
   getFeedbackScreenshot,
   insertFeedbackWithScreenshot,
 } from "../db/repos.ts";
@@ -13,9 +14,11 @@ import type { ServerConfig } from "../env.ts";
 import { checkLimiter, checkSameOrigin, type Err, err, fail, isErr, readJson, requireSession } from "../http.ts";
 import type { Worker, WorkerOpResult } from "../pipeline/worker.ts";
 import { ImageValidationError, type SanitizedImage, validateAndSanitizePng } from "../services/image.ts";
+import { type LogPart, LogValidationError, validateLogAttachments } from "../services/logs.ts";
 
 const MAX_TEXT_CODEPOINTS = 10_000;
-const MAX_MULTIPART_BYTES = 6 * 1024 * 1024; // 6MiB
+/** 请求体上限：截图 5MiB + 3 份日志各 1MiB + 表单开销，留出余量到 9MiB。 */
+const MAX_MULTIPART_BYTES = 9 * 1024 * 1024; // 9MiB
 
 export interface FeedbackDeps {
   db: Db;
@@ -66,12 +69,14 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
     let text = "";
     let contextInput: unknown = null;
     let captureInput: unknown = null;
+    let logsMetaInput: unknown = null;
     let screenshotBuffer: Buffer | null = null;
+    let logParts: LogPart[] = [];
 
     if (contentType.includes("multipart/form-data")) {
       const len = Number(c.req.header("content-length") ?? 0);
       if (len > MAX_MULTIPART_BYTES) {
-        return fail(c, err("too_large", "请求体超过 6MiB 上限", 413));
+        return fail(c, err("too_large", "请求体超过 9MiB 上限", 413));
       }
 
       const reader = c.req.raw.body?.getReader();
@@ -83,7 +88,7 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
         if (done) break;
         totalBytes += value.byteLength;
         if (totalBytes > MAX_MULTIPART_BYTES) {
-          return fail(c, err("too_large", "请求体超过 6MiB 上限", 413));
+          return fail(c, err("too_large", "请求体超过 9MiB 上限", 413));
         }
         chunks.push(value);
       }
@@ -116,6 +121,7 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
       text = typeof metaParsed.text === "string" ? metaParsed.text : "";
       contextInput = metaParsed.context;
       captureInput = metaParsed.capture;
+      logsMetaInput = metaParsed.logs;
 
       const fileField = formData.get("screenshot");
       if (fileField && typeof fileField === "object" && "arrayBuffer" in fileField) {
@@ -124,6 +130,21 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
           screenshotBuffer = Buffer.from(ab);
         }
       }
+
+      // 重复的 `logs` 部件按出现顺序收集（getAll 保留插入顺序），与 metadata.logs 下标一一对应。
+      const collected: LogPart[] = [];
+      for (const part of formData.getAll("logs")) {
+        if (typeof part !== "object" || part === null || !("arrayBuffer" in part)) {
+          return fail(c, err("invalid_log", "logs 部件不是文件", 400));
+        }
+        const blob = part as File;
+        const ab = await blob.arrayBuffer();
+        collected.push({
+          filename: typeof blob.name === "string" && blob.name !== "" ? blob.name : null,
+          bytes: Buffer.from(ab),
+        });
+      }
+      logParts = collected;
     } else {
       const body = await readJson<{
         idempotencyKey?: unknown;
@@ -214,6 +235,19 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
       }
     }
 
+    // 日志：数量、扩展名、大小、实际 UTF-8 内容与 metadata 逐项核对；任何不符整单拒绝。
+    // 放在截图校验之后，保证截图错误码优先级不变。
+    let logs: FeedbackLogInput[] = [];
+    if (logParts.length > 0 || (logsMetaInput !== undefined && logsMetaInput !== null)) {
+      const validated = validateLogAttachments(logParts, logsMetaInput);
+      if (!validated.ok) {
+        const e = validated.error;
+        if (!(e instanceof LogValidationError)) throw e;
+        return fail(c, err(e.code, e.message, e.code === "too_large" ? 413 : 400));
+      }
+      logs = validated.logs;
+    }
+
     const app = getAppByAppId(db, appId);
     if (!app) return fail(c, err("unknown_app", "appId 未在服务端配置", 404));
 
@@ -222,6 +256,7 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
       text,
       context,
       sanitizedImage ? { sha256: sanitizedImage.sha256, releasePoint: capture?.releasePoint } : null,
+      logs.map((l) => ({ name: l.name, sha256: l.sha256 })),
     );
 
     const existing = getFeedbackByKey(db, idempotencyKey);
@@ -254,6 +289,7 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
               captureJson: capture ? JSON.stringify(capture) : null,
             }
           : null,
+        logs,
       );
     } catch (insertErr) {
       // 并发下的 UNIQUE 冲突兜底
@@ -386,11 +422,11 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
     return opResponse(c, r);
   });
 
-  // 4.4 恢复接口：针对图片/评论的分阶段人工恢复
+  // 4.4 恢复接口：针对图片/日志/评论的分阶段人工恢复
   routes.post("/:id/recover", async (c) => {
     const g = cookieGuard(c);
     if (g instanceof Response) return g;
-    const body = await readJson<{ action?: unknown; expectedRevision?: unknown }>(c);
+    const body = await readJson<{ action?: unknown; expectedRevision?: unknown; logId?: unknown }>(c);
     if (isErr(body)) return fail(c, body);
     const id = c.req.param("id");
     const rev = parseExpectedRevision(body.expectedRevision);
@@ -398,12 +434,23 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
     if (rev === undefined) {
       return fail(c, err("invalid_request", "recover 操作必须携带 expectedRevision", 400));
     }
+    // logId 缺省 = 原有截图行为（兼容旧管理页）；提供时必须是该反馈下真实存在的日志
+    let logId: string | undefined;
+    if (body.logId !== undefined && body.logId !== null) {
+      if (typeof body.logId !== "string" || body.logId.trim() === "" || body.logId.length > 200) {
+        return fail(c, err("invalid_request", "logId 必须是非空字符串", 400));
+      }
+      logId = body.logId.trim();
+      if (!getFeedbackLog(db, id, logId)) {
+        return fail(c, err("invalid_request", "logId 对应的日志不属于该反馈", 400));
+      }
+    }
     let r: WorkerOpResult;
     try {
       if (body.action === "retry_comment") {
-        r = await worker.recoverRetryComment(id, rev);
+        r = await worker.recoverRetryComment(id, rev, logId);
       } else if (body.action === "replace_upload") {
-        r = await worker.recoverReplaceUpload(id, rev);
+        r = await worker.recoverReplaceUpload(id, rev, logId);
       } else {
         return fail(c, err("invalid_request", 'action 必须为 "retry_comment" 或 "replace_upload"', 400));
       }

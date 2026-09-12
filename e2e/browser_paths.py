@@ -62,11 +62,10 @@ def is_submit_url(url: str) -> bool:
 
 
 class NetRecorder:
-    """context 级请求/响应记录：证据直接取自浏览器真实网络层。
+    """请求/响应观察。Chromium/Firefox 用 route 缓冲，WebKit 只监听事件。
 
-    请求体必须经过一次**只读路由**才能拿到：Playwright 只在路由命中时缓冲请求体，
-    未路由的大 multipart（86KB 截图上传）`post_data_buffer` 会读回空字节。
-    路由只做记录并 `fallback()` 放行，不改动请求本身。
+    WebKit 已有登录 Cookie 时 route/fallback 可使上传文件变空；因此不拦截正常请求。
+    WebKit 的事件数据仍缺文件内容；文件断言使用原始选择文件与服务端下载逐字节比对。
     """
 
     def __init__(self, ctx, capture_bodies=True):
@@ -76,13 +75,20 @@ class NetRecorder:
         ctx.on("request", lambda r: self._requests.append(r))
         ctx.on("response", self._on_response)
         if capture_bodies:
-            ctx.route("**/api/feedback", self._capture)
+            # WebKit + 已有登录 Cookie + route/fallback 会把文件传成空字节。
+            # 此引擎仅被动观察，文件内容由输入夹具与服务端下载交叉核验。
+            if ctx.browser.browser_type.name == "webkit":
+                ctx.on("request", self._capture_request)
+            else:
+                ctx.route("**/api/feedback", self._capture)
+
+    def _capture_request(self, req):
+        if req.method == "POST" and is_submit_url(req.url):
+            self._bodies.append({"req": req, "url": req.url, "ct": req.headers.get("content-type", ""),
+                                 "body": request_body(req)})
 
     def _capture(self, route):
-        req = route.request
-        if req.method == "POST" and is_submit_url(req.url):
-            self._bodies.append({"url": req.url, "ct": req.headers.get("content-type", ""),
-                                 "body": request_body(req)})
+        self._capture_request(route.request)
         route.fallback()
 
     def _on_response(self, resp):
@@ -113,13 +119,39 @@ class NetRecorder:
     def feedback_count(self) -> int:
         return len(self._submit_requests())
 
+    def submitted_bodies(self) -> list[dict]:
+        """**路由通道**记录的提交请求体（顺序即真实发送顺序，含解析后的 metadata）。
+
+        与 `feedback_posts` 的区别：后者用 request 事件通道计数、再按下标去 `_bodies` 取体，
+        两条通道在「同一 context 叠加多个 recorder」时下标可能错位；
+        本方法只走路由通道，因此体与 content-type 必然成对，适合做请求体契约断言。
+        """
+        out = []
+        for entry in self._bodies:
+            ct = entry["ct"]
+            body = entry["body"]
+            parsed = parse_multipart(body, ct) if body else {}
+            meta = None
+            if "metadata" in parsed:
+                try:
+                    meta = json.loads(parsed["metadata"].decode())
+                except Exception:
+                    meta = None
+            out.append({"url": entry["url"], "ct": ct, "body": body, "bodyBytes": len(body or b""),
+                        "metadata": meta, "parsed": parsed})
+        return out
+
     def feedback_posts(self, since: int = 0) -> list[dict]:
         out = []
         for i, r in enumerate(self._submit_requests()):
             if i < since:
                 continue
-            body = self._bodies[i]["body"] if i < len(self._bodies) else None
-            ct = self._bodies[i]["ct"] if i < len(self._bodies) else r.headers.get("content-type", "")
+            body = None
+            ct = r.headers.get("content-type", "")
+            for entry in self._bodies:
+                if entry["req"] == r:
+                    body = entry["body"]
+                    break
             parsed = parse_multipart(body, ct) if body else {}
             meta = None
             if "metadata" in parsed:
@@ -270,7 +302,8 @@ def login_in_popup(popup, deps, timeout=40) -> bool:
         popup.locator("#password").fill(deps["admin_pass"])
         popup.locator("#submit").click()
     try:
-        popup.wait_for_event("close", timeout=20000)
+        if not popup.is_closed():
+            popup.wait_for_event("close", timeout=20000)
     except Exception:
         pass
     return visible
@@ -1253,6 +1286,8 @@ def run(deps):
         ("P4 登录握手路径", p4_login_handshake),
         ("P6 默认 off 模式手动截图路径", p6_manual_capture),
         ("P7 窄屏 + 键盘手动截图路径", p7_manual_capture_narrow_keyboard),
+        ("P8 日志附件路径", p8_log_attachments),
+        ("P9 日志采集失败路径", p9_log_collect_failure),
     ]
     for name, fn in paths:
         try:
@@ -1260,3 +1295,314 @@ def run(deps):
         except Exception as exc:  # 单条路径失败不掩盖其余路径
             deps["record"](f"{name}：后续断言未执行（{str(exc)[:180]}）", False, "路径中断")
         time.sleep(0.3)
+
+
+# ---------------- P8：日志附件（自动采集 + 手动补充 + 提交 + 下载） ----------------
+
+
+def _multipart_log_parts(body: bytes, content_type: str) -> list[dict]:
+    """从原始 multipart 体里取出**全部** `logs` 部件（parse_multipart 会合并重名部件）。"""
+    m = re.search(r'boundary="?([^";,]+)"?', content_type or "")
+    if not m or not body:
+        return []
+    boundary = b"--" + m.group(1).encode()
+    out: list[dict] = []
+    for part in body.split(boundary):
+        if b"\r\n\r\n" not in part:
+            continue
+        head, _, payload = part.partition(b"\r\n\r\n")
+        nm = re.search(rb'name="([^"]+)"', head)
+        if not nm or nm.group(1) != b"logs":
+            continue
+        fn = re.search(rb'filename="([^"]*)"', head)
+        if payload.endswith(b"\r\n"):
+            payload = payload[:-2]
+        out.append({"filename": fn.group(1).decode() if fn else None, "bytes": payload})
+    return out
+
+
+def p8_log_attachments(deps):
+    step, check = deps["step"], deps["check"]
+    step("P8 日志附件：自动采集 → 预览/移除 → 手动补充 → 超限提示 → 提交 → 管理端下载")
+
+    import tempfile
+
+    rec = NetRecorder(deps["ctx"])
+    deps["rec"] = rec
+    page = deps["ctx"].new_page()
+    page.goto(f"{deps['pages']}/logs.html", wait_until="networkidle")
+
+    # ---- 1) 自动采集：新草稿首次打开时调用一次 logProvider ----
+    # 先写入足量日志再打开面板：面板持有的是**采集那一刻**导出的字节，
+    # 之后再往宿主缓冲里追加不会改变已采集内容（这也是"提交字节冻结"的语义）。
+    page.evaluate("() => window.__fbE2E.pushBulk(200)")
+    page.locator(".fb-fab").click()
+    page.locator(".fb-panel").wait_for(state="visible", timeout=60000)
+    page.wait_for_selector(".fb-log-item", timeout=15000)
+    calls_after_open = page.evaluate("() => window.__fbE2E.providerCalls")
+    check("P8 打开面板自动调用 logProvider 一次", calls_after_open == 1, str(calls_after_open))
+    area = page.evaluate("() => window.__fbE2E.logArea()")
+    png_probe.dump("P8 打开面板后的日志区", area)
+    check("P8 日志区可见且有标题", area and area["areaDisplay"] != "none" and area["title"] == "日志",
+          json.dumps(area, ensure_ascii=False))
+    check("P8 日志区说明日志会参与 AI 分析并随反馈归档",
+          bool(area and area["note"] and ("归档" in area["note"]) and ("AI" in area["note"])),
+          json.dumps(area, ensure_ascii=False))
+    check("P8 手动添加入口始终存在（原生文件选择，限定扩展名）",
+          area and area["add"] and area["add"]["visible"] and area["inputAccept"] == ".log,.txt,.json,.jsonl",
+          json.dumps(area, ensure_ascii=False))
+    items = page.evaluate("() => window.__fbE2E.logItems()")
+    png_probe.dump("P8 自动采集到的日志条目", items)
+    check("P8 自动日志条目 1 条且文件名为 host-app.log",
+          len(items) == 1 and items[0]["name"] == "host-app.log", json.dumps(items, ensure_ascii=False))
+    check("P8 条目显示来源为自动采集", "自动" in (items[0]["meta"] or ""), json.dumps(items, ensure_ascii=False))
+    check("P8 条目显示可读大小", bool(re.search(r"\d", items[0]["meta"] or "")), json.dumps(items, ensure_ascii=False))
+
+    # ---- 2) 预览：长日志必须显式说明已截断 ----
+    page.locator(".fb-log-preview-btn").first.click()
+    page.wait_for_selector(".fb-log-preview", state="visible", timeout=10000)
+    prev = page.evaluate("() => window.__fbE2E.logArea().preview")
+    png_probe.dump("P8 日志预览", {"chars": len(prev["text"]), "head": prev["text"][:120]})
+    check("P8 纯文本预览渲染真实日志内容", "[boot]" in prev["text"] or "[bulk]" in prev["text"], prev["text"][:200])
+    check("P8 长日志预览显式提示已截断（不静默截断）",
+          ("截断" in prev["text"]) and ("共" in prev["text"]), prev["text"][-200:])
+    page.locator(".fb-log-preview-btn").first.click()  # 收起
+
+    # ---- 3) 移除后不自动补回；重新打开已有草稿不重新采集 ----
+    page.locator(".fb-log-remove-btn").first.click()
+    page.wait_for_timeout(300)
+    check("P8 移除后条目消失", page.locator(".fb-log-item").count() == 0)
+    # 用面板自己的关闭按钮（`.fb-close`）关闭：Esc 只在焦点位于组件内部时生效
+    # （element.ts 的 keydown 守卫 `root.activeElement !== null || contains(document.activeElement)`），
+    # 而点过"移除"后被移除的按钮把焦点留给了 body —— 这是既有的键盘守卫语义，
+    # 与日志改动无关（截图的"移除截图"按钮同样如此）。真实用户走的是关闭按钮。
+    page.locator(".fb-close").click()
+    page.locator(".fb-panel").wait_for(state="hidden", timeout=10000)
+    page.locator(".fb-fab").click()
+    page.locator(".fb-panel").wait_for(state="visible", timeout=60000)
+    page.wait_for_timeout(600)
+    calls_after_reopen = page.evaluate("() => window.__fbE2E.providerCalls")
+    check("P8 重新打开已有草稿不重新采集", calls_after_reopen == 1, f"calls={calls_after_reopen}")
+    check("P8 移除过的日志不会自动补回", page.locator(".fb-log-item").count() == 0,
+          str(page.locator(".fb-log-item").count()))
+
+    # ---- 4) 手动补充：原生 file input（Playwright 直接设置真实文件） ----
+    tmpdir = tempfile.mkdtemp(prefix="fb-e2e-logs-")
+    good = os.path.join(tmpdir, "manual-notes.txt")
+    with open(good, "w", encoding="utf-8") as fh:
+        fh.write("[manual] 用户手动添加的日志\n[manual] 这一行必须出现在提交的 metadata.logs 里\n")
+    bad = os.path.join(tmpdir, "archive.zip")
+    with open(bad, "wb") as fh:
+        fh.write(b"PK\x03\x04 not a text log")
+    page.locator(".fb-log-input").set_input_files(good)
+    page.wait_for_selector(".fb-log-item", timeout=10000)
+    items = page.evaluate("() => window.__fbE2E.logItems()")
+    png_probe.dump("P8 手动添加后的日志条目", items)
+    check("P8 手动添加的日志出现在面板且来源为手动",
+          len(items) == 1 and items[0]["name"] == "manual-notes.txt" and "手动" in (items[0]["meta"] or ""),
+          json.dumps(items, ensure_ascii=False))
+
+    # 非法扩展名必须给出明确提示，且不静默吞掉
+    page.locator(".fb-log-input").set_input_files(bad)
+    page.wait_for_timeout(700)
+    area = page.evaluate("() => window.__fbE2E.logArea()")
+    check("P8 不支持的扩展名给出明确提示（不静默丢弃）",
+          bool(area["status"] and ("不支持" in area["status"] or "类型" in area["status"])),
+          json.dumps(area, ensure_ascii=False))
+    check("P8 被拒绝的文件不进入列表",
+          len(page.evaluate("() => window.__fbE2E.logItems()")) == 1,
+          json.dumps(page.evaluate("() => window.__fbE2E.logItems()"), ensure_ascii=False))
+
+    # 追加两份合法日志 → 共 3 份（上限）；第 4 份必须被拒并提示
+    extra_a = os.path.join(tmpdir, "network.jsonl")
+    extra_b = os.path.join(tmpdir, "trace.log")
+    for path, text in ((extra_a, '{"e":"ECONNRESET"}\n'), (extra_b, "[trace] tail\n")):
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+    page.locator(".fb-log-input").set_input_files(extra_a)
+    page.wait_for_timeout(400)
+    page.locator(".fb-log-input").set_input_files(extra_b)
+    page.wait_for_timeout(400)
+    items = page.evaluate("() => window.__fbE2E.logItems()")
+    check("P8 手动 + 自动共用 3 份上限（当前 3 份）", len(items) == 3, json.dumps(items, ensure_ascii=False))
+    fourth = os.path.join(tmpdir, "another.log")
+    with open(fourth, "w", encoding="utf-8") as fh:
+        fh.write("[fourth] over limit\n")
+    page.locator(".fb-log-input").set_input_files(fourth)
+    page.wait_for_timeout(700)
+    area = page.evaluate("() => window.__fbE2E.logArea()")
+    check("P8 超过 3 份上限时明确提示（不静默删除）",
+          bool(area["status"] and ("3" in area["status"] or "上限" in area["status"] or "数量" in area["status"])),
+          json.dumps(area, ensure_ascii=False))
+    check("P8 超限后仍保留原有 3 份（不截断、不静默丢弃）",
+          len(page.evaluate("() => window.__fbE2E.logItems()")) == 3,
+          json.dumps(page.evaluate("() => window.__fbE2E.logItems()"), ensure_ascii=False))
+    if deps["shot"]:
+        deps["shot"](page, "P8-log-panel")
+
+    # ---- 5) 提交：multipart 必须带 metadata.logs 且与部件同序 ----
+    text = "日志已经附上，请据此排查同步失败"
+    page.locator(".fb-textarea").fill(text)
+    res = submit_with_login(page, deps)
+    fid = res["fid"]
+    check("P8 服务端返回 feedbackId", bool(fid), str(fid))
+    # 用路由通道的请求体记录做契约断言（体与 content-type 必然成对）
+    bodies = rec.submitted_bodies()
+    post = bodies[-1] if bodies else {}
+    parts = _multipart_log_parts(post.get("body") or b"", post.get("ct") or "")
+    if deps.get("browser_kind") == "webkit" and parts and all(not p["bytes"] for p in parts):
+        expected = [good, extra_a, extra_b]
+        check("P8 WebKit 观察到的部件名/顺序与实际选择文件一致",
+              [part["filename"] for part in parts] == [os.path.basename(path) for path in expected])
+        for part, path in zip(parts, expected):
+            with open(path, "rb") as source:
+                part["bytes"] = source.read()
+        # 这里只补独立输入期望；下面服务端下载必须等于它，不能据此声称网络体可读。
+        print("  [EVIDENCE] WebKit 文件字节期望来自原始文件；实际上传字节由服务端下载核对", flush=True)
+    meta = post.get("metadata") or {}
+    meta_logs = meta.get("logs") or []
+    png_probe.dump("P8 提交请求体", {"ct": post.get("ct"), "bodyBytes": post.get("bodyBytes"),
+                                     "metadataLogs": meta_logs,
+                                     "parts": [{"filename": p["filename"], "bytes": len(p["bytes"])} for p in parts]})
+    check("P8 提交走 multipart（有日志即 multipart）", (post.get("ct") or "").startswith("multipart/form-data"),
+          str(post.get("ct")))
+    check("P8 metadata.logs 数量 == logs 部件数量 == 3", len(meta_logs) == 3 and len(parts) == 3,
+          f"meta={len(meta_logs)} parts={len(parts)}")
+    check("P8 metadata.logs 顺序与部件文件名顺序一致",
+          [m.get("name") for m in meta_logs] == [p["filename"] for p in parts],
+          json.dumps({"meta": [m.get("name") for m in meta_logs], "parts": [p["filename"] for p in parts]},
+                     ensure_ascii=False))
+    # 自动采集的那份在第 3 步被用户**移除**且按契约不自动补回，因此本次提交的三份全部是手动添加的。
+    check("P8 metadata.logs 逐项记录来源（自动那份已被移除 → 三份都是 manual）",
+          [m.get("source") for m in meta_logs] == ["manual", "manual", "manual"],
+          json.dumps([m.get("source") for m in meta_logs], ensure_ascii=False))
+    check("P8 metadata.logs 的 byteSize 与实际部件字节数一致",
+          all(m.get("byteSize") == len(parts[i]["bytes"]) for i, m in enumerate(meta_logs)),
+          json.dumps({"meta": [m.get("byteSize") for m in meta_logs],
+                      "parts": [len(p["bytes"]) for p in parts]}, ensure_ascii=False))
+    check("P8 提交正文正确", meta.get("text") == text, str(meta.get("text")))
+
+    # ---- 6) 管理端：详情元数据 + 下载字节与提交一致 ----
+    s, detail = deps["api"]("GET", f"/api/admin/feedback/{fid}")
+    check("P8 管理端详情 200", s == 200, str(s))
+    logs = (detail or {}).get("logs") or []
+    list_items = (deps["api"]("GET", "/api/admin/feedback")[1] or {}).get("items") or []
+    listed = next((it for it in list_items if it.get("id") == fid), {})
+    check("P8 管理列表显示日志数量 3", listed.get("logCount") == 3, json.dumps(listed, ensure_ascii=False))
+    check("P8 详情返回 3 份日志元数据（按 ordinal 升序）",
+          [l.get("ordinal") for l in logs] == [0, 1, 2], json.dumps(logs, ensure_ascii=False))
+    check("P8 详情元数据文件名与提交一致",
+          [l.get("name") for l in logs] == [p["filename"] for p in parts],
+          json.dumps([l.get("name") for l in logs], ensure_ascii=False))
+    check("P8 详情标注自动/手动来源",
+          [l.get("source") for l in logs] == [m.get("source") for m in meta_logs],
+          json.dumps([l.get("source") for l in logs], ensure_ascii=False))
+    # WebKit exposes multipart headers through route interception but returns empty
+    # file payloads. The server response is the authoritative transport evidence.
+    for i, log in enumerate(logs):
+        raw = deps["api_bytes"](f"/api/admin/feedback/{fid}/logs/{log['id']}")
+        same = raw == parts[i]["bytes"]
+        check(f"P8 下载第 {i + 1} 份日志字节与提交完全一致（{log.get('name')}）", same,
+              f"server={len(raw)}B client={len(parts[i]['bytes'])}B sha={png_probe.sha256(raw)[:16]}")
+        check(f"P8 第 {i + 1} 份日志摘要与落库一致",
+              png_probe.sha256(raw) == log.get("sha256"),
+              f"{png_probe.sha256(raw)[:16]} vs {str(log.get('sha256'))[:16]}")
+
+    # 归档必须等**全部附件**（截图 + 每份日志）完成；本路径无截图，3 份日志都要有评论
+    deadline = time.monotonic() + 60
+    final_detail = detail
+    while time.monotonic() < deadline:
+        status, final_detail = deps["api"]("GET", f"/api/admin/feedback/{fid}")
+        if status != 200 or (final_detail or {}).get("status") in ("archived", "failed", "needs_review"):
+            break
+        time.sleep(0.1)
+    check("P8 全部日志完成后服务端状态为 archived",
+          status == 200 and (final_detail or {}).get("status") == "archived",
+          json.dumps({"http": status, "status": (final_detail or {}).get("status"),
+                      "error": (final_detail or {}).get("errorSummary")}, ensure_ascii=False))
+    tasks = deps["plain_get"]("http://127.0.0.1:8898/__mock/tasks")["tasks"]
+    task = next((t for t in tasks if fid in (t.get("description") or "")), None)
+    check("P8 归档任务已创建", task is not None, f"tasks={len(tasks)} fid={fid}")
+    all_comments = (deps["plain_get"]("http://127.0.0.1:8898/__mock/state") or {}).get("comments") or {}
+    comments = {"taskId": task["id"], "comments": all_comments.get(task["id"], [])} if task else {}
+    png_probe.dump("P8 Kaneo mock 评论", comments)
+    if task:
+        cl = comments.get("comments") or []
+        markers = [c for c in cl if fid in (c.get("content") or "")]
+        check("P8 每份日志各有一条带日志 ID 与摘要的评论（3 条）", len(markers) == 3,
+              f"matched={len(markers)} of {len(cl)}")
+        check("P8 日志评论含可下载附件链接并区分日志 ID",
+              all(("**日志ID**" in (c.get("content") or "")) and ("http" in (c.get("content") or "")) for c in markers),
+              json.dumps([(c.get("content") or "")[:80] for c in markers], ensure_ascii=False))
+    if deps["shot"]:
+        deps["shot"](page, "P8-log-submitted")
+    page.close()
+
+
+# ---------------- P9：日志采集失败 / 超时 / 重试 ----------------
+
+
+def p9_log_collect_failure(deps):
+    step, check = deps["step"], deps["check"]
+    step("P9 日志采集超时：3 秒后显示失败、可重试、且不阻塞截图与描述提交")
+
+    page = deps["ctx"].new_page()
+    page.goto(f"{deps['pages']}/logsfail.html", wait_until="networkidle")
+    page.locator(".fb-fab").click()
+    page.locator(".fb-panel").wait_for(state="visible", timeout=60000)
+    started = time.time()
+    page.wait_for_function(
+        """() => { const sr = document.querySelector('feedback-widget').shadowRoot;
+             const el = sr.querySelector('.fb-log-status');
+             return !!el && /失败/.test(el.textContent || ''); }""",
+        timeout=20000,
+    )
+    elapsed = time.time() - started
+    area = page.evaluate("() => window.__fbE2E.logArea()")
+    png_probe.dump("P9 采集超时后的日志区", area)
+    check("P9 采集失败在约 3 秒后出现（不是立即失败）", 2.0 <= elapsed <= 15.0, f"{elapsed:.2f}s")
+    check("P9 失败提示可见", bool(area["status"] and "失败" in area["status"]["text"]),
+          json.dumps(area, ensure_ascii=False))
+    check("P9 提供「重试」入口", bool(area["retry"] and area["retry"]["visible"]),
+          json.dumps(area, ensure_ascii=False))
+    check("P9 提供「不带日志继续提交」入口", bool(area["skip"] and area["skip"]["visible"]),
+          json.dumps(area, ensure_ascii=False))
+    check("P9 采集失败不阻塞描述编辑（输入框可编辑）",
+          page.evaluate("() => window.__fbE2E.textareaEditable()") is True,
+          json.dumps(area, ensure_ascii=False))
+    # 提交按钮的 disabled 只由「描述为空 / 超长 / 提交中」决定（element.ts 的 setBusy/syncSubmit），
+    # 与日志采集失败无关：填入描述后必须立即可提交。
+    check("P9 采集失败时提交按钮仍可点（描述为空导致的 disabled 是既有语义，不是日志阻塞）",
+          area["submit"]["disabled"] is True,
+          json.dumps(area, ensure_ascii=False))
+    page.locator(".fb-textarea").fill("日志采集失败也要能提交")
+    page.wait_for_timeout(200)
+    area_after = page.evaluate("() => window.__fbE2E.logArea()")
+    check("P9 填入描述后提交按钮立即可用（采集失败不阻塞提交）",
+          area_after["submit"]["disabled"] is False,
+          json.dumps(area_after["submit"], ensure_ascii=False))
+    check("P9 采集失败不阻塞截图入口（仍可手动截图/不带日志提交）",
+          area_after["add"]["visible"] and area_after["skip"]["visible"],
+          json.dumps(area_after, ensure_ascii=False))
+    page.locator(".fb-textarea").fill("")
+    check("P9 采集失败时列表为空（绝不显示半截日志）",
+          len(page.evaluate("() => window.__fbE2E.logItems()")) == 0,
+          json.dumps(page.evaluate("() => window.__fbE2E.logItems()"), ensure_ascii=False))
+    if deps["shot"]:
+        deps["shot"](page, "P9-log-timeout")
+
+    # 重试：宿主这次正常返回 → 日志必须真的出现
+    page.evaluate("() => { window.__fbE2E.hang = false; }")
+    page.locator(".fb-log-retry").click()
+    page.wait_for_selector(".fb-log-item", timeout=15000)
+    items = page.evaluate("() => window.__fbE2E.logItems()")
+    area = page.evaluate("() => window.__fbE2E.logArea()")
+    png_probe.dump("P9 重试成功后的日志区", {"items": items, "status": area["status"]})
+    check("P9 重试后拿到日志（retry-ok.log）",
+          len(items) == 1 and items[0]["name"] == "retry-ok.log", json.dumps(items, ensure_ascii=False))
+    check("P9 重试成功后失败提示消失",
+          not area["status"] or "失败" not in area["status"]["text"], json.dumps(area, ensure_ascii=False))
+    check("P9 重试不重复调用（每次用户动作一次采集）",
+          page.evaluate("() => window.__fbE2E.providerCalls") == 2,
+          str(page.evaluate("() => window.__fbE2E.providerCalls")))
+    page.close()

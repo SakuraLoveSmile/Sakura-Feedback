@@ -25,6 +25,7 @@ FeedbackWidget(
     appVersion: '1.2.3',      // 仅显式传入才上报
     pageLabel: 'settings',    // 仅显式传入才上报
     side: FeedbackSide.right,
+    logProvider: myLogExporter, // 可选：宿主日志导出（见「日志附件」）
   ),
   controller: controller,
   child: MyHomePage(),
@@ -107,11 +108,41 @@ FeedbackWidget(
     以及「该反馈已被服务接收，请勿重复提交；管理员可在管理页按此 ID 恢复
     原始记录」的提示；「返回编辑」会恢复原话并清除 feedbackId 与幂等键，
     之后用户主动提交的是**全新反馈（新 key）**，不是重发旧工单。
-- 提交期间冻结快照（正文 + 截图字节 + 元数据）；`409
+- 提交期间冻结快照（正文 + 截图字节 + 元数据 + 日志）；`409
   idempotency_conflict` 提示「该反馈已提交」且不自动换 key。
 - 状态视图：提交中 → 已接收 / 处理中（轮询 `GET /api/feedback/:id`，
   2s→5s 退避）→ 已归档（可打开/复制 Kaneo 链接）；失败视图见上（刷新 /
   复制 ID / 返回编辑）。成功接收后才清空草稿与截图。
+
+## 日志附件
+
+- `FeedbackConfig(logProvider: ...)` 让宿主把**已有日志系统**接进来：
+  `typedef FeedbackLogProvider = Future<List<FeedbackLogFile>> Function();`
+  （`FeedbackLogFile = { String name; Uint8List bytes }`）。未配置时面板只显示
+  「添加文件」入口。宿主负责在交付前去除凭据等敏感内容。
+- **采集时机**：新草稿**首次打开**面板时调用一次（3 秒超时）；重新打开已有
+  草稿不重新采集，用户移除日志后不自动补回；提交成功后新草稿重新采集。
+  采集中允许继续编辑描述与截图。
+- **失败不阻塞**：超时或回调抛错 → 面板显示「日志获取失败」，提供「重试」与
+  「不带日志继续提交」；截图与描述的提交不受影响。
+- **限制（自动与手动共用，整批拒绝、不静默删除或截断）**：最多
+  `kFeedbackMaxLogs`(3) 个、每个 ≤ `kFeedbackMaxLogBytes`(1 MiB)、扩展名
+  ∈ `.log/.txt/.json/.jsonl`（大小写不敏感）、内容非空且**严格 UTF-8**
+  （`utf8.decode(bytes, allowMalformed: false)`，无替换字符、无 NUL）。
+- **面板**：展示文件名、大小与来源（自动 / 手动），支持纯文本预览（超过
+  `kFeedbackLogPreviewMaxRunes` 码点只预览前 N 个，提交字节不变）与移除，
+  并说明日志会参与 AI 分析并随反馈归档。
+- **手动添加**：`file_selector.openFiles`（`XTypeGroup` 扩展名过滤）+
+  `XFile.readAsBytes()` **按字节读取**，Web 与原生端一致；`pickLogFiles`
+  可注入自定义选择器（测试 / 特殊平台）。
+- **提交编码**：有截图**或**有日志 → `multipart/form-data`，
+  `metadata.logs = [{ name, source, byteSize }]` 与重复的 `logs` 文件部件
+  （filename = 日志名、contentType = `text/plain`）**同序**一一对应；
+  都没有 → 保持原 JSON 请求（逐字节兼容旧客户端）。
+- **迟到结果不写回**：面板关闭、组件销毁、切换 `apiBase` / `appId`
+  （面板状态整体重建）后进行中的采集结果一律丢弃。
+- 日志是提交快照的一部分（顺序敏感）：提交 / 轮询期间锁定附件修改，
+  失败保留原快照；**增删或替换日志后生成新的幂等键**。
 
 ## 登录
 
@@ -153,4 +184,12 @@ flutter test
 Class B 零重发 + 刷新 + 复制 ID；`test/token_store_scope_test.dart`：
 不同服务 / 不同 appId 键不同、读不到别家令牌）。
 
-示例应用见仓库 `examples/flutter`（含像素遮挡演示区）。
+日志附件的回归见 `test/logs_test.dart`（校验规则与 multipart 线格式：
+`metadata.logs` 顺序 / `byteSize` / 部件 filename 与 `text/plain`、
+无日志时 JSON 逐字节兼容）与 `test/logs_panel_test.dart`（自动采集一次、
+超时与失败重试、手动添加、扩展名/大小/数量/UTF-8 超限提示、预览与移除、
+不自动补回、重开不重采集、迟到结果不写回（关闭 / 销毁 / 切身份）、
+提交与轮询期间锁定、改附件换新幂等键）。
+
+示例应用见仓库 `examples/flutter`（含像素遮挡演示区与宿主日志环形缓冲 →
+`logProvider` 接入演示）。

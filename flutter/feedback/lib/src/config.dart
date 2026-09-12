@@ -1,4 +1,27 @@
+import 'dart:typed_data' show Uint8List;
 import 'dart:ui' show Offset;
+
+/// 宿主交给反馈组件的一份日志文件：文件名 + 原始字节。
+///
+/// 组件按契约要求校验（扩展名白名单 / ≤ 1 MiB / 严格 UTF-8），校验与提交都
+/// 只使用 [bytes]，绝不解码后重新编码，保证提交字节与宿主导出一致。
+///
+/// 宿主负责在把日志交给组件**之前**去除凭据等敏感内容（契约 §0）。
+class FeedbackLogFile {
+  /// 构造一份日志文件。
+  const FeedbackLogFile({required this.name, required this.bytes});
+
+  /// 文件名（含扩展名；仅接受 `.log` / `.txt` / `.json` / `.jsonl`）。
+  final String name;
+
+  /// 文件原始字节。
+  final Uint8List bytes;
+}
+
+/// 日志提供者回调：返回宿主当前的日志文件列表。
+///
+/// 每份**新草稿首次打开**面板时调用一次（3 秒超时，超时/失败不阻塞提交）。
+typedef FeedbackLogProvider = Future<List<FeedbackLogFile>> Function();
 
 /// 悬浮按钮停靠的侧边。
 enum FeedbackSide {
@@ -60,6 +83,7 @@ class FeedbackConfig {
     this.launcherBottom = '25%',
     this.launcherMode = FeedbackLauncherMode.tab,
     this.captureMode = FeedbackCaptureMode.off,
+    this.logProvider,
   })  : assert(apiBase.trim().isNotEmpty, 'apiBase 不能为空'),
         assert(appId.trim().isNotEmpty, 'appId 不能为空'),
         assert(_isHttpUrl(apiBase), 'apiBase 必须是 http(s) 地址'),
@@ -98,6 +122,12 @@ class FeedbackConfig {
 
   /// 截图捕获模式，默认关闭 [FeedbackCaptureMode.off]。
   final FeedbackCaptureMode captureMode;
+
+  /// 宿主日志提供者；省略时面板只显示「手动添加日志」入口。
+  ///
+  /// 新草稿首次打开面板时调用一次（3 秒超时）；重新打开已有草稿不重新采集，
+  /// 用户移除后也不自动补回。采集失败/超时不影响截图与描述的提交。
+  final FeedbackLogProvider? logProvider;
 
   static String _normalize(String base) {
     var b = base.trim();

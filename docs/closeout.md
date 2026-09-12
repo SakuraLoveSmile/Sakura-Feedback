@@ -1,5 +1,119 @@
 # 收尾记录（T1–T3）
 
+## 当前收尾：v0.2.0（2026-09-12）
+
+本节是当前状态入口。下文 v0.1.0、RAG／Comic 和日志专项记录为历史证据，不能替代本轮验收。
+本轮仅含本地服务、独立 Web／Android 示例和固定版本交付；公网部署、RAG／Comic 改造留到下一阶段。
+
+| 任务 | 当前状态 | 结果与缺口 |
+|---|---|---|
+| T1 本地服务真实保存并归档 | 实现中 | 真实纯文字已归档；日志保存/管理下载通过，Kaneo 申请附件上传地址返回 503，图文日志仍待核对 |
+| T2 独立 Web／Android 示例可用 | 实现中 | Chromium/Firefox 日志流程通过；WebKit 正常上传被动观测修复后全流程通过；Mi 10 安装启动成功，锁屏/输入权限阻止 UI 操作 |
+| T3 固定版本安装 | 实现中 | 已统一 0.2.0，独立 Web 安装通过；候选源码验证中，未打正式标签或发布镜像 |
+
+### 本轮代码与修复
+
+起点 `083259e` 加用户已有日志功能未提交改动；工作分支 `codex/closeout-v0.2.0`，保留既有日志工作。
+
+- 归档屏障：正常提交、已有评论补记、日志人工重发/替换的确认状态保存失败时立即停止，
+  不上传下一份附件，不覆盖为 archived；新增双日志数据库故障回归。
+- 迁移：移除启动 SCHEMA 中提前建日志表的重复 DDL，v3 统一在事务内创建；启动失败关闭连接。
+  新增真实 `openDb()` 启动失败不残留日志表、修复冲突后可重新启动的回归。
+- 启动隔离：`scripts/start-service.sh` 明确要求真实数据目录，前台运行并保留主密钥；
+  mock 入口强制 `data/mock-demo`，启动 worker 前拒绝真实连接，seed 不覆盖真实配置；
+  停演示不再按全局命令行杀其它实例。2 项隔离回归已加入 CI。
+- Android 示例接收 `FEEDBACK_API_BASE` / `FEEDBACK_APP_ID` 编译参数，默认值不变；HTTP 许可仅 debug manifest。
+- Web／Flutter／服务／管理页版本统一 0.2.0，组件默认 tab/off 不变。
+  release 工作流核对标签与包版本，并把 image-digest.txt 附到同一 Release。
+- 接入指南纠正 v3／归档 V2 的回退说明：不得直接让旧镜像处理新库；回退前保留当前库并核对远端写入。
+
+### 本次验证（不是历史计数）
+
+环境：macOS，本地 Node v22.23.2、corepack pnpm 11.23.0；Flutter 使用 `/Users/sakurasep/flutter/bin/flutter`。
+默认 PATH 的 pnpm 8.15.4 不支持当前锁文件，已改用项目版本，未重写锁文件绕过。
+
+| 检查 | 本次结果 | 记录入口 |
+|---|---|---|
+| frozen install → build → typecheck → lint → test | 通过；server 170、Web 145；lint 8 条既有警告 | `/tmp/feedback-closeout-{build,typecheck,lint,test}.log` |
+| mock 启动隔离 | 2/2 通过，真实库字节未改变 | `python3 scripts/test/start-local.test.py` |
+| Flutter 组件 analyze/test | No issues；105/105 | `flutter/feedback` |
+| Flutter 示例 analyze/test | No issues；9/9，自定义 defines 同样通过 | `examples/flutter` |
+| Android debug APK／release manifest | 构建通过；仅 debug 含 cleartext 许可 | `examples/flutter/build/app/outputs/flutter-apk/app-debug.apk` |
+| 独立 Web tarball | npm install、Vite build、tsc 通过；UMD 注册/打开面板通过，截图分块存在，无本仓库绝对路径 | `/tmp/feedback-closeout-install-path` 指向独立目录 |
+
+独立 Web 验证先复制示例时发现示例 tsconfig 继承仓库配置；独立夹具已内联该配置，
+不依赖上级仓库文件。此问题属于夹具复制方式，不是 tarball 缺文件。
+Chromium 首次及 WebKit 早期测试受共享 mock 重置/退出干扰，废弃为验收证据；以隔离重跑结果为准。
+
+### 浏览器与备份恢复补充
+
+- 管理页日志恢复：`python3 e2e/run_admin_logs.py` 通过。独立端口 8796/8896/8897，
+  真实浏览器登录、详情、点击日志评论恢复；等待实际 202 响应且状态 archived。
+  精确核对 action/logId、任务数保持 1、评论数从 1 到 2、截图及保存的日志元数据不变。
+  运行前附件未完成时状态为 needs_review。记录 `/tmp/feedback-closeout-admin.log`。
+- WebKit 对照复现：首次登录即使带 route 也能上传；已有 Cookie 时 route/fallback 导致截图字段为空，
+  去除 route 后相同流程连续两次保存 1280×800、10193 B 截图。证据
+  `/tmp/feedback-closeout-browser/ab-cookie.log` 与 `ab-cookie-noroute.log`。
+  因此正常上传只做 request 事件监听；T7b 仅在注入失败时临时安装 abort 路由，重试前解除。
+  T7b 对照原预览与服务端重编码 PNG 的完整像素；P8 文件字节期望来自原始选择文件，
+  实际上传通过服务端下载逐字节/摘要验证，保留观察到的部件名称与顺序，未伪称网络文件体可读。
+  移除了不正确的“等待 worker 写入附件”轮询：附件在提交响应前就应事务落库。
+- 带日志 Docker 备份恢复已运行 **33/33**（本轮较早镜像）：两份日志恢复后 ID、字节、SHA 保持，
+  同主密钥可解密，错误密钥不可解密，待核对记录不产生第二个任务。
+  **最终源码镜像重建未通过**：Docker pnpm install 返回 ENOSPC，命令与输出位于
+  `/tmp/feedback-closeout-docker-build.log`。宿主仍有约 67 GiB，但 Docker 自身存储不足；
+  未清理其他项目镜像/卷/缓存。不得把较早 33/33 说成最终镜像重跑。
+
+### 真实服务证据与阻塞（T1）
+
+隔离数据：`/tmp/fb-real-agent/data`，服务 `http://192.168.0.23:8798`，健康路径 `/healthz`。
+原库仅只读读取配置，没有复制原反馈队列或覆盖连接。新 appId：`com.feedback.real-e2e-20260912`，
+真实 Kaneo 项目：`Feedback 测试`（`gvfgclb9idzgi0jdfqg4wk72`），列 `待筛选`。
+
+- 纯文字反馈 `1558ddcf-9925-48db-9938-34af7b629371` → **archived**，
+  Kaneo task `sua2356k7ggckgob5omj77ib`。无日志时无 diagnostics，符合兼容行为。
+- 图文日志反馈 `b2d73aa3-867b-48c0-9120-7dec593a9006` → **needs_review / asset_uploading**，
+  Kaneo task `pbmgnm9t69a3ko4xltps66ym` 已创建，恢复没有再建任务。
+- 管理页下载 `host.log` 94 B，与输入逐字节一致，SHA-256：
+  `8a529167f4453d32b9c64c34da8b9047a9686509e4c68568ccf7429baf28e558`。
+  真实 AI 将日志事实、未确认原因和推测分开返回。
+- 远端阻塞：`POST /api/task/{taskId}/image-upload` 申请预签名上传地址返回 **503**；
+  尚未进入 PUT/finalize，截图及日志替换均不能完成。已停止重复写入尝试。
+  不改 Kaneo 仓库／配置；需该实例恢复附件上传能力后继续使用现有反馈恢复。
+- 验证限制：本次真实请求只含一份自动日志；截图是已有 E2E 图片夹具，不是本轮真实 UI 截图。
+  **截图＋自动/手动日志在真实 Kaneo 的最终下载及摘要比对仍未完成**，不能称完整业务验收。
+  完整脱敏证据位于 `/tmp/fb-real-agent/evidence.json`；该运行目录权限 0700。
+
+### Android 真机证据与阻塞（T2）
+
+Mi 10 / Android 16，ADB `192.168.0.19:40029`。实际构建命令（示例目录）：
+
+```sh
+JAVA_HOME=/opt/homebrew/opt/openjdk@17 /Users/sakurasep/flutter/bin/flutter build apk --debug \
+  --dart-define=FEEDBACK_API_BASE=http://192.168.0.23:8798 \
+  --dart-define=FEEDBACK_APP_ID=com.feedback.real-e2e-20260912
+```
+
+安装返回 Success，Activity resumed；已核对 APK 内嵌地址与 appId。
+示例应用 versionName 仍为 1.0.0（宿主版本），依赖 feedback_widget 为 0.2.0。
+截图 `/tmp/feedback-mi10.png`；设备处于 Dozing/锁屏，UIAutomator 仅有 SystemUI/keyguard，
+ADB 输入曾返回 INJECT_EVENTS 权限拒绝。未绕过设备保护。
+因此尚未验证拖球截图、文件选择添加/取消、原生日志提交、页面/草稿切换。
+需要用户正常解锁设备，并在系统设置中允许所需调试输入后继续；不是服务或 APK 启动失败。
+
+### 剩余执行与状态规则
+
+WebKit 与管理恢复路径已修复并验证；继续完成最终隔离源码检查。外部 503、设备锁屏和 Docker 存储不足分别阻塞对应验收。
+正式 v0.2.0 发布保留门禁，不把候选 tarball 当已发布版本；远端产物校验和、来源 SHA、镜像 digest 必须发布后核验。
+
+状态只用未开始／实现中／待体验／已验收；适用必要验证完成才待体验，用户确认后才已验收。
+普通局部偏差可自行处理并记录；重要接口、兼容、数据或范围变化须停止受影响步骤。
+同一阻塞经两次不同依据尝试仍未解决时记录预期/实际/尝试/证据，其他独立工作继续，不删除失败断言。
+
+---
+
+## 历史收尾记录（以下不代表本轮已验收）
+
 > 本文件记录本轮「收尾与首批接入」的交付、版本、证据与剩余问题。
 > 历史验证记录继续保留在 [`VERIFICATION.md`](../VERIFICATION.md)，不被本文件取代。
 >
@@ -15,6 +129,19 @@
 | Web 安装包 | `feedback-web-0.1.0.tgz`，SHA-256 `0e300dac47811045bb9b150ad0e3001b68618a1f028354ca52560ebb39992737` |
 | 宿主接入的组件提交 | `8c66cc07c3ba9e1fa706485b8b0b8ada25635343` |
 
+## 本轮新增：「截图＋描述＋日志」（T1–T3）
+
+在既有「截图 + 文字」基础上补齐**日志附件**：打开面板自动带上宿主最近日志、可手动补充；
+提交后随反馈保存、管理页可查看与下载；AI 结合日志给出区分**证据与推测**的诊断；
+Kaneo 按「截图 → 日志」顺序归档可下载附件，且**全部附件完成才算归档完成**。
+
+- 实施契约：[`logs-plan.md`](logs-plan.md)；交付记录（含实测命令与结果）：[`logs-delivery.md`](logs-delivery.md)。
+- 本轮实测：`pnpm test` 168（server）+ 145（web）全通过；`pnpm typecheck` / `pnpm lint` / `pnpm build` 通过；
+  Flutter 包 105 项、示例 9 项通过且 `flutter analyze` 干净；
+  浏览器 E2E（Chromium）**288/288 通过**（新增 P8 日志附件路径、P9 采集失败路径共 51 条断言）。
+- 状态口径：T1–T3 均为**待体验**（自动化与浏览器验证完成，等你确认效果后才记「已验收」）。
+- 未验证：真实 Kaneo 实例的日志附件归档、真实 AI 的诊断质量、Flutter 真实平台的文件选择对话框。
+
 ## 任务状态
 
 按计划的四个口径（未开始 / 实现中 / 待体验 / 已验收）。**只有你确认效果后才记「已验收」。**
@@ -22,6 +149,9 @@
 | 任务 | 状态 | 说明 |
 |---|---|---|
 | T1 云服务器可拉固定镜像长期跑 HTTPS | **待体验** | 镜像/Actions/生产 compose/Nginx 模板/故障处理均已实测；差真实域名与公网证书 |
+| 本轮 T1 反馈面板自动/手动附带日志（Web + Flutter） | **待体验** | 两端实现 + 回归（Web 25 项、Flutter 28 项）+ 浏览器 P8 实测；差 Flutter 真实平台文件对话框手测 |
+| 本轮 T2 提交后在管理页查看与下载日志 | **待体验** | multipart `logs`、`feedback_logs`（schema v3）、幂等摘要、管理端读取/下载均有测试与浏览器实测 |
+| 本轮 T3 AI 结合日志分析、Kaneo 保留可下载附件 | **待体验** | AI 截取与 `diagnostics`、归档 V2、集中完成条件、带 `logId` 恢复均有测试；差真实 Kaneo / 真实 AI 验证 |
 | T2 RAG 与 Comic 接入同一服务 | **实现中** | 两端代码与依赖已落地、构建通过；差真实 Kaneo 写入、RAG 5174 浏览器实测、Mi 10 实机 |
 | T3 后续项目照着指南安装 | **待体验** | 指南已补（镜像拉取/私有认证/固定 SHA/升级）；差一个真实新项目照做一遍 |
 

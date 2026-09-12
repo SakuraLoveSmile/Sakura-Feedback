@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 // 导入即自动注册 <feedback-widget> Custom Element（副作用）。
-import type { FeedbackWidget, FeedbackSubmittedDetail } from '@feedback/web';
+import type { FeedbackWidget, FeedbackSubmittedDetail, LogProvider } from '@feedback/web';
 import '@feedback/web';
+import { createHostLogBuffer, exportHostLog } from './host-logs';
 
 export function App() {
   // 用回调 ref 把真实 DOM 元素提到 state：事件订阅的 effect 依赖"元素身份"
@@ -11,6 +12,22 @@ export function App() {
   // 因此重挂 effect 不会让用户丢失已输入内容。
   const [widget, setWidget] = useState<FeedbackWidget | null>(null);
   const [last, setLast] = useState<string | null>(null);
+
+  // 宿主自己的内存日志环形缓冲（不扫盘、不拦截 console）。
+  const [hostLogs] = useState(() => createHostLogBuffer());
+  const [logLines, setLogLines] = useState(() => hostLogs.size());
+  // logProvider 是**组件实例的 JS 属性**（不是 attribute）：useMemo 保证引用稳定，
+  // StrictMode 双调用 effect 时第二次赋值是 no-op，不会打断在途采集。
+  const logProvider = useMemo<LogProvider>(
+    () => () => exportHostLog(hostLogs),
+    [hostLogs],
+  );
+
+  useEffect(() => {
+    if (!widget) return;
+    // 交给组件：新草稿首次打开面板时调用一次，导出当前缓冲区内容
+    widget.logProvider = logProvider;
+  }, [widget, logProvider]);
 
   useEffect(() => {
     if (!widget) return;
@@ -38,6 +55,24 @@ export function App() {
         <code>capture-mode=&quot;viewport&quot;</code>：
         组件自身的默认值是 <code>tab</code> / <code>off</code>（升级不改变旧宿主行为），
         所以要灵感球与自动截图必须显式声明。截图范围是**当前应用视口**，拖拽落点只标记问题位置。
+      </p>
+
+      <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 8 }}>
+        <button
+          onClick={() => {
+            hostLogs.push('[ui] 用户点击了「写一条日志」');
+            setLogLines(hostLogs.size());
+          }}
+        >
+          写一条日志
+        </button>
+        <span style={{ fontSize: 13, color: '#64748b' }}>
+          宿主内存日志缓冲：{logLines} 行（<code>logProvider</code> 导出为{' '}
+          <code>host-app.log</code>，面板会显示为「来源：自动」）
+        </span>
+      </div>
+      <p style={{ margin: '0 0 20px 0', fontSize: 13, color: '#64748b' }}>
+        先写几条日志再打开反馈面板，日志会随反馈一起提交（也可在面板里手动添加 / 预览 / 移除）。
       </p>
 
       <div

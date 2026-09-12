@@ -3,8 +3,22 @@ import 'package:flutter/material.dart';
 
 import 'details_page.dart';
 import 'home_page.dart';
+import 'host_logs.dart';
 
-void main() => runApp(const FeedbackExampleApp());
+const String feedbackApiBase = String.fromEnvironment(
+  'FEEDBACK_API_BASE',
+  defaultValue: 'http://localhost:8787',
+);
+const String feedbackAppId = String.fromEnvironment(
+  'FEEDBACK_APP_ID',
+  defaultValue: 'com.example.demo',
+);
+
+void main() {
+  // 宿主日志：真实应用在这里初始化自己的日志系统（本示例用内存环形缓冲）。
+  hostLogs.info('示例应用启动');
+  runApp(const FeedbackExampleApp());
+}
 
 /// 应用根：持有 [FeedbackController]，并把 [FeedbackWidget] 挂在 Navigator 之上。
 ///
@@ -39,6 +53,8 @@ class _FeedbackExampleAppState extends State<FeedbackExampleApp> {
     // 对话框等匿名路由（name == null）不改变 pageLabel。
     if (name == null || name == _pageLabel.value) return;
     _pageLabel.value = name;
+    // 顺手写一条宿主日志：下次打开反馈面板时会被自动采集进 host-app.log。
+    hostLogs.info('路由切换 → $name');
   }
 
   @override
@@ -99,15 +115,19 @@ class _FeedbackExampleAppState extends State<FeedbackExampleApp> {
   Widget _buildFeedbackLayer(Widget? child, String pageLabel) {
     return FeedbackWidget(
       config: FeedbackConfig(
-        // 改为你自己的 Feedback 服务地址与服务端登记的 appId。
-        'http://localhost:8787',
-        'com.example.demo',
+        // 可通过 --dart-define=FEEDBACK_API_BASE/FEEDBACK_APP_ID 覆盖。
+        feedbackApiBase,
+        feedbackAppId,
         appVersion: '1.0.0',
         pageLabel: pageLabel,
         side: FeedbackSide.right,
         // 显式声明：灵感球（可拖拽落点）+ 呼出时截取当前应用视口。
         launcherMode: FeedbackLauncherMode.orb,
         captureMode: FeedbackCaptureMode.viewport,
+        // 宿主日志：新草稿首次打开面板时自动采集一次（3 秒超时），
+        // 失败/超时只提示、不阻塞截图与描述提交。
+        // 宿主的导出方法自己负责脱敏（见 host_logs.dart）。
+        logProvider: hostLogs.export,
       ),
       controller: _feedback,
       child: child ?? const SizedBox.shrink(),

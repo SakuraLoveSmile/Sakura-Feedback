@@ -34,6 +34,21 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      - name: 核对发布版本一致
+        env:
+          RELEASE_REF: ${{ github.ref_name }}
+          REQUESTED_TAG: ${{ inputs.version_tag }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re
+          paths = ['package.json', 'packages/web/package.json', 'apps/server/package.json', 'apps/admin/package.json']
+          versions = {json.loads(pathlib.Path(p).read_text())['version'] for p in paths}
+          versions.add(re.search(r'^version:\s*(\S+)', pathlib.Path('flutter/feedback/pubspec.yaml').read_text(), re.M)[1])
+          assert len(versions) == 1, f'组件版本不一致: {versions}'
+          expected = 'v' + versions.pop()
+          tag = os.environ.get('REQUESTED_TAG') or (os.environ['RELEASE_REF'] if os.environ['GITHUB_REF'].startswith('refs/tags/') else '')
+          assert not tag or tag == expected, f'标签 {tag} 与源码版本 {expected} 不一致'
+          PY
       - uses: pnpm/action-setup@v4
         with:
           version: 11.23.0
@@ -96,7 +111,7 @@ jobs:
     needs: [artifacts]
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write # 将镜像 digest 附到同一 Release
       packages: write # 仅此 job 有发布权限
     steps:
       - uses: actions/checkout@v4
@@ -155,3 +170,10 @@ jobs:
           name: feedback-image-digest
           path: image-digest.txt
           retention-days: 90
+
+      - name: 标签发布时附加镜像 digest
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: gh release upload "$TAG" image-digest.txt --clobber

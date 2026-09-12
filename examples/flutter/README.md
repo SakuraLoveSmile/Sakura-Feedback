@@ -42,10 +42,25 @@ Navigator 提供这两个祖先。
 ## 运行
 
 ```sh
-# 先启动 Feedback 服务（默认 8787 端口），或修改 lib/main.dart 中的 apiBase/appId
+# 先启动 Feedback 服务（默认 8787 端口）。默认值为下面这组地址和 appId。
 flutter run -d chrome
 flutter run -d macos
+
+# 覆盖服务地址和服务端登记的 appId（编译时配置）：
+flutter run -d chrome \
+  --dart-define=FEEDBACK_API_BASE=http://localhost:8787 \
+  --dart-define=FEEDBACK_APP_ID=com.example.demo
+
+# Android 模拟器访问宿主电脑使用 10.0.2.2；真机使用电脑在同一局域网的 IP，
+# 例如 http://192.168.1.20:8787。真机不能把 localhost 当作电脑。
+flutter run -d android \
+  --dart-define=FEEDBACK_API_BASE=http://10.0.2.2:8787 \
+  --dart-define=FEEDBACK_APP_ID=com.example.demo
 ```
+
+`FEEDBACK_API_BASE` 和 `FEEDBACK_APP_ID` 也适用于 `flutter build`。示例默认值保留为
+`http://localhost:8787` 和 `com.example.demo`，没有传入 `--dart-define` 时无需额外配置。
+Android 示例只在 debug 构建启用明文 HTTP（便于连接本地服务）；发布构建应使用 HTTPS。
 
 本机 Flutter 不在 PATH 上时用绝对路径：`/Users/sakurasep/flutter/bin/flutter`。
 

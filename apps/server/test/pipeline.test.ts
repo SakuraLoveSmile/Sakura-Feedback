@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createApp, resumeWorker } from "../src/app.ts";
 import { type Db, getFeedback, getFeedbackScreenshot, updateFeedback } from "../src/db/repos.ts";
-import { type ArchiveDataV1, loadArchiveData, saveArchiveData } from "../src/pipeline/archive-data.ts";
+import { type ArchiveData, loadArchiveData, saveArchiveData } from "../src/pipeline/archive-data.ts";
 import {
   createTestPng,
   defaultSubmitBody,
@@ -19,7 +19,7 @@ import {
   submitMultipartFeedback,
 } from "./helpers.ts";
 
-function expectValidArchive(db: Db, id: string): ArchiveDataV1 {
+function expectValidArchive(db: Db, id: string): ArchiveData {
   const parsed = loadArchiveData(db, id);
   if (parsed.kind !== "valid") throw new Error(`期望合法归档数据，实际 ${parsed.kind}`);
   return parsed.data;
@@ -341,7 +341,7 @@ describe("分阶段恢复（4.2–4.3：同 key 恢复与意图记录）", () =>
   async function seedResume(
     h: Awaited<ReturnType<typeof makeHarness>>,
     id: string,
-    upload: ArchiveDataV1["upload"] | undefined,
+    upload: ArchiveData["upload"] | undefined,
   ): Promise<void> {
     h.kaneo.comments.length = 0;
     const base = expectValidArchive(h.feedbackApp.db, id);

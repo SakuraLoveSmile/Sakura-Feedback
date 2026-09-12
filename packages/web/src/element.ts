@@ -7,11 +7,27 @@ import {
   uuid,
   type FeedbackCaptureInfo,
   type FeedbackContext,
+  type FeedbackLogFile,
+  type FeedbackLogSource,
   type FeedbackRecord,
   type FeedbackStatus,
+  type LogProvider,
 } from './api';
 import { LoginHandshake, type AuthMessage } from './auth';
 import { STYLES } from './styles';
+import {
+  LOG_ACCEPT,
+  LOG_PREVIEW_MAX_CHARS,
+  MAX_LOGS,
+  LogTimeoutError,
+  formatBytes,
+  logBasename,
+  logErrorMessage,
+  logPreview,
+  normalizeLogFiles,
+  validateLogFile,
+  withLogTimeout,
+} from './logs';
 import {
   CAPTURE_FAILURE_MESSAGE,
   CaptureError,
@@ -22,6 +38,17 @@ import {
   type CaptureProvider,
 } from './capture';
 
+/** 草稿中的一条日志：文件名 + 原始字节 + 来源，`id` 仅用于面板内的定位（不参与提交）。 */
+interface DraftLog {
+  id: number;
+  name: string;
+  bytes: Uint8Array;
+  source: FeedbackLogSource;
+}
+
+/** 自动采集状态：`loading` 期间仍可编辑描述、可继续提交（不阻塞）。 */
+type LogCollectStatus = 'idle' | 'loading' | 'error';
+
 interface DraftState {
   text: string;
   screenshotBlob: Blob | null;
@@ -29,6 +56,15 @@ interface DraftState {
   captureInfo: FeedbackCaptureInfo | null;
   /** 草稿版本号：每次内容变更递增，用于判定提交快照是否与当前草稿一致。 */
   version: number;
+  /** 日志附件（自动 + 手动共用 3 个 / 1 MiB / 扩展名白名单上限）。 */
+  logs: DraftLog[];
+  /** 新草稿是否已经发起过自动采集（含失败、超时、被移除）：只采一次、不自动补回。 */
+  logCollected: boolean;
+  logStatus: LogCollectStatus;
+  /** 采集失败原因（面板展示 + 重试入口）。 */
+  logError: string | null;
+  /** 被拒绝文件的明确提示（超限 / 类型 / 编码）：不静默丢弃。 */
+  logNotice: string | null;
 }
 
 /**
@@ -47,6 +83,8 @@ interface SubmitSnapshot {
   /** 截图字节与元数据。 */
   blob: Blob | null;
   captureInfo: FeedbackCaptureInfo | null;
+  /** 日志附件快照（与草稿同一批对象引用；只读，改动草稿会生成新快照 / 新 key）。 */
+  logs: DraftLog[];
   /** 草稿版本：与当前草稿一致时快照可复用（重试同 key 同字节）。 */
   draftVersion: number;
   /** 上一次尝试结果未知（网络错误 / 5xx）：草稿被修改时先保留原请求供核对。 */
@@ -209,6 +247,16 @@ export class FeedbackWidget extends HTMLElement {
   private submitBtn!: HTMLButtonElement;
   private statusRegion!: HTMLDivElement;
   private errorRegion!: HTMLDivElement;
+  /** 日志区：列表 + 状态/失败操作 + 手动入口 + 预览。 */
+  private logArea!: HTMLDivElement;
+  private logList!: HTMLUListElement;
+  private logStatusLine!: HTMLDivElement;
+  private logActions!: HTMLDivElement;
+  private logRetryBtn!: HTMLButtonElement;
+  private logSkipBtn!: HTMLButtonElement;
+  private logInput!: HTMLInputElement;
+  private logAddLabel!: HTMLLabelElement;
+  private logPreviewBox!: HTMLPreElement;
 
   private phase: Phase = 'idle';
   private polling = false;
@@ -245,6 +293,8 @@ export class FeedbackWidget extends HTMLElement {
    * 未提交草稿：组件实例所有（断开重连保留字节并重建自己的预览 URL），
    * 仅存内存，刷新即弃，绝不用 localStorage；appId 变化时整体废弃，
    * 旧捕获/旧草稿不得写入新身份。
+   * 日志字节同样只活在实例草稿里（Uint8Array，可结构化克隆的序列化形态）：
+   * 不写 localStorage 就没有配额 / 半写失败面，草稿可用性不会被存储异常破坏。
    */
   private readonly draft: DraftState = {
     text: '',
@@ -252,6 +302,11 @@ export class FeedbackWidget extends HTMLElement {
     screenshotUrl: null,
     captureInfo: null,
     version: 0,
+    logs: [],
+    logCollected: false,
+    logStatus: 'idle',
+    logError: null,
+    logNotice: null,
   };
 
   /** 当前提交快照（冻结）；失败且草稿未变时复用（同 key 同字节重试）。 */
@@ -274,6 +329,40 @@ export class FeedbackWidget extends HTMLElement {
     if (p !== this._captureProvider) this.invalidateCaptureSession();
     this._captureProvider = p;
   }
+
+  /**
+   * 宿主日志回调（**JS 属性，不是 attribute**）：返回文件名 + 原始字节，
+   * 同步 / 异步、单个 / 数组、`null` 都接受。未配置时面板只显示「手动添加日志」入口。
+   *
+   * 语义（docs/logs-plan.md §4）：
+   * - **新草稿首次打开**时调用一次（采集时点即该次打开）；
+   * - 重新打开已有草稿（恢复草稿）不重新采集；
+   * - 用户移除日志后不自动补回（只能显式「重试」或手动添加）；
+   * - 3 秒未返回 → 「日志获取失败」+ 重试 / 不带日志继续提交，绝不阻塞截图与描述提交。
+   *
+   * 替换 provider（含置空）使在途采集失效：旧回调的迟到结果绝不写回草稿。
+   */
+  private _logProvider?: LogProvider;
+  get logProvider(): LogProvider | undefined {
+    return this._logProvider;
+  }
+  set logProvider(p: LogProvider | undefined) {
+    if (p === this._logProvider) return;
+    this._logProvider = p;
+    // 旧 provider 的迟到结果一律丢弃
+    this.invalidateLogCollection();
+    // 面板已打开、新草稿且尚未采集时补采一次
+    // （openFeedback({ logProvider }) 命中一个已经打开的实例）
+    if (this.openState) this.maybeCollectLogs();
+    this.syncUi();
+  }
+
+  /** 自动采集会话序号：关闭 / 卸载 / 切换身份 / 换 provider / 提交冻结时递增，旧结果即失效。 */
+  private logSeq = 0;
+  /** 日志条目自增 id（仅面板内定位用，不进入请求）。 */
+  private logIdSeq = 0;
+  /** 当前展开预览的日志 id（`null` = 收起）。 */
+  private previewLogId: number | null = null;
 
   /** 令牌仅存组件实例内存；页面刷新后靠重新握手恢复。 */
   private accessToken: string | null = null;
@@ -405,6 +494,9 @@ export class FeedbackWidget extends HTMLElement {
     if (this.phase === 'tracking') {
       void this.resumePolling();
     }
+
+    // 新草稿首次打开：采集宿主日志（异步，不阻塞面板使用）
+    this.maybeCollectLogs();
   }
 
   close(): void {
@@ -412,6 +504,13 @@ export class FeedbackWidget extends HTMLElement {
     this.invalidateCaptureSession();
     this.captureInFlight = null;
     this.restoreCaptureUi();
+    // 关闭后迟到的日志采集结果不得写回（§4.7）
+    this.invalidateLogCollection();
+    if (this.previewLogId !== null) {
+      // 预览是面板内的临时展开态：关闭即收起，并让 DOM 与状态一致
+      this.previewLogId = null;
+      this.syncLogUi();
+    }
 
     if (!this.openState) return;
     this.openState = false;
@@ -615,6 +714,99 @@ export class FeedbackWidget extends HTMLElement {
     this.shotArea.classList.toggle('is-capturing', this.isCapturing);
   }
 
+  /**
+   * 日志区同步：
+   * - 列表逐条展示文件名 / 人类可读大小 / 来源（自动 / 手动）并提供预览与移除；
+   * - 采集中显示「正在获取日志…」（**不锁描述与提交**）；
+   * - 失败 / 超时显示「日志获取失败」+ 重试 / 不带日志继续提交；
+   * - 被拒文件（超限 / 类型 / 编码）显示**明确原因**，绝不静默丢弃；
+   * - 预览按码点截断到上限并在正文里说明「已截断」。
+   */
+  private syncLogUi(): void {
+    if (!this.logArea) return;
+    const locked = this.attachmentsLocked();
+
+    // 1) 列表
+    this.logList.textContent = '';
+    for (const log of this.draft.logs) {
+      const item = el('li', 'fb-log-item');
+      const info = el('div', 'fb-log-info');
+      info.append(
+        el('span', 'fb-log-name', log.name),
+        el(
+          'span',
+          'fb-log-meta',
+          `${formatBytes(log.bytes.byteLength)} · 来源：${log.source === 'auto' ? '自动' : '手动'}`,
+        ),
+      );
+
+      const expanded = this.previewLogId === log.id;
+      const actions = el('div', 'fb-log-item-actions');
+      const previewBtn = el('button', 'fb-log-preview-btn', expanded ? '收起预览' : '预览');
+      previewBtn.type = 'button';
+      previewBtn.setAttribute('aria-label', `${expanded ? '收起' : '预览'}日志 ${log.name}`);
+      previewBtn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+      previewBtn.setAttribute('aria-controls', 'fb-log-preview');
+      previewBtn.addEventListener('click', () => this.toggleLogPreview(log.id));
+
+      const removeBtn = el('button', 'fb-log-remove-btn', '移除');
+      removeBtn.type = 'button';
+      removeBtn.setAttribute('aria-label', `移除日志 ${log.name}`);
+      removeBtn.disabled = locked;
+      removeBtn.addEventListener('click', () => this.removeLog(log.id));
+
+      actions.append(previewBtn, removeBtn);
+      item.append(info, actions);
+      this.logList.append(item);
+    }
+    this.logList.hidden = this.draft.logs.length === 0;
+
+    // 2) 手动入口：提交 / 轮询期间禁用（锁定附件修改，含日志）
+    this.logInput.disabled = locked;
+    this.logAddLabel.classList.toggle('is-disabled', locked);
+
+    // 3) 状态行：采集中 → 失败 → 被拒提示
+    this.logStatusLine.classList.remove('is-error', 'is-warn');
+    if (this.draft.logStatus === 'loading') {
+      this.logStatusLine.textContent = '正在获取日志…';
+      this.logStatusLine.hidden = false;
+    } else if (this.draft.logStatus === 'error' && this.draft.logError) {
+      this.logStatusLine.textContent = this.draft.logError;
+      this.logStatusLine.classList.add('is-error');
+      this.logStatusLine.hidden = false;
+    } else if (this.draft.logNotice) {
+      this.logStatusLine.textContent = this.draft.logNotice;
+      this.logStatusLine.classList.add('is-warn');
+      this.logStatusLine.hidden = false;
+    } else {
+      this.logStatusLine.textContent = '';
+      this.logStatusLine.hidden = true;
+    }
+
+    // 4) 失败操作：重试 / 不带日志继续提交（失败绝不阻塞截图与描述提交）
+    const failed = this.draft.logStatus === 'error';
+    this.logActions.hidden = !failed;
+    this.logRetryBtn.hidden = !failed;
+    this.logSkipBtn.hidden = !failed;
+    this.logRetryBtn.disabled = locked || this._logProvider === undefined;
+    this.logSkipBtn.disabled = locked;
+
+    // 5) 纯文本预览（截断到合理长度并说明）
+    const previewed = this.draft.logs.find((log) => log.id === this.previewLogId) ?? null;
+    if (!previewed) {
+      this.logPreviewBox.textContent = '';
+      this.logPreviewBox.hidden = true;
+      return;
+    }
+    const preview = logPreview(previewed.bytes);
+    const body = preview.text.length > 0 ? preview.text : '（空内容）';
+    const suffix = preview.truncated
+      ? `\n…（已截断：仅显示前 ${LOG_PREVIEW_MAX_CHARS} 个字符，共 ${preview.totalChars} 个字符）`
+      : '';
+    this.logPreviewBox.textContent = `${body}${suffix}`;
+    this.logPreviewBox.hidden = false;
+  }
+
   /** 单次捕获会话主体：每个异步步骤后与更新草稿 / 开面板前都校验会话有效性。 */
   private async runCapture(opts: { releasePoint?: { x: number; y: number } }): Promise<void> {
     const seq = ++this.captureSeq;
@@ -624,6 +816,9 @@ export class FeedbackWidget extends HTMLElement {
     const controller = new AbortController();
     this.captureController = controller;
     const { signal } = controller;
+    // 呼出即采集宿主日志：截图的字节随后才写入草稿，因此这里不能等 open()——
+    // 那时草稿已"脏"，会被「恢复已有草稿不重新采集」挡掉（capture-mode=viewport 路径）。
+    this.maybeCollectLogs();
     // 加载 / 禁用态必须在隐藏面板之前落到 DOM（同一 tick，不存在中间帧）：
     // 「截取中…」与 aria-busy 因此永远不可能出现在截图里（面板随后整体不可见）。
     this.isCapturing = true;
@@ -758,6 +953,8 @@ export class FeedbackWidget extends HTMLElement {
 
   /** 清空草稿（提交成功后 / appId 变化时），字节与预览 URL 一并释放。 */
   private clearDraft(): void {
+    // 先失效在途采集：已清空的草稿绝不被迟到结果重新填回
+    this.invalidateLogCollection();
     this.draft.text = '';
     if (this.draft.screenshotUrl) {
       URL.revokeObjectURL(this.draft.screenshotUrl);
@@ -765,7 +962,211 @@ export class FeedbackWidget extends HTMLElement {
     }
     this.draft.screenshotBlob = null;
     this.draft.captureInfo = null;
+    this.draft.logs = [];
+    this.draft.logCollected = false;
+    this.draft.logStatus = 'idle';
+    this.draft.logError = null;
+    this.draft.logNotice = null;
+    this.previewLogId = null;
     this.draft.version++;
+  }
+
+  // ---------- 日志附件（docs/logs-plan.md §4） ----------
+
+  /** 提交 / 轮询期间锁定附件修改（含日志），与截图三件套的禁用口径一致。 */
+  private attachmentsLocked(): boolean {
+    return this.phase === 'submitting' || this.polling;
+  }
+
+  /**
+   * 新草稿**首次打开**时自动采集一次宿主日志：
+   * - 未配置 `logProvider` → 什么都不做（面板只保留「手动添加日志」入口）；
+   * - 已发起过采集（含失败 / 超时 / 被用户移除）→ 不再自动采集（**不自动补回**）；
+   * - 恢复已有草稿（有文字 / 截图 / 日志）或当前在结果卡片阶段 → 不采集。
+   */
+  private maybeCollectLogs(): void {
+    if (!this._logProvider) return;
+    if (this.draft.logCollected) return;
+    if (this.phase !== 'idle') return;
+    if (this.isDraftDirty() || this.draft.logs.length > 0) return;
+    void this.collectLogs();
+  }
+
+  /**
+   * 采集会话主体：每次采集递增序号并捕获身份世代，await 恢复后先校验
+   * （关闭 / 卸载 / 切换 `api-base`|`app-id` / 换 provider / 提交冻结都会使会话失效）。
+   * 采集期间不锁任何东西：描述可继续编辑，截图与描述提交不被阻塞。
+   */
+  private async collectLogs(): Promise<void> {
+    const provider = this._logProvider;
+    if (!provider || this.attachmentsLocked()) return;
+
+    // 采集机会在发起时即被消费：失败 / 超时 / 被取消都不会自动重来
+    this.draft.logCollected = true;
+
+    const seq = ++this.logSeq;
+    const epoch = this.identityEpoch;
+    const active = (): boolean => seq === this.logSeq && epoch === this.identityEpoch;
+
+    this.draft.logStatus = 'loading';
+    this.draft.logError = null;
+    this.syncUi();
+
+    try {
+      const raw = await withLogTimeout(() => provider());
+      if (!active()) return;
+      const files = normalizeLogFiles(raw);
+      if (files === null) {
+        this.failLogCollect('日志获取失败：宿主回调返回的数据格式不正确（需要 { name, bytes }）');
+        return;
+      }
+      this.applyLogFiles(files, 'auto');
+    } catch (err) {
+      if (!active()) return;
+      this.failLogCollect(
+        err instanceof LogTimeoutError
+          ? '日志获取失败：超过 3 秒未返回。可重试，或直接不带日志提交。'
+          : `日志获取失败：${logErrorMessage(err)}`,
+      );
+    } finally {
+      if (active()) this.syncUi();
+    }
+  }
+
+  /** 采集失败：面板展示「日志获取失败」+ 重试 / 不带日志继续提交；**绝不阻塞提交**。 */
+  private failLogCollect(message: string): void {
+    this.draft.logStatus = 'error';
+    this.draft.logError = message;
+    this.draft.logNotice = null;
+    this.syncUi();
+  }
+
+  /**
+   * 接收一批日志（自动与手动**共用**同一上限）：逐个校验，
+   * 超限 / 类型不符 / 非 UTF-8 的文件**逐个给出明确原因**后跳过——
+   * 不静默删除、不截断字节、不改变文件内容。
+   */
+  private applyLogFiles(
+    files: FeedbackLogFile[],
+    source: FeedbackLogSource,
+    readFailures: string[] = [],
+  ): void {
+    const rejected: string[] = [...readFailures];
+    let added = 0;
+
+    for (const file of files) {
+      const name = logBasename(file.name) || '(未命名)';
+      if (this.draft.logs.length >= MAX_LOGS) {
+        rejected.push(`${name}：最多只能附加 ${MAX_LOGS} 个日志文件`);
+        continue;
+      }
+      const reason = validateLogFile(file);
+      if (reason) {
+        rejected.push(`${name}：${reason}`);
+        continue;
+      }
+      this.draft.logs.push({
+        id: ++this.logIdSeq,
+        name: logBasename(file.name),
+        bytes: file.bytes,
+        source,
+      });
+      added++;
+    }
+
+    if (added > 0) this.draft.version++;
+    const notice =
+      rejected.length > 0 ? `以下日志未附加（未截断、未静默丢弃）：${rejected.join('；')}` : null;
+
+    if (source === 'auto' && added === 0 && rejected.length > 0) {
+      // 自动采集一个都没收下：按获取失败处理，给出重试入口
+      this.failLogCollect(`日志获取失败：${rejected.join('；')}`);
+      return;
+    }
+
+    this.draft.logStatus = 'idle';
+    this.draft.logError = null;
+    this.draft.logNotice = notice;
+    this.syncUi();
+  }
+
+  /** 手动添加：`<input type="file" multiple accept=".log,.txt,.json,.jsonl">`，按**字节**读取。 */
+  private async addManualLogs(files: File[]): Promise<void> {
+    const picked: FeedbackLogFile[] = [];
+    const readFailures: string[] = [];
+    for (const file of files) {
+      try {
+        const buf = await file.arrayBuffer();
+        picked.push({ name: file.name, bytes: new Uint8Array(buf) });
+      } catch {
+        readFailures.push(`${file.name}：读取失败`);
+      }
+    }
+    // 读取期间进入了提交 / 轮询：本轮作废（附件已锁定，快照不受影响）
+    if (this.attachmentsLocked()) return;
+    this.applyLogFiles(picked, 'manual', readFailures);
+  }
+
+  private onLogInputChange(): void {
+    const input = this.logInput;
+    const files = Array.from(input.files ?? []);
+    // 立即清空 value：再次选择同一个文件也能触发 change
+    input.value = '';
+    if (files.length === 0) return;
+    if (this.attachmentsLocked()) return;
+    void this.addManualLogs(files);
+  }
+
+  /**
+   * 移除日志。**不自动补回**：`logCollected` 保持 true，
+   * 只有显式「重试」或再次手动添加才会出现新日志。
+   */
+  private removeLog(id: number): void {
+    if (this.attachmentsLocked()) return;
+    const idx = this.draft.logs.findIndex((log) => log.id === id);
+    if (idx === -1) return;
+    this.draft.logs.splice(idx, 1);
+    this.draft.version++;
+    if (this.previewLogId === id) this.previewLogId = null;
+    this.syncUi();
+  }
+
+  /** 纯文本预览的展开 / 收起（只读操作，提交期间也允许）。 */
+  private toggleLogPreview(id: number): void {
+    this.previewLogId = this.previewLogId === id ? null : id;
+    this.syncLogUi();
+  }
+
+  /** 失败 / 超时后的**显式**重试（用户动作，不受「只采一次」限制）。 */
+  private retryLogCollection(): void {
+    if (this.attachmentsLocked()) return;
+    if (!this._logProvider) return;
+    void this.collectLogs();
+  }
+
+  /**
+   * 「不带日志继续提交」：清掉失败态（失败 / 超时绝不阻塞提交），
+   * 有描述时直接走正常提交路径（未登录则先登录并挂起提交）。
+   */
+  private continueWithoutLogs(): void {
+    if (this.attachmentsLocked()) return;
+    this.draft.logStatus = 'idle';
+    this.draft.logError = null;
+    this.draft.logNotice = null;
+    this.syncUi();
+    void this.onPrimaryAction();
+  }
+
+  /**
+   * 使在途采集失效：序号先行递增 → 迟到的结果一律 no-op。
+   * 被中断的 loading 会留下**明确**失败态（可重试 / 可不带日志提交），而不是静默消失。
+   */
+  private invalidateLogCollection(): void {
+    this.logSeq++;
+    if (this.draft.logStatus !== 'loading') return;
+    this.draft.logStatus = 'error';
+    this.draft.logError = '日志获取失败：采集已中断，可重试或直接不带日志提交。';
+    this.syncUi();
   }
 
   private isMobile(): boolean {
@@ -820,6 +1221,8 @@ export class FeedbackWidget extends HTMLElement {
     // 卸载使进行中的捕获会话失效：旧截图结果不得再写入草稿
     this.invalidateCaptureSession();
     this.captureInFlight = null;
+    // 卸载同理使在途日志采集失效：迟到结果不得写回（§4.7）
+    this.invalidateLogCollection();
     this.stopPolling();
     this.handshake?.cancel();
     // 取消后必须丢弃引用：否则重挂载后的登录会误判"已有握手"而永不开窗
@@ -863,6 +1266,7 @@ export class FeedbackWidget extends HTMLElement {
   private resetForServiceSwitch(): void {
     this.invalidateCaptureSession();
     this.captureInFlight = null;
+    this.invalidateLogCollection();
     this.stopPolling();
     this.pollDelay = POLL_START_MS;
     this.pollStartedAt = 0;
@@ -899,6 +1303,7 @@ export class FeedbackWidget extends HTMLElement {
   private resetForAppIdSwitch(): void {
     this.invalidateCaptureSession();
     this.captureInFlight = null;
+    this.invalidateLogCollection();
     this.restoreCaptureUi();
     this.stopPolling();
     this.pollDelay = POLL_START_MS;
@@ -1129,6 +1534,66 @@ export class FeedbackWidget extends HTMLElement {
     this.retakeBtn.addEventListener('click', () => void this.retakeScreenshot());
     this.removeBtn.addEventListener('click', () => this.removeScreenshot());
 
+    // ---- 日志区（docs/logs-plan.md §4.5 / §4.6）----
+    // 始终存在：未配置 logProvider 时它就是「手动添加日志」入口；
+    // 有日志时逐条展示文件名 / 大小 / 来源（自动 / 手动）/ 预览 / 移除。
+    this.logArea = el('div', 'fb-log-area');
+
+    const logHead = el('div', 'fb-log-head');
+    const logTitle = el('span', 'fb-log-title', '日志');
+    const logNote = el(
+      'span',
+      'fb-log-note',
+      `日志会参与 AI 分析并随反馈归档（最多 ${MAX_LOGS} 个、每个 ≤ 1 MiB）。请自行去除凭据等敏感内容。`,
+    );
+    logHead.append(logTitle, logNote);
+
+    this.logList = el('ul', 'fb-log-list');
+    this.logList.hidden = true;
+
+    this.logStatusLine = el('div', 'fb-log-status');
+    this.logStatusLine.setAttribute('role', 'status');
+    this.logStatusLine.setAttribute('aria-live', 'polite');
+    this.logStatusLine.hidden = true;
+
+    this.logActions = el('div', 'fb-log-actions');
+    this.logRetryBtn = el('button', 'fb-log-retry', '重试');
+    this.logRetryBtn.type = 'button';
+    this.logRetryBtn.setAttribute('aria-label', '重新获取日志');
+    this.logRetryBtn.hidden = true;
+    this.logSkipBtn = el('button', 'fb-log-skip', '不带日志继续提交');
+    this.logSkipBtn.type = 'button';
+    this.logSkipBtn.setAttribute('aria-label', '不附加日志继续提交反馈');
+    this.logSkipBtn.hidden = true;
+    this.logActions.append(this.logRetryBtn, this.logSkipBtn);
+
+    this.logInput = el('input', 'fb-log-input');
+    this.logInput.type = 'file';
+    this.logInput.multiple = true;
+    this.logInput.accept = LOG_ACCEPT;
+    this.logInput.id = 'fb-log-input';
+    this.logAddLabel = el('label', 'fb-log-add', '添加日志');
+    this.logAddLabel.setAttribute('for', 'fb-log-input');
+
+    this.logPreviewBox = el('pre', 'fb-log-preview');
+    this.logPreviewBox.id = 'fb-log-preview';
+    this.logPreviewBox.setAttribute('aria-label', '日志纯文本预览');
+    this.logPreviewBox.hidden = true;
+
+    this.logArea.append(
+      logHead,
+      this.logList,
+      this.logStatusLine,
+      this.logActions,
+      this.logInput,
+      this.logAddLabel,
+      this.logPreviewBox,
+    );
+
+    this.logInput.addEventListener('change', () => this.onLogInputChange());
+    this.logRetryBtn.addEventListener('click', () => this.retryLogCollection());
+    this.logSkipBtn.addEventListener('click', () => this.continueWithoutLogs());
+
     // 可见提示标签
     const promptLabel = el('label', 'fb-prompt', '哪里不顺手，或者有什么新想法？');
     promptLabel.setAttribute('for', 'fb-textarea');
@@ -1163,7 +1628,15 @@ export class FeedbackWidget extends HTMLElement {
     const footnote = el('p', 'fb-footnote', '会保留原话，整理为候选改进');
     footer.append(this.submitBtn, footnote);
 
-    body.append(this.shotArea, promptLabel, textareaWrap, this.statusRegion, this.errorRegion, footer);
+    body.append(
+      this.shotArea,
+      this.logArea,
+      promptLabel,
+      textareaWrap,
+      this.statusRegion,
+      this.errorRegion,
+      footer,
+    );
     this.panel.append(header, body);
 
     // 大图预览弹窗 (Zoom Modal)
@@ -1244,7 +1717,7 @@ export class FeedbackWidget extends HTMLElement {
       return;
     }
 
-    // ---- 冻结快照：请求标识 / 应用与来源 / 原话 / 截图字节 / 元数据 / 草稿版本 ----
+    // ---- 冻结快照：请求标识 / 应用与来源 / 原话 / 截图与日志字节 / 元数据 / 草稿版本 ----
     // 草稿未变 → 复用现有快照（重试走同 key 同字节）；
     // 草稿已变且原请求结果未知 → 先保留原请求供核对，再冻结新快照。
     let snap = this.submitSnapshot;
@@ -1253,6 +1726,8 @@ export class FeedbackWidget extends HTMLElement {
       snap.draftVersion === this.draft.version &&
       snap.text === this.textarea.value &&
       snap.blob === this.draft.screenshotBlob &&
+      snap.logs.length === this.draft.logs.length &&
+      snap.logs.every((log, i) => log === this.draft.logs[i]) &&
       snap.apiBase === apiBase &&
       snap.appId === appId;
     if (!snap || !snapshotMatchesDraft) {
@@ -1280,6 +1755,7 @@ export class FeedbackWidget extends HTMLElement {
         text,
         blob: this.draft.screenshotBlob,
         captureInfo: this.draft.captureInfo ? { ...this.draft.captureInfo } : null,
+        logs: this.draft.logs.slice(),
         draftVersion: this.draft.version,
         unknownOutcome: false,
       };
@@ -1294,10 +1770,11 @@ export class FeedbackWidget extends HTMLElement {
       return;
     }
 
-    // 冻结后不允许任何迟到的捕获会话再写草稿
+    // 冻结后不允许任何迟到的捕获会话 / 日志采集再写草稿
     this.invalidateCaptureSession();
     this.captureInFlight = null;
     this.restoreCaptureUi();
+    this.invalidateLogCollection();
 
     this.phase = 'submitting';
     this.lastErrorSummary = null;
@@ -1314,6 +1791,7 @@ export class FeedbackWidget extends HTMLElement {
         ...(Object.keys(frozen.context).length ? { context: frozen.context } : {}),
         ...(frozen.captureInfo ? { capture: frozen.captureInfo } : {}),
         ...(frozen.blob ? { screenshot: frozen.blob } : {}),
+        ...(frozen.logs.length > 0 ? { logs: frozen.logs } : {}),
       });
 
       // 201/200 后才清空输入与截图，快照随之消费
@@ -1696,6 +2174,9 @@ export class FeedbackWidget extends HTMLElement {
 
     // 截图区同步：预览 / 首个截图入口 / 重拍 / 移除
     this.syncShotUi();
+
+    // 日志区同步：列表 / 采集状态 / 失败操作 / 预览
+    this.syncLogUi();
 
     // 禁用态
     this.textarea.disabled = this.phase === 'submitting';
