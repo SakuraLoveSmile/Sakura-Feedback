@@ -604,7 +604,7 @@ MaterialApp(
 | 取消进行中的截图 | `cancelCapture()` | `cancelCapture()` |
 | 切换开关 | — | `toggle()` |
 | 读取开关状态 | 面板状态可在 DOM 上观察（`aria-expanded` 等） | `isOpen`（`FeedbackController` 是 `ChangeNotifier`） |
-| 主动开始登录握手 | `startLogin()`（返回登录页 URL） | 面板内触发（原生表单 / Web 弹窗握手） |
+| 展开登录表单 | `startLogin()`（在当前面板展开，返回空串） | 点击主按钮「登录并提交」时展开（Web / 原生共用） |
 
 行为细节（两端一致）：
 
@@ -814,33 +814,39 @@ Flutter 端只提供内置视口截图 + `FeedbackCaptureMask` 遮挡。
 
 ## 7. 登录、网络与平台配置
 
-### 7.1 Web 登录握手时序
+### 7.1 面板内登录（Web 组件与 Flutter 当前方式）
 
-1. 组件内「登录」→ 打开 `"<apiBase>/login?appId=<appId>&nonce=<r>&cb=<encodeURIComponent(宿主 origin)>"`
-   （实现为 `window.open(url, "feedback_login", "popup,width=480,height=640")`）。
-2. 用户在服务自己的窗口完成 `POST /api/auth/login`（建立 `SameSite=Lax` 的 Cookie 会话；HTTPS 部署下 `Secure`）。
-3. 登录页调用 `POST /api/auth/handshake { appId, origin }`（服务端**再次**校验 origin 在该 `appId` 的
-   `allowedOrigins` 内，不在则 `403 origin_not_allowed`）→ 获得**短期访问令牌**（默认 900 秒）。
-4. 登录页 `window.opener.postMessage({ type: "feedback:auth", nonce, accessToken, expiresAt }, cbOrigin)` 后自行关闭。
-5. 组件**严格校验三件事**：`event.origin === 服务 origin`、`type === "feedback:auth"`、`nonce` 匹配——
-   三者全对才接受令牌；令牌**仅存组件实例内存**。
+1. 未登录也可在面板内编辑文字与截图；点击主按钮「登录并提交」，面板**就地展开**账号密码表单（不打开任何窗口）。
+2. 确认后组件调用 `POST /api/auth/login`，显式携带 `clientLabel`（Web 为 `web:<appId>`，Flutter 为
+   `flutter-<平台>-<iso 时间>`）与 `appId`；浏览器请求由服务端按该 `appId` 的 `allowedOrigins` 校验 `Origin`
+   （不在列表内 `403 origin_not_allowed`，`appId` 未登记 `404 unknown_app`）。
+3. 成功后返回 `token` 与 `user` / `quota`；令牌仅存内存（Web、Flutter Web）或安全存储（原生 Flutter）。
+   登录成功立即提交一次；取消只收起表单，草稿与截图保留。
+4. **额度**：每个账号默认每天 3 次（北京时间零点刷新，所有项目/设备共用）。面板显示剩余次数；
+   额度用尽返回 `429 daily_quota_exceeded`，按**未接收**处理（保留草稿、不扣次），额度刷新后可直接再提交。
+   打开面板、登录成功、提交完成与应用恢复前台时刷新额度。刷新被在途查询或登录/提交忙碌挡下时，组件会登记
+   「待立即刷新」意图，旧查询结束后或忙碌结束后立即补发一次（Web 会话查询另有 20 秒超时，超时按既有失败规则
+   30 秒重试）；额度用尽后每 30 秒重查一次，其余状态按服务端 `resetAt` 定时单次查询。重新登录后，旧请求
+   迟到的 401 不会把新登录的账号退出（Flutter 侧按请求发出时捕获的令牌与认证世代做条件清除）。
+5. **旧登录窗口握手（兼容保留）**：`window.open("<apiBase>/login?appId=&nonce=&cb=…")`，登录页调用
+   `POST /api/auth/handshake` 获得短期令牌后 `postMessage({ type: "feedback:auth", nonce, accessToken, expiresAt }, cbOrigin)`；
+   令牌绑定当前登录用户。新集成请使用上面的面板内登录。
 
 其他要点：
 
-- **弹窗被拦截**时 `window.open` 返回 `null`：组件降级显示「打开登录窗口」的普通链接（`target="_blank"`），点击同样能完成流程。
 - **令牌只属于签发它的服务**：`api-base` 变化即清空并需重新登录；旧服务的令牌绝不随请求发送给新基址。
-- **令牌过期**：组件保留草稿，重新走 1–5；重开软件后走同一流程，由服务域 Cookie 静默完成第 2 步
-  （登录页检测到有效 Cookie 时跳过表单直接执行 3–4）。
-- **不依赖第三方 Cookie**：会话 Cookie 只在同站第一方上下文使用；跨源提交走 Bearer + 已登记 Origin 的 CORS 头。
+- **令牌过期**：组件保留草稿并可重新登录后继续；`app-id` 变化保留令牌（同一服务）。
+- **不依赖第三方 Cookie**：跨源登录 / 会话查询 / 提交走 Bearer + 已登记 Origin 的 CORS 头。
 - **会话撤销**：管理页可列出并撤销会话（`GET /api/auth/sessions`、`DELETE /api/auth/sessions/:id`、
-  `POST /api/auth/sessions/revoke-all`），撤销后对应 Bearer 令牌同时失效。接口见 [`docs/api.md`](api.md)。
+  `POST /api/auth/sessions/revoke-all`，均需管理员），撤销或禁用账号后对应 Bearer 令牌同时失效。接口见 [`docs/api.md`](api.md)。
 
 ### 7.2 Flutter 登录
 
-- **原生平台**：面板内用户名 / 密码表单 → `POST /api/auth/login`（携带 `clientLabel`，形如
-  `flutter-macos-<iso 时间>`）→ 返回**长期可撤销令牌**（默认 90 天）→ 存入平台安全存储
-  （`flutter_secure_storage`；`SecureFeedbackTokenStore(config: …)`）。
-  后续请求带 `Authorization: Bearer <token>`；收到 **401** 时清除令牌并回到登录视图。密码不写日志。
+- **Web 与原生平台统一**：面板内用户名 / 密码表单 → `POST /api/auth/login`（携带 `clientLabel`，形如
+  `flutter-macos-<iso 时间>`，以及 `appId`）→ 返回可撤销令牌。**Web 平台令牌仅存内存**（刷新后重新登录），
+  **原生平台存入 `flutter_secure_storage`**（`SecureFeedbackTokenStore(config: …)`）。
+  后续请求带 `Authorization: Bearer <token>`；收到 **401** 时清除令牌并回到未登录面板，草稿保留。密码不写日志、不留存 UI。
+- **额度**：面板撰写区显示「今日剩余 N 次」；额度用尽时提交按钮禁用并提示，草稿保留。
 - **令牌按服务身份分槽**：原生存储键由 `apiBase` + `appId` 派生
   （[`flutter/feedback/lib/src/token_store.dart`](../flutter/feedback/lib/src/token_store.dart) 的 `feedbackTokenStorageKey`）：
 
@@ -851,8 +857,6 @@ Flutter 端只提供内置视口截图 + `FeedbackCaptureMask` 遮挡。
   同一台设备上，不同 Feedback 服务、或同一服务的不同 `appId` **各占一个槽位**；
   读取时用同一派生键，因此**换服务读不到旧服务的令牌（返回 `null`），不会跨服务串用凭据**；
   键是确定性的，且只含平台存储后端的安全字符（`A–Z a–z 0–9 - _ .`）。
-- **Flutter Web**：走与 Web 组件相同的弹窗 + `postMessage` 握手，短期令牌**仅存内存**
-  （不持久化，因此不需要服务隔离键）；弹窗被拦截时提供「打开登录窗口」入口。
 - Flutter 原生（非浏览器）不受 CORS 约束；但 **Flutter Web 仍受**，需登记来源。
 
 ### 7.3 验证程度：代码支持 / 构建验证 / 实机闭环（诚实标注）
@@ -943,15 +947,16 @@ Flutter 端只提供内置视口截图 + `FeedbackCaptureMask` 遮挡。
 
 | 症状（可观察） | 可能原因 | 处理 |
 |---|---|---|
-| 提交返回 `401`，面板要求重新登录 | 令牌已过期（Web 组件/Flutter Web 的短期令牌默认 15 分钟；Flutter 原生的长期令牌默认 90 天），或从未登录 | 点登录完成握手 / 在 Flutter 面板内登录；确认 `api-base` 没被改过（改过就必须重新登录） |
+| 提交返回 `401`，面板要求重新登录 | 令牌已过期 / 被撤销 / 账号被禁用，或从未登录 | 在当前面板点「登录并提交」重新登录（不打开窗口）；确认 `api-base` 没被改过（改过就必须重新登录） |
 | 浏览器控制台报 CORS 错误、请求被拦，服务端日志却没有该请求 | 宿主 origin 未被登记（服务端只对已登记 Origin 回显 CORS 头） | 管理页 → 软件配置 → 把**精确 origin**（协议 + 主机 + 端口）加进允许来源；`localhost` 与 `127.0.0.1` **分别登记**（见 1.3） |
-| 登录窗口报 `origin_not_allowed`（403，来源写法非法时为 400），或页面提示"来源不合法" | 握手的 `cb`（宿主 origin）不在该 `appId` 的 `allowedOrigins` 内 | 同上；注意协议与端口也要完全一致 |
+| 登录报 `origin_not_allowed`（403）/ `unknown_app`（404） | 宿主 origin 不在该 `appId` 的 `allowedOrigins` 内，或 `app-id` 未登记 | 在「软件配置」中登记精确 origin（协议 + 主机 + 端口）；核对 `appId` 逐字符一致 |
 | 提交返回 `404 unknown_app` | `app-id` 与服务端登记的 `appId` 不一致，或该软件配置被删 | 核对管理页「软件配置」里的 `appId`（创建后不可改）；`app-id` 必须逐字符一致 |
 | 提交返回 `409 idempotency_conflict` | 同一个幂等键被用于**不同内容**（例如手改了内容却复用旧 key） | 组件不自动换 key；修改内容后重新提交（新 key 自然生成） |
 | 提交返回 `413 too_large` | 文字 > 10,000 码点；截图超限（>5 MiB / 最长边 >2048 / 总像素 >4M）；或 multipart 体 > 6 MiB | 缩短文字；在面板里重拍截图（会自动按限制缩放重编码）；仍不行则改用纯文字反馈 |
 | 管理页恢复动作报 `409 target_changed` | 已保存的归档目标与**当前** Kaneo 配置不一致（Kaneo 地址 / 项目 / 工作区被改过） | 把配置改回原目标，或按 `needs_review` 人工处理该记录；该动作**不会**发出任何远端写入 |
 | 恢复动作报 `409 revision_conflict` / `409 busy` / `502 recover_failed` | 页面数据过期 / 同一反馈正被其它操作处理 / 远端读写出错 | 刷新页面重试；稍后重试；`recover_failed` 时状态未变，可重试或人工核对 |
-| 提交或登录返回 `429` | 限流：登录 10 次 / 15 分钟 / IP+用户名；提交 60 次 / 小时 / 会话 | 按 `Retry-After` 等待后重试 |
+| 提交返回 `429 daily_quota_exceeded` | 该账号当日额度用尽（默认 3 次，北京时间零点刷新，跨项目/设备共用） | 面板显示剩余次数与下次可提交时间；未接收、不扣次，额度刷新后可直接重试 |
+| 提交或登录返回 `429 rate_limited` | 限流：登录 10 次 / 15 分钟 / IP+用户名；提交 60 次 / 小时 / 会话 | 按 `Retry-After` 等待后重试 |
 | 截图一直没出现，提示"截图未完成，可重试或继续文字反馈" | 敏感节点无法在克隆中定位 / 遮挡坐标非有限 / 最终位图无法验证（如 canvas 被跨源图片污染）；或 PNG 缩小重编码 3 次后仍 > 5 MiB | 重试；缩小窗口尺寸；处理会被跳过的跨源图片（补 CORS 或去掉）；改用自定义 `captureProvider`（有敏感区时**必须**提供同帧遮挡证明）；或直接用纯文字反馈 |
 | 浏览器控制台出现动态 `import()` **404**（文件名形如 `html2canvas-pro.esm-*.js`） | ESM 自托管时**只部署了 `feedback-web.js`**，漏了懒加载分块 | 部署**整个 `packages/web/dist/`**（见 2.3）；或改用 UMD 单文件 |
 | Vue 开发模式打印 `Failed to resolve component: feedback-widget` | 未配 `isCustomElement` | 按 3.3 配置 `vite.config.ts` |

@@ -1,0 +1,109 @@
+{
+  "schema": "t1c-signing-config-audit/2",
+  "auditedAt": "2026-09-14T00:28:43.679363+08:00",
+  "checkerCommand": "python3 e2e/t1c_check_signing_config.py",
+  "checkerExitCode": 0,
+  "ready": true,
+  "gaps": [],
+  "notes": [
+    "Keychain 访问组使用构建变量，会在签名时展开：['$(AppIdentifierPrefix)dev.example.feedbackExample']",
+    "现有构建产物已含 Keychain 授权（['C5Q966MAGT.dev.example.feedbackExample']）",
+    "现有产物签名身份链：['Apple Development: 13562008871@163.com (53J98NU8CJ)', 'Apple Worldwide Developer Relations Certification Authority', 'Apple Root CA']"
+  ],
+  "identities": {
+    "validCount": 1,
+    "identities": [
+      {
+        "sha1": "DFF0573FD9D11148BD20B25378C4D8E21CC04AB5",
+        "name": "Apple Development: 13562008871@163.com (53J98NU8CJ)",
+        "team": "53J98NU8CJ"
+      }
+    ],
+    "raw": null
+  },
+  "effectiveDebugSettings": {
+    "CODE_SIGNING_ALLOWED": "YES",
+    "CODE_SIGNING_REQUIRED": "YES",
+    "CODE_SIGN_ENTITLEMENTS": "Runner/DebugProfile.entitlements",
+    "CODE_SIGN_IDENTITY": "Apple Development",
+    "CODE_SIGN_STYLE": "Automatic",
+    "DEVELOPMENT_TEAM": "C5Q966MAGT",
+    "PRODUCT_BUNDLE_IDENTIFIER": "dev.example.feedbackExample"
+  },
+  "debugEntitlements": {
+    "path": "examples/flutter/macos/Runner/DebugProfile.entitlements",
+    "keys": [
+      "com.apple.security.app-sandbox",
+      "com.apple.security.cs.allow-jit",
+      "com.apple.security.network.client",
+      "com.apple.security.network.server",
+      "keychain-access-groups"
+    ],
+    "keychainAccessGroups": [
+      "$(AppIdentifierPrefix)dev.example.feedbackExample"
+    ]
+  },
+  "releaseEntitlements": {
+    "path": "examples/flutter/macos/Runner/Release.entitlements",
+    "keys": [
+      "com.apple.security.app-sandbox",
+      "com.apple.security.network.client",
+      "keychain-access-groups"
+    ],
+    "keychainAccessGroups": [
+      "$(AppIdentifierPrefix)dev.example.feedbackExample"
+    ]
+  },
+  "builtProduct": {
+    "present": true,
+    "path": "examples/flutter/build/macos/Build/Products/Debug/feedback_example.app",
+    "identifier": "dev.example.feedbackExample",
+    "teamIdentifier": "C5Q966MAGT",
+    "authorityChain": [
+      "Apple Development: 13562008871@163.com (53J98NU8CJ)",
+      "Apple Worldwide Developer Relations Certification Authority",
+      "Apple Root CA"
+    ],
+    "signature": "authority",
+    "entitlementKeys": [
+      "com.apple.application-identifier",
+      "com.apple.developer.team-identifier",
+      "com.apple.security.app-sandbox",
+      "com.apple.security.cs.allow-jit",
+      "com.apple.security.get-task-allow",
+      "com.apple.security.network.client",
+      "com.apple.security.network.server",
+      "keychain-access-groups"
+    ],
+    "keychainAccessGroups": [
+      "C5Q966MAGT.dev.example.feedbackExample"
+    ]
+  },
+  "appliedConfiguration": {
+    "DEVELOPMENT_TEAM": "C5Q966MAGT",
+    "CODE_SIGN_IDENTITY": "Apple Development",
+    "CODE_SIGN_STYLE": "Automatic",
+    "removedInheritedAdHoc": "项目基础配置 Debug/Release/Profile 的 CODE_SIGN_IDENTITY = \"-\"",
+    "keychainAccessGroups": "$(AppIdentifierPrefix)dev.example.feedbackExample",
+    "systemCapability": "com.apple.KeychainSharing",
+    "bundleId": "dev.example.feedbackExample（未改动）",
+    "provisioningProfile": "8a92c5ed-ff0f-4180-a834-e2f5b4a0bfca.provisionprofile (Mac Team Provisioning Profile: dev.example.feedbackExample)",
+    "certificate": "Apple Development: 13562008871@163.com (53J98NU8CJ) / SHA-1 DFF0573FD9D11148BD20B25378C4D8E21CC04AB5"
+  },
+  "fileDigests": {
+    "Runner.xcodeproj/project.pbxproj": "1444410f646dc43cacaede5bec2bf1b6cc59e4dc5b6d67e0c905097f58091d84",
+    "Runner/DebugProfile.entitlements": "275cedebf190e24abbc37bb492ede83b3d52f56c07b6288130de4ba497978e64",
+    "Runner/Release.entitlements": "85420e210c34604c5529fbc98ee4450a45d30afa43574ca4181eeb773d250bf4",
+    "integration_test/t1c_secure_storage_common.dart": "d83221f447615008fe081c704d5cfa2e115b07c943ac013a7ba4f33cbbc36b7e"
+  },
+  "acceptanceRun": {
+    "runId": "20260914-002316-fcf481",
+    "verdict": "PASS",
+    "exitCode": 0
+  },
+  "notDone": [
+    "未关闭任何系统安全校验、未批量重签、未改用内存或明文存储",
+    "未修改公开 API 与每日默认三次规则，未升级存储插件，未部署",
+    "Release 配置已同步添加 Keychain 授权，但未做 Release 构建验证"
+  ]
+}

@@ -9,6 +9,9 @@ CREATE TABLE IF NOT EXISTS users (
   id            TEXT PRIMARY KEY,
   username      TEXT NOT NULL UNIQUE,
   pass_hash     TEXT NOT NULL,
+  role          TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('admin','user')),
+  enabled       INTEGER NOT NULL DEFAULT 1,
+  daily_limit   INTEGER NOT NULL DEFAULT 3,
   created_at    TEXT NOT NULL
 );
 
@@ -44,6 +47,7 @@ CREATE TABLE IF NOT EXISTS feedbacks (
   id               TEXT PRIMARY KEY,
   app_row_id       TEXT NOT NULL REFERENCES apps(id),
   app_id           TEXT NOT NULL,
+  user_id          TEXT NOT NULL DEFAULT '',
   text             TEXT NOT NULL,
   context_json     TEXT,
   idempotency_key  TEXT NOT NULL UNIQUE,
@@ -65,6 +69,14 @@ CREATE TABLE IF NOT EXISTS feedbacks (
 CREATE INDEX IF NOT EXISTS idx_feedbacks_status ON feedbacks(status);
 CREATE INDEX IF NOT EXISTS idx_feedbacks_app ON feedbacks(app_row_id, created_at);
 
+CREATE TABLE IF NOT EXISTS daily_usage (
+  user_id   TEXT NOT NULL REFERENCES users(id),
+  day       TEXT NOT NULL,
+  used      INTEGER NOT NULL DEFAULT 0,
+  reset_at  TEXT NOT NULL,
+  PRIMARY KEY (user_id, day)
+);
+
 CREATE TABLE IF NOT EXISTS feedback_screenshots (
   feedback_id   TEXT PRIMARY KEY REFERENCES feedbacks(id) ON DELETE CASCADE,
   png_blob      BLOB NOT NULL,
@@ -77,7 +89,11 @@ CREATE TABLE IF NOT EXISTS feedback_screenshots (
 );
 `;
 
-function migrate(db: DatabaseSync): void {
+function columns(db: DatabaseSync, table: string): string[] {
+  return (db.prepare(`PRAGMA table_info(${table})`).all() as unknown as { name: string }[]).map((c) => c.name);
+}
+
+export function migrate(db: DatabaseSync): void {
   const v = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
   if (v < 2) {
     db.exec(`
@@ -92,7 +108,7 @@ function migrate(db: DatabaseSync): void {
         created_at    TEXT NOT NULL
       );
     `);
-    const cols = (db.prepare("PRAGMA table_info(feedbacks)").all() as unknown as { name: string }[]).map((c) => c.name);
+    const cols = columns(db, "feedbacks");
     if (!cols.includes("archive_stage")) {
       db.exec(
         "ALTER TABLE feedbacks ADD COLUMN archive_stage TEXT CHECK (archive_stage IN ('task_pending','task_created','asset_uploading','asset_finalized','comment_pending','complete'))",
@@ -102,6 +118,46 @@ function migrate(db: DatabaseSync): void {
       db.exec("ALTER TABLE feedbacks ADD COLUMN archive_data_json TEXT");
     }
     db.exec("PRAGMA user_version = 2;");
+  }
+
+  if (v < 3) {
+    // 角色 / 启用状态 / 每日额度、反馈归属与每日用量。
+    // 迁移在事务内完成：任一步失败即回滚，版本号不前进（下次启动重试）。
+    db.exec("BEGIN");
+    try {
+      const userCols = columns(db, "users");
+      if (!userCols.includes("role")) {
+        db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('admin','user'))");
+      }
+      if (!userCols.includes("enabled")) {
+        db.exec("ALTER TABLE users ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1");
+      }
+      if (!userCols.includes("daily_limit")) {
+        db.exec("ALTER TABLE users ADD COLUMN daily_limit INTEGER NOT NULL DEFAULT 3");
+      }
+      const fbCols = columns(db, "feedbacks");
+      if (!fbCols.includes("user_id")) {
+        db.exec("ALTER TABLE feedbacks ADD COLUMN user_id TEXT NOT NULL DEFAULT ''");
+      }
+      db.exec("CREATE INDEX IF NOT EXISTS idx_feedbacks_user ON feedbacks(user_id, created_at)");
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS daily_usage (
+          user_id   TEXT NOT NULL REFERENCES users(id),
+          day       TEXT NOT NULL,
+          used      INTEGER NOT NULL DEFAULT 0,
+          reset_at  TEXT NOT NULL,
+          PRIMARY KEY (user_id, day)
+        );
+      `);
+      // 原有账号全部升为管理员（含部署初始账号）；历史反馈归属最早的初始账号。
+      db.exec("UPDATE users SET role = 'admin' WHERE role = 'user'");
+      db.exec("UPDATE feedbacks SET user_id = (SELECT id FROM users ORDER BY created_at LIMIT 1) WHERE user_id = ''");
+      db.exec("PRAGMA user_version = 3;");
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
   }
 }
 

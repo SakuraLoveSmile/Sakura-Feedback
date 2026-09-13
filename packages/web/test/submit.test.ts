@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import '../src/index';
 import {
   API_BASE,
@@ -9,7 +9,7 @@ import {
   mount,
   recordFetch,
   setTextarea,
-  stubWindowOpen,
+  submitLoginForm,
   type Mounted,
 } from './helpers';
 
@@ -23,10 +23,9 @@ async function settled(): Promise<void> {
 
 describe('提交流程', () => {
   async function ready(): Promise<{ m: Mounted; calls: ReturnType<typeof recordFetch>['calls'] }> {
-    stubWindowOpen({ closed: false });
     const m = mount();
     const { calls } = recordFetch(async () => httpResponse(201, { feedbackId: 'fb-1', status: 'received' }));
-    completeLogin(m);
+    await completeLogin(m);
     return { m, calls };
   }
 
@@ -61,7 +60,6 @@ describe('提交流程', () => {
   });
 
   it('网络/服务失败：保留输入文本，展示 errorSummary 与重试提交（复用幂等键）', async () => {
-    stubWindowOpen({ closed: false });
     const m = mount();
     let first = true;
     const { calls } = recordFetch(async () => {
@@ -71,7 +69,7 @@ describe('提交流程', () => {
       }
       return httpResponse(201, { feedbackId: 'fb-2', status: 'received' });
     });
-    completeLogin(m);
+    await completeLogin(m);
     setTextarea(m, '深色模式刺眼');
     m.submitBtn.click();
     await settled();
@@ -91,7 +89,6 @@ describe('提交流程', () => {
   });
 
   it('无令牌：不提交，显示“需要登录”与登录按钮，草稿保留', async () => {
-    stubWindowOpen({ closed: false });
     const m = mount();
     const { calls } = recordFetch(async () => httpResponse(201, {}));
     setTextarea(m, '未登录草稿');
@@ -105,10 +102,9 @@ describe('提交流程', () => {
   });
 
   it('提交返回 401：保留草稿并回到需要登录态', async () => {
-    stubWindowOpen({ closed: false });
     const m = mount();
     recordFetch(async () => httpResponse(401, apiError(401, 'unauthorized', '登录已过期')));
-    completeLogin(m);
+    await completeLogin(m);
     setTextarea(m, '过期令牌');
     m.submitBtn.click();
     await settled();
@@ -118,23 +114,19 @@ describe('提交流程', () => {
     expect(m.statusRegion.textContent).toContain('需要登录');
   });
 
-  it('登录按钮点击后自动续交挂起的草稿', async () => {
-    stubWindowOpen({ closed: false });
+  it('点击登录并提交：在当前面板展开表单，登录成功后自动续交挂起的草稿', async () => {
     const m = mount();
-    const { calls } = recordFetch(async () => httpResponse(201, { feedbackId: 'fb-9', status: 'received' }));
+    const { calls } = recordFetch(
+      async () => httpResponse(201, { feedbackId: 'fb-9', status: 'received' }),
+      { token: 'tok-2' },
+    );
     setTextarea(m, '登录后续交');
-    m.submitBtn.click(); // 无令牌 → 登录区
+    m.submitBtn.click(); // 无令牌 → 展开面板内登录表单，不打开新窗口
     await settled();
-    m.panel.querySelector<HTMLButtonElement>('.fb-login')?.click();
-    await settled();
-    // 从弹窗 URL 提取 nonce 交付令牌
-    const loginUrl = (globalThis.window.open as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0] as string;
-    const nonce = new URL(loginUrl).searchParams.get('nonce') as string;
-    const ev = new MessageEvent('message', {
-      origin: API_BASE,
-      data: { type: 'feedback:auth', nonce, accessToken: 'tok-2', expiresAt: new Date(Date.now() + 60000).toISOString() },
-    });
-    window.dispatchEvent(ev);
+    expect(m.root.querySelector<HTMLDivElement>('.fb-login-panel')?.hidden).toBe(false);
+    expect(m.root.querySelector<HTMLButtonElement>('.fb-login-confirm')?.textContent).toBe('登录并提交');
+
+    submitLoginForm(m);
     await settled();
 
     expect(calls).toHaveLength(1);

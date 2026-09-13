@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -120,6 +121,106 @@ void main() {
       api.dispose();
     });
 
+    test('旧会话请求的 401 不得清除新登录令牌（T1-A）', () async {
+      var unauthorizedCalls = 0;
+      final store = MemoryTokenStore('tok-old');
+      final session = Completer<http.Response>();
+      final client = MockClient((request) async {
+        if (request.url.path == '/api/auth/session') return session.future;
+        throw StateError('unexpected ${request.url}');
+      });
+      final api = ApiClient(
+        config: buildConfig(),
+        tokenStore: store,
+        httpClient: client,
+        onUnauthorized: () => unauthorizedCalls++,
+      );
+
+      // 旧令牌的会话查询挂起期间，用户重新登录保存了新令牌。
+      // （先等请求发出并捕获旧令牌，再写入新令牌。）
+      final pending = api.fetchSession();
+      await Future<void>.delayed(Duration.zero);
+      await store.write('tok-new');
+      session.complete(jsonResponse(
+        {
+          'error': {'code': 'unauthorized', 'message': '登录已过期'}
+        },
+        401,
+      ));
+
+      // 失效请求仍向原调用者返回错误，但不得退出当前登录。
+      await expectLater(
+        pending,
+        throwsA(isA<ApiException>()
+            .having((e) => e.statusCode, 'statusCode', 401)),
+      );
+      expect(await store.read(), 'tok-new');
+      expect(unauthorizedCalls, 0);
+      api.dispose();
+    });
+
+    test('当前有效会话请求的 401 仍清除令牌并触发 onUnauthorized（T1-A）', () async {
+      var unauthorizedCalls = 0;
+      final store = MemoryTokenStore('tok');
+      final client = MockClient((request) async => jsonResponse(
+          {
+            'error': {'code': 'unauthorized', 'message': '登录已过期'}
+          },
+          401));
+      final api = ApiClient(
+        config: buildConfig(),
+        tokenStore: store,
+        httpClient: client,
+        onUnauthorized: () => unauthorizedCalls++,
+      );
+      await expectLater(
+        api.fetchSession(),
+        throwsA(isA<ApiException>()
+            .having((e) => e.statusCode, 'statusCode', 401)),
+      );
+      expect(await store.read(), isNull);
+      expect(unauthorizedCalls, 1);
+      api.dispose();
+    });
+
+    test('旧提交请求的 401 不得清除新登录令牌（T1-A）', () async {
+      var unauthorizedCalls = 0;
+      final store = MemoryTokenStore('tok-old');
+      final submit = Completer<http.Response>();
+      final client = MockClient((request) async {
+        if (request.url.path == '/api/feedback') return submit.future;
+        throw StateError('unexpected ${request.url}');
+      });
+      final api = ApiClient(
+        config: buildConfig(),
+        tokenStore: store,
+        httpClient: client,
+        onUnauthorized: () => unauthorizedCalls++,
+      );
+
+      // 旧令牌的提交挂起期间，用户重新登录保存了新令牌。
+      // （先等请求发出并捕获旧令牌，再写入新令牌。）
+      final Future<FeedbackSubmitResult> pending =
+          api.submitFeedback(idempotencyKey: 'k1', text: 'x');
+      await Future<void>.delayed(Duration.zero);
+      await store.write('tok-new');
+      submit.complete(jsonResponse(
+        {
+          'error': {'code': 'unauthorized', 'message': '登录已过期'}
+        },
+        401,
+      ));
+
+      await expectLater(
+        pending,
+        throwsA(isA<ApiException>()
+            .having((e) => e.statusCode, 'statusCode', 401)),
+      );
+      expect(await store.read(), 'tok-new');
+      expect(unauthorizedCalls, 0);
+      api.dispose();
+    });
+
     test('login 401 不触发 onUnauthorized（凭据错误）', () async {
       var unauthorizedCalls = 0;
       final client = MockClient((request) async => jsonResponse(
@@ -134,7 +235,7 @@ void main() {
         onUnauthorized: () => unauthorizedCalls++,
       );
       await expectLater(
-        api.login(username: 'u', password: 'p', clientLabel: 'flutter-test'),
+        api.login(username: 'u', password: 'p', clientLabel: 'flutter-test', appId: 'com.test.app'),
         throwsA(isA<ApiException>()
             .having((e) => e.code, 'code', 'invalid_credentials')),
       );
@@ -157,13 +258,61 @@ void main() {
           tokenStore: MemoryTokenStore(),
           httpClient: client);
       final r = await api.login(
-          username: 'u', password: 'p', clientLabel: 'flutter-macos-x');
+          username: 'u',
+          password: 'p',
+          clientLabel: 'flutter-macos-x',
+          appId: 'com.example.app');
       expect(r.token, 'long-lived');
       expect(r.expiresAt, isNotNull);
       final body = jsonDecode(captured.body) as Map<String, Object?>;
       expect(body['clientLabel'], 'flutter-macos-x');
       expect(body['username'], 'u');
       expect(body['password'], 'p');
+      expect(body['appId'], 'com.example.app');
+      api.dispose();
+    });
+
+    test('login 解析 user 与 quota；fetchSession 刷新额度', () async {
+      final client = MockClient((request) async {
+        if (request.url.path == '/api/auth/login') {
+          return jsonResponse({
+            'ok': true,
+            'token': 't2',
+            'expiresAt': '2030-01-01T00:00:00Z',
+            'user': {'id': 'u1', 'username': 'admin', 'role': 'user'},
+            'quota': {
+              'dailyLimit': 3,
+              'used': 1,
+              'remaining': 2,
+              'resetAt': '2030-01-01T16:00:00Z'
+            },
+          });
+        }
+        return jsonResponse({
+          'authenticated': true,
+          'user': {'id': 'u1', 'username': 'admin', 'role': 'user'},
+          'quota': {
+            'dailyLimit': 5,
+            'used': 1,
+            'remaining': 4,
+            'resetAt': '2030-01-01T16:00:00Z'
+          },
+        });
+      });
+      final api = ApiClient(
+          config: buildConfig(),
+          tokenStore: MemoryTokenStore('t'),
+          httpClient: client);
+      final r = await api.login(
+          username: 'u',
+          password: 'p',
+          clientLabel: 'c',
+          appId: 'com.example.app');
+      expect(r.user?.username, 'admin');
+      expect(r.quota?.remaining, 2);
+      final info = await api.fetchSession();
+      expect(info.quota?.dailyLimit, 5);
+      expect(info.quota?.remaining, 4);
       api.dispose();
     });
 

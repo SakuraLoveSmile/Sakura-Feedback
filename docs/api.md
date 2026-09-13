@@ -5,13 +5,25 @@ Base URL：`http(s)://<host>:8787`。所有 JSON 请求必须 `Content-Type: app
 
 认证方式（两类接口）：
 
-1. **Cookie 会话**（管理页与登录窗口）：`POST /api/auth/login` 成功后由服务端下发 HttpOnly Cookie
+1. **Cookie 会话**（管理后台与旧登录页）：`POST /api/auth/login` 成功后由服务端下发 HttpOnly Cookie
    `fb_session`（`SameSite=Lax`；HTTPS 部署下 `Secure`）。仅同站第一方请求携带，不依赖第三方 Cookie。
-2. **Bearer 令牌**（客户端组件提交反馈）：`Authorization: Bearer <token>`。令牌来源两种：
-   - Web 组件：登录窗口握手交付的**短期访问令牌**（默认 15 分钟）；
-   - Flutter 原生端：`POST /api/auth/login` 携带 `clientLabel` 换取的**长期可撤销令牌**（默认 90 天）。
+   管理后台、会话管理、反馈重试 / 恢复均要求**管理员角色**且 Cookie 同源；普通账号即使持有 Cookie 也会收到 `403 forbidden`。
+2. **Bearer 令牌**（客户端组件登录与提交反馈）：`Authorization: Bearer <token>`。来源：
+   - Web 组件与 Flutter（Web / 原生）：在**当前面板内**用账号密码调用 `POST /api/auth/login` 携带
+     `clientLabel` + `appId` 换取令牌（Web 组件与 Flutter Web 仅存内存，原生 Flutter 存入安全存储）；
+   - 旧登录窗口握手签发的短期令牌（兼容保留，默认 15 分钟）。
 
-无注册接口。初始账号由部署环境变量 `FEEDBACK_ADMIN_USER` / `FEEDBACK_ADMIN_PASSWORD` 建立。
+账号由后台创建并分发，**不开放注册**。部署初始账号由 `FEEDBACK_ADMIN_USER` / `FEEDBACK_ADMIN_PASSWORD` 建立，角色为管理员。
+
+### 每日提交额度
+
+- 每个账号默认每天 **3 次**，按**北京时间**每天零点刷新；所有接入项目与设备共用同一额度。
+- 日期与 `resetAt` 均由服务端时钟产生，客户端时间不参与，也不依赖定时清零。
+- 一次反馈被服务端成功保存计一次；网络重试（同 key 同内容）不重复扣次；后台 AI / 归档失败不退次数；
+  参数错误与事务失败不计次。
+- 统一额度结构：`{ "dailyLimit": number, "used": number, "remaining": number, "resetAt": "<iso UTC>" }`。
+- 登录、会话查询、提交成功与幂等重放响应都带 `user: { id, username, role }` 与 `quota`。
+- 额度用尽返回 `429 daily_quota_exceeded`（**明确未接收**，不扣次），响应携带同结构 `quota`。
 
 ## 状态机（反馈记录）
 
@@ -35,30 +47,49 @@ Base URL：`http(s)://<host>:8787`。所有 JSON 请求必须 `Content-Type: app
 ## 认证组
 
 ### POST /api/auth/login
-Body: `{ "username": string, "password": string, "clientLabel"?: string }`
-- 无 `clientLabel`（浏览器）：`200 { "ok": true, "expiresAt": "<iso>" }` + Set-Cookie；不返回令牌。
-- 有 `clientLabel`（Flutter 原生等）：`200 { "ok": true, "token": "<bearer，仅此一次明文返回>", "expiresAt": "<iso>" }`，同时可附带 Cookie。
-- 失败：`401 { error.code: "invalid_credentials" }`；限流后 `429 "rate_limited"`（`Retry-After` 头）。
-- 限流：按 IP+用户名滑动窗口。
+Body: `{ "username": string, "password": string, "clientLabel"?: string, "appId"?: string }`
+- 无 `clientLabel`（管理后台 / 旧登录页）：`200 { "ok": true, "expiresAt": "<iso>", "user", "quota" }` + Set-Cookie；不返回令牌。
+- 有 `clientLabel`（Web 组件 / Flutter）：必须同时携带 `appId`，否则 `400 "invalid_request"`；
+  浏览器请求会按该 `appId` 的 `allowedOrigins` 校验 `Origin`（未登记 `403 "origin_not_allowed"`，`appId` 未配置 `404 "unknown_app"`），
+  原生客户端不发送 `Origin` 时不校验来源。成功返回 `200 { "ok": true, "token": "<bearer，仅此一次明文返回>", "expiresAt", "user", "quota" }`（不附带 Cookie）。
+- 账号不存在 / 已禁用 / 密码错误统一 `401 "invalid_credentials"`；限流后 `429 "rate_limited"`（`Retry-After` 头）。
+- 限流：按 IP+用户名滑动窗口。登录、会话查询、退出支持跨源 Bearer（CORS，见文末），不依赖跨站 Cookie。
 
 ### POST /api/auth/logout
-Cookie 会话。`204`。撤销当前会话（其 Bearer 令牌同时失效）。
+Cookie 或 Bearer。`204`。撤销当前会话（其 Bearer 令牌同时失效）。
 
 ### GET /api/auth/session
-Cookie 或 Bearer。`200 { "authenticated": true, "kind": "cookie"|"client", "expiresAt": "<iso>", "clientLabel"?: string }`；未认证 `401`。
+Cookie 或 Bearer。`200 { "authenticated": true, "kind": "cookie"|"client", "expiresAt": "<iso>", "user", "quota", "clientLabel"?: string }`；未认证 `401`。
+组件在打开面板 / 登录成功 / 提交完成 / 恢复前台时调用此端点刷新额度。
 
-### GET /api/auth/handshake/validate?appId=&origin= （需 Cookie 会话）
-登录窗口在把令牌 postMessage 给宿主前调用。校验 `origin` 是否在 `appId` 的允许来源列表内。
+### GET /api/auth/handshake/validate?appId=&origin= （需 Cookie 会话，兼容保留）
+旧登录窗口在把令牌 postMessage 给宿主前调用。校验 `origin` 是否在 `appId` 的允许来源列表内。
 - `200 { "ok": true }` 或 `400 "origin_not_allowed"`。
 
-### POST /api/auth/handshake （需 Cookie 会话；body `{ "appId": string, "origin": string }`）
-签发短期访问令牌。服务端再次校验 origin。
+### POST /api/auth/handshake （需 Cookie 会话，兼容保留；body `{ "appId": string, "origin": string }`）
+签发短期访问令牌，**绑定当前登录用户**（不再固定为数据库首个账号）。服务端再次校验 origin。
 `200 { "accessToken": string, "expiresIn": number, "expiresAt": "<iso>" }`（默认 `expiresIn` = 900 秒）。
 
-### 管理：会话撤销
+### 管理：会话撤销（仅管理员 Cookie 会话）
 - `GET /api/auth/sessions` → `{ "sessions": [{ "id", "kind", "clientLabel"?, "createdAt", "lastUsedAt"?, "expiresAt", "current": bool }] }`
-- `DELETE /api/auth/sessions/:id` → `204`（不能撤销当前 cookie 会话本身以外均可；撤销 `current` 返回 `204` 但前端应随即跳登录）。
+- `DELETE /api/auth/sessions/:id` → `204`（撤销 `current` 亦返回 `204`，前端应随即跳登录）。
 - `POST /api/auth/sessions/revoke-all` → `{ "revoked": number }`
+- 账号被禁用或密码被重置时，其全部会话立即失效（鉴权每次检查账号启用状态）。
+
+### 账号管理（仅管理员 Cookie 会话，前缀 /api/admin/users）
+
+账号对象（**绝不返回密码或哈希**）：
+```jsonc
+{ "id", "username", "enabled": bool, "dailyLimit": number, "used": number, "remaining": number,
+  "resetAt": "<iso>", "createdAt": "<iso>" }
+```
+- `GET /api/admin/users` → `{ "users": [账号] }`（只列出**普通账号**；管理员保留，不在此管理）
+- `POST /api/admin/users` `{ "username", "password", "dailyLimit"?: number }` → `201 账号`；`dailyLimit` 缺省为 3，
+  必须是非负安全整数（`0` 表示禁止新提交）；重复用户名 `409 "user_exists"`；缺失/非法字段 `400 "invalid_request"`。
+- `PATCH /api/admin/users/:id` `{ "enabled"?: bool, "dailyLimit"?: number }` → `200 账号`；调整立即生效且**不清除当天用量**
+  （额度从 3 调 5、当天已用 3 次 → 剩余 2；降到低于已用次数 → 剩余 0）；禁用账号同时撤销其全部会话。
+  目标不是普通账号（含管理员）→ `404 "not_found"`。
+- `POST /api/admin/users/:id/password` `{ "password" }` → `{ "ok": true }`，并撤销该账号全部会话。
 
 ## 反馈组
 
@@ -74,11 +105,12 @@ Cookie 或 Bearer。`200 { "authenticated": true, "kind": "cookie"|"client", "ex
   }
 }
 ```
-响应：
-- `201 { "feedbackId": string, "status": "received" }`
-- `200 { "feedbackId", "status", "replayed": true }`（同 key 同内容，幂等重放）
-- `409 "idempotency_conflict"`（同 key 不同内容）
-- `401` / `400 "invalid_request"` / `404 "unknown_app"` / `413 "too_large"` / `429`
+响应（均带 `user: { id, username, role }` 与 `quota`）：
+- `201 { "feedbackId": string, "status": "received", "user", "quota" }`
+- `200 { "feedbackId", "status", "replayed": true, "user", "quota" }`（同 key 同内容，幂等重放；**不扣次数**，额度已满也允许）
+- `409 "idempotency_conflict"`（同 key 不同内容；或同 key 被**其他账号**占用 —— 统一通用冲突，不透露原记录）
+- `429 "daily_quota_exceeded"`（当日额度用尽，明确**未接收**；响应携带同结构 `quota`）
+- `401` / `400 "invalid_request"` / `404 "unknown_app"` / `413 "too_large"` / `429 "rate_limited"`
 
 **multipart 变体**（携带截图）：`Content-Type: multipart/form-data`，字段 `metadata`（同上 JSON，另加可选 `capture`）与 `screenshot`（PNG 文件）。`capture` 仅接受白名单字段，全部可选：
 
@@ -93,7 +125,7 @@ Cookie 或 Bearer。`200 { "authenticated": true, "kind": "cookie"|"client", "ex
 
 ### GET /api/feedback/:id （Bearer 或 Cookie）
 `200 { "id", "status", "createdAt", "updatedAt", "errorSummary"?: string|null, "kaneoUrl"?: string|null }`
-不存在/无权限 `404 "not_found"`。面板轮询此端点（建议 2s 退避至 5s）。
+**归属隔离**：普通账号只能读取自己的反馈状态与截图，他人记录统一 `404 "not_found"`（不透露存在性）；管理员可读全量。面板轮询此端点（建议 2s 退避至 5s）。
 
 ### POST /api/feedback/:id/retry （仅 Cookie 会话，管理页）
 将 `failed` 重新入队（AI 失败→从 processing 恢复；归档失败→从 archiving 恢复）。
@@ -211,18 +243,27 @@ App 对象：
 ## 管理列表组（仅 Cookie 会话）
 
 - `GET /api/admin/feedback?status=&appId=&cursor=&limit=50` →
-  `{ "items": [{ "id", "appId", "status", "createdAt", "updatedAt", "title"?: string|null, "kaneoUrl"?: string|null, "errorSummary"?: string|null, "archiveStage"?: string|null, "hasScreenshot": boolean }], "nextCursor": string|null }`
-- `GET /api/admin/feedback/:id` → 详情：以上字段 + `{ "text", "processed"?: { "title", "sections": { "experience", "problems", "suggestions", "questions" } }, "kaneoTaskId"?, "attemptCount", "lastError"?, "context"?, "screenshot"?, "recovery"? }`，其中 `screenshot` 为截图元数据（`width`/`height`/`byteSize`/`sha256`/`capture`/`createdAt`，无截图则为 `null`；PNG 本体经 `GET /api/admin/feedback/:id/screenshot` 取回），`recovery` 见「管理页允许动作」。
+  `{ "items": [{ "id", "appId", "username": string|null, "status", "createdAt", "updatedAt", "title"?: string|null, "kaneoUrl"?: string|null, "errorSummary"?: string|null, "archiveStage"?: string|null, "hasScreenshot": boolean }], "nextCursor": string|null }`
+  （`username` 为提交账号；旧记录归属迁移前的初始账号）
+- `GET /api/admin/feedback/:id` → 详情：以上字段 + `{ "username", "text", "processed"?: { "title", "sections": { "experience", "problems", "suggestions", "questions" } }, "kaneoTaskId"?, "attemptCount", "lastError"?, "context"?, "screenshot"?, "recovery"? }`，其中 `screenshot` 为截图元数据（`width`/`height`/`byteSize`/`sha256`/`capture`/`createdAt`，无截图则为 `null`；PNG 本体经 `GET /api/admin/feedback/:id/screenshot` 取回），`recovery` 见「管理页允许动作」。
 
-## Web 登录握手时序
+## 面板内登录（Web 组件 / Flutter，当前方式）
 
-1. 组件内“登录”按钮 → `window.open("<service>/login?appId=<appId>&nonce=<r>&cb=<encodeURIComponent(宿主 origin)>", "_blank", "popup")`。
-2. 用户在服务自己的窗口完成 `POST /api/auth/login`（Cookie 会话建立）。
-3. 登录页调用 `POST /api/auth/handshake`（服务端校验 cb origin 在 appId 的 allowedOrigins 内）获得短期令牌。
-4. 登录页 `window.opener.postMessage({ type: "feedback:auth", nonce, accessToken, expiresAt }, cbOrigin)` 后自行关闭。
-5. 组件校验 `event.origin === <服务 origin>` 且 `nonce` 匹配，存储令牌（仅内存），继续提交。
-弹窗被拦截时 `window.open` 返回 null：组件显示“打开登录窗口”普通链接入口。
-令牌过期后组件保留草稿，重新走 1–5；重开软件后走同一流程，由 Cookie 静默完成 2（登录页检测到有效 Cookie 时跳过表单直接执行 3–4）。
+1. 未登录也可在面板内编辑反馈文字与截图；点击主按钮「登录并提交」。
+2. 面板**就地展开**账号密码表单（同一个主按钮文案为「登录并提交」），不打开任何窗口。
+3. 确认后调用 `POST /api/auth/login`，显式携带 `clientLabel`（Web 为 `web:<appId>`，Flutter 为 `flutter-<平台>-<时间>`）
+   与 `appId`；浏览器请求由服务端按该 `appId` 的 `allowedOrigins` 校验 `Origin`。
+4. 成功后令牌仅存内存（Web / Flutter Web）或安全存储（原生 Flutter），立即提交一次；取消只收起表单，草稿保留。
+5. 打开面板、登录成功、提交完成与应用恢复前台时刷新额度；跨过 `resetAt` 后重新查询，不在本地擅自重置。
+   剩余 0 次禁止新提交，但结果未知的同键请求仍允许重试（避免丢失已接收结果）。
+
+密码不持久化、不进入反馈或截图、不写日志，登录结束即清空。
+
+### 旧登录窗口握手（兼容保留）
+
+服务端仍保留 `/login` + `/api/auth/handshake` 供既有集成使用：登录页校验 `cb` origin 在 appId 的 `allowedOrigins` 内后
+`postMessage({ type: "feedback:auth", nonce, accessToken, expiresAt })`；组件校验 `event.origin` 与 `nonce`。
+握手令牌绑定当前登录用户。新集成请使用上面的面板内登录。
 
 ## 客户端公开参数（Web / Flutter 共用）
 
@@ -237,4 +278,6 @@ App 对象：
 
 ## 跨源（CORS）
 
-宿主应用与反馈服务通常不同源。`/api/feedback*` 仅接受 Bearer/Cookie 中 **Bearer** 类凭据参与跨源：服务端只对已在任一软件配置 `allowedOrigins` 中登记的 Origin 回显 CORS 头（含 OPTIONS 预检）。管理接口与登录接口不开放跨源（第一方上下文）。Flutter 原生（非浏览器）不受 CORS 约束。
+宿主应用与反馈服务通常不同源。`/api/feedback*` 与 `/api/auth/*`（登录、会话查询、退出）仅接受 **Bearer** 类凭据参与跨源：
+服务端只对已在任一软件配置 `allowedOrigins` 中登记的 Origin 回显 CORS 头（含 OPTIONS 预检），不使用跨站 Cookie。
+登录还会按目标 `appId` 的 `allowedOrigins` 校验 `Origin`。管理接口仍限第一方同源 Cookie。Flutter 原生（非浏览器）不受 CORS 约束。

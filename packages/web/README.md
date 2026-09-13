@@ -29,7 +29,7 @@ import { FeedbackWidget, openFeedback } from '@feedback/web';
 
 | attribute | prop | 必填 | 说明 |
 |---|---|---|---|
-| `api-base` | `apiBase` | 是 | 反馈服务地址（含协议，如 `http://localhost:8787`）；**运行时变化 = 完整身份切换**：取消在途捕获 / 提交 / 轮询 / 握手，清空令牌、任务态与草稿，新服务需重新登录 |
+| `api-base` | `apiBase` | 是 | 反馈服务地址（含协议，如 `http://localhost:8787`）；**运行时变化 = 完整身份切换**：取消在途捕获 / 提交 / 轮询 / 登录，清空令牌、任务态与草稿，新服务需重新登录 |
 | `app-id` | `appId` | 是 | 服务端登记的软件标识；**运行时变化会废弃当前草稿、进行中的捕获与旧提交结果**（同一服务，令牌保留） |
 | `app-version` | `appVersion` | 否 | 随 `context.appVersion` 上报（变化只刷新头部信息，不清空草稿） |
 | `page-label` | `pageLabel` | 否 | 随 `context.pageLabel` 上报（变化只刷新头部信息，不清空草稿） |
@@ -47,7 +47,7 @@ import { FeedbackWidget, openFeedback } from '@feedback/web';
   - 已有草稿（文字或截图）时**恢复草稿、不重拍**；有捕获进行中时**合并**到该会话，不重复发起。
   - 这是**呼出**语义：草稿一脏就不再重拍。面板内的手动截图入口（「截取当前页面」/「重新截图」）走显式重拍流程，**不受草稿影响**。
 - `cancelCapture()`：取消进行中的捕获：失效会话序号 → abort → 释放 Pointer Capture → 恢复 UI。迟到的结果被静默丢弃。
-- `startLogin()`：主动开始 Web 登录握手，返回登录页 URL。
+- `startLogin()`：在当前面板展开登录表单（不打开窗口），返回空串。
 - `feedback-submitted`（CustomEvent，bubbles + composed）：提交被服务端接收（201/200）后在元素上派发，`detail = { feedbackId, status, replayed }`。
 
 ## 截图与敏感区遮挡
@@ -107,13 +107,13 @@ widget.captureProvider = async (ctx) => {
 - 手动截图（默认 `capture-mode="off"` 宿主唯一的截图方式）：面板的截图区**预览与操作分离**——无截图时显示「截取当前页面」，此时缩略图 / 放大 / 「重新截图 / 移除截图」都不出现；有截图时显示预览与「重新截图 / 移除截图」；移除后回到首个入口并**保留文字**。手动入口复用显式重拍流程（不受文字草稿影响、可替换旧图、**失败不丢旧图与文字**，首次失败保留重试入口），捕获期间三个操作全部禁用并给出加载态——面板在捕获期间整体不可见，因此加载态与组件 UI 都不可能进入截图；截图结束后焦点回到面板内（原控件已隐藏时回到输入框）。提交与轮询期间禁止截图与移除。
 - 草稿：**组件实例单一所有者**——同实例关闭再打开保留；从 DOM 断开重连保留截图字节并重建预览 URL；仅存内存，刷新即弃，绝不用 localStorage；`app-id` 变化时旧草稿与旧捕获整体废弃。重拍是唯一替换旧截图的入口，重拍失败不丢旧图；移除截图同时移除落点与捕获时间。有文字或截图的草稿再次呼出时恢复草稿不重拍。
 - 提交流程：提交瞬间**冻结快照**（幂等键 / 应用与来源 / 原话 / 截图字节 / 元数据 / 草稿版本），HTTP 只读快照；提交期间禁用编辑、重拍、移除与重复提交。POST `/api/feedback` → 已接收（201/200 后才清空草稿）→ 轮询 `GET /api/feedback/:id`（2s 起指数退避封顶 5s，最长约 2 分钟）→ 已归档（展示任务链接）/ 服务端处理失败（原话已保存：提供「刷新状态 / 复制标识」与找回提示，**绝不重复提交**）/ 提交未到达服务（保留草稿，展示 errorSummary 与「重试提交」，复用同一幂等键与同一字节）。
-- **服务身份与凭据隔离（P1）**：`api-base` 与 `app-id` 共同构成服务身份，任一变化都会递增实例内的**身份世代**；所有异步操作（提交、轮询、捕获会话、登录握手回调）在开始时捕获世代，恢复后世代不符即整体 no-op——**旧服务 / 旧身份的迟到结果绝不写入新身份的状态**（不写 `lastFeedbackId`、不改相位、不清草稿、不派发 `feedback-submitted`、不启动轮询）。
-- `api-base` 变化 = **完整身份切换**：取消捕获会话 / 提交快照 / 幂等键 / 登录握手，停止轮询（复位 `polling` / `pollDelay` / `pollStartedAt`），清空**访问令牌**（`accessToken = null`、`tokenExpiresAt = 0`）与任务态（`lastFeedbackId` / `lastRecord` / `lastErrorSummary` / `unconfirmedRequest` / 登录降级链接，相位复位 `idle`）与草稿（含 textarea），并 `syncUi()` 重渲染。**新服务必须重新登录**：旧服务的 `Authorization` 绝不随请求发送给新基址（切换后未重新登录时组件不会发出任何请求）。
-- `app-id` 变化 = **同一服务内**切换：草稿 / 捕获 / 提交结果 / 轮询 / 绑定旧 `appId` 的握手全部作废，相位复位 `idle`；**令牌保留**（服务未变，无需重新登录）。
+- **服务身份与凭据隔离（P1）**：`api-base` 与 `app-id` 共同构成服务身份，任一变化都会递增实例内的**身份世代**；所有异步操作（提交、轮询、捕获会话、登录响应）在开始时捕获世代，恢复后世代不符即整体 no-op——**旧服务 / 旧身份的迟到结果绝不写入新身份的状态**（不写 `lastFeedbackId`、不改相位、不清草稿、不派发 `feedback-submitted`、不启动轮询）。
+- `api-base` 变化 = **完整身份切换**：取消捕获会话 / 提交快照 / 幂等键 / 登录表单，停止轮询（复位 `polling` / `pollDelay` / `pollStartedAt`），清空**访问令牌**（`accessToken = null`、`tokenExpiresAt = 0`）与任务态（`lastFeedbackId` / `lastRecord` / `lastErrorSummary` / `unconfirmedRequest` / 登录错误，相位复位 `idle`）与草稿（含 textarea），并 `syncUi()` 重渲染。**新服务必须重新登录**：旧服务的 `Authorization` 绝不随请求发送给新基址（切换后未重新登录时组件不会发出任何请求）。
+- `app-id` 变化 = **同一服务内**切换：草稿 / 捕获 / 提交结果 / 轮询 / 旧 `appId` 的登录表单全部作废，相位复位 `idle`；**令牌保留**（服务未变，无需重新登录）。
 - `page-label` / `app-version` / `theme` 变化**绝不清空草稿**：前两者只刷新头部 `vX.Y.Z · 页面标签`，`theme` 只改样式；令牌、任务态与截图同样不受影响。提交来源取自**冻结快照**——快照冻结后修改 `page-label`（含后续重试）不会改变请求的元数据与截图字节。
 - 服务端已接收但后台处理失败（`phase === 'failed'` 且已有记录）的卡片提供：**刷新状态**（`GET /api/feedback/:id` 只读重取，复用身份世代校验，刷新到 `archived` 即展示任务链接）、**复制标识**（`navigator.clipboard.writeText`，剪贴板 API 不可用时静默降级、绝不抛错）与**找回提示**（管理页可据反馈标识找回原话与截图）。该分支**绝不再次 POST `/api/feedback`**；「重试提交」只属于「提交未到达服务」的分支（同 key 同字节）。
 - 幂等与冲突：草稿未变化的重试复用**同一幂等键与同一字节**；`409 idempotency_conflict` 显示冲突、**不自动换 key**；结果未知的提交（网络错误/5xx）在草稿被修改时保留原请求标识与时间供人工核对，新内容用新 key 重新提交。
-- 登录握手：`window.open` 弹窗 + `postMessage`（严格校验 `event.origin === 服务 origin` 与 type/nonce）；弹窗被拦截时降级为 `打开登录窗口` 链接（`target="_blank"`）。握手绑定发起时的服务身份：`api-base` / `app-id` 变化会取消该握手并丢弃其迟到令牌（新身份必须用自己的登录页重新握手）。
+- 登录：未登录可在面板内编辑；点击「登录并提交」就地展开账号密码表单，`POST /api/auth/login` 显式携带 `clientLabel=web:<appId>` 与 `appId`，令牌仅存内存，成功后只提交一次。登录响应绑定发起时的服务身份：`api-base` / `app-id` 变化会丢弃迟到的登录结果（新身份必须重新登录）。响应含 `user` 与每日 `quota`（北京时间零点刷新）。
 - 令牌仅存组件实例内存，且**只属于签发它的服务**（`api-base` 变化即清空，需重新登录）；未提交草稿仅存组件实例内存。
 - 无障碍：Esc 关闭（先关截图预览再关面板）、focus trap、打开聚焦 textarea、关闭恢复焦点、`role="dialog"` `aria-modal`、`prefers-reduced-motion` 尊重。
 

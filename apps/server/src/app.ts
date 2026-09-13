@@ -22,6 +22,8 @@ export interface AppDeps {
   kaneo?: KaneoClient;
   /** 测试注入：替代 worker 重试退避与 idle 轮询的真实等待。 */
   workerSleep?: (ms: number) => Promise<void>;
+  /** 测试注入：可控服务端时钟（额度按北京时间日切分）。 */
+  now?: () => number;
 }
 
 export interface FeedbackApp {
@@ -88,6 +90,27 @@ export function createApp(config: ServerConfig, deps: AppDeps = {}): FeedbackApp
     await next();
   });
 
+  // 组件在宿主页面内登录：登录 / 会话查询 / 退出支持跨源 Bearer（不依赖跨站 Cookie）。
+  app.use("/api/auth/*", async (c, next) => {
+    const origin = c.req.header("origin");
+    if (origin) {
+      let normalized: string | null = null;
+      try {
+        normalized = new URL(origin).origin;
+      } catch {
+        normalized = null;
+      }
+      if (normalized && isRegisteredOrigin(db, normalized)) {
+        c.header("access-control-allow-origin", normalized);
+        c.header("access-control-allow-methods", "GET, POST, DELETE, OPTIONS");
+        c.header("access-control-allow-headers", "authorization, content-type");
+        c.header("access-control-max-age", "300");
+        if (c.req.method === "OPTIONS") return c.body(null, 204);
+      }
+    }
+    await next();
+  });
+
   // 登录窗口页面（Web 组件握手入口），CSP 只放行带 nonce 的内联脚本
   app.get("/login", (c) => {
     const nonce = randomBytes(16).toString("hex");
@@ -103,7 +126,13 @@ export function createApp(config: ServerConfig, deps: AppDeps = {}): FeedbackApp
   app.route("/api/auth", authRoutes({ db, config, loginLimiter: createRateLimiter(10, 15 * 60 * 1000) }));
   app.route(
     "/api/feedback",
-    feedbackRoutes({ db, config, worker, submitLimiter: createRateLimiter(60, 60 * 60 * 1000) }),
+    feedbackRoutes({
+      db,
+      config,
+      worker,
+      submitLimiter: createRateLimiter(60, 60 * 60 * 1000),
+      ...(deps.now ? { now: deps.now } : {}),
+    }),
   );
   app.route("/api/admin", adminRoutes({ db, masterKey: config.masterKey, config, kaneo, ai }));
 

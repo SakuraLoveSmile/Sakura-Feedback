@@ -1,18 +1,22 @@
 import { Hono } from "hono";
 import type { RateLimiter } from "../auth/ratelimit.ts";
-import type { Db, FeedbackRow, FeedbackStatus, SessionRow } from "../db/repos.ts";
-import {
-  contentHash,
-  getAppByAppId,
-  getFeedback,
-  getFeedbackByKey,
-  getFeedbackScreenshot,
-  insertFeedbackWithScreenshot,
-} from "../db/repos.ts";
+import type { Db, FeedbackStatus, SessionRow } from "../db/repos.ts";
+import { contentHash, getAppByAppId, getFeedback, getFeedbackScreenshot, submitFeedbackAtomic } from "../db/repos.ts";
 import type { ServerConfig } from "../env.ts";
-import { checkLimiter, checkSameOrigin, type Err, err, fail, isErr, readJson, requireSession } from "../http.ts";
+import {
+  checkLimiter,
+  type Err,
+  err,
+  fail,
+  isErr,
+  readJson,
+  requireAdminCookie,
+  requireSession,
+  sessionUser,
+} from "../http.ts";
 import type { Worker, WorkerOpResult } from "../pipeline/worker.ts";
 import { ImageValidationError, type SanitizedImage, validateAndSanitizePng } from "../services/image.ts";
+import { publicUser } from "./auth.ts";
 
 const MAX_TEXT_CODEPOINTS = 10_000;
 const MAX_MULTIPART_BYTES = 6 * 1024 * 1024; // 6MiB
@@ -22,6 +26,8 @@ export interface FeedbackDeps {
   config: ServerConfig;
   worker: Worker;
   submitLimiter: RateLimiter;
+  /** 可控时钟（测试注入；默认系统时钟）。 */
+  now?: () => number;
 }
 
 function textCodepointLen(s: string): number {
@@ -53,6 +59,8 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
   routes.post("/", async (c) => {
     const session = requireSession(db, c, ["cookie", "client", "handshake"]);
     if (isErr(session)) return fail(c, session);
+    const user = sessionUser(db, session);
+    if (!user) return fail(c, err("unauthorized", "需要登录", 401));
 
     const limited = checkLimiter(deps.submitLimiter, session.id);
     if (limited) {
@@ -224,65 +232,83 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
       sanitizedImage ? { sha256: sanitizedImage.sha256, releasePoint: capture?.releasePoint } : null,
     );
 
-    const existing = getFeedbackByKey(db, idempotencyKey);
-    if (existing) {
-      if (existing.content_hash !== hash) {
-        return fail(c, err("idempotency_conflict", "同一提交标识对应了不同内容", 409));
-      }
-      return c.json({ feedbackId: existing.id, status: existing.status, replayed: true });
-    }
+    const outcome = submitFeedbackAtomic(
+      db,
+      {
+        userId: user.id,
+        appId: app.app_id,
+        appRowId: app.id,
+        text,
+        contextJson: context ? JSON.stringify(context) : null,
+        idempotencyKey,
+        contentHash: hash,
+      },
+      sanitizedImage
+        ? {
+            pngBlob: sanitizedImage.sanitizedBuffer,
+            width: sanitizedImage.width,
+            height: sanitizedImage.height,
+            byteSize: sanitizedImage.byteSize,
+            sha256: sanitizedImage.sha256,
+            captureJson: capture ? JSON.stringify(capture) : null,
+          }
+        : null,
+      deps.now,
+    );
 
-    let row: FeedbackRow;
-    try {
-      row = insertFeedbackWithScreenshot(
-        db,
-        {
-          appId: app.app_id,
-          appRowId: app.id,
-          text,
-          contextJson: context ? JSON.stringify(context) : null,
-          idempotencyKey,
-          contentHash: hash,
-        },
-        sanitizedImage
-          ? {
-              pngBlob: sanitizedImage.sanitizedBuffer,
-              width: sanitizedImage.width,
-              height: sanitizedImage.height,
-              byteSize: sanitizedImage.byteSize,
-              sha256: sanitizedImage.sha256,
-              captureJson: capture ? JSON.stringify(capture) : null,
-            }
-          : null,
+    if (outcome.kind === "conflict") {
+      return fail(c, err("idempotency_conflict", "同一提交标识对应了不同内容", 409));
+    }
+    if (outcome.kind === "account_invalid") {
+      return fail(c, err("unauthorized", "账号不可用，请重新登录", 401));
+    }
+    if (outcome.kind === "quota_exceeded") {
+      // 明确「未接收」：不扣次数、不保存；同结构额度随 429 返回。
+      return c.json(
+        { error: { code: "daily_quota_exceeded", message: "今日提交次数已用完" }, quota: outcome.quota },
+        429,
       );
-    } catch (insertErr) {
-      // 并发下的 UNIQUE 冲突兜底
-      const raced = getFeedbackByKey(db, idempotencyKey);
-      if (raced) {
-        if (raced.content_hash !== hash) {
-          return fail(c, err("idempotency_conflict", "同一提交标识对应了不同内容", 409));
-        }
-        return c.json({ feedbackId: raced.id, status: raced.status, replayed: true });
-      }
-      throw insertErr;
+    }
+    if (outcome.kind === "replayed") {
+      return c.json({
+        feedbackId: outcome.row.id,
+        status: outcome.row.status,
+        replayed: true,
+        user: publicUser(user),
+        quota: outcome.quota,
+      });
     }
 
-    worker.enqueue(row.id); // 先持久化已接收，再后台处理
-    return c.json({ feedbackId: row.id, status: "received" }, 201);
+    worker.enqueue(outcome.row.id); // 先持久化已接收，再后台处理
+    return c.json(
+      { feedbackId: outcome.row.id, status: "received", user: publicUser(user), quota: outcome.quota },
+      201,
+    );
   });
 
   routes.get("/:id", (c) => {
     const session = requireSession(db, c, ["cookie", "client", "handshake"]);
     if (isErr(session)) return fail(c, session);
+    const user = sessionUser(db, session);
+    if (!user) return fail(c, err("unauthorized", "需要登录", 401));
     const row = getFeedback(db, c.req.param("id"));
-    if (!row) return fail(c, err("not_found", "反馈不存在", 404));
+    // 普通账号只能读取自己的记录；他人记录统一 404（不透露存在性）。
+    if (!row || (user.role !== "admin" && row.user_id !== user.id)) {
+      return fail(c, err("not_found", "反馈不存在", 404));
+    }
     return c.json(publicStatus(row));
   });
 
   routes.get("/:id/screenshot", (c) => {
     const session = requireSession(db, c, ["cookie", "client", "handshake"]);
     if (isErr(session)) return fail(c, session);
-    const screenshot = getFeedbackScreenshot(db, c.req.param("id"));
+    const user = sessionUser(db, session);
+    if (!user) return fail(c, err("unauthorized", "需要登录", 401));
+    const row = getFeedback(db, c.req.param("id"));
+    if (!row || (user.role !== "admin" && row.user_id !== user.id)) {
+      return fail(c, err("not_found", "截图不存在", 404));
+    }
+    const screenshot = getFeedbackScreenshot(db, row.id);
     if (!screenshot) return fail(c, err("not_found", "截图不存在", 404));
     return new Response(screenshot.png_blob as unknown as BodyInit, {
       status: 200,
@@ -294,12 +320,10 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
     });
   });
 
-  // —— 管理操作：仅 cookie 会话 ——
+  // —— 管理操作：仅管理员 Cookie 会话 + 同源 ——
   const cookieGuard = (c: Parameters<typeof requireSession>[1]): SessionRow | Response => {
-    const s = requireSession(db, c, ["cookie"]);
+    const s = requireAdminCookie(db, c, config);
     if (isErr(s)) return fail(c, s);
-    const o = checkSameOrigin(c, s, config);
-    if (o) return fail(c, o);
     return s;
   };
 

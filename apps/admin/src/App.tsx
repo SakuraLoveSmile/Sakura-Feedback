@@ -1,16 +1,18 @@
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { ApiError, api } from "./api.ts";
+import AccountsView from "./views/AccountsView.tsx";
 import AppsView from "./views/AppsView.tsx";
 import ConnectionsView from "./views/ConnectionsView.tsx";
 import FeedbacksView from "./views/FeedbacksView.tsx";
 import SessionsView from "./views/SessionsView.tsx";
 
-type Tab = "feedbacks" | "apps" | "connections" | "sessions";
+type Tab = "feedbacks" | "apps" | "connections" | "accounts" | "sessions";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "feedbacks", label: "反馈" },
   { id: "apps", label: "软件配置" },
   { id: "connections", label: "连接配置" },
+  { id: "accounts", label: "账号" },
   { id: "sessions", label: "会话" },
 ];
 
@@ -127,6 +129,8 @@ function renderTab(tab: Tab): ReactNode {
       return <AppsView />;
     case "connections":
       return <ConnectionsView />;
+    case "accounts":
+      return <AccountsView />;
     case "sessions":
       return <SessionsView />;
   }

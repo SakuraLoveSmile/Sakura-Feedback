@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import '../src/index';
-import { API_BASE, apiError, cleanup, completeLogin, httpResponse, mount, recordFetch, setTextarea, stubWindowOpen } from './helpers';
+import { API_BASE, apiError, cleanup, completeLogin, httpResponse, mount, recordFetch, setTextarea } from './helpers';
 
 afterEach(() => {
   cleanup();
@@ -22,7 +22,6 @@ function feedbackRecord(status: string, extra: Record<string, unknown> = {}) {
 describe('轮询 GET /api/feedback/:id', () => {
   it('2s 起指数退避（封顶 5s），archived 后展示任务链接并停止轮询', async () => {
     vi.useFakeTimers();
-    stubWindowOpen({ closed: false });
     const m = mount();
     const statuses = ['processing', 'archived'];
     let gets = 0;
@@ -38,7 +37,7 @@ describe('轮询 GET /api/feedback/:id', () => {
       );
     });
 
-    completeLogin(m);
+    await completeLogin(m);
     setTextarea(m, '轮询我');
     m.submitBtn.click();
     await vi.advanceTimersByTimeAsync(0); // POST 落地
@@ -66,7 +65,6 @@ describe('轮询 GET /api/feedback/:id', () => {
 
   it('轮询到 failed：说明原话已保存，引导管理页处理，不把原话作为新反馈再次提交', async () => {
     vi.useFakeTimers();
-    stubWindowOpen({ closed: false });
     const m = mount();
     let firstPost = true;
     recordFetch(async (url, init) => {
@@ -81,7 +79,7 @@ describe('轮询 GET /api/feedback/:id', () => {
       return httpResponse(201, { feedbackId: 'fb-2', status: 'received' });
     });
 
-    completeLogin(m);
+    await completeLogin(m);
     setTextarea(m, '会失败的反馈');
     m.submitBtn.click();
     await vi.advanceTimersByTimeAsync(2000);
@@ -107,14 +105,13 @@ describe('轮询 GET /api/feedback/:id', () => {
 
   it('needs_review 显示归档结果待确认，不提供重复创建提交按钮；轮询超时不呈现为归档失败', async () => {
     vi.useFakeTimers();
-    stubWindowOpen({ closed: false });
     const m = mount();
     recordFetch(async (url, init) => {
       if (init.method === 'POST') return httpResponse(201, { feedbackId: 'fb-1', status: 'received' });
       if (url.endsWith('/fb-1')) return httpResponse(200, feedbackRecord('needs_review'));
       return httpResponse(401, apiError(401, 'unauthorized', 'expired'));
     });
-    completeLogin(m);
+    await completeLogin(m);
     setTextarea(m, '待核对');
     m.submitBtn.click();
     await vi.advanceTimersByTimeAsync(2000);
@@ -131,13 +128,12 @@ describe('轮询 GET /api/feedback/:id', () => {
 
   it('轮询时间较长超时停止，不被呈现为归档失败', async () => {
     vi.useFakeTimers();
-    stubWindowOpen({ closed: false });
     const m = mount();
     recordFetch(async (url, init) => {
       if (init.method === 'POST') return httpResponse(201, { feedbackId: 'fb-1', status: 'received' });
       return httpResponse(200, feedbackRecord('processing'));
     });
-    completeLogin(m);
+    await completeLogin(m);
     setTextarea(m, '处理较长的反馈');
     m.submitBtn.click();
     await vi.advanceTimersByTimeAsync(130000);

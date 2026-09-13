@@ -24,7 +24,7 @@
 
 | 路径 | 内容 |
 |---|---|
-| `apps/server` | 反馈服务：Node.js + TypeScript + Hono；数据库是 Node 内置的 `node:sqlite`（`src/db/db.ts`，不需要额外自带的 SQLite 原生模块），但服务**仍有一个原生依赖 `sharp`**（截图的校验与重编码，`src/services/image.ts`），安装时会带上平台相关的 libvips 二进制（本机为 `@img/sharp-darwin-arm64` + `@img/sharp-libvips-darwin-arm64`）。含管理 API、登录窗口页、后台处理流水线 |
+| `apps/server` | 反馈服务：Node.js + TypeScript + Hono；数据库是 Node 内置的 `node:sqlite`（`src/db/db.ts`，不需要额外自带的 SQLite 原生模块），但服务**仍有一个原生依赖 `sharp`**（截图的校验与重编码，`src/services/image.ts`），安装时会带上平台相关的 libvips 二进制（本机为 `@img/sharp-darwin-arm64` + `@img/sharp-libvips-darwin-arm64`）。含管理 API、账号与每日额度、登录窗口页（兼容保留）、后台处理流水线 |
 | `apps/admin` | 管理页（React + Vite），构建产物由 server 在 `/admin/` 下托管 |
 | `packages/web` | 框架无关 Web 组件 `<feedback-widget>`（TypeScript Custom Element + Shadow DOM），npm 导入或 `<script>` 加载，导出 `openFeedback()`。运行时依赖只有 `html2canvas-pro`（2.4.2），**且只被内置视口截图路径使用**：ESM 构建（`dist/feedback-web.js`，约 80 KB）把它拆成独立 chunk（约 329 KB）**懒加载**；UMD 构建（`dist/feedback-web.umd.cjs`，约 316 KB）单文件内联。纯文字提交或自定义 `captureProvider` 都不会加载它（体积以 `pnpm --filter @feedback/web build` 的输出为准） |
 | `flutter/feedback` | Flutter 包 `feedback_widget`：`FeedbackWidget` 包裹组件 + `FeedbackController` 主动呼出，覆盖 Web/Android/iOS/Windows/macOS/Linux |
@@ -44,7 +44,7 @@ pnpm --filter @feedback/admin build
 FEEDBACK_MASTER_KEY=$(node -e 'console.log(require("crypto").randomBytes(32).toString("base64"))') \
 FEEDBACK_ADMIN_USER=admin FEEDBACK_ADMIN_PASSWORD=changeme \
 pnpm --filter @feedback/server dev
-# 服务: http://127.0.0.1:8787  管理页: /admin  登录窗口: /login
+# 服务: http://127.0.0.1:8787  管理页: /admin（旧登录窗口: /login，兼容保留）
 ```
 
 验证命令：各包均有 `build / test / typecheck / lint` 脚本（`pnpm -r run …`）；Flutter 包用 `flutter analyze` / `flutter test`（见其 README）。
@@ -60,5 +60,5 @@ pnpm --filter @feedback/server dev
 - AI 只产出标题与结构化整理（使用体验/问题/建议/待确认），来源信息、原话引用与反馈 ID 由服务追加，AI 不决定项目、列或调度。
 - Kaneo 目标列以真实 slug 保存；列失效时停止归档并提示修复，不自动创建或改写看板。
 - 提交幂等：客户端唯一标识；同标识不同内容返回冲突。
-- 登录：Web 组件在服务自身窗口登录 + 严格来源校验的消息握手（短期令牌）；持久会话为服务域安全 Cookie，不依赖第三方 Cookie。Flutter 原生用平台安全存储保存可撤销令牌。
+- 登录：Web 组件与 Flutter 都在**当前面板内**用账号密码登录（`POST /api/auth/login` + `clientLabel`/`appId`，Bearer，不依赖跨站 Cookie）；Web 令牌仅存内存，原生 Flutter 用平台安全存储。旧登录窗口握手仍兼容。账号由后台创建分发，不开放注册；每账号默认每天 3 次提交额度，北京时间零点刷新。
 - 日志不记录反馈原文、密码或令牌；密钥以主密钥 AES-256-GCM 加密存储（`apps/server/src/crypto/secret.ts`），页面仅显示掩码。

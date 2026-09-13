@@ -106,7 +106,7 @@ describe('面板内手动截图入口', () => {
     m.captureBtn.click();
     await tick();
     setTextarea(m, '手动截图 + 文字');
-    completeLogin(m);
+    await completeLogin(m);
 
     let body: FormData | null = null;
     vi.stubGlobal(
@@ -368,7 +368,7 @@ describe('面板内手动截图入口', () => {
     m.fab.click();
     m.captureBtn.click();
     await tick();
-    completeLogin(m);
+    await completeLogin(m);
     setTextarea(m, '提交中的反馈');
 
     // 提交挂起：fetch 永不自动 resolve（用对象承载 release，避免 TS 把变量收窄成 never）
@@ -410,7 +410,7 @@ describe('面板内手动截图入口', () => {
     m.fab.click();
     m.captureBtn.click();
     await tick();
-    completeLogin(m);
+    await completeLogin(m);
     setTextarea(m, '提交后的反馈');
 
     vi.stubGlobal(

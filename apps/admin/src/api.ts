@@ -36,6 +36,7 @@ export const api = {
   get: <T>(url: string) => req<T>("GET", url),
   post: <T>(url: string, body?: unknown) => req<T>("POST", url, body ?? {}),
   put: <T>(url: string, body?: unknown) => req<T>("PUT", url, body ?? {}),
+  patch: <T>(url: string, body?: unknown) => req<T>("PATCH", url, body ?? {}),
   del: <T>(url: string) => req<T>("DELETE", url),
 };
 
@@ -44,6 +45,7 @@ export const api = {
 export interface FeedbackListItem {
   id: string;
   appId: string;
+  username?: string | null;
   status: string;
   createdAt: string;
   updatedAt: string;
@@ -116,6 +118,18 @@ export interface SessionItem {
   lastUsedAt: string | null;
   expiresAt: string;
   current: boolean;
+}
+
+/** 普通账号（账号页面只管理普通账号；响应绝不包含口令或哈希）。 */
+export interface AccountItem {
+  id: string;
+  username: string;
+  enabled: boolean;
+  dailyLimit: number;
+  used: number;
+  remaining: number;
+  resetAt: string;
+  createdAt: string;
 }
 
 export interface KaneoTestResult {

@@ -1,7 +1,9 @@
 import { Hono } from "hono";
+import { hashPassword } from "../auth/password.ts";
 import { encryptSecret } from "../crypto/secret.ts";
 import {
   type AppRow,
+  createUser,
   type Db,
   deleteApp,
   type FeedbackRow,
@@ -10,16 +12,24 @@ import {
   getFeedback,
   getFeedbackScreenshot,
   getFeedbackScreenshotMeta,
+  getQuota,
   getSetting,
+  getUserById,
+  getUserByUsername,
   insertApp,
   listApps,
   listFeedbacks,
+  listOrdinaryUsers,
+  revokeUserSessions,
   setSetting,
+  setUserPassword,
   toAdminListItem,
+  type UserRow,
   updateApp,
+  updateUser,
 } from "../db/repos.ts";
 import type { ServerConfig } from "../env.ts";
-import { checkSameOrigin, type Err, err, fail, isErr, readJson, requireSession } from "../http.ts";
+import { type Err, err, fail, isErr, readJson, requireAdminCookie } from "../http.ts";
 import { parseArchiveData } from "../pipeline/archive-data.ts";
 import type { AiClient } from "../services/ai.ts";
 import type { KaneoClient } from "../services/kaneo.ts";
@@ -95,13 +105,108 @@ export function adminRoutes(deps: AdminDeps): Hono {
   const { db, masterKey, config } = deps;
   const routes = new Hono();
 
-  // 全部管理接口：仅 cookie 会话 + 同源检查
+  // 全部管理接口：仅管理员 Cookie 会话 + 同源检查
   routes.use("*", async (c, next) => {
-    const s = requireSession(db, c, ["cookie"]);
+    const s = requireAdminCookie(db, c, config);
     if (isErr(s)) return fail(c, s);
-    const o = checkSameOrigin(c, s, config);
-    if (o) return fail(c, o);
     await next();
+  });
+
+  // ---------- 账号管理（只管理普通账号；管理员保留，不提供删除与角色修改） ----------
+
+  function quotaUserView(u: UserRow) {
+    const quota = getQuota(db, u);
+    return {
+      id: u.id,
+      username: u.username,
+      enabled: u.enabled === 1,
+      dailyLimit: u.daily_limit,
+      used: quota.used,
+      remaining: quota.remaining,
+      resetAt: quota.resetAt,
+      createdAt: u.created_at,
+    };
+  }
+
+  const MAX_DAILY_LIMIT = 1_000_000;
+
+  /** 校验每日额度：非负安全整数（0 表示禁止新提交）。 */
+  function parseDailyLimit(v: unknown): number | Err {
+    if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0 || v > MAX_DAILY_LIMIT) {
+      return err("invalid_request", `dailyLimit 必须是 0..${MAX_DAILY_LIMIT} 的整数`, 400);
+    }
+    return v;
+  }
+
+  /** 目标必须是可管理的普通账号（管理员不在本页管理范围）。 */
+  function ordinaryUserOr404(id: string): UserRow | Err {
+    const u = getUserById(db, id);
+    if (!u || u.role !== "user") return err("not_found", "账号不存在", 404);
+    return u;
+  }
+
+  routes.get("/users", (c) => c.json({ users: listOrdinaryUsers(db).map(quotaUserView) }));
+
+  routes.post("/users", async (c) => {
+    const body = await readJson<{ username?: unknown; password?: unknown; dailyLimit?: unknown }>(c);
+    if (isErr(body)) return fail(c, body);
+    const username = typeof body.username === "string" ? body.username.trim() : "";
+    const password = typeof body.password === "string" ? body.password : "";
+    if (!username || username.length > 100) {
+      return fail(c, err("invalid_request", "username 必填且不超过 100 字符", 400));
+    }
+    if (!password || password.length > 200) {
+      return fail(c, err("invalid_request", "password 必填且不超过 200 字符", 400));
+    }
+    let dailyLimit = 3;
+    if (body.dailyLimit !== undefined) {
+      const parsed = parseDailyLimit(body.dailyLimit);
+      if (typeof parsed !== "number") return fail(c, parsed);
+      dailyLimit = parsed;
+    }
+    if (getUserByUsername(db, username)) return fail(c, err("user_exists", "该用户名已存在", 409));
+    const row = createUser(db, username, hashPassword(password), { role: "user", dailyLimit });
+    return c.json(quotaUserView(row), 201);
+  });
+
+  routes.patch("/users/:id", async (c) => {
+    const target = ordinaryUserOr404(c.req.param("id"));
+    if ("status" in target) return fail(c, target);
+    const body = await readJson<{ enabled?: unknown; dailyLimit?: unknown }>(c);
+    if (isErr(body)) return fail(c, body);
+    const patch: { enabled?: number; dailyLimit?: number } = {};
+    if (body.enabled !== undefined) {
+      if (typeof body.enabled !== "boolean") {
+        return fail(c, err("invalid_request", "enabled 必须是布尔值", 400));
+      }
+      patch.enabled = body.enabled ? 1 : 0;
+    }
+    if (body.dailyLimit !== undefined) {
+      const parsed = parseDailyLimit(body.dailyLimit);
+      if (typeof parsed !== "number") return fail(c, parsed);
+      patch.dailyLimit = parsed; // 立即生效，不清除当天用量
+    }
+    if (Object.keys(patch).length === 0) {
+      return fail(c, err("invalid_request", "没有可更新的字段", 400));
+    }
+    updateUser(db, target.id, patch);
+    // 禁用账号立即撤销其全部会话（启用不重建会话）。
+    if (patch.enabled === 0) revokeUserSessions(db, target.id);
+    return c.json(quotaUserView(getUserById(db, target.id)!));
+  });
+
+  routes.post("/users/:id/password", async (c) => {
+    const target = ordinaryUserOr404(c.req.param("id"));
+    if ("status" in target) return fail(c, target);
+    const body = await readJson<{ password?: unknown }>(c);
+    if (isErr(body)) return fail(c, body);
+    const password = typeof body.password === "string" ? body.password : "";
+    if (!password || password.length > 200) {
+      return fail(c, err("invalid_request", "password 必填且不超过 200 字符", 400));
+    }
+    setUserPassword(db, target.id, hashPassword(password));
+    revokeUserSessions(db, target.id); // 重置密码撤销旧会话
+    return c.json({ ok: true });
   });
 
   // ---------- 软件配置 ----------
@@ -256,8 +361,10 @@ export function adminRoutes(deps: AdminDeps): Hono {
       }
     }
     const screenshotMeta = getFeedbackScreenshotMeta(db, row.id);
+    const submitter = row.user_id ? getUserById(db, row.user_id) : null;
     return c.json({
       ...toAdminListItem(row),
+      username: submitter?.username ?? null,
       text: row.text,
       context,
       processed,

@@ -226,7 +226,7 @@ describe('灵感球与视口截图组件测试', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const m = mount();
-    completeLogin(m);
+    await completeLogin(m);
 
     // 模拟截图
     const mockBlob = new Blob(['image-bytes-mock'], { type: 'image/png' });
@@ -266,7 +266,7 @@ describe('灵感球与视口截图组件测试', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const m = mount();
-    completeLogin(m);
+    await completeLogin(m);
 
     const mockBlob = new Blob(['image-bytes-mock'], { type: 'image/png' });
     m.widget.captureProvider = vi.fn(async () => ({

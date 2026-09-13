@@ -1,7 +1,7 @@
 import type { Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { RateLimiter } from "./auth/ratelimit.ts";
-import { type Db, findActiveSessionByToken, type SessionRow } from "./db/repos.ts";
+import { type Db, findActiveSessionByToken, getUserById, type SessionRow, type UserRow } from "./db/repos.ts";
 import type { ServerConfig } from "./env.ts";
 
 export const COOKIE_NAME = "fb_session";
@@ -43,6 +43,26 @@ export function requireSession(db: Db, c: Context, kinds: SessionRow["kind"][]):
   if (!session) return err("unauthorized", "需要登录", 401);
   if (!kinds.includes(session.kind)) return err("unauthorized", "凭据类型不允许此操作", 403);
   return session;
+}
+
+/** 会话对应的账号（禁用账号的会话已在 resolveSession 阶段失效）。 */
+export function sessionUser(db: Db, session: SessionRow): UserRow | null {
+  return getUserById(db, session.user_id);
+}
+
+/**
+ * 管理员守卫：Cookie 会话 + 同源检查 + **管理员角色**。
+ * 普通账号即便持有 Cookie 也不能管理服务；账号角色每次请求都重新读取。
+ */
+export function requireAdminCookie(db: Db, c: Context, config: ServerConfig): SessionRow | Err {
+  const s = requireSession(db, c, ["cookie"]);
+  if (isErr(s)) return s;
+  const o = checkSameOrigin(c, s, config);
+  if (o) return o;
+  const user = getUserById(db, s.user_id);
+  if (user?.enabled !== 1) return err("unauthorized", "需要登录", 401);
+  if (user.role !== "admin") return err("forbidden", "需要管理员权限", 403);
+  return s;
 }
 
 /**
