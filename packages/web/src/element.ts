@@ -3,14 +3,18 @@ import {
   MAX_TEXT,
   codePointLength,
   getFeedback,
+  getSession,
+  login,
   submitFeedback,
   uuid,
+  type AuthUser,
   type FeedbackCaptureInfo,
   type FeedbackContext,
   type FeedbackRecord,
   type FeedbackStatus,
+  type Quota,
 } from './api';
-import { LoginHandshake, type AuthMessage } from './auth';
+import { loginErrorMessage, webClientLabel } from './auth';
 import { STYLES } from './styles';
 import {
   CAPTURE_FAILURE_MESSAGE,
@@ -65,11 +69,27 @@ type Phase =
   | 'tracking' // 201/200 后轮询（已接收/处理中）
   | 'archived' // 终态：已归档
   | 'failed' // 提交未成功（接口/网络报错）或服务端处理失败（failed/needs_review）
+  | 'quota' // 每日额度用尽（明确未接收；非「结果未知」）
   | 'needs_review'; // 服务端标记需要人工核对
 
 const POLL_START_MS = 2000;
 const POLL_MAX_MS = 5000;
 const POLL_BUDGET_MS = 120000; // ~2 分钟
+
+/**
+ * 额度用尽后的重试间隔（T1-B）：后台调高额度后，持续打开的面板最多 30 秒
+ * 即可恢复提交，无需关闭重开。用量未用尽时只在 resetAt 排单次查询。
+ * 被在途查询 / 登录忙碌挡下的「待立即刷新」优先于本规则——旧查询结束后
+ * 或忙碌结束后立即补发一次（见 consumeQuotaRefreshIntent）。
+ */
+const QUOTA_RETRY_MS = 30_000;
+
+/**
+ * 额度定时查询的最大等待。服务端 `resetAt` 正常在 24 小时内（北京时间日切）；
+ * 异常 / 超远时间不得直接交给宿主定时器——超过 2^31-1 ms 的延时会被截断为
+ * 立即触发，形成对服务端的紧密循环请求。
+ */
+const QUOTA_MAX_DELAY_MS = 86_400_000;
 
 /**
  * 面板内截图入口的文案：
@@ -209,6 +229,17 @@ export class FeedbackWidget extends HTMLElement {
   private submitBtn!: HTMLButtonElement;
   private statusRegion!: HTMLDivElement;
   private errorRegion!: HTMLDivElement;
+  /** 今日剩余额度（登录后显示；未登录/未取得时隐藏）。 */
+  private quotaInfo!: HTMLSpanElement;
+  /** 额度用尽提示（含下次可提交时间）。 */
+  private quotaBlockedInfo!: HTMLParagraphElement;
+  /** 面板内登录表单（点击「登录并提交」展开，不打开新窗口）。 */
+  private loginPanel!: HTMLDivElement;
+  private loginUsername!: HTMLInputElement;
+  private loginPassword!: HTMLInputElement;
+  private loginErrorEl!: HTMLParagraphElement;
+  private loginConfirmBtn!: HTMLButtonElement;
+  private loginCancelBtn!: HTMLButtonElement;
 
   private phase: Phase = 'idle';
   private polling = false;
@@ -217,10 +248,48 @@ export class FeedbackWidget extends HTMLElement {
   private pollStartedAt = 0;
   private openState = false;
   private authRequired = false;
-  private loginFallbackUrl: string | null = null;
-  private lastLoginUrl: string | null = null;
+  /** 当前登录账号（登录响应提供；仅用于展示与额度归属）。 */
+  private authUser: AuthUser | null = null;
+  /** 最近一次取得的每日额度；resetAt 之后重新查询，不在本地擅自重置。 */
+  private quota: Quota | null = null;
+  private loginVisible = false;
+  private loginBusy = false;
+  private loginError = '';
+  private visibilityHandler: (() => void) | null = null;
   /** 手动刷新服务端记录状态进行中（按钮禁用 + 防重入）。 */
   private refreshing = false;
+
+  /**
+   * 登录操作序号（T1-A）：每次发起登录递增；面板关闭 / 取消登录 /
+   * 组件卸载 / 服务身份变化都会递增使在途登录失效，并清除密码、
+   * 登录忙碌状态与待自动提交标记。
+   *
+   * 登录回调返回后必须同时满足「序号未变 + 身份世代未变 + 组件仍连接」，
+   * 才允许写入令牌、更新界面或自动提交；失败回调同样校验，
+   * 防止旧登录的错误覆盖新登录。由于 close() 也会递增序号，
+   * 「序号仍有效」等价于「面板自登录发起以来没有被关闭」。
+   */
+  private loginSeq = 0;
+
+  /**
+   * 额度查询序号（T1-B）：提交成功 / 收到额度错误 / 关闭 / 卸载 /
+   * 退到后台 / 身份变化都会递增使在途查询失效；查询结果除校验身份、
+   * 令牌外还要校验该序号，避免旧查询覆盖刚扣除后的次数。
+   */
+  private quotaSeq = 0;
+  /** 额度查询定时器（resetAt 单次 或 额度用尽后每 30 秒）；同时最多一个。 */
+  private quotaTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 额度查询进行中：同一时刻最多一个额度查询。 */
+  private quotaInFlight = false;
+  /** 最近一次额度刷新失败（网络等）：保留旧额度，30 秒后重试。 */
+  private quotaRefreshFailed = false;
+  /**
+   * 「待立即刷新」标记（T1-B）：打开面板 / 回到前台的刷新被旧查询或登录
+   * 忙碌挡下时登记，不得丢弃；旧查询结束后或忙碌结束后立即补发一次。
+   * 多次登记合并为一次；关闭 / 卸载 / 退到后台 / 身份变化 / 401 时清除，
+   * 重新打开按当前身份重新登记。
+   */
+  private quotaRefreshPending = false;
 
   /**
    * 服务身份世代（epoch）：`api-base` 或 `app-id` 变化时递增。
@@ -285,7 +354,6 @@ export class FeedbackWidget extends HTMLElement {
   private lastErrorSummary: string | null = null;
   private lastRecord: FeedbackRecord | null = null;
 
-  private handshake: LoginHandshake | null = null;
   private keydownHandler: ((ev: KeyboardEvent) => void) | null = null;
   private handledKey: KeyboardEvent | null = null;
 
@@ -398,6 +466,9 @@ export class FeedbackWidget extends HTMLElement {
     // 打开时焦点移到 textarea（草稿已恢复）
     this.textarea.focus();
 
+    // 打开面板即刷新额度（已登录时）；跨 resetAt 后由服务端给出新额度。
+    void this.refreshQuota();
+
     // 键盘监听：Esc 与 Tab
     this.keydownHandler = (ev: KeyboardEvent) => this.onKeydown(ev);
     document.addEventListener('keydown', this.keydownHandler, true);
@@ -408,6 +479,12 @@ export class FeedbackWidget extends HTMLElement {
   }
 
   close(): void {
+    // 关闭面板：使尚未完成的登录接续与额度查询失效（已建立的登录态、
+    // 草稿与截图不受影响），并取消额度定时查询；同时清除补发意图，
+    // 重新打开时按当前状态重新登记（T1-B）。
+    this.invalidateLogin();
+    this.invalidateQuotaRefresh();
+    this.quotaRefreshPending = false;
     // 即使面板尚未打开（先截图后开面板阶段），关闭也必须取消进行中的截图
     this.invalidateCaptureSession();
     this.captureInFlight = null;
@@ -813,6 +890,21 @@ export class FeedbackWidget extends HTMLElement {
     if (this.draft.screenshotBlob && !this.draft.screenshotUrl) {
       this.draft.screenshotUrl = URL.createObjectURL(this.draft.screenshotBlob);
     }
+    // 应用恢复前台（含移动端切回）时刷新额度；跨过 resetAt 后由服务端给出新额度。
+    if (!this.visibilityHandler) {
+      this.visibilityHandler = () => {
+        if (document.visibilityState === 'visible') {
+          this.quotaRefreshFailed = false;
+          void this.refreshQuota();
+        } else {
+          // 退到后台：取消定时查询并使在途查询失效（旧结果不得写回前台状态）；
+          // 同时清除补发意图，回前台时重新登记（T1-B）。
+          this.invalidateQuotaRefresh();
+          this.quotaRefreshPending = false;
+        }
+      };
+      document.addEventListener('visibilitychange', this.visibilityHandler);
+    }
     this.syncUi();
   }
 
@@ -821,9 +913,17 @@ export class FeedbackWidget extends HTMLElement {
     this.invalidateCaptureSession();
     this.captureInFlight = null;
     this.stopPolling();
-    this.handshake?.cancel();
-    // 取消后必须丢弃引用：否则重挂载后的登录会误判"已有握手"而永不开窗
-    this.handshake = null;
+    // 卸载同样使在途登录与额度查询失效，并取消额度定时查询；
+    // 补发意图一并清除（重挂载时重新登记）。
+    this.invalidateLogin();
+    this.invalidateQuotaRefresh();
+    this.quotaRefreshPending = false;
+    if (this.visibilityHandler) {
+      document.removeEventListener('visibilitychange', this.visibilityHandler);
+      this.visibilityHandler = null;
+    }
+    // 密码不跨挂载保留（登录结束即清空）。
+    this.loginPassword.value = '';
     if (this.keydownHandler) {
       document.removeEventListener('keydown', this.keydownHandler, true);
       this.keydownHandler = null;
@@ -839,11 +939,13 @@ export class FeedbackWidget extends HTMLElement {
     if (name === 'api-base' && oldVal !== newVal) {
       // 服务身份切换：先递增世代（在途请求全部作废），再清空属于旧服务的一切
       this.identityEpoch++;
+      this.quotaRefreshPending = false; // 旧身份的补发意图一并清除（T1-B）
       this.resetForServiceSwitch();
     }
     if (name === 'app-id' && oldVal !== newVal) {
       // 同一服务内的应用身份变化：令牌保留，草稿 / 捕获 / 结果 / 握手整体作废
       this.identityEpoch++;
+      this.quotaRefreshPending = false;
       this.resetForAppIdSwitch();
     }
     if (name === 'launcher-bottom') {
@@ -862,6 +964,8 @@ export class FeedbackWidget extends HTMLElement {
    */
   private resetForServiceSwitch(): void {
     this.invalidateCaptureSession();
+    this.invalidateLogin();
+    this.invalidateQuotaRefresh();
     this.captureInFlight = null;
     this.stopPolling();
     this.pollDelay = POLL_START_MS;
@@ -874,12 +978,12 @@ export class FeedbackWidget extends HTMLElement {
     this.tokenExpiresAt = 0;
     this.authRequired = false;
     this.pendingSubmit = false;
-    this.loginFallbackUrl = null;
-    this.lastLoginUrl = null;
-    if (this.handshake) {
-      this.handshake.cancel();
-      this.handshake = null;
-    }
+    this.authUser = null;
+    this.quota = null;
+    this.loginVisible = false;
+    this.loginBusy = false;
+    this.loginError = '';
+    this.loginPassword.value = '';
     this.lastFeedbackId = null;
     this.lastRecord = null;
     this.lastErrorSummary = null;
@@ -898,6 +1002,8 @@ export class FeedbackWidget extends HTMLElement {
    */
   private resetForAppIdSwitch(): void {
     this.invalidateCaptureSession();
+    this.invalidateLogin();
+    this.invalidateQuotaRefresh();
     this.captureInFlight = null;
     this.restoreCaptureUi();
     this.stopPolling();
@@ -914,13 +1020,12 @@ export class FeedbackWidget extends HTMLElement {
     this.lastSubmittedText = '';
     this.refreshing = false;
     this.phase = 'idle';
-    // 旧身份的握手（登录页 URL 携带旧 appId）一并作废；令牌保留
-    if (this.handshake) {
-      this.handshake.cancel();
-      this.handshake = null;
-      this.pendingSubmit = false;
-      this.loginFallbackUrl = null;
-    }
+    // 旧身份的登录表单（appId 已变）收起；令牌与额度保留（同一服务、同一账号）。
+    this.loginVisible = false;
+    this.loginBusy = false;
+    this.loginError = '';
+    this.loginPassword.value = '';
+    this.pendingSubmit = false;
     this.renderStatus('');
     this.syncUi();
   }
@@ -1154,14 +1259,64 @@ export class FeedbackWidget extends HTMLElement {
     this.errorRegion = el('div', 'fb-error fb-status-card-wrap');
     this.errorRegion.hidden = true;
 
-    // 底部操作区：提交/登录按钮 + 次要说明
+    // 底部操作区：额度 / 面板内登录表单 + 提交按钮 + 次要说明
     const footer = el('footer', 'fb-footer');
+
+    this.quotaInfo = el('span', 'fb-quota');
+    this.quotaInfo.hidden = true;
+    this.quotaInfo.setAttribute('role', 'status');
+
+    this.quotaBlockedInfo = el('p', 'fb-quota-blocked');
+    this.quotaBlockedInfo.hidden = true;
+
+    this.loginPanel = el('div', 'fb-login-panel');
+    this.loginPanel.hidden = true;
+    this.loginPanel.setAttribute('role', 'group');
+    this.loginPanel.setAttribute('aria-label', '账号登录');
+
+    this.loginUsername = el('input', 'fb-login-input fb-login-username');
+    this.loginUsername.type = 'text';
+    this.loginUsername.autocomplete = 'username';
+    this.loginUsername.placeholder = '用户名';
+    this.loginUsername.setAttribute('aria-label', '用户名');
+
+    this.loginPassword = el('input', 'fb-login-input fb-login-password');
+    this.loginPassword.type = 'password';
+    this.loginPassword.autocomplete = 'current-password';
+    this.loginPassword.placeholder = '密码';
+    this.loginPassword.setAttribute('aria-label', '密码');
+
+    this.loginErrorEl = el('p', 'fb-login-error');
+    this.loginErrorEl.hidden = true;
+
+    this.loginConfirmBtn = el('button', 'fb-btn-secondary fb-login-confirm', '登录并提交');
+    this.loginConfirmBtn.type = 'button';
+    this.loginConfirmBtn.setAttribute('aria-label', '登录并提交反馈');
+    this.loginCancelBtn = el('button', 'fb-btn-secondary fb-login-cancel', '取消');
+    this.loginCancelBtn.type = 'button';
+    const loginActions = el('div', 'fb-login-actions');
+    loginActions.append(this.loginConfirmBtn, this.loginCancelBtn);
+
+    const loginRow = el('div', 'fb-login-row');
+    loginRow.append(this.loginUsername, this.loginPassword);
+    this.loginPanel.append(loginRow, this.loginErrorEl, loginActions);
+
     this.submitBtn = el('button', 'fb-submit', '提交');
     this.submitBtn.type = 'button';
     this.submitBtn.setAttribute('aria-label', '提交反馈');
 
     const footnote = el('p', 'fb-footnote', '会保留原话，整理为候选改进');
-    footer.append(this.submitBtn, footnote);
+    footer.append(this.quotaInfo, this.quotaBlockedInfo, this.loginPanel, this.submitBtn, footnote);
+
+    // 面板内登录：确认即登录并提交；取消只收起表单，草稿与截图保留。
+    this.loginConfirmBtn.addEventListener('click', () => void this.doLogin());
+    this.loginCancelBtn.addEventListener('click', () => this.cancelLogin());
+    this.loginPassword.addEventListener('keydown', (ev: KeyboardEvent) => {
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        void this.doLogin();
+      }
+    });
 
     body.append(this.shotArea, promptLabel, textareaWrap, this.statusRegion, this.errorRegion, footer);
     this.panel.append(header, body);
@@ -1244,6 +1399,22 @@ export class FeedbackWidget extends HTMLElement {
       return;
     }
 
+    // 额度用尽禁止新提交；但结果未知的同键请求仍允许重试（可能已被服务端接收）。
+    const snap0 = this.submitSnapshot;
+    const retryingUnknown =
+      snap0 !== null &&
+      snap0.unknownOutcome &&
+      snap0.draftVersion === this.draft.version &&
+      snap0.text === this.textarea.value &&
+      snap0.blob === this.draft.screenshotBlob;
+    if (this.quota !== null && this.quota.remaining <= 0 && !retryingUnknown) {
+      this.phase = 'quota';
+      this.lastErrorSummary = '今日提交次数已用完，请在额度刷新后重试。文字与截图已保留。';
+      this.renderStatus('');
+      this.syncUi();
+      return;
+    }
+
     // ---- 冻结快照：请求标识 / 应用与来源 / 原话 / 截图字节 / 元数据 / 草稿版本 ----
     // 草稿未变 → 复用现有快照（重试走同 key 同字节）；
     // 草稿已变且原请求结果未知 → 先保留原请求供核对，再冻结新快照。
@@ -1301,10 +1472,12 @@ export class FeedbackWidget extends HTMLElement {
 
     this.phase = 'submitting';
     this.lastErrorSummary = null;
-    this.loginFallbackUrl = null;
     this.renderStatus('提交中…');
     this.syncUi();
 
+    // 请求发出时捕获实际使用的令牌（T1-A）：401 是否清理凭据以它为准，
+    // 而不是响应到达时刻的"当前"令牌。
+    const usedToken = this.accessToken as string;
     try {
       // HTTP 只读快照：提交期间的草稿变化不影响本次请求字节
       const res = await submitFeedback(frozen.apiBase, this.accessToken as string, {
@@ -1319,6 +1492,10 @@ export class FeedbackWidget extends HTMLElement {
       // 201/200 后才清空输入与截图，快照随之消费
       // 身份已切换 → 结果为旧服务所有：不写任务态、不清草稿、不派发事件、不轮询
       if (epoch !== this.identityEpoch) return;
+      // 提交已扣次：使此前的额度查询失效，旧查询不得把剩余次数加回。
+      this.invalidateQuotaRefresh();
+      if (res.quota) this.quota = res.quota;
+      if (res.user) this.authUser = res.user;
       this.lastFeedbackId = res.feedbackId;
       this.submitSnapshot = null;
       this.idempotencyKey = null;
@@ -1345,20 +1522,44 @@ export class FeedbackWidget extends HTMLElement {
       );
       this.syncUi();
       this.startPolling(res.feedbackId);
+      this.consumeQuotaRefreshIntent(); // 提交忙碌结束：补发被挡下的刷新
     } catch (err) {
       // 身份已切换 → 旧服务的失败同样不得改写新身份的状态（含 401 清令牌）
       if (epoch !== this.identityEpoch) return;
       if (err instanceof ApiError && err.status === 401) {
+        if (usedToken !== this.accessToken) {
+          // T1-A：期间已用新令牌重新登录——旧请求的 401 只退出提交忙碌态，
+          // 不得清除新令牌、不得把新登录界面切到需要登录。草稿与快照保留。
+          this.phase = 'idle';
+          this.renderStatus('登录已更新，请重新提交');
+          this.syncUi();
+          return;
+        }
         // 令牌过期/无效：保留草稿与快照（登录后重发仍同 key 同字节），提示登录
         this.accessToken = null;
         this.tokenExpiresAt = 0;
         this.authRequired = true;
         this.phase = 'idle';
+        this.invalidateQuotaRefresh();
+        this.quotaRefreshPending = false; // 会话已失效：清除旧身份的补发意图
         this.renderStatus('需要登录（登录已过期）');
         this.syncUi();
         return;
       }
       this.phase = 'failed';
+      if (err instanceof ApiError && err.code === 'daily_quota_exceeded') {
+        // 明确「未接收」：不使用 429 的「结果未知」语义，草稿保留待额度刷新后重试。
+        frozen.unknownOutcome = false;
+        // 额度错误带回权威额度：使此前的额度查询失效，避免旧查询覆盖。
+        this.invalidateQuotaRefresh();
+        if (err.quota) this.quota = err.quota;
+        this.phase = 'quota';
+        this.lastErrorSummary = '今日提交次数已用完，请在额度刷新后重试。文字与截图已保留。';
+        this.renderStatus('');
+        this.syncUi();
+        this.consumeQuotaRefreshIntent();
+        return;
+      }
       if (err instanceof ApiError && err.code === 'idempotency_conflict') {
         // 409：显示冲突，不自动更换 key（快照与 key 保留；用户编辑后自然形成新请求）
         frozen.unknownOutcome = false;
@@ -1407,11 +1608,19 @@ export class FeedbackWidget extends HTMLElement {
     }
 
     let record: FeedbackRecord;
+    // 请求发出时捕获实际使用的令牌（T1-A）：401 是否清理凭据以它为准。
+    const usedToken = this.accessToken as string;
     try {
-      record = await getFeedback(apiBase, this.accessToken as string, id);
+      record = await getFeedback(apiBase, usedToken, id);
     } catch (err) {
       if (epoch !== this.identityEpoch) return; // 身份已切换：旧服务的错误一律丢弃
       if (err instanceof ApiError && err.status === 401) {
+        if (usedToken !== this.accessToken) {
+          // T1-A：期间已换新令牌——不清凭据、不改登录界面，按退避续排
+          // 下一次轮询（下个 tick 自然使用新令牌）。
+          this.schedulePoll(id);
+          return;
+        }
         this.polling = false;
         this.accessToken = null;
         this.authRequired = true;
@@ -1530,12 +1739,14 @@ export class FeedbackWidget extends HTMLElement {
     }
 
     const epoch = this.identityEpoch;
+    // 请求发出时捕获实际使用的令牌（T1-A）：401 是否清理凭据以它为准。
+    const usedToken = this.accessToken as string;
     this.refreshing = true;
     this.renderStatus('正在刷新状态…');
     this.syncUi();
 
     try {
-      const record = await getFeedback(apiBase, this.accessToken as string, id);
+      const record = await getFeedback(apiBase, usedToken, id);
       if (epoch !== this.identityEpoch) return; // 身份已切换：旧服务的记录一律丢弃
 
       if (isTerminalStatus(record.status)) {
@@ -1553,6 +1764,10 @@ export class FeedbackWidget extends HTMLElement {
     } catch (err) {
       if (epoch !== this.identityEpoch) return;
       if (err instanceof ApiError && err.status === 401) {
+        if (usedToken !== this.accessToken) {
+          // T1-A：期间已换新令牌——不清凭据、不改登录界面，仅退出忙碌态。
+          return;
+        }
         this.accessToken = null;
         this.tokenExpiresAt = 0;
         this.authRequired = true;
@@ -1595,10 +1810,11 @@ export class FeedbackWidget extends HTMLElement {
     }
   }
 
-  // ---------- 登录握手 ----------
+  // ---------- 面板内登录 ----------
 
   private pendingSubmit = false;
 
+  /** 展开面板内账号密码表单（不打开新窗口）；pendingSubmit=true 时登录成功后只提交一次。 */
   private beginLogin(pendingSubmit: boolean): void {
     const apiBase = this.apiBase;
     const appId = this.appId;
@@ -1608,60 +1824,238 @@ export class FeedbackWidget extends HTMLElement {
     }
     this.authRequired = true;
     this.pendingSubmit = pendingSubmit;
-    if (this.handshake) {
-      // 若已有握手在进行，更新 pendingSubmit 标记即可，不丢失当前 nonce
-      return;
-    }
-    this.loginFallbackUrl = null;
-    // 握手绑定发起时的服务身份：身份切换后的令牌回调一律 no-op
-    const epoch = this.identityEpoch;
-    const handshake = new LoginHandshake({
-      apiBase,
-      appId,
-      hostOrigin: location.origin,
-      onToken: (msg: AuthMessage) => {
-        if (epoch !== this.identityEpoch) {
-          // 旧身份的令牌绝不写入新身份，并丢弃这次失效的握手
-          if (this.handshake === handshake) {
-            handshake.cancel();
-            this.handshake = null;
-          }
-          return;
-        }
-        this.accessToken = msg.accessToken;
-        const exp = Date.parse(msg.expiresAt);
-        this.tokenExpiresAt = Number.isFinite(exp) ? exp : Date.now() + 15 * 60_000;
-        this.authRequired = false;
-        this.loginFallbackUrl = null;
-        this.handshake = null;
-        this.renderStatus('已登录。');
-        this.syncUi();
-        if (this.pendingSubmit && codePointLength(this.textarea.value) > 0) {
-          this.pendingSubmit = false;
-          void this.submit();
-        } else if (this.phase === 'tracking') {
-          void this.resumePolling();
-        }
-      },
-      onPopupBlocked: (loginUrl: string) => {
-        if (epoch !== this.identityEpoch) return; // 同上：旧身份的登录页链接不再展示
-        this.loginFallbackUrl = loginUrl;
-        this.syncUi();
-      },
-    });
-    this.handshake = handshake;
-    const ticket = handshake.start();
-    this.lastLoginUrl = ticket.loginUrl;
-    this.handshake.openPopup(ticket);
-    this.renderStatus('请在打开的登录窗口完成登录…（需要登录）');
+    this.loginVisible = true;
+    this.loginError = '';
+    this.syncUi();
+    this.loginUsername.focus();
+    this.renderStatus('需要登录：请输入账号密码');
+  }
+
+  /** 取消登录：收起表单并让在途登录失效，草稿与截图保留。 */
+  private cancelLogin(): void {
+    this.invalidateLogin();
+    this.loginVisible = false;
+    this.renderStatus(this.phase === 'tracking' ? '已保存，正在整理' : '');
     this.syncUi();
   }
 
+  /**
+   * 使尚未完成的登录接续失效：递增登录序号，清除密码、登录忙碌状态与
+   * 待自动提交标记。**不撤销**已经建立的有效登录态，也不动草稿与截图。
+   * 调用点：关闭面板、取消登录、组件卸载、服务身份变化。
+   */
+  private invalidateLogin(): void {
+    this.loginSeq++;
+    this.loginBusy = false;
+    this.pendingSubmit = false;
+    this.loginPassword.value = '';
+  }
+
+  /**
+   * 登录回调是否仍然有效：序号未变（面板自登录发起以来没有被关闭、
+   * 也没有被取消 / 卸载 / 换身份）+ 服务身份世代未变 + 组件仍连接。
+   */
+  private loginStillValid(seq: number, epoch: number): boolean {
+    return seq === this.loginSeq && epoch === this.identityEpoch && this.isConnected;
+  }
+
+  private async doLogin(): Promise<void> {
+    if (this.loginBusy) return;
+    const apiBase = this.apiBase;
+    const appId = this.appId;
+    if (!apiBase || !appId) {
+      this.failPhase('缺少必填配置：api-base / app-id');
+      return;
+    }
+    const username = this.loginUsername.value.trim();
+    const password = this.loginPassword.value;
+    if (!username || !password) {
+      this.loginError = '请输入用户名和密码';
+      this.syncUi();
+      return;
+    }
+    // 登录回调绑定发起时的登录序号与服务身份：任一变则结果一律 no-op。
+    const epoch = this.identityEpoch;
+    const seq = ++this.loginSeq;
+    this.loginBusy = true;
+    this.loginError = '';
+    this.syncUi();
+    try {
+      const res = await login(apiBase, { username, password, clientLabel: webClientLabel(appId), appId });
+      if (!this.loginStillValid(seq, epoch)) return;
+      this.accessToken = res.token;
+      const exp = Date.parse(res.expiresAt);
+      this.tokenExpiresAt = Number.isFinite(exp) ? exp : Date.now() + 15 * 60_000;
+      this.authUser = res.user;
+      this.quota = res.quota;
+      this.authRequired = false;
+      this.loginVisible = false;
+      this.loginBusy = false;
+      this.loginError = '';
+      this.quotaRefreshFailed = false;
+      this.loginPassword.value = ''; // 密码不持久化
+      this.renderStatus('已登录。');
+      this.syncUi();
+      this.consumeQuotaRefreshIntent(); // 登录忙碌结束：补发被挡下的刷新
+      const queued = this.pendingSubmit;
+      this.pendingSubmit = false;
+      if (queued && codePointLength(this.textarea.value) > 0) {
+        void this.submit(); // 成功后只提交一次
+      } else if (this.phase === 'tracking') {
+        void this.resumePolling();
+      }
+    } catch (err) {
+      // 失败回调同样校验：旧登录的错误不得覆盖新登录状态或界面。
+      if (!this.loginStillValid(seq, epoch)) return;
+      this.loginBusy = false;
+      this.loginPassword.value = ''; // 登录结束清空密码
+      this.loginError = loginErrorMessage(err);
+      this.renderStatus('');
+      this.syncUi();
+    }
+  }
+
+  // ---------- 额度刷新与生命周期 ----------
+
+  private cancelQuotaTimer(): void {
+    if (this.quotaTimer !== null) {
+      clearTimeout(this.quotaTimer);
+      this.quotaTimer = null;
+    }
+  }
+
+  /**
+   * 使在途额度查询失效并取消定时查询：关闭 / 卸载 / 退到后台 / 身份变化 /
+   * 提交成功 / 收到额度错误时调用。旧查询结果不得再写回额度。
+   */
+  private invalidateQuotaRefresh(): void {
+    this.quotaSeq++;
+    this.cancelQuotaTimer();
+  }
+
+  /**
+   * 统一调度额度查询（同一时刻最多一个定时器）：
+   * - 未登录 / 面板未打开 / 应用不在前台 → 不排程；
+   * - 刷新失败 → 30 秒后重试（不对过期 resetAt 立即循环请求）；
+   * - 额度用尽 → 每 30 秒一次，并与 resetAt 合并取更早者
+   *   （后台调高额度后最多 30 秒即可恢复，无需关闭重开面板）；
+   * - 其它状态 → 只在服务端 resetAt 排单次查询，到期只向服务端取最新值。
+   */
+  private scheduleQuotaRefresh(): void {
+    this.cancelQuotaTimer();
+    if (!this.tokenValid() || !this.openState) return;
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+    if (this.quotaInFlight) return; // 在途查询完成后会重新调度
+    if (this.quotaRefreshFailed) {
+      this.quotaTimer = setTimeout(() => void this.refreshQuota(), QUOTA_RETRY_MS);
+      return;
+    }
+    const q = this.quota;
+    if (!q || typeof q.remaining !== 'number' || typeof q.resetAt !== 'string') return;
+    const reset = Date.parse(q.resetAt);
+    const untilReset = Number.isFinite(reset) ? reset - Date.now() : Number.NaN;
+    let delay: number | null;
+    if (q.remaining <= 0) {
+      delay = untilReset > 0 && untilReset < QUOTA_RETRY_MS ? untilReset : QUOTA_RETRY_MS;
+    } else if (untilReset > 0) {
+      delay = untilReset;
+    } else {
+      delay = null; // 非用尽且 resetAt 已过：等下一次打开 / 回到前台刷新
+    }
+    if (delay === null || delay <= 0) return;
+    // 夹到安全上限：超长延时在宿主里会退化为立即触发（紧密循环）。
+    delay = Math.min(delay, QUOTA_MAX_DELAY_MS);
+    this.quotaTimer = setTimeout(() => void this.refreshQuota(), delay);
+  }
+
+  /**
+   * 刷新额度与会话信息：打开面板、应用恢复前台、提交完成、额度用尽轮询时调用。
+   * 不在本地擅自重置——跨过 resetAt 后由服务端返回新的 used / remaining。
+   * 结果除校验身份与令牌外还校验查询序号：提交成功后的旧查询不得把次数加回。
+   * 被旧查询 / 登录忙碌挡下时登记「待立即刷新」，结束后立即补发（T1-B）。
+   */
+  private async refreshQuota(): Promise<void> {
+    const apiBase = this.apiBase;
+    if (!apiBase || !this.tokenValid() || this.loginBusy || this.quotaInFlight) {
+      // T1-B：打开面板 / 回到前台的刷新被旧查询或登录忙碌挡下时登记意图，
+      // 不得丢弃；未登录 / 面板未打开 / 不在可见页时不登记（相应事件会重新登记）。
+      if (
+        apiBase &&
+        this.tokenValid() &&
+        this.openState &&
+        (this.loginBusy || this.quotaInFlight) &&
+        (typeof document === 'undefined' || document.visibilityState === 'visible')
+      ) {
+        this.quotaRefreshPending = true;
+      }
+      return;
+    }
+    const epoch = this.identityEpoch;
+    const token = this.accessToken as string;
+    const seq = ++this.quotaSeq;
+    this.quotaInFlight = true;
+    try {
+      const res = await getSession(apiBase, token);
+      if (!this.quotaResultValid(seq, epoch, token)) return;
+      this.authUser = res.user;
+      this.quota = res.quota;
+      this.quotaRefreshFailed = false;
+      this.syncUi();
+    } catch (err) {
+      if (!this.quotaResultValid(seq, epoch, token)) return;
+      if (err instanceof ApiError && err.status === 401) {
+        // 令牌过期/被撤销：保留草稿，回到需要登录态并停止额度定时查询；
+        // 补发意图一并清除，避免对已失效会话的补发循环（重新登录后重新调度）。
+        this.accessToken = null;
+        this.tokenExpiresAt = 0;
+        this.authRequired = true;
+        this.authUser = null;
+        this.quota = null;
+        this.quotaRefreshFailed = false;
+        this.quotaRefreshPending = false;
+        this.invalidateQuotaRefresh();
+        this.renderStatus('登录已过期，请重新登录。');
+        this.syncUi();
+        return;
+      }
+      // 其它错误（网络 / 超时等）：保留旧额度 / 草稿，30 秒后重试。
+      this.quotaRefreshFailed = true;
+    } finally {
+      this.quotaInFlight = false;
+      this.consumeQuotaRefreshIntent();
+    }
+  }
+
+  /**
+   * 消费「待立即刷新」意图（T1-B）：优先于定时规则——旧查询结束 / 忙碌结束
+   * 后条件仍满足时立即补发一次并清除标记；否则按现有 30 秒 / resetAt 规则
+   * 排定时器（不会紧密循环，也不会因一次跳过而永久停摆）。
+   */
+  private consumeQuotaRefreshIntent(): void {
+    if (
+      this.quotaRefreshPending &&
+      this.tokenValid() &&
+      this.openState &&
+      !this.loginBusy &&
+      !this.quotaInFlight &&
+      (typeof document === 'undefined' || document.visibilityState === 'visible')
+    ) {
+      this.quotaRefreshPending = false;
+      void this.refreshQuota();
+      return;
+    }
+    this.scheduleQuotaRefresh();
+  }
+
+  /** 额度查询结果是否仍然有效：序号 + 身份世代 + 令牌三者都要匹配。 */
+  private quotaResultValid(seq: number, epoch: number, token: string): boolean {
+    return seq === this.quotaSeq && epoch === this.identityEpoch && token === this.accessToken;
+  }
+
+  /** 公开 API：展开面板内登录表单（保留旧签名的返回值）。 */
   startLogin(): string {
-    this.handshake?.cancel();
-    this.handshake = null;
     this.beginLogin(false);
-    return this.lastLoginUrl ?? '';
+    return '';
   }
 
   private resetToCompose(): void {
@@ -1694,6 +2088,48 @@ export class FeedbackWidget extends HTMLElement {
     const isAuthed = this.tokenValid();
     const busy = this.phase === 'submitting' || this.polling;
 
+    // 额度用尽：禁止新提交，但结果未知的同键重试仍放行。
+    const snap = this.submitSnapshot;
+    const retryingUnknown =
+      snap !== null &&
+      snap.unknownOutcome &&
+      snap.draftVersion === this.draft.version &&
+      snap.text === this.textarea.value &&
+      snap.blob === this.draft.screenshotBlob;
+    const quotaBlocked = isAuthed && this.quota !== null && this.quota.remaining <= 0 && !retryingUnknown;
+
+    // 额度显示：仅在已登录且已取得额度时出现。
+    if (isAuthed && this.quota) {
+      this.quotaInfo.hidden = false;
+      this.quotaInfo.textContent = `今日剩余 ${this.quota.remaining} 次`;
+    } else {
+      this.quotaInfo.hidden = true;
+      this.quotaInfo.textContent = '';
+    }
+    // 额度用尽提示（含下次可提交时间）；同键未知结果重试时不再提示。
+    if (quotaBlocked && this.quota) {
+      const reset = new Date(this.quota.resetAt);
+      this.quotaBlockedInfo.hidden = false;
+      this.quotaBlockedInfo.textContent = Number.isFinite(reset.getTime())
+        ? `今日提交次数已用完，下次可提交时间：${reset.toLocaleString()}`
+        : '今日提交次数已用完，请在额度刷新后重试';
+    } else {
+      this.quotaBlockedInfo.hidden = true;
+      this.quotaBlockedInfo.textContent = '';
+    }
+
+    // 面板内登录表单：展开 / 收起与忙碌态。
+    // 「取消」在登录进行中保持可用：用户必须能中止一次挂起的登录，
+    // 中止会递增登录序号使该次登录的迟到结果失效（T1-A）。
+    this.loginPanel.hidden = !this.loginVisible;
+    this.loginUsername.disabled = this.loginBusy;
+    this.loginPassword.disabled = this.loginBusy;
+    this.loginConfirmBtn.disabled = this.loginBusy;
+    this.loginCancelBtn.disabled = false;
+    this.loginConfirmBtn.textContent = this.loginBusy ? '登录中…' : '登录并提交';
+    this.loginErrorEl.hidden = this.loginError === '';
+    this.loginErrorEl.textContent = this.loginError;
+
     // 截图区同步：预览 / 首个截图入口 / 重拍 / 移除
     this.syncShotUi();
 
@@ -1720,11 +2156,11 @@ export class FeedbackWidget extends HTMLElement {
       // 提交未成功（未保存到服务端），允许重试提交
       this.submitBtn.className = 'fb-submit';
       this.submitBtn.textContent = '重试提交';
-      this.submitBtn.disabled = busy || len === 0 || len > MAX_TEXT;
+      this.submitBtn.disabled = busy || len === 0 || len > MAX_TEXT || quotaBlocked;
     } else {
       this.submitBtn.className = 'fb-submit';
       this.submitBtn.textContent = '提交';
-      this.submitBtn.disabled = busy || len === 0 || len > MAX_TEXT || this.phase === 'tracking';
+      this.submitBtn.disabled = busy || len === 0 || len > MAX_TEXT || this.phase === 'tracking' || quotaBlocked;
     }
 
     // 状态卡片构建
@@ -1805,7 +2241,21 @@ export class FeedbackWidget extends HTMLElement {
       this.errorRegion.append(card);
     }
 
-    // 4. 状态：提交未成功（网络异常 / 5xx，尚未保存）
+    // 4. 状态：每日额度用尽（明确未接收，不提供「结果未知」重试）
+    else if (this.phase === 'quota') {
+      this.errorRegion.hidden = false;
+      const card = el('div', 'fb-status-card is-warn');
+      card.append(el('p', undefined, '今日提交次数已用完。文字与截图已保留，额度刷新后可直接再提交。'));
+      if (this.quota) {
+        const reset = new Date(this.quota.resetAt);
+        if (Number.isFinite(reset.getTime())) {
+          card.append(el('p', 'fb-header-meta', `下次可提交时间：${reset.toLocaleString()}`));
+        }
+      }
+      this.errorRegion.append(card);
+    }
+
+    // 5. 状态：提交未成功（网络异常 / 5xx，尚未保存）
     else if (this.phase === 'failed' && !this.lastRecord) {
       this.errorRegion.hidden = false;
       const card = el('div', 'fb-status-card is-error');
@@ -1838,19 +2288,6 @@ export class FeedbackWidget extends HTMLElement {
       this.errorRegion.hidden = false;
       const card = el('div', 'fb-status-card is-warn');
       card.append(el('p', undefined, '已保存，正在整理。您可以关闭面板，我们将继续在后台处理。'));
-      this.errorRegion.append(card);
-    }
-
-    // 6. 弹窗被拦截降级链接
-    if (this.loginFallbackUrl) {
-      this.errorRegion.hidden = false;
-      const card = el('div', 'fb-status-card is-warn');
-      card.append(el('p', undefined, '登录弹窗可能被浏览器拦截，请点击下方链接完成登录：'));
-      const a = el('a', 'fb-task-link fb-login-link', '打开登录窗口');
-      a.href = this.loginFallbackUrl;
-      a.target = '_blank';
-      a.rel = 'noopener';
-      card.append(a);
       this.errorRegion.append(card);
     }
   }

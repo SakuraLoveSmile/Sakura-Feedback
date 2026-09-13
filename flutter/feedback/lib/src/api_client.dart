@@ -5,6 +5,7 @@ import 'dart:ui' show Offset;
 import 'package:http/http.dart' as http;
 
 import 'config.dart';
+import 'token_coordination.dart';
 import 'token_store.dart';
 
 /// 服务返回的 API 错误（契约统一错误体 `{error:{code,message}}`）。
@@ -14,6 +15,7 @@ class ApiException implements Exception {
     required this.statusCode,
     this.code,
     this.message,
+    this.quota,
   });
 
   /// HTTP 状态码。
@@ -25,9 +27,79 @@ class ApiException implements Exception {
   /// 可安全展示的人类可读消息。
   final String? message;
 
+  /// 错误体携带的额度（`daily_quota_exceeded` 429 会返回同结构额度）。
+  final Quota? quota;
+
   @override
   String toString() =>
       'ApiException($statusCode, code: $code, message: $message)';
+}
+
+/// 已登录账号的最小信息（服务端不返回密码或哈希）。
+class AuthUser {
+  /// 构造账号信息。
+  const AuthUser({required this.id, required this.username, required this.role});
+
+  /// 账号 id。
+  final String id;
+
+  /// 用户名。
+  final String username;
+
+  /// 角色（admin / user）。
+  final String role;
+
+  /// 从 JSON 宽松解析；缺失时返回 null。
+  static AuthUser? fromJson(Object? raw) {
+    if (raw is! Map) return null;
+    final Object? id = raw['id'];
+    final Object? username = raw['username'];
+    if (id is! String || username is! String) return null;
+    return AuthUser(
+      id: id,
+      username: username,
+      role: raw['role']?.toString() ?? 'user',
+    );
+  }
+}
+
+/// 每日提交额度（服务端按北京时间日切分）。
+class Quota {
+  /// 构造额度。
+  const Quota({
+    required this.dailyLimit,
+    required this.used,
+    required this.remaining,
+    this.resetAt,
+  });
+
+  /// 每日上限。
+  final int dailyLimit;
+
+  /// 当日已用。
+  final int used;
+
+  /// 剩余次数（不为负）。
+  final int remaining;
+
+  /// 下次刷新时间（服务端生成）。
+  final DateTime? resetAt;
+
+  /// 从 JSON 宽松解析；缺失时返回 null。
+  static Quota? fromJson(Object? raw) {
+    if (raw is! Map) return null;
+    final Object? limit = raw['dailyLimit'];
+    final Object? used = raw['used'];
+    final Object? remaining = raw['remaining'];
+    if (limit is! num || used is! num || remaining is! num) return null;
+    final Object? reset = raw['resetAt'];
+    return Quota(
+      dailyLimit: limit.toInt(),
+      used: used.toInt(),
+      remaining: remaining.toInt(),
+      resetAt: reset is String ? DateTime.tryParse(reset) : null,
+    );
+  }
 }
 
 /// 截图捕获元数据。
@@ -86,6 +158,8 @@ class FeedbackSubmitResult {
     required this.feedbackId,
     required this.status,
     this.replayed = false,
+    this.quota,
+    this.user,
   });
 
   /// 反馈记录 id。
@@ -97,12 +171,20 @@ class FeedbackSubmitResult {
   /// 是否为幂等重放（同 key 同内容，`200 replayed:true`）。
   final bool replayed;
 
+  /// 提交后的最新额度（若服务端返回）。
+  final Quota? quota;
+
+  /// 提交账号（若服务端返回）。
+  final AuthUser? user;
+
   /// 从 JSON 解析（宽松）。
   factory FeedbackSubmitResult.fromJson(Map<String, Object?> json) =>
       FeedbackSubmitResult(
         feedbackId: json['feedbackId'] as String? ?? '',
         status: json['status'] as String? ?? 'received',
         replayed: json['replayed'] == true,
+        quota: Quota.fromJson(json['quota']),
+        user: AuthUser.fromJson(json['user']),
       );
 }
 
@@ -137,16 +219,40 @@ class FeedbackRecord {
       );
 }
 
-/// `POST /api/auth/login`（携带 clientLabel）的解析结果。
+/// `POST /api/auth/login`（携带 clientLabel + appId）的解析结果。
 class LoginResult {
   /// 构造结果。
-  const LoginResult({required this.token, this.expiresAt});
+  const LoginResult({required this.token, this.expiresAt, this.user, this.quota});
 
-  /// 长期可撤销 Bearer 令牌（仅此一次明文返回）。
+  /// 可撤销 Bearer 令牌（仅此一次明文返回）。
   final String token;
 
   /// 过期时间（若有）。
   final DateTime? expiresAt;
+
+  /// 登录账号（若服务端返回）。
+  final AuthUser? user;
+
+  /// 登录后的额度（若服务端返回）。
+  final Quota? quota;
+}
+
+/// `GET /api/auth/session` 的解析结果（用于刷新额度）。
+class SessionInfo {
+  /// 构造结果。
+  const SessionInfo({this.user, this.quota});
+
+  /// 当前账号。
+  final AuthUser? user;
+
+  /// 当前额度。
+  final Quota? quota;
+
+  /// 从 JSON 宽松解析。
+  factory SessionInfo.fromJson(Map<String, Object?> json) => SessionInfo(
+        user: AuthUser.fromJson(json['user']),
+        quota: Quota.fromJson(json['quota']),
+      );
 }
 
 /// 401 回调：调用方应清除令牌并回到登录视图。
@@ -154,8 +260,11 @@ typedef FeedbackUnauthorizedCallback = void Function();
 
 /// Feedback 服务 HTTP 客户端。
 ///
-/// [httpClient] 可注入以便测试；[tokenStore] 提供 Bearer 令牌来源；
-/// 认证接口收到 401 时清除令牌并触发 [onUnauthorized]。
+/// [httpClient] 可注入以便测试；[tokenStore] 提供 Bearer 令牌来源。
+/// 认证接口收到 401 时按「请求发出时捕获的令牌与认证世代」做条件清除
+/// （T1-A）：仅当该请求仍属于当前认证世代才清除令牌并触发
+/// [onUnauthorized]；期间已发生新登录的过期请求只向原调用者抛错，
+/// 绝不退出当前登录。
 ///
 /// 注意：本类绝不明文输出密码或令牌（不写日志）。
 class ApiClient {
@@ -165,7 +274,8 @@ class ApiClient {
     required this.tokenStore,
     http.Client? httpClient,
     this.onUnauthorized,
-  })  : _client = httpClient ?? http.Client(),
+  })  : _tokens = CoordinatedTokenStore.of(tokenStore),
+        _client = httpClient ?? http.Client(),
         _ownsClient = httpClient == null;
 
   /// 连接与上报配置。
@@ -176,6 +286,9 @@ class ApiClient {
 
   /// 401 处理回调（认证类接口之外）。
   FeedbackUnauthorizedCallback? onUnauthorized;
+
+  /// 令牌协调器：与面板的登录写入共享同一操作队列与认证世代。
+  final CoordinatedTokenStore _tokens;
 
   final http.Client _client;
   final bool _ownsClient;
@@ -189,18 +302,22 @@ class ApiClient {
     if (_ownsClient) _client.close();
   }
 
-  Future<Map<String, String>> _headers({bool withAuth = true}) async {
-    final Map<String, String> headers = {
+  Map<String, String> _headers({bool withAuth = true, String? token}) {
+    final Map<String, String> headers = <String, String>{
       'content-type': 'application/json',
       'accept': 'application/json',
     };
-    if (withAuth) {
-      final String? token = await tokenStore.read();
-      if (token != null && token.isNotEmpty) {
-        headers['authorization'] = 'Bearer $token';
-      }
+    if (withAuth && token != null && token.isNotEmpty) {
+      headers['authorization'] = 'Bearer $token';
     }
     return headers;
+  }
+
+  /// 统一 401 入口（T1-A）：仅当请求仍属于当前认证世代且令牌未被更换时
+  /// 清除对应令牌并通知界面；过期请求不进入此路径，继续向原调用者抛错。
+  Future<void> _handleUnauthorized(TokenLease lease) async {
+    if (!await _tokens.clearIfCurrent(lease)) return;
+    onUnauthorized?.call();
   }
 
   static Map<String, Object?> _decode(http.Response response) {
@@ -230,24 +347,27 @@ class ApiClient {
       statusCode: response.statusCode,
       code: code,
       message: message,
+      quota: Quota.fromJson(body['quota']),
     );
   }
 
-  /// 登录（原生端）：`POST /api/auth/login`，携带 [clientLabel]
-  /// 换取长期可撤销令牌。401 表示凭据错误，不触发 [onUnauthorized]。
+  /// 登录：`POST /api/auth/login`，显式携带 [clientLabel] 与 [appId]。
+  /// Web / 原生共用同一表单路径；401 表示凭据错误，不触发 [onUnauthorized]。
   Future<LoginResult> login({
     required String username,
     required String password,
     required String clientLabel,
+    required String appId,
   }) async {
     final http.Response response = await _client
         .post(
           _uri('/api/auth/login'),
-          headers: await _headers(withAuth: false),
+          headers: _headers(withAuth: false),
           body: jsonEncode(<String, Object?>{
             'username': username,
             'password': password,
             'clientLabel': clientLabel,
+            'appId': appId,
           }),
         )
         .timeout(_requestTimeout);
@@ -266,7 +386,28 @@ class ApiClient {
     return LoginResult(
       token: token,
       expiresAt: rawExpiry is String ? DateTime.tryParse(rawExpiry) : null,
+      user: AuthUser.fromJson(body['user']),
+      quota: Quota.fromJson(body['quota']),
     );
+  }
+
+  /// 查询会话（用于刷新额度 / 校验令牌）：`GET /api/auth/session`。
+  /// 401 按认证世代条件清除令牌并触发 [onUnauthorized]。
+  Future<SessionInfo> fetchSession() async {
+    final TokenLease lease = await _tokens.lease(); // 请求发出前捕获令牌与世代
+    final http.Response response = await _client
+        .get(
+          _uri('/api/auth/session'),
+          headers: _headers(token: lease.token),
+        )
+        .timeout(_requestTimeout);
+    if (response.statusCode == 200) {
+      return SessionInfo.fromJson(_decode(response));
+    }
+    if (response.statusCode == 401) {
+      await _handleUnauthorized(lease);
+    }
+    _throwApiError(response);
   }
 
   /// 提交反馈：`POST /api/feedback`。
@@ -286,11 +427,12 @@ class ApiClient {
     if (pageLabel != null) context['pageLabel'] = pageLabel;
 
     final http.Response response;
+    final TokenLease lease = await _tokens.lease(); // 请求发出前捕获令牌与世代
     try {
       if (screenshotBytes != null) {
         final http.MultipartRequest req =
             http.MultipartRequest('POST', _uri('/api/feedback'));
-        final String? token = await tokenStore.read();
+        final String? token = lease.token;
         if (token != null && token.isNotEmpty) {
           req.headers['authorization'] = 'Bearer $token';
         }
@@ -318,7 +460,7 @@ class ApiClient {
         response = await _client
             .post(
               _uri('/api/feedback'),
-              headers: await _headers(),
+              headers: _headers(token: lease.token),
               body: jsonEncode(<String, Object?>{
                 'idempotencyKey': idempotencyKey,
                 'appId': config.appId,
@@ -345,8 +487,7 @@ class ApiClient {
       return FeedbackSubmitResult.fromJson(body);
     }
     if (response.statusCode == 401) {
-      await tokenStore.clear();
-      onUnauthorized?.call();
+      await _handleUnauthorized(lease);
       _throwApiError(response);
     }
     _throwApiError(response);
@@ -354,18 +495,18 @@ class ApiClient {
 
   /// 查询反馈状态：`GET /api/feedback/:id`。
   Future<FeedbackRecord> fetchFeedback(String feedbackId) async {
+    final TokenLease lease = await _tokens.lease(); // 请求发出前捕获令牌与世代
     final http.Response response = await _client
         .get(
           _uri('/api/feedback/${Uri.encodeComponent(feedbackId)}'),
-          headers: await _headers(),
+          headers: _headers(token: lease.token),
         )
         .timeout(_requestTimeout);
     if (response.statusCode == 200) {
       return FeedbackRecord.fromJson(_decode(response));
     }
     if (response.statusCode == 401) {
-      await tokenStore.clear();
-      onUnauthorized?.call();
+      await _handleUnauthorized(lease);
     }
     _throwApiError(response);
   }

@@ -13,13 +13,16 @@ P2 遮罩：宿主页同时有 [data-feedback-capture-mask] 与 input[type=passw
 P3 遮挡失败规则：可见敏感区无法遮挡时必须整次截图失败
   （旧草稿/旧截图保留、用户被告知截图未完成、绝不静默产出未遮挡图片）。
 
-P4 登录握手：真实弹窗到 <apiBase>/login → postMessage 回宿主（严格 origin+type+nonce），
-  负例（异源 / nonce 不匹配）必须被忽略；切换 api-base 后旧服务令牌绝不发给新服务。
+P4 面板内登录：点击主按钮在当前面板展开账号密码表单（不打开窗口），凭据错误/取消保留草稿，
+  登录后自动提交；切换 api-base 后旧服务令牌绝不发给新服务。
+
+P5 登录期间关闭 / 重新打开：登录请求挂起时关闭面板，迟到的登录成功不得写令牌 / 自动提交；
+  重新打开保留草稿并可重新登录（只提交一次）；关闭后不查询额度、重新打开立即查询。
 
 所有断言都是真实浏览器/真实服务观测；没有对被测组件做任何 mock。
 注意：组件的「提交」按钮在未登录时会**直接打开**登录弹窗
-（packages/web/src/element.ts: beginLogin() → handshake.openPopup()），
-所以下面所有登录流程都是「点提交 → expect_page → 在弹窗里完成登录」。
+（packages/web/src/element.ts: beginLogin() → 面板内登录表单），
+所以下面所有登录流程都是「点提交 → 面板内展开表单 → 填账号密码完成登录」。
 """
 
 from __future__ import annotations
@@ -71,7 +74,7 @@ class NetRecorder:
 
     def __init__(self, ctx, capture_bodies=True):
         self._requests = []
-        self._handshakes = []
+        self._token_resps = []
         self._bodies = []
         ctx.on("request", lambda r: self._requests.append(r))
         ctx.on("response", self._on_response)
@@ -86,8 +89,8 @@ class NetRecorder:
         route.fallback()
 
     def _on_response(self, resp):
-        if "/api/auth/handshake" in resp.url:
-            self._handshakes.append(resp)
+        if "/api/auth/handshake" in resp.url or "/api/auth/login" in resp.url:
+            self._token_resps.append(resp)
 
     # -- 索引 --
     def mark(self) -> int:
@@ -162,13 +165,14 @@ class NetRecorder:
         return seen
 
     def tokens(self) -> list[str]:
+        """登录/握手响应里的令牌（登录返回 token，旧握手返回 accessToken）。"""
         out = []
-        for resp in self._handshakes:
+        for resp in self._token_resps:
             try:
                 data = resp.json()
             except Exception:
                 continue
-            tok = (data or {}).get("accessToken")
+            tok = (data or {}).get("accessToken") or (data or {}).get("token")
             if tok:
                 out.append(tok)
         return out
@@ -249,49 +253,68 @@ def client_png(page, deps) -> tuple[bytes, object]:
     return raw, png_probe.decode(raw)
 
 
-def login_in_popup(popup, deps, timeout=40) -> bool:
-    """在真实登录弹窗里完成登录；返回是否走了密码表单（无 Cookie 的干净 context 才会）。"""
-    popup.wait_for_load_state()
-    form = popup.locator("#login-form")
-    deadline = time.time() + timeout
-    visible = False
-    while time.time() < deadline:
-        try:
-            if form.is_visible():
-                visible = True
-                break
-            if popup.is_closed():
-                break
-        except Exception:
-            break
-        time.sleep(0.15)
-    if visible:
-        popup.locator("#username").fill(deps["admin_user"])
-        popup.locator("#password").fill(deps["admin_pass"])
-        popup.locator("#submit").click()
+def login_in_panel(page, deps, user=None, pw=None):
+    """在当前反馈面板内完成登录（不打开任何窗口）。
+
+    未登录时主按钮点击会展开账号密码表单；确认后组件调用
+    POST /api/auth/login（clientLabel + appId），Bearer 仅存内存。
+    """
+    if page.locator(".fb-login-panel").is_hidden():
+        page.locator(".fb-submit").click()
+        page.locator(".fb-login-panel").wait_for(state="visible", timeout=15000)
+    page.locator(".fb-login-username").fill(user or deps["panel_user"])
+    page.locator(".fb-login-password").fill(pw or deps["panel_pass"])
+    page.locator(".fb-login-confirm").click()
     try:
-        popup.wait_for_event("close", timeout=20000)
-    except Exception:
-        pass
-    return visible
+        page.wait_for_function(
+            "() => { const sr = document.querySelector('feedback-widget').shadowRoot;"
+            " const p = sr.querySelector('.fb-login-panel'); return !!p && p.hidden; }",
+            timeout=30000,
+        )
+    except Exception as exc:  # 附上界面上的真实原因，便于定位（限流 / 来源 / 网络）
+        raise AssertionError(f"面板内登录未完成：{panel_login_state(page)}（{exc}）") from exc
+
+
+def panel_login_state(page) -> str:
+    """登录失败时读取界面上的可诊断信息（错误提示 / 状态文案 / 按钮态）。"""
+    try:
+        state = page.evaluate(
+            """() => { const w = document.querySelector('feedback-widget');
+                const sr = w && w.shadowRoot; if (!sr) return {widget: false};
+                const err = sr.querySelector('.fb-login-error');
+                const status = sr.querySelector('.fb-status');
+                const panel = sr.querySelector('.fb-login-panel');
+                const confirm = sr.querySelector('.fb-login-confirm');
+                return {widget: true,
+                        errorVisible: !!(err && !err.hidden),
+                        errorText: err ? err.textContent : null,
+                        statusText: status ? status.textContent : null,
+                        loginPanelHidden: panel ? panel.hidden : null,
+                        confirmText: confirm ? confirm.textContent : null,
+                        confirmDisabled: confirm ? confirm.disabled : null}; }"""
+        )
+    except Exception as exc:  # pragma: no cover - 诊断本身不得掩盖原错误
+        return f"<无法读取面板状态：{exc}>"
+    return json.dumps(state, ensure_ascii=False)
 
 
 def submit_with_login(page, deps, timeout=90000, rec=None) -> dict:
     """
-    未登录 → 点「提交」会打开 <apiBase>/login 弹窗 → 弹窗内真实登录 → 组件自动提交。
-    返回 {fid, token, payload, posts, mark}：token 是本次握手真实签发的令牌。
+    未登录 → 点「提交」在当前面板展开登录表单 → 面板内真实登录 → 组件自动提交。
+    返回 {fid, token, payload, posts, mark}：token 是本次登录真实签发的令牌。
     """
-    ctx = page.context  # P4c 用的是独立 context，不能写死主 context
     rec = rec or deps["rec"]
     mark = rec.feedback_count()
     tokens_before = len(rec.tokens())
+    pages_before = len(page.context.pages)
     with page.expect_response(
         lambda r: r.url.endswith("/api/feedback") and r.request.method == "POST", timeout=timeout
     ) as info:
-        with ctx.expect_page() as pop_info:
-            page.locator(".fb-submit").click()
-        popup = pop_info.value
-        login_in_popup(popup, deps)
+        page.locator(".fb-submit").click()
+        page.locator(".fb-login-panel").wait_for(state="visible", timeout=15000)
+        deps["check"]("登录表单在当前面板内展开（不打开窗口）", len(page.context.pages) == pages_before,
+                      str(len(page.context.pages)))
+        login_in_panel(page, deps)
     payload = info.value.json() or {}
     tokens = rec.tokens()
     token = tokens[tokens_before] if len(tokens) > tokens_before else None
@@ -739,112 +762,52 @@ def _fresh_login_context(deps, label):
 def p4_login_handshake(deps):
     step, check = deps["step"], deps["check"]
 
-    # ---------- P4a：异源消息必须被忽略 ----------
-    step("P4a 登录握手：异源消息必须被忽略 → 真实登录仍然成功")
+    # ---------- P4a：面板内登录（不打开窗口）+ 错误 / 取消保留草稿 ----------
+    step("P4a 面板内登录：展开表单、错误与取消保留草稿、登录后自动提交")
     ctx, rec, page = _fresh_login_context(deps, "P4a")
     deps["rec"] = rec
-    page.locator(".fb-textarea").fill("异源伪造消息必须被忽略")
-    with ctx.expect_page() as pop_info:
-        page.locator(".fb-submit").click()
-    popup = pop_info.value
-    popup.wait_for_load_state()
-    check("P4a 未登录点提交 → 弹窗打到 <apiBase>/login", popup.url.startswith(deps["service"] + "/login?"), popup.url)
-    q = {k: urllib.parse.unquote(v) for k, v in re.findall(r"([^?&=]+)=([^&]*)", popup.url.split("?", 1)[1])}
-    png_probe.dump("P4a 登录页 URL 参数", q)
-    check("P4a 登录页 URL 带 appId/nonce/cb", {"appId", "nonce", "cb"} <= set(q), str(q))
-    check("P4a cb 是宿主 origin", q["cb"] == deps["pages"], q.get("cb"))
-    check("P4a 弹窗停在真实待登录状态", popup.locator("#login-form").is_visible())
-    nonce = q["nonce"]
+    page.locator(".fb-textarea").fill("面板内登录验证")
+    pages_before = len(ctx.pages)
+    check("P4a 未登录主按钮为「登录并提交」",
+          page.locator(".fb-submit").inner_text().strip() == "登录并提交",
+          page.locator(".fb-submit").inner_text())
+    page.locator(".fb-submit").click()
+    page.locator(".fb-login-panel").wait_for(state="visible", timeout=15000)
+    check("P4a 点击后在当前面板展开表单，未打开任何窗口", len(ctx.pages) == pages_before, str(len(ctx.pages)))
+    check("P4a 确认按钮文案为「登录并提交」",
+          page.locator(".fb-login-confirm").inner_text().strip() == "登录并提交",
+          page.locator(".fb-login-confirm").inner_text())
+    check("P4a 表单含用户名/密码且绑定当前面板",
+          page.locator(".fb-login-username").count() == 1 and page.locator(".fb-login-password").count() == 1)
 
-    attacker_url = f"{deps['attacker']}/attacker.html?nonce={nonce}&token={FORGED_TOKEN}"
-    page.evaluate("(u) => { document.getElementById('e2e-open-attacker').dataset.url = u; }", attacker_url)
-    mark = rec.mark()
-    with ctx.expect_page() as apop:
-        page.locator("#e2e-open-attacker").click()
-    apage = apop.value
-    apage.wait_for_function("() => window.__attacker && window.__attacker.posts > 0", timeout=15000)
-    ainfo = apage.evaluate("() => window.__attacker")
-    png_probe.dump("P4a 异源页投递记录", ainfo)
-    check("P4a 攻击窗口来自另一个 origin", ainfo["origin"] == deps["attacker"], str(ainfo))
-    check("P4a 攻击页确实投递了消息（不是被浏览器丢弃）",
-          ainfo["posts"] > 0 and not ainfo["lastError"] and ainfo["hasOpener"], str(ainfo))
-    page.wait_for_function("() => window.__fbE2E.messages.length > 0", timeout=15000)
-    got = page.evaluate("() => window.__fbE2E.messages")
-    png_probe.dump("P4a 宿主页收到的消息（含 origin/nonce/token）", got)
-    check("P4a 宿主页收到了这条异源消息（送达 ≠ 被接受）",
-          any(m["origin"] == deps["attacker"] and m["type"] == "feedback:auth" and m["nonce"] == nonce for m in got),
-          json.dumps(got, ensure_ascii=False))
-    page.wait_for_timeout(1000)
-    forged = rec.bearer(FORGED_TOKEN, since=mark)
-    check("P4a 组件忽略异源消息：没有任何请求带伪造令牌", not forged, str(forged)[:300])
-    check("P4a 组件忽略异源消息：没有发起提交", rec.feedback_count() == 0, str(rec.feedback_count()))
-    check("P4a 握手仍待完成（弹窗表单还在）", popup.locator("#login-form").is_visible())
-    check("P4a 宿主页仍显示需要登录",
-          page.evaluate("() => window.__fbE2E.widget().shadowRoot.querySelector('.fb-submit').textContent") == "登录并提交")
-    check("P4a 草稿文字保留", page.locator(".fb-textarea").input_value() == "异源伪造消息必须被忽略")
-    apage.close()
+    # 凭据错误：提示可见、草稿保留、无提交、密码清空
+    page.locator(".fb-login-username").fill(deps["panel_user"])
+    page.locator(".fb-login-password").fill(deps["panel_pass"] + "-wrong")
+    page.locator(".fb-login-confirm").click()
+    page.locator(".fb-login-error").wait_for(state="visible", timeout=15000)
+    check("P4a 凭据错误显示提示", "用户名或密码错误" in page.locator(".fb-login-error").inner_text(),
+          page.locator(".fb-login-error").inner_text())
+    check("P4a 凭据错误保留草稿", page.locator(".fb-textarea").input_value() == "面板内登录验证")
+    check("P4a 凭据错误不发起提交", rec.feedback_count() == 0, str(rec.feedback_count()))
+    check("P4a 登录结束清空密码框", page.locator(".fb-login-password").input_value() == "")
 
-    form_visible = login_in_popup(popup, deps)
-    check("P4a 真实登录走的是密码表单（干净 context）", form_visible is True, str(form_visible))
+    # 取消：只收起表单、保留草稿
+    page.locator(".fb-login-cancel").click()
+    check("P4a 取消收起登录表单", page.locator(".fb-login-panel").is_hidden())
+    check("P4a 取消保留草稿", page.locator(".fb-textarea").input_value() == "面板内登录验证")
+
+    # 正例：登录成功 → 自动提交一次
+    login_in_panel(page, deps)
     page.wait_for_selector(".fb-task-link", timeout=90000)
+    check("P4a 登录后自动提交 1 次", rec.feedback_count() == 1, str(rec.feedback_count()))
     toks = rec.bearer_tokens()
     posts = rec.feedback_posts()
-    png_probe.dump("P4a 客户端真实携带的令牌", {"bearerTokens": len(toks), "handshakeResponses": len(rec.tokens()),
-                                            "submitAuth": posts[0]["authorization"] if posts else None})
-    check("P4a 登录后自动提交 1 次", len(posts) == 1, str(len(posts)))
-    check("P4a 客户端开始携带握手签发的真实令牌", len(toks) == 1, str(toks))
-    check("P4a 该令牌不是异源伪造令牌", bool(toks) and toks[0] != FORGED_TOKEN, str(toks))
-    check("P4a 提交携带的就是这个真实令牌", bool(posts) and posts[0]["authorization"] == f"Bearer {toks[0]}",
+    check("P4a 提交携带登录签发的真实令牌",
+          bool(posts) and len(toks) == 1 and posts[0]["authorization"] == f"Bearer {toks[0]}",
           str(posts[:1])[:200])
     check("P4a 提交打到旧服务 8787", bool(posts) and posts[0]["url"].startswith(deps["service"] + "/api/feedback"))
-    token_a_real = toks[0]
     page.close()
     ctx.close()
-
-    # ---------- P4b：origin 正确但 nonce 不匹配 ----------
-    step("P4b 登录握手：正确 origin + 错误 nonce（真实旧令牌重放）必须被忽略")
-    ctx2, rec2, page2 = _fresh_login_context(deps, "P4b")
-    deps["rec"] = rec2
-    page2.locator(".fb-textarea").fill("旧 nonce 重放必须被忽略")
-    with ctx2.expect_page() as pop_info2:
-        page2.locator(".fb-submit").click()
-    popup2 = pop_info2.value
-    popup2.wait_for_load_state()
-    check("P4b 弹窗停在真实待登录状态", popup2.locator("#login-form").is_visible())
-    nonce2 = {k: urllib.parse.unquote(v) for k, v in re.findall(r"([^?&=]+)=([^&]*)", popup2.url.split("?", 1)[1])}["nonce"]
-    stale_nonce = "0123456789abcdef0123456789abcdef"
-    check("P4b 重放 nonce 与本次握手 nonce 不同", stale_nonce != nonce2, nonce2)
-    mark2 = rec2.mark()
-    popup2.evaluate(
-        """([nonce, token, target]) => window.opener.postMessage(
-             {type: 'feedback:auth', nonce, accessToken: token,
-              expiresAt: new Date(Date.now() + 3600_000).toISOString()}, target)""",
-        [stale_nonce, token_a_real, deps["pages"]],
-    )
-    page2.wait_for_function("() => window.__fbE2E.messages.length > 0", timeout=15000)
-    got2 = page2.evaluate("() => window.__fbE2E.messages")
-    png_probe.dump("P4b 宿主页收到的消息", got2)
-    check("P4b 宿主页收到了来自服务 origin 的消息",
-          any(m["origin"] == deps["service"] and m["type"] == "feedback:auth" for m in got2),
-          json.dumps(got2, ensure_ascii=False))
-    page2.wait_for_timeout(1200)
-    check("P4b 组件忽略 nonce 不匹配的消息：没有发起提交", rec2.feedback_count() == 0, str(rec2.feedback_count()))
-    check("P4b 该旧令牌没有被用于任何请求", not rec2.bearer(token_a_real, since=mark2), str(rec2.bearer(token_a_real, since=mark2))[:300])
-    check("P4b 宿主页仍显示需要登录", page2.locator(".fb-login").is_visible())
-    check("P4b 草稿文字保留", page2.locator(".fb-textarea").input_value() == "旧 nonce 重放必须被忽略")
-
-    form_visible2 = login_in_popup(popup2, deps)
-    check("P4b 之后真实登录仍成功（正例）", form_visible2 is True, str(form_visible2))
-    page2.wait_for_selector(".fb-task-link", timeout=90000)
-    tokens2 = rec2.bearer_tokens()
-    posts2 = rec2.feedback_posts()
-    check("P4b 客户端只携带了本次真实令牌", len(tokens2) == 1, str(tokens2))
-    check("P4b 提交用的是本次真实令牌", bool(posts2) and posts2[0]["authorization"] == f"Bearer {tokens2[0]}",
-          str(posts2[:1])[:300])
-    check("P4b 本次令牌与 P4a 的令牌不同", bool(tokens2) and tokens2[0] != token_a_real)
-    check("P4b 被重放的旧令牌从未被客户端使用", token_a_real not in tokens2, str(tokens2))
-    page2.close()
-    ctx2.close()
 
     # ---------- P4c：切换 api-base 的凭据隔离 ----------
     step("P4c 切换 api-base：旧服务令牌绝不发给新服务")
@@ -870,12 +833,11 @@ def p4_login_handshake(deps):
     check("P4c 切换清空旧服务草稿（文档化：完整身份切换）", after["text"] == "", str(after))
 
     page3.locator(".fb-textarea").fill("切换服务后的提交")
-    with ctx3.expect_page() as pop_info4:
-        page3.locator(".fb-submit").click()
-    popup4 = pop_info4.value
-    popup4.wait_for_load_state()
-    check("P4c 切换后提交 → 为新服务打开登录窗（不会直接发提交）",
-          popup4.url.startswith(deps["service2"] + "/login?"), popup4.url)
+    pages_before3 = len(ctx3.pages)
+    page3.locator(".fb-submit").click()
+    page3.locator(".fb-login-panel").wait_for(state="visible", timeout=15000)
+    check("P4c 切换后提交 → 在当前面板展开登录表单（不打开窗口）", len(ctx3.pages) == pages_before3,
+          str(len(ctx3.pages)))
     to_new = rec3.to_base(deps["service2"], since=mark3)
     png_probe.dump("P4c 切换后打到新服务的请求",
                    [{"method": e["method"], "url": e["url"], "authorization": e["authorization"]} for e in to_new])
@@ -884,8 +846,8 @@ def p4_login_handshake(deps):
     new_posts = [e for e in to_new if e["method"] == "POST" and e["url"].endswith("/api/feedback")]
     check("P4c 未重新登录前不会向新服务发提交请求", not new_posts, str(new_posts)[:300])
 
-    form_visible4 = login_in_popup(popup4, deps)
-    check("P4c 新服务登录走真实表单（不同 origin → 无旧 Cookie）", form_visible4 is True, str(form_visible4))
+    login_in_panel(page3, deps)
+    check("P4c 新服务登录在同一面板完成（Bearer 仅存内存）", True)
     page3.wait_for_selector(".fb-task-link", timeout=90000)
     tokens4 = rec3.bearer_tokens(since=mark3, base=deps["service2"])
     check("P4c 新服务登录后客户端携带新令牌（不是旧服务的）", len(tokens4) == 1, str(tokens4))
@@ -902,6 +864,205 @@ def p4_login_handshake(deps):
                    [{"method": e["method"], "url": e["url"]} for e in rec3.bearer(token_old)])
     page3.close()
     ctx3.close()
+
+
+# ---------------- P5：登录期间关闭 / 重新打开 ----------------
+#
+# T1 补修的缺口：登录请求在途时关闭面板，迟到的登录结果仍会写入令牌并自动
+# 提交；重新打开也不会重新查询额度。本路径用页面内的真实慢网络（延迟
+# window.fetch 上的 /api/auth/login）制造"登录请求挂起"，然后在响应返回前
+# 用真实鼠标点击关闭面板，随后核对真实网络层与界面状态。
+
+
+def _session_calls(rec, since=0) -> int:
+    return len([e for e in rec.entries(since) if e["url"].endswith("/api/auth/session")])
+
+
+def p5_login_close_reopen(deps):
+    step, check = deps["step"], deps["check"]
+    step("P5 登录期间关闭 / 重新打开：迟到登录不提交，重开立即刷新额度")
+
+    ctx, rec, page = _fresh_login_context(deps, "P5")
+    deps["rec"] = rec
+    mode = page.evaluate(
+        "() => document.querySelector('feedback-widget')?.getAttribute('launcher-mode')"
+    )
+    launcher = ".fb-orb" if mode == "orb" else ".fb-fab"
+
+    page.locator(".fb-textarea").fill("登录期间离开的草稿")
+
+    # 只让**第一次**登录请求变慢（2.5s），从而能在响应返回前关闭面板；
+    # 之后重新登录走正常速度。这是页面侧的慢网络，不改服务端。
+    page.evaluate(
+        """() => {
+          const orig = window.fetch.bind(window);
+          window.__fbLoginDelayMs = 2500;
+          window.fetch = async (input, init) => {
+            const url = String(input && input.url ? input.url : input);
+            const wait = window.__fbLoginDelayMs;
+            if (wait > 0 && url.includes('/api/auth/login')) {
+              window.__fbLoginDelayMs = 0;
+              await new Promise((r) => setTimeout(r, wait));
+            }
+            return orig(input, init);
+          };
+        }"""
+    )
+
+    page.locator(".fb-submit").click()
+    page.locator(".fb-login-panel").wait_for(state="visible", timeout=15000)
+    page.locator(".fb-login-username").fill(deps["panel_user2"])
+    page.locator(".fb-login-password").fill(deps["panel_pass2"])
+
+    with page.expect_request(lambda r: "/api/auth/login" in r.url, timeout=15000):
+        page.locator(".fb-login-confirm").click()
+
+    # 登录请求已在途（被延迟）：立刻用真实点击关闭面板。
+    page.locator(".fb-close").click()
+    page.locator(".fb-panel").wait_for(state="hidden", timeout=5000)
+    page.wait_for_timeout(3200)  # 等迟到的登录响应真正回来
+
+    check("P5 迟到的登录成功不触发自动提交", rec.feedback_count() == 0, str(rec.feedback_count()))
+    check(
+        "P5 迟到的登录成功后仍未登录（主按钮仍是「登录并提交」）",
+        page.locator(".fb-submit").inner_text().strip() == "登录并提交",
+        page.locator(".fb-submit").inner_text(),
+    )
+
+    # 重新打开：草稿保留，可继续编辑并重新登录。
+    page.locator(launcher).click()
+    page.locator(".fb-panel").wait_for(state="visible", timeout=30000)
+    check(
+        "P5 重新打开保留草稿",
+        page.locator(".fb-textarea").input_value() == "登录期间离开的草稿",
+        page.locator(".fb-textarea").input_value(),
+    )
+    check(
+        "P5 重新打开后仍可继续编辑",
+        page.locator(".fb-textarea").is_editable(),
+    )
+
+    page.locator(".fb-submit").click()  # 重新发起登录（pendingSubmit）
+    page.locator(".fb-login-panel").wait_for(state="visible", timeout=15000)
+    with page.expect_response(
+        lambda r: r.url.endswith("/api/feedback") and r.request.method == "POST",
+        timeout=90000,
+    ):
+        login_in_panel(page, deps, user=deps["panel_user2"], pw=deps["panel_pass2"])
+    page.wait_for_selector(".fb-task-link", timeout=90000)
+    posts = rec.feedback_posts()
+    check("P5 重新登录后只自动提交一次", len(posts) == 1, str(len(posts)))
+
+    # 额度刷新：已登录面板展示额度；关闭后不查询，重新打开立即查询。
+    quota_text = page.evaluate(
+        "() => { const sr = document.querySelector('feedback-widget').shadowRoot;"
+        " const q = sr.querySelector('.fb-quota'); return q ? q.textContent : null; }"
+    )
+    check("P5 已登录面板显示今日剩余次数", bool(quota_text) and "今日剩余" in quota_text, str(quota_text))
+
+    closed_mark = rec.mark()
+    page.locator(".fb-close").click()
+    page.locator(".fb-panel").wait_for(state="hidden", timeout=5000)
+    page.wait_for_timeout(1500)
+    check("P5 关闭面板后不再查询额度", _session_calls(rec, closed_mark) == 0,
+          str(_session_calls(rec, closed_mark)))
+
+    page.locator(launcher).click()
+    page.locator(".fb-panel").wait_for(state="visible", timeout=30000)
+    page.wait_for_timeout(1200)
+    check("P5 重新打开立即重新查询额度", _session_calls(rec, closed_mark) >= 1,
+          str(_session_calls(rec, closed_mark)))
+
+    page.close()
+    ctx.close()
+
+
+# ---------------- P8：慢会话查询在途时关闭 / 重新打开 ----------------
+#
+# T1-B1 的缺口：额度查询在途时关闭面板再重新打开，重开触发的一次刷新会被
+# 「在途占用」静默挡下且不登记意图；旧查询结束后只按 resetAt / 30 秒规则排
+# 定时器，不会立即补发。本路径用页面侧 fetch 包装只延迟**第一次**
+# /api/auth/session（2.5s）制造"慢会话查询"，然后核对真实网络层：
+# 在途时不并发、旧结果丢弃、结束后立即恰好补发一次（远早于 30 秒 / resetAt）。
+
+
+def p8_slow_session_close_reopen(deps):
+    step, check = deps["step"], deps["check"]
+    step("P8 慢会话查询在途时关闭重开：不并发、旧结果丢弃、结束后立即补发一次")
+
+    ctx, rec, page = _fresh_login_context(deps, "P8")
+    deps["rec"] = rec
+    mode = page.evaluate(
+        "() => document.querySelector('feedback-widget')?.getAttribute('launcher-mode')"
+    )
+    launcher = ".fb-orb" if mode == "orb" else ".fb-fab"
+
+    # 登录（正常速度；登录后自动提交一次并归档，与 P5 同构）。
+    page.locator(".fb-textarea").fill("慢会话关闭重开验证")
+    page.locator(".fb-submit").click()
+    page.locator(".fb-login-panel").wait_for(state="visible", timeout=15000)
+    login_in_panel(page, deps, user=deps["panel_user2"], pw=deps["panel_pass2"])
+    page.wait_for_selector(".fb-task-link", timeout=90000)
+    # 回到撰写视图：额度行只在撰写视图渲染（「再记一条」是卡片区最后一个按钮）。
+    page.locator(".fb-status-card .fb-card-actions button").last.click()
+    page.wait_for_timeout(500)
+
+    # 只让**第一次**会话查询变慢（2.5s）：页面侧慢网络，不改服务端。
+    page.evaluate(
+        """() => {
+          const orig = window.fetch.bind(window);
+          window.__fbSessionDelayMs = 2500;
+          window.fetch = async (input, init) => {
+            const url = String(input && input.url ? input.url : input);
+            const wait = window.__fbSessionDelayMs;
+            if (wait > 0 && url.includes('/api/auth/session')) {
+              window.__fbSessionDelayMs = 0;
+              await new Promise((r) => setTimeout(r, wait));
+            }
+            return orig(input, init);
+          };
+        }"""
+    )
+
+    # 关闭 → 重开：发出慢会话查询 A（页面侧挂起，延迟 2.5s 后才真正出网）。
+    # 注意：页面侧延迟期间网络记录器看不到该请求，断言全部围绕
+    # 「A 出网时刻（重开 #1 后约 2.5s）」编排。
+    page.locator(".fb-close").click()
+    page.locator(".fb-panel").wait_for(state="hidden", timeout=5000)
+    page.locator(launcher).click()
+    page.locator(".fb-panel").wait_for(state="visible", timeout=30000)
+    page.wait_for_timeout(300)  # A 的 fetch 已在页面侧挂起（尚未出网）
+
+    # A 在途时再次关闭 → 重开：不得并发，只能登记"待立即刷新"。
+    page.locator(".fb-close").click()
+    page.locator(".fb-panel").wait_for(state="hidden", timeout=5000)
+    mark_reopen = rec.mark()
+    page.locator(launcher).click()
+    page.locator(".fb-panel").wait_for(state="visible", timeout=30000)
+    page.wait_for_timeout(700)
+    check("P8 查询在途时重开：不并发发起第二个会话查询（此刻 A 尚未出网）",
+          _session_calls(rec, mark_reopen) == 0, str(_session_calls(rec, mark_reopen)))
+
+    # 约 2.5s 时 A 出网并立即返回：旧结果被序号校验丢弃，随即应立即补发
+    # 一次 B（B 与 A 几乎同窗口出网；若实现缺失，这里只会有 A 一条记录，
+    # 且下一条要等 30 秒 / resetAt）。
+    page.wait_for_timeout(2200)
+    after_a = _session_calls(rec, mark_reopen)
+    check("P8 旧查询出网后旧结果丢弃并立即补发一次（A+B 同窗口，共 2 条）",
+          after_a == 2, str(after_a))
+    page.wait_for_timeout(1500)
+    check("P8 补发不重复（此后无新增会话查询）",
+          _session_calls(rec, mark_reopen) == 2, str(_session_calls(rec, mark_reopen)))
+
+    quota_text = page.evaluate(
+        "() => { const sr = document.querySelector('feedback-widget').shadowRoot;"
+        " const q = sr.querySelector('.fb-quota'); return q ? q.textContent : null; }"
+    )
+    check("P8 补发结果生效（面板展示最新额度）",
+          bool(quota_text) and "今日剩余" in quota_text, str(quota_text))
+
+    page.close()
+    ctx.close()
 
 
 # ---------------- P6：默认 off 模式的**手动**截图入口 ----------------
@@ -1251,6 +1412,8 @@ def run(deps):
         ("P2 遮罩像素路径", p2_mask_pixels),
         ("P3 遮挡失败规则路径", p3_mask_failure),
         ("P4 登录握手路径", p4_login_handshake),
+        ("P5 登录期间关闭/重新打开路径", p5_login_close_reopen),
+        ("P8 慢会话关闭/重开补发路径", p8_slow_session_close_reopen),
         ("P6 默认 off 模式手动截图路径", p6_manual_capture),
         ("P7 窄屏 + 键盘手动截图路径", p7_manual_capture_narrow_keyboard),
     ]

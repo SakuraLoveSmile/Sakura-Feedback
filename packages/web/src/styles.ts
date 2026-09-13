@@ -610,6 +610,74 @@ export const STYLES = /* css */ `
   line-height: 1.4;
 }
 
+/* ---- 额度与面板内登录 ---- */
+.fb-quota {
+  font-size: 12px;
+  color: var(--fb-text-secondary);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.fb-quota-blocked {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fb-status-warn-text);
+  text-align: center;
+  line-height: 1.4;
+}
+
+.fb-login-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--fb-border);
+  border-radius: 10px;
+  background: var(--fb-bg-subtle);
+}
+
+.fb-login-row {
+  display: flex;
+  gap: 8px;
+}
+
+.fb-login-input {
+  flex: 1;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid var(--fb-border-strong);
+  border-radius: 8px;
+  background: var(--fb-bg);
+  color: var(--fb-text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.fb-login-input:focus {
+  outline: none;
+  border-color: var(--fb-accent);
+  box-shadow: 0 0 0 3px var(--fb-focus-ring);
+}
+
+.fb-login-input:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.fb-login-error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fb-status-error-text);
+  line-height: 1.4;
+}
+
+.fb-login-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 /* ---- 截图区：预览与操作分离 ----
    预览（.fb-screenshot-wrap）只在真的有可渲染的截图 URL 时可见；
    操作区（.fb-screenshot-actions）始终在面板里：没有截图时它是「截取当前页面」。

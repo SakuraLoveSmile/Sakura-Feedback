@@ -41,6 +41,12 @@ dependencies:
 dev_dependencies:
   flutter_test:
     sdk: flutter
+  integration_test:
+    sdk: flutter
+
+  # T1-C 集成测试用：真实 HTTP 转发观察器（只观察反馈 POST 的接收结果，
+  # 底层仍是正常客户端，不伪造响应）。
+  http: ^1.2.0
 
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is

@@ -15,11 +15,55 @@ export type ArchiveStage =
   | "comment_pending"
   | "complete";
 
+export type UserRole = "admin" | "user";
+
 export interface UserRow {
   id: string;
   username: string;
   pass_hash: string;
+  role: UserRole;
+  enabled: number; // 0/1
+  daily_limit: number;
   created_at: string;
+}
+
+/** 每日提交额度（响应契约统一结构）。 */
+export interface Quota {
+  dailyLimit: number;
+  used: number;
+  remaining: number;
+  /** 下次额度刷新时间（北京时间次日零点，ISO-8601 UTC）。 */
+  resetAt: string;
+}
+
+export const DEFAULT_DAILY_LIMIT = 3;
+
+const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** 北京时间日期（YYYY-MM-DD）。服务端唯一时钟来源，不使用客户端时间。 */
+export function beijingDay(at: Date | number = Date.now()): string {
+  const ms = typeof at === "number" ? at : at.getTime();
+  return new Date(ms + BEIJING_OFFSET_MS).toISOString().slice(0, 10);
+}
+
+/** 北京时间某日零点对应的 UTC 毫秒。 */
+function beijingDayStartMs(day: string): number {
+  const [y, m, d] = day.split("-").map((n) => Number(n));
+  // Date.UTC 得到 UTC 零点，减去 8 小时即为北京当日零点。
+  return Date.UTC(y as number, (m as number) - 1, d as number) - BEIJING_OFFSET_MS;
+}
+
+/** 下一次额度刷新时刻：北京时间次日零点，ISO-8601 UTC。 */
+export function beijingResetAt(at: Date | number = Date.now()): string {
+  const ms = typeof at === "number" ? at : at.getTime();
+  return new Date(beijingDayStartMs(beijingDay(ms)) + DAY_MS).toISOString();
+}
+
+/** 由上限与已用量构造统一额度结构（remaining 不为负）。 */
+export function makeQuota(dailyLimit: number, used: number, resetAt: string): Quota {
+  const remaining = Math.max(0, dailyLimit - used);
+  return { dailyLimit, used, remaining, resetAt };
 }
 
 export interface SessionRow {
@@ -49,6 +93,7 @@ export interface FeedbackRow {
   id: string;
   app_row_id: string;
   app_id: string;
+  user_id: string;
   text: string;
   context_json: string | null;
   idempotency_key: string;
@@ -133,19 +178,87 @@ export function contentHash(
 
 // ---------- users ----------
 
+/** 最早的账号（部署初始账号，兼容旧调用点）。 */
 export function getUser(db: Db): UserRow | null {
   return (db.prepare("SELECT * FROM users ORDER BY created_at LIMIT 1").get() as unknown as UserRow) ?? null;
 }
 
-export function createUser(db: Db, username: string, passHash: string): UserRow {
-  const row: UserRow = { id: randomUUID(), username, pass_hash: passHash, created_at: nowIso() };
-  db.prepare("INSERT INTO users (id, username, pass_hash, created_at) VALUES (?, ?, ?, ?)").run(
-    row.id,
-    row.username,
-    row.pass_hash,
-    row.created_at,
-  );
+export function getUserById(db: Db, id: string): UserRow | null {
+  return (db.prepare("SELECT * FROM users WHERE id = ?").get(id) as unknown as UserRow) ?? null;
+}
+
+export function getUserByUsername(db: Db, username: string): UserRow | null {
+  return (db.prepare("SELECT * FROM users WHERE username = ?").get(username) as unknown as UserRow) ?? null;
+}
+
+/** 普通账号列表（账号页面只管理普通账号，管理员保留）。 */
+export function listOrdinaryUsers(db: Db): UserRow[] {
+  return db.prepare("SELECT * FROM users WHERE role = 'user' ORDER BY created_at").all() as unknown as UserRow[];
+}
+
+export function createUser(
+  db: Db,
+  username: string,
+  passHash: string,
+  opts: { role?: UserRole; dailyLimit?: number } = {},
+): UserRow {
+  const row: UserRow = {
+    id: randomUUID(),
+    username,
+    pass_hash: passHash,
+    role: opts.role ?? "user",
+    enabled: 1,
+    daily_limit: opts.dailyLimit ?? DEFAULT_DAILY_LIMIT,
+    created_at: nowIso(),
+  };
+  db.prepare(
+    "INSERT INTO users (id, username, pass_hash, role, enabled, daily_limit, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  ).run(row.id, row.username, row.pass_hash, row.role, row.enabled, row.daily_limit, row.created_at);
   return row;
+}
+
+/** 更新启用状态 / 每日额度（仅普通账号由路由层限定）。返回是否命中。 */
+export function updateUser(db: Db, id: string, patch: { enabled?: number; dailyLimit?: number }): boolean {
+  const sets: string[] = [];
+  const values: (string | number)[] = [];
+  if (patch.enabled !== undefined) {
+    sets.push("enabled = ?");
+    values.push(patch.enabled);
+  }
+  if (patch.dailyLimit !== undefined) {
+    sets.push("daily_limit = ?");
+    values.push(patch.dailyLimit);
+  }
+  if (sets.length === 0) return false;
+  const r = db.prepare(`UPDATE users SET ${sets.join(", ")} WHERE id = ?`).run(...values, id);
+  return Number(r.changes) > 0;
+}
+
+export function setUserPassword(db: Db, id: string, passHash: string): boolean {
+  return Number(db.prepare("UPDATE users SET pass_hash = ? WHERE id = ?").run(passHash, id).changes) > 0;
+}
+
+/** 撤销某账号全部会话（禁用 / 重置密码时）。 */
+export function revokeUserSessions(db: Db, userId: string): number {
+  return Number(
+    db.prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL").run(nowIso(), userId)
+      .changes,
+  );
+}
+
+// ---------- daily usage ----------
+
+export function getDailyUsed(db: Db, userId: string, day: string): number {
+  const row = db.prepare("SELECT used FROM daily_usage WHERE user_id = ? AND day = ?").get(userId, day) as
+    | { used: number }
+    | undefined;
+  return row?.used ?? 0;
+}
+
+/** 读取账号当前额度（含服务端生成的北京时间日期与 resetAt）。 */
+export function getQuota(db: Db, user: Pick<UserRow, "id" | "daily_limit">, at: Date | number = Date.now()): Quota {
+  const day = beijingDay(at);
+  return makeQuota(user.daily_limit, getDailyUsed(db, user.id, day), beijingResetAt(at));
 }
 
 // ---------- sessions ----------
@@ -177,9 +290,16 @@ export function createSession(
   return { row, token };
 }
 
+/**
+ * 按令牌解析有效会话。**每次鉴权都联查账号启用状态**：
+ * 账号被禁用后其既有会话立即失效（无需等会话过期）。
+ */
 export function findActiveSessionByToken(db: Db, token: string): SessionRow | null {
   const row = db
-    .prepare("SELECT * FROM sessions WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > ?")
+    .prepare(
+      `SELECT s.* FROM sessions s JOIN users u ON u.id = s.user_id
+       WHERE s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > ? AND u.enabled = 1`,
+    )
     .get(hashToken(token), nowIso()) as SessionRow | undefined;
   if (row) {
     db.prepare("UPDATE sessions SET last_used_at = ? WHERE id = ?").run(nowIso(), row.id);
@@ -280,6 +400,7 @@ export function insertFeedbackWithScreenshot(
   input: {
     appId: string;
     appRowId: string;
+    userId?: string;
     text: string;
     contextJson: string | null;
     idempotencyKey: string;
@@ -299,6 +420,7 @@ export function insertFeedbackWithScreenshot(
     id: randomUUID(),
     app_row_id: input.appRowId,
     app_id: input.appId,
+    user_id: input.userId ?? "",
     text: input.text,
     context_json: input.contextJson,
     idempotency_key: input.idempotencyKey,
@@ -319,40 +441,167 @@ export function insertFeedbackWithScreenshot(
 
   db.exec("BEGIN");
   try {
-    db.prepare(
-      `INSERT INTO feedbacks (id, app_row_id, app_id, text, context_json, idempotency_key, content_hash,
-         status, title, processed_json, kaneo_task_id, kaneo_task_url, archive_stage, archive_data_json,
-         attempt_count, last_error, error_summary, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'received', NULL, NULL, NULL, NULL, 'task_pending', NULL, 0, NULL, NULL, ?, ?)`,
-    ).run(
-      row.id,
-      row.app_row_id,
-      row.app_id,
-      row.text,
-      row.context_json,
-      row.idempotency_key,
-      row.content_hash,
-      now,
-      now,
-    );
-
-    if (screenshot) {
-      db.prepare(
-        `INSERT INTO feedback_screenshots (feedback_id, png_blob, width, height, byte_size, sha256, capture_json, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
-        row.id,
-        screenshot.pngBlob,
-        screenshot.width,
-        screenshot.height,
-        screenshot.byteSize,
-        screenshot.sha256,
-        screenshot.captureJson,
-        now,
-      );
-    }
+    insertFeedbackRow(db, row, screenshot ?? null, now);
     db.exec("COMMIT");
     return row;
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+}
+
+/** 事务内插入反馈与截图（不含 BEGIN/COMMIT，供原子提交函数复用）。 */
+function insertFeedbackRow(
+  db: Db,
+  row: FeedbackRow,
+  screenshot: {
+    pngBlob: Uint8Array;
+    width: number;
+    height: number;
+    byteSize: number;
+    sha256: string;
+    captureJson: string | null;
+  } | null,
+  now: string,
+): void {
+  db.prepare(
+    `INSERT INTO feedbacks (id, app_row_id, app_id, user_id, text, context_json, idempotency_key, content_hash,
+       status, title, processed_json, kaneo_task_id, kaneo_task_url, archive_stage, archive_data_json,
+       attempt_count, last_error, error_summary, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'received', NULL, NULL, NULL, NULL, 'task_pending', NULL, 0, NULL, NULL, ?, ?)`,
+  ).run(
+    row.id,
+    row.app_row_id,
+    row.app_id,
+    row.user_id,
+    row.text,
+    row.context_json,
+    row.idempotency_key,
+    row.content_hash,
+    now,
+    now,
+  );
+
+  if (screenshot) {
+    db.prepare(
+      `INSERT INTO feedback_screenshots (feedback_id, png_blob, width, height, byte_size, sha256, capture_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      row.id,
+      screenshot.pngBlob,
+      screenshot.width,
+      screenshot.height,
+      screenshot.byteSize,
+      screenshot.sha256,
+      screenshot.captureJson,
+      now,
+    );
+  }
+}
+
+/** 原子提交结果（区分「已创建」「幂等重放」「冲突」「账号失效」「额度用尽」）。 */
+export type SubmitOutcome =
+  | { kind: "created"; row: FeedbackRow; quota: Quota }
+  | { kind: "replayed"; row: FeedbackRow; quota: Quota }
+  | { kind: "conflict" }
+  | { kind: "account_invalid" }
+  | { kind: "quota_exceeded"; quota: Quota };
+
+/**
+ * 在单个事务内完成：重新核验账号有效性 → 检查幂等记录 → 检查当日额度 →
+ * 保存反馈与截图 → 增加用量 → 提交。事务中不执行任何异步 / 网络 / 图片处理
+ * （图片校验必须在调用前完成）。
+ *
+ * 幂等语义（保留全局唯一键约束）：
+ * - 同账号、同键、同内容 → 返回原记录，不扣次数（额度已满也允许重放）；
+ * - 同键被其他账号占用，或同键不同内容 → 统一 conflict（不透露原记录）。
+ */
+export function submitFeedbackAtomic(
+  db: Db,
+  input: {
+    userId: string;
+    appId: string;
+    appRowId: string;
+    text: string;
+    contextJson: string | null;
+    idempotencyKey: string;
+    contentHash: string;
+  },
+  screenshot?: {
+    pngBlob: Uint8Array;
+    width: number;
+    height: number;
+    byteSize: number;
+    sha256: string;
+    captureJson: string | null;
+  } | null,
+  /** 可控时钟（测试注入；生产默认系统时钟）。 */
+  clock: () => number = Date.now,
+): SubmitOutcome {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    // 1. 重新核验账号有效性（禁用 / 不存在都不接收新反馈）
+    const user = getUserById(db, input.userId);
+    if (user?.enabled !== 1) {
+      db.exec("ROLLBACK");
+      return { kind: "account_invalid" };
+    }
+
+    // 2. 幂等记录（先于额度检查：额度已满也必须允许重放原结果）
+    const existing = getFeedbackByKey(db, input.idempotencyKey);
+    if (existing) {
+      if (existing.user_id !== input.userId || existing.content_hash !== input.contentHash) {
+        db.exec("ROLLBACK");
+        return { kind: "conflict" };
+      }
+      const quota = getQuota(db, user, clock());
+      db.exec("COMMIT");
+      return { kind: "replayed", row: existing, quota };
+    }
+
+    // 3. 当日额度（日期与 resetAt 均由服务端时钟产生）
+    const at = clock();
+    const day = beijingDay(at);
+    const quota = makeQuota(user.daily_limit, getDailyUsed(db, user.id, day), beijingResetAt(at));
+    if (quota.remaining <= 0) {
+      db.exec("ROLLBACK");
+      return { kind: "quota_exceeded", quota };
+    }
+
+    // 4. 保存反馈与截图
+    const now = new Date(at).toISOString();
+    const row: FeedbackRow = {
+      id: randomUUID(),
+      app_row_id: input.appRowId,
+      app_id: input.appId,
+      user_id: input.userId,
+      text: input.text,
+      context_json: input.contextJson,
+      idempotency_key: input.idempotencyKey,
+      content_hash: input.contentHash,
+      status: "received",
+      title: null,
+      processed_json: null,
+      kaneo_task_id: null,
+      kaneo_task_url: null,
+      archive_stage: "task_pending",
+      archive_data_json: null,
+      attempt_count: 0,
+      last_error: null,
+      error_summary: null,
+      created_at: now,
+      updated_at: now,
+    };
+    insertFeedbackRow(db, row, screenshot ?? null, now);
+
+    // 5. 增加用量（同日 upsert）
+    db.prepare(
+      `INSERT INTO daily_usage (user_id, day, used, reset_at) VALUES (?, ?, 1, ?)
+       ON CONFLICT(user_id, day) DO UPDATE SET used = used + 1`,
+    ).run(user.id, day, quota.resetAt);
+
+    db.exec("COMMIT");
+    return { kind: "created", row, quota: makeQuota(user.daily_limit, quota.used + 1, quota.resetAt) };
   } catch (err) {
     db.exec("ROLLBACK");
     throw err;
@@ -364,6 +613,7 @@ export function insertFeedback(
   input: {
     appId: string;
     appRowId: string;
+    userId?: string;
     text: string;
     contextJson: string | null;
     idempotencyKey: string;
@@ -456,7 +706,7 @@ export function updateFeedback(
 export function listFeedbacks(
   db: Db,
   filter: { status?: FeedbackStatus; appId?: string; cursor?: string; limit: number },
-): { items: (FeedbackRow & { has_screenshot?: number })[]; nextCursor: string | null } {
+): { items: (FeedbackRow & { has_screenshot?: number; username?: string | null })[]; nextCursor: string | null } {
   const where: string[] = [];
   const params: (string | number)[] = [];
   if (filter.status) {
@@ -480,10 +730,15 @@ export function listFeedbacks(
   const w = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const rows = db
     .prepare(
-      `SELECT f.*, (SELECT 1 FROM feedback_screenshots s WHERE s.feedback_id = f.id) AS has_screenshot
-       FROM feedbacks f ${w} ORDER BY f.created_at DESC, f.id DESC LIMIT ?`,
+      `SELECT f.*, u.username AS username,
+              (SELECT 1 FROM feedback_screenshots s WHERE s.feedback_id = f.id) AS has_screenshot
+       FROM feedbacks f LEFT JOIN users u ON u.id = f.user_id ${w}
+       ORDER BY f.created_at DESC, f.id DESC LIMIT ?`,
     )
-    .all(...params, filter.limit + 1) as unknown as (FeedbackRow & { has_screenshot?: number })[];
+    .all(...params, filter.limit + 1) as unknown as (FeedbackRow & {
+    has_screenshot?: number;
+    username?: string | null;
+  })[];
   const hasMore = rows.length > filter.limit;
   const items = hasMore ? rows.slice(0, filter.limit) : rows;
   const last = items[items.length - 1];
@@ -502,10 +757,11 @@ export function findResumable(db: Db): { requeue: FeedbackRow[]; uncertain: Feed
 }
 
 /** 管理列表用的轻量字段。 */
-export function toAdminListItem(r: FeedbackRow & { has_screenshot?: number }) {
+export function toAdminListItem(r: FeedbackRow & { has_screenshot?: number; username?: string | null }) {
   return {
     id: r.id,
     appId: r.app_id,
+    username: r.username ?? null,
     status: r.status,
     createdAt: r.created_at,
     updatedAt: r.updated_at,

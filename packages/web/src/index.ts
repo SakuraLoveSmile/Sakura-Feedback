@@ -9,6 +9,10 @@ export type {
   FeedbackCaptureInfo,
   FeedbackSubmitPayload,
   FeedbackSubmitResponse,
+  AuthUser,
+  Quota,
+  LoginResponse,
+  SessionResponse,
 } from './api';
 
 /** 元素标签名。 */

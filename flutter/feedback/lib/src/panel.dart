@@ -11,6 +11,7 @@ import 'api_client.dart';
 import 'config.dart';
 import 'idempotency.dart';
 import 'platform.dart';
+import 'token_coordination.dart';
 import 'token_store.dart';
 
 /// 反馈正文最大长度（按 Unicode 码点 / runes 计，与契约 1..10000 一致）。
@@ -117,6 +118,7 @@ class FeedbackPanel extends StatefulWidget {
     this.onRetakeScreenshot,
     this.httpClient,
     this.tokenStore,
+    this.visible,
   });
 
   /// 连接与展示配置。
@@ -134,12 +136,23 @@ class FeedbackPanel extends StatefulWidget {
   /// 注入的令牌仓库（主要面向测试）。
   final FeedbackTokenStore? tokenStore;
 
+  /// 面板当前是否由用户打开（内部协作接口，不是公开配置）。
+  ///
+  /// [FeedbackWidget] 常驻面板（`maintainState`）时传入真实开关状态：
+  /// 关闭 → 取消尚未完成的登录接续并停止额度定时查询；重新打开 → 立即
+  /// 刷新会话与额度。**截图期间暂时隐藏不算关闭**（调用方不得把
+  /// `_temporarilyHideForCapture` 折算进来）。
+  ///
+  /// null 表示未接入（直接构造面板的测试、独立使用）：始终视为可见，
+  /// 与旧行为完全兼容。
+  final bool? visible;
+
   @override
   State<FeedbackPanel> createState() => FeedbackPanelState();
 }
 
 /// 面板状态（暴露为 public 仅供测试驱动内部状态机）。
-class FeedbackPanelState extends State<FeedbackPanel> {
+class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserver {
   late final FeedbackTokenStore _tokenStore;
   late final ApiClient _api;
 
@@ -212,15 +225,61 @@ class FeedbackPanelState extends State<FeedbackPanel> {
 
   bool _authReady = false;
   bool _signedIn = false;
-  bool _busy = false; // 提交中 / 登录中 / 握手中
+  bool _busy = false; // 提交中 / 登录中
   FeedbackStage _stage = FeedbackStage.compose;
 
-  // Web 握手辅助状态。
-  bool _popupBlocked = false;
-  String? _handshakeError;
+  /// 面板内登录表单是否展开（点击「登录并提交」展开，不打开任何窗口）。
+  bool _showLoginForm = false;
+  /// 登录成功后是否自动提交（点击「登录并提交」触发）。
+  bool _submitAfterLogin = false;
 
-  // 原生登录辅助状态。
+  /// 登录错误提示（面板内表单）。
   String? _loginError;
+
+  /// 登录操作序号（T1-A）：每次发起登录递增；面板关闭 / 取消登录 /
+  /// 销毁 / 身份变化都会递增使在途登录失效，并清除密码、登录忙碌状态
+  /// 与待自动提交标记。回调返回后必须校验序号（外加 [mounted]）才允许
+  /// 写入令牌、更新界面或自动提交；失败回调同样校验。
+  int _loginSeq = 0;
+
+  /// 是否有登录请求在途（用于失效时只清除登录忙碌态，不误清提交忙碌态）。
+  bool _loginInFlight = false;
+
+  /// 已登录账号与最新额度（额度由服务端按北京时间日切分）。
+  AuthUser? _user;
+  Quota? _quota;
+
+  /// 额度查询序号（T1-B）：提交成功 / 收到额度错误 / 关闭 / 销毁 /
+  /// 退到后台 / 401 都会递增使在途查询失效；结果除校验枚举与令牌外
+  /// 还要校验该序号，避免旧查询覆盖刚扣除后的次数。
+  int _quotaSeq = 0;
+
+  /// 额度查询定时器（resetAt 单次 或 额度用尽后每 30 秒）；同时最多一个。
+  Timer? _quotaTimer;
+
+  /// 额度查询进行中：同一时刻最多一个额度查询。
+  bool _quotaInFlight = false;
+
+  /// 最近一次额度刷新失败（网络等）：保留旧额度，30 秒后重试。
+  bool _quotaRefreshFailed = false;
+
+  /// 「待立即刷新」标记（T1-B）：打开面板 / 回到前台的刷新被旧查询或忙碌
+  /// 挡下时登记，不得丢弃；旧查询结束后或忙碌结束后立即补发一次。多次
+  /// 登记合并为一次；关闭 / 销毁 / 退后台 / 401 时清除，重新打开重新登记。
+  bool _quotaRefreshPending = false;
+
+  /// 应用是否在前台（退到后台时取消额度定时查询）。
+  bool _foreground = true;
+
+  /// 额度用尽后的重试间隔：后台调高额度后最多 30 秒即可恢复提交。
+  static const Duration _quotaRetryDelay = Duration(seconds: 30);
+
+  /// 额度定时查询的最大等待。服务端 `resetAt` 正常在 24 小时内（北京时间日切）；
+  /// 异常 / 超远时间不直接交给宿主定时器（避免排一个无意义的超长定时器）。
+  static const Duration _quotaMaxDelay = Duration(hours: 24);
+
+  /// 面板当前是否由用户打开（[FeedbackPanel.visible] 为 null 时视为可见）。
+  bool get _panelVisible => widget.visible ?? true;
 
   /// 当前令牌仓库（测试可见）。
   FeedbackTokenStore get tokenStore => _tokenStore;
@@ -231,7 +290,12 @@ class FeedbackPanelState extends State<FeedbackPanel> {
   @override
   void initState() {
     super.initState();
-    _tokenStore = widget.tokenStore ?? createDefaultTokenStore(widget.config);
+    WidgetsBinding.instance.addObserver(this);
+    // 包一层协调器（幂等）：登录写入（[_login]）与 ApiClient 的 401 条件
+    // 清除共享同一操作队列与认证世代（T1-A）；默认安全存储按服务身份共享。
+    _tokenStore = CoordinatedTokenStore.of(
+      widget.tokenStore ?? createDefaultTokenStore(widget.config),
+    );
     _api = ApiClient(
       config: widget.config,
       tokenStore: _tokenStore,
@@ -239,7 +303,48 @@ class FeedbackPanelState extends State<FeedbackPanel> {
       onUnauthorized: _onUnauthorized,
     );
     _draft.addListener(_onDraftChanged);
+    final AppLifecycleState? lifecycle = WidgetsBinding.instance.lifecycleState;
+    _foreground = lifecycle == null || lifecycle == AppLifecycleState.resumed;
     unawaited(_restoreSession());
+  }
+
+  @override
+  void didUpdateWidget(FeedbackPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final bool wasVisible = oldWidget.visible ?? true;
+    final bool nowVisible = widget.visible ?? true;
+    if (wasVisible && !nowVisible) {
+      // 用户关闭面板：取消尚未完成的登录接续与额度定时查询，
+      // 使在途额度查询失效；不撤销已建立的登录态，不动草稿与截图。
+      // 同时清除「待立即刷新」意图（重新打开时按当前状态重新登记）。
+      _invalidateLogin();
+      _invalidateQuotaRefresh();
+      _quotaRefreshPending = false;
+    } else if (!wasVisible && nowVisible) {
+      // 重新打开：必须实际调用刷新（不能只请求输入焦点）。
+      _onPanelOpened();
+    }
+  }
+
+  /// 面板被用户打开：请求输入焦点并立即刷新会话与额度。
+  void _onPanelOpened() {
+    _focusFirstField();
+    unawaited(_refreshQuota());
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // 应用恢复前台时刷新额度（跨过 resetAt 后由服务端给出新额度）；
+    // 退到后台时取消额度定时查询并使在途查询失效。
+    if (state == AppLifecycleState.resumed) {
+      _foreground = true;
+      _quotaRefreshFailed = false;
+      unawaited(_refreshQuota());
+    } else {
+      _foreground = false;
+      _invalidateQuotaRefresh();
+      _quotaRefreshPending = false; // 退后台清除补发意图；回前台重新登记
+    }
   }
 
   Future<void> _restoreSession() async {
@@ -256,6 +361,7 @@ class FeedbackPanelState extends State<FeedbackPanel> {
       _signedIn = token != null && token.isNotEmpty;
       _authReady = true;
     });
+    if (_signedIn) unawaited(_refreshQuota());
     _focusFirstField();
   }
 
@@ -264,8 +370,10 @@ class FeedbackPanelState extends State<FeedbackPanel> {
       if (!mounted) return;
       if (_signedIn && _stage == FeedbackStage.compose) {
         _draftFocus.requestFocus();
-      } else if (!_signedIn && !kIsWeb) {
+      } else if (!_signedIn && _showLoginForm) {
         _usernameFocus.requestFocus();
+      } else if (!_signedIn) {
+        _draftFocus.requestFocus();
       }
     });
   }
@@ -279,7 +387,12 @@ class FeedbackPanelState extends State<FeedbackPanel> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _pollTimer?.cancel();
+    // 销毁：使在途登录与额度查询失效并取消额度定时查询。
+    _invalidateLogin();
+    _invalidateQuotaRefresh();
+    _quotaRefreshPending = false;
     _draft.removeListener(_onDraftChanged);
     _api.dispose();
     _draft.dispose();
@@ -295,12 +408,19 @@ class FeedbackPanelState extends State<FeedbackPanel> {
   void _onUnauthorized() {
     if (!mounted) return;
     _pollTimer?.cancel();
+    // 401：回到需要登录态并停止额度定时查询；同时清除补发意图，
+    // 避免对已失效会话的补发循环（重新登录后由登录流程重新调度）。
+    _invalidateQuotaRefresh();
+    _quotaRefreshPending = false;
     setState(() {
       _signedIn = false;
       _stage = FeedbackStage.compose;
       _busy = false;
-      _popupBlocked = false;
-      _handshakeError = null;
+      _user = null;
+      _quota = null;
+      _showLoginForm = false;
+      _submitAfterLogin = false;
+      _loginError = null;
     });
     _focusFirstField();
   }
@@ -308,7 +428,158 @@ class FeedbackPanelState extends State<FeedbackPanel> {
   String _clientLabel() =>
       'flutter-${defaultTargetPlatform.name}-${DateTime.now().toIso8601String()}';
 
-  Future<void> _nativeLogin() async {
+  /// 使尚未完成的登录接续失效：递增登录序号，清除密码、登录忙碌状态
+  /// 与待自动提交标记。不撤销已建立的登录态，也不动草稿与截图。
+  void _invalidateLogin() {
+    _loginSeq++;
+    _submitAfterLogin = false;
+    _password.clear();
+    if (_loginInFlight) {
+      _loginInFlight = false;
+      _busy = false; // 只清登录忙碌态：提交在途时不得误清。
+    }
+  }
+
+  /// 登录回调是否仍然有效：序号未变（面板自登录发起以来没有被关闭、
+  /// 也没有被取消 / 销毁 / 换身份）且面板仍然可见。
+  bool _loginStillValid(int seq) => mounted && seq == _loginSeq && _panelVisible;
+
+  // ---------------------------------------------------------------- 额度
+
+  void _cancelQuotaTimer() {
+    _quotaTimer?.cancel();
+    _quotaTimer = null;
+  }
+
+  /// 使在途额度查询失效并取消定时查询（关闭 / 销毁 / 退后台 / 401 /
+  /// 提交成功 / 收到额度错误）。
+  void _invalidateQuotaRefresh() {
+    _quotaSeq++;
+    _cancelQuotaTimer();
+  }
+
+  /// 统一调度额度查询（同一时刻最多一个定时器）：
+  /// - 未登录 / 面板未打开 / 应用不在前台 → 不排程；
+  /// - 刷新失败 → 30 秒后重试（不对过期 resetAt 立即循环请求）；
+  /// - 额度用尽 → 每 30 秒一次，并与 resetAt 合并取更早者；
+  /// - 其它状态 → 只在服务端 resetAt 排单次查询。
+  ///
+  /// 「待立即刷新」意图由 [_consumeQuotaRefreshIntent] 优先消费并立即补发，
+  /// 本方法只负责常规定时规则（T1-B）。
+  void _scheduleQuotaRefresh() {
+    _cancelQuotaTimer();
+    if (!mounted || !_signedIn || !_panelVisible || !_foreground) return;
+    if (_quotaInFlight) return; // 在途查询完成后会重新调度
+    Duration? delay;
+    if (_quotaRefreshFailed) {
+      delay = _quotaRetryDelay;
+    } else {
+      final Quota? q = _quota;
+      if (q == null) return;
+      final Duration? until = q.resetAt?.difference(DateTime.now());
+      if (q.remaining <= 0) {
+        delay = (until != null && until > Duration.zero && until < _quotaRetryDelay)
+            ? until
+            : _quotaRetryDelay;
+      } else if (until != null && until > Duration.zero) {
+        delay = until;
+      } else {
+        delay = null; // 非用尽且 resetAt 已过：等下一次打开 / 回到前台刷新
+      }
+    }
+    if (delay == null || delay <= Duration.zero) return;
+    if (delay > _quotaMaxDelay) delay = _quotaMaxDelay;
+    _quotaTimer = Timer(delay, () {
+      _quotaTimer = null;
+      unawaited(_refreshQuota());
+    });
+  }
+
+  /// 刷新额度与会话信息（打开面板 / 重新打开 / 登录后 / 提交完成后 / 恢复前台）。
+  /// 结果除校验挂载状态外还要校验查询序号：提交成功或额度错误之后的旧查询
+  /// 不得把剩余次数加回。
+  Future<void> _refreshQuota() async {
+    if (!_signedIn || _busy || _quotaInFlight) {
+      // T1-B：被旧查询或忙碌挡下时登记「待立即刷新」，不得丢弃意图；
+      // 未登录 / 面板未打开 / 不在前台时不登记（相应事件会重新登记）。
+      if (mounted &&
+          _signedIn &&
+          _panelVisible &&
+          _foreground &&
+          (_busy || _quotaInFlight)) {
+        _quotaRefreshPending = true;
+      }
+      return;
+    }
+    final int seq = ++_quotaSeq;
+    _quotaInFlight = true;
+    try {
+      final SessionInfo info = await _api.fetchSession();
+      if (!mounted || seq != _quotaSeq) return;
+      setState(() {
+        _quota = info.quota ?? _quota;
+        _user = info.user ?? _user;
+        _quotaRefreshFailed = false;
+      });
+    } on ApiException {
+      // 401 已由 ApiClient 触发 onUnauthorized；其它错误保留旧额度、30 秒后重试。
+      if (!mounted || seq != _quotaSeq) return;
+      _quotaRefreshFailed = true;
+    } catch (_) {
+      // 网络异常：保留旧额度与草稿。
+      if (!mounted || seq != _quotaSeq) return;
+      _quotaRefreshFailed = true;
+    } finally {
+      _quotaInFlight = false;
+      _consumeQuotaRefreshIntent();
+    }
+  }
+
+  /// 消费「待立即刷新」意图（T1-B）：优先于定时规则——旧查询结束 / 忙碌
+  /// 结束后条件仍满足时立即补发一次并清除标记；否则按现有 30 秒 / resetAt
+  /// 规则排定时器（不会紧密循环，也不会因一次跳过而永久停摆）。
+  void _consumeQuotaRefreshIntent() {
+    if (_quotaRefreshPending &&
+        mounted &&
+        _signedIn &&
+        _panelVisible &&
+        _foreground &&
+        !_busy &&
+        !_quotaInFlight) {
+      _quotaRefreshPending = false;
+      unawaited(_refreshQuota());
+      return;
+    }
+    _scheduleQuotaRefresh();
+  }
+
+  /// 展开面板内账号密码表单（不打开新窗口）。
+  void _openLoginForm({required bool thenSubmit}) {
+    if (_busy) return;
+    setState(() {
+      _showLoginForm = true;
+      _submitAfterLogin = thenSubmit;
+      _loginError = null;
+    });
+    _focusFirstField();
+  }
+
+  void _cancelLoginForm() {
+    // 取消登录：使在途登录失效（迟到结果不得写令牌 / 更新界面 / 自动提交）。
+    _invalidateLogin();
+    setState(() {
+      _showLoginForm = false;
+      _submitAfterLogin = false;
+      _loginError = null;
+    });
+  }
+
+  /// 提交登录表单：成功后（可选）自动提交一次。
+  ///
+  /// 令牌写入**之前**先校验操作有效性；写入完成后再次校验——
+  /// 已开始的平台安全存储写入无法撤回时不做无条件清库（避免误删更新的
+  /// 凭据），只保证失效操作不更新界面、不自动提交。
+  Future<void> _login() async {
     if (_busy) return;
     final String username = _username.text.trim();
     final String password = _password.text;
@@ -316,83 +587,106 @@ class FeedbackPanelState extends State<FeedbackPanel> {
       setState(() => _loginError = '请输入用户名和密码');
       return;
     }
+    final int seq = ++_loginSeq;
+    _loginInFlight = true;
     setState(() {
       _busy = true;
       _loginError = null;
     });
+    final bool thenSubmit = _submitAfterLogin;
     try {
       final LoginResult result = await _api.login(
         username: username,
         password: password,
         clientLabel: _clientLabel(),
+        appId: widget.config.appId,
       );
-      await _tokenStore.write(result.token);
-      if (!mounted) return;
+      if (!_loginStillValid(seq)) return; // 写入令牌之前校验
+      try {
+        await _tokenStore.write(result.token);
+      } catch (_) {
+        // T1-C：平台安全存储写入失败（如 macOS Keychain 缺少 entitlement）
+        // 与凭据错误 / 网络失败明确区分——登录请求本身已成功，只是无法保存
+        // 登录状态。清空密码、取消自动提交、保留草稿，提示检查安全存储。
+        if (!_loginStillValid(seq)) return;
+        _invalidateLogin();
+        setState(() {
+          _busy = false;
+          _loginError = '无法保存登录状态，请检查应用的安全存储配置';
+        });
+        return;
+      }
+      if (!_loginStillValid(seq)) return; // 写入完成后再次校验
+      _loginInFlight = false;
       setState(() {
         _busy = false;
         _signedIn = true;
+        _showLoginForm = false;
+        _submitAfterLogin = false;
+        _loginError = null;
+        _user = result.user;
+        _quota = result.quota;
+        _quotaRefreshFailed = false;
         _password.clear(); // 密码不留存 UI。
       });
+      _invalidateQuotaRefresh();
+      _consumeQuotaRefreshIntent(); // 登录忙碌结束：补发被挡下的刷新
       _focusFirstField();
+      if (thenSubmit && _draft.text.trim().isNotEmpty) {
+        await _submit(); // 登录成功后只提交一次
+      }
     } on ApiException catch (e) {
-      if (!mounted) return;
+      if (!_loginStillValid(seq)) return; // 失效登录的错误不得覆盖新登录
+      _loginInFlight = false;
       setState(() {
         _busy = false;
+        _password.clear(); // 登录结束清空密码。
         _loginError = _friendlyApiError(e);
       });
     } catch (_) {
-      if (!mounted) return;
+      if (!_loginStillValid(seq)) return;
+      _loginInFlight = false;
       setState(() {
         _busy = false;
+        _password.clear();
         _loginError = '网络异常，登录失败，请稍后重试';
       });
     }
   }
 
-  Future<void> _webHandshake() async {
-    if (_busy) return;
-    setState(() {
-      _busy = true;
-      _handshakeError = null;
-    });
-    final result = await startWebLoginHandshake(
-      apiBase: widget.config.apiBase,
-      appId: widget.config.appId,
-    );
-    if (!mounted) return;
-    if (result.success && result.accessToken != null) {
-      await _tokenStore.write(result.accessToken!);
-      if (!mounted) return;
-      setState(() {
-        _busy = false;
-        _signedIn = true;
-        _popupBlocked = false;
-      });
-      _focusFirstField();
-      return;
-    }
-    setState(() {
-      _busy = false;
-      _popupBlocked = result.popupBlocked;
-      _handshakeError = result.popupBlocked
-          ? '弹窗被浏览器拦截，请点击下方按钮手动打开登录窗口'
-          : (result.error ?? '登录未完成，请重试');
-    });
-  }
-
   // ---------------------------------------------------------------- 提交
 
-  bool get _canSubmit {
+  /// 草稿是否满足提交条件（与登录状态无关）。
+  bool get _draftValid {
     final int runes = _draft.text.runes.length;
+    return runes > 0 && runes <= kFeedbackMaxTextRunes && _draft.text.trim().isNotEmpty;
+  }
+
+  /// 结果未知的同键重试（服务端可能已接收）：额度用尽也允许，避免丢失已接收结果。
+  bool get _retryingUnknown =>
+      _stage == FeedbackStage.notSent && _pendingSubmit != null;
+
+  /// 额度用尽：禁止新提交（但允许上面的同键重试）。
+  bool get _quotaBlocked {
+    final Quota? q = _quota;
+    return _signedIn && q != null && q.remaining <= 0 && !_retryingUnknown;
+  }
+
+  bool get _canSubmit {
     return !_busy &&
         _signedIn &&
         (_stage == FeedbackStage.compose || _stage == FeedbackStage.notSent) &&
-        runes > 0 &&
-        runes <= kFeedbackMaxTextRunes &&
-        _draft.text.trim().isNotEmpty;
+        _draftValid &&
+        !_quotaBlocked;
   }
 
   Future<void> _submit() async {
+    if (_quotaBlocked) {
+      setState(() {
+        _composeError = '今日提交次数已用完，请在额度刷新后重试。您的输入已保留';
+      });
+      return;
+    }
     if (!_canSubmit) return;
     // 防御：Class B（服务端已接收、后台处理失败）绝不重新 POST——重发只会
     // 产生重复工单；该视图只提供刷新状态 / 复制反馈 ID / 返回编辑开新反馈。
@@ -433,6 +727,8 @@ class FeedbackPanelState extends State<FeedbackPanel> {
       _screenshotBytes = null;
       _captureInfo = null;
       _pendingSubmit = null;
+      // 提交已扣次：使此前的额度查询失效，旧查询不得把剩余次数加回。
+      _invalidateQuotaRefresh();
       setState(() {
         _busy = false;
         _ticketId = result.feedbackId;
@@ -440,12 +736,34 @@ class FeedbackPanelState extends State<FeedbackPanel> {
         _kaneoUrl = null;
         _errorSummary = null;
         _failedNotice = null;
+        _quota = result.quota ?? _quota;
+        _user = result.user ?? _user;
         _stage = _stageForStatus(result.status);
       });
+      _consumeQuotaRefreshIntent(); // 提交忙碌结束：补发被挡下的刷新
       _schedulePollingIfNeeded();
     } on ApiException catch (e) {
       if (!mounted) return;
-      if (e.statusCode == 401) return; // 已回登录视图，草稿保留。
+      if (e.statusCode == 401) {
+        // 当前世代 401 已由 onUnauthorized 回登录视图；期间换了新登录的
+        // 过期请求不触发回调——这里只退出提交忙碌态，不改写登录界面。
+        // 草稿与冻结快照保留（重新提交仍同 key 同字节）。
+        if (mounted) setState(() => _busy = false);
+        return;
+      }
+      if (e.code == 'daily_quota_exceeded') {
+        // 明确「未接收」：不套用「服务端已收到」语义，草稿保留待额度刷新后重试。
+        // 额度错误带回权威额度：使此前的额度查询失效，避免旧查询覆盖。
+        _invalidateQuotaRefresh();
+        setState(() {
+          _busy = false;
+          _quota = e.quota ?? _quota;
+          _stage = FeedbackStage.compose;
+          _composeError = '今日提交次数已用完，请在额度刷新后重试。您的输入已保留';
+        });
+        _consumeQuotaRefreshIntent();
+        return;
+      }
       if (e.code == 'idempotency_conflict') {
         // 契约：同 key 不同内容。提示已提交并按重放处理（不再轮询）。
         setState(() {
@@ -460,9 +778,11 @@ class FeedbackPanelState extends State<FeedbackPanel> {
       // 冻结快照保留（未变则重试仍复用同一 key）。
       setState(() {
         _busy = false;
+        _quota = e.quota ?? _quota;
         _stage = FeedbackStage.compose;
         _composeError = _friendlyApiError(e);
       });
+      _consumeQuotaRefreshIntent();
     } catch (_) {
       if (!mounted) return;
       setState(() {
@@ -679,6 +999,10 @@ class FeedbackPanelState extends State<FeedbackPanel> {
         return e.message ?? '请求无效，请检查输入内容';
       case 'unknown_app':
         return '应用未在服务器登记（appId 无效）';
+      case 'origin_not_allowed':
+        return '当前来源未被该应用允许登录，请联系管理员';
+      case 'daily_quota_exceeded':
+        return '今日提交次数已用完，请在额度刷新后重试。您的输入已保留';
       case 'too_large':
         return '内容超出大小限制';
       case 'not_found':
@@ -736,7 +1060,8 @@ class FeedbackPanelState extends State<FeedbackPanel> {
     if (!_authReady) {
       return const Center(child: CircularProgressIndicator());
     }
-    if (!_signedIn) return _buildLoginView(context);
+    // 未登录也可继续编辑：登录表单在撰写视图底部按需展开（不打开任何窗口）。
+    if (!_signedIn) return _buildComposeView(context);
     if (_busy &&
         (_stage == FeedbackStage.compose ||
             _stage == FeedbackStage.notSent)) {
@@ -943,101 +1268,81 @@ class FeedbackPanelState extends State<FeedbackPanel> {
     );
   }
 
-  Widget _buildLoginView(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(20),
-      child: SingleChildScrollView(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: <Widget>[
-            Text('登录后即可提交反馈', style: Theme.of(context).textTheme.titleSmall),
-            const SizedBox(height: 16),
-            if (kIsWeb) ...<Widget>[
-              Text(
-                '将打开 Feedback 服务的登录窗口，授权完成后自动返回本面板。',
-                style: Theme.of(context).textTheme.bodyMedium,
-              ),
-              const SizedBox(height: 16),
-              FilledButton.icon(
-                key: const Key('feedback-web-login'),
-                onPressed: _busy ? null : _webHandshake,
-                icon: const Icon(Icons.login, size: 18),
-                label: Text(_popupBlocked ? '打开登录窗口' : '登录'),
-              ),
-              if (_popupBlocked) ...<Widget>[
-                const SizedBox(height: 12),
-                Text(
-                  _handshakeError ?? '',
-                  style: TextStyle(
-                    color: Theme.of(context).colorScheme.error,
-                  ),
-                ),
-              ] else if (_handshakeError != null) ...<Widget>[
-                const SizedBox(height: 12),
-                Text(
-                  _handshakeError!,
-                  style: TextStyle(
-                    color: Theme.of(context).colorScheme.error,
-                  ),
-                ),
-              ],
-            ] else ...<Widget>[
-              TextField(
-                key: const Key('feedback-login-username'),
-                controller: _username,
-                focusNode: _usernameFocus,
-                enabled: !_busy,
-                autofillHints: const <String>[AutofillHints.username],
-                decoration: const InputDecoration(
-                  labelText: '用户名',
-                  border: OutlineInputBorder(),
-                  isDense: true,
-                ),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                key: const Key('feedback-login-password'),
-                controller: _password,
-                enabled: !_busy,
-                obscureText: true,
-                autofillHints: const <String>[AutofillHints.password],
-                onSubmitted: (_) => _nativeLogin(),
-                decoration: const InputDecoration(
-                  labelText: '密码',
-                  border: OutlineInputBorder(),
-                  isDense: true,
-                ),
-              ),
-              if (_loginError != null) ...<Widget>[
-                const SizedBox(height: 12),
-                Text(
-                  _loginError!,
-                  key: const Key('feedback-login-error'),
-                  style: TextStyle(
-                    color: Theme.of(context).colorScheme.error,
-                  ),
-                ),
-              ],
-              const SizedBox(height: 16),
+  /// 面板内登录表单：在撰写视图底部按需展开（Web 与原生共用，不打开任何窗口）。
+  Widget _buildInlineLoginForm(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    return Container(
+      key: const Key('feedback-login-form'),
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Text('登录后即可提交（账号由管理员分发）',
+              style: theme.textTheme.bodySmall),
+          const SizedBox(height: 8),
+          TextField(
+            key: const Key('feedback-login-username'),
+            controller: _username,
+            focusNode: _usernameFocus,
+            enabled: !_busy,
+            autofillHints: const <String>[AutofillHints.username],
+            decoration: const InputDecoration(
+              labelText: '用户名',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+          ),
+          const SizedBox(height: 8),
+          TextField(
+            key: const Key('feedback-login-password'),
+            controller: _password,
+            enabled: !_busy,
+            obscureText: true,
+            autofillHints: const <String>[AutofillHints.password],
+            onSubmitted: (_) => _login(),
+            decoration: const InputDecoration(
+              labelText: '密码',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+          ),
+          if (_loginError != null) ...<Widget>[
+            const SizedBox(height: 8),
+            Text(
+              _loginError!,
+              key: const Key('feedback-login-error'),
+              style: TextStyle(color: theme.colorScheme.error, fontSize: 12),
+            ),
+          ],
+          const SizedBox(height: 8),
+          Row(
+            children: <Widget>[
               FilledButton(
                 key: const Key('feedback-login-submit'),
-                onPressed: _busy ? null : _nativeLogin,
+                onPressed: _busy ? null : _login,
                 child: _busy
                     ? const SizedBox.square(
                         dimension: 18,
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
-                    : const Text('登录'),
+                    : const Text('登录并提交'),
               ),
-              const SizedBox(height: 8),
-              Text(
-                '登录令牌将安全存储在本设备。',
-                style: Theme.of(context).textTheme.bodySmall,
-                textAlign: TextAlign.center,
+              const SizedBox(width: 8),
+              // 「取消」在登录进行中保持可用：用户必须能中止一次挂起的登录，
+              // 中止会递增登录序号使该次登录的迟到结果失效（T1-A）。
+              TextButton(
+                key: const Key('feedback-login-cancel'),
+                onPressed: _cancelLoginForm,
+                child: const Text('取消'),
               ),
             ],
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -1168,6 +1473,17 @@ class FeedbackPanelState extends State<FeedbackPanel> {
             ),
           ),
           const SizedBox(height: 10),
+          if (!_signedIn && _showLoginForm) _buildInlineLoginForm(context),
+          if (_signedIn && _quotaBlocked)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Text(
+                '今日提交次数已用完，额度刷新后可继续提交',
+                key: const Key('feedback-quota-blocked'),
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: theme.colorScheme.error),
+              ),
+            ),
           Row(
             children: <Widget>[
               Text(
@@ -1179,15 +1495,37 @@ class FeedbackPanelState extends State<FeedbackPanel> {
                       : theme.colorScheme.onSurfaceVariant,
                 ),
               ),
-              const Spacer(),
+              if (_signedIn && _quota != null) ...<Widget>[
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    '${_user?.username ?? ''} · 今日剩余 ${_quota!.remaining} 次',
+                    key: const Key('feedback-quota'),
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall
+                        ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                  ),
+                ),
+              ] else
+                const Spacer(),
               FilledButton.icon(
                 key: const Key('feedback-submit'),
-                onPressed: _canSubmit ? _submit : null,
-                icon: const Icon(Icons.send_outlined, size: 18),
+                // 未登录：点击在当前面板展开登录表单（成功后自动提交一次）。
+                onPressed: _signedIn
+                    ? (_canSubmit ? _submit : null)
+                    : (_draftValid && !_busy
+                        ? () => _openLoginForm(thenSubmit: true)
+                        : null),
+                icon: Icon(
+                  _signedIn ? Icons.send_outlined : Icons.login,
+                  size: 18,
+                ),
                 // Class A（未送达）时按钮语义是重试：同 key 同字节重发，
                 // 快照变化（改文案 / 换图 / 移图）则自动换新 key。
                 label: Text(
-                  _stage == FeedbackStage.notSent ? '重试提交' : '提交',
+                  _signedIn
+                      ? (_stage == FeedbackStage.notSent ? '重试提交' : '提交')
+                      : '登录并提交',
                 ),
               ),
             ],

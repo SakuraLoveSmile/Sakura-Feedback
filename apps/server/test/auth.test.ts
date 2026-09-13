@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { jsonReq, loginAsAdmin, makeTestApp, TEST_PASSWORD } from "./helpers.ts";
+import { jsonReq, loginAsAdmin, makeTestApp, seedApp, TEST_PASSWORD } from "./helpers.ts";
 
 describe("认证", () => {
   it("初始账号可登录并建立 cookie 会话；错误密码 401", async () => {
@@ -24,14 +24,65 @@ describe("认证", () => {
 
   it("clientLabel 登录返回长期可撤销 bearer 令牌", async () => {
     const t = makeTestApp();
+    const cookie = await loginAsAdmin(t);
+    await seedApp(t, cookie); // 令牌模式需登记 appId，浏览器来源按该应用允许来源校验
     const r = await jsonReq(t.app, "POST", "/api/auth/login", {
-      body: { username: "admin", password: TEST_PASSWORD, clientLabel: "flutter-android" },
+      origin: "http://host.test",
+      body: {
+        username: "admin",
+        password: TEST_PASSWORD,
+        clientLabel: "flutter-android",
+        appId: "com.test.app",
+      },
     });
     expect(r.status).toBe(200);
     expect(typeof r.data.token).toBe("string");
+    expect(r.data.user).toMatchObject({ username: "admin", role: "admin" });
+    expect(r.data.quota).toMatchObject({ dailyLimit: 3, used: 0, remaining: 3 });
     const s = await jsonReq(t.app, "GET", "/api/auth/session", { bearer: r.data.token });
     expect(s.data.kind).toBe("client");
     expect(s.data.clientLabel).toBe("flutter-android");
+    expect(s.data.user.username).toBe("admin");
+    expect(s.data.quota.remaining).toBe(3);
+  });
+
+  it("令牌登录：未携带 appId 400；浏览器来源未登记 403；原生无 Origin 放行", async () => {
+    const t = makeTestApp();
+    const cookie = await loginAsAdmin(t);
+    await seedApp(t, cookie);
+
+    const noApp = await jsonReq(t.app, "POST", "/api/auth/login", {
+      origin: "http://host.test",
+      body: { username: "admin", password: TEST_PASSWORD, clientLabel: "web-x" },
+    });
+    expect(noApp.status).toBe(400);
+
+    const badOrigin = await jsonReq(t.app, "POST", "/api/auth/login", {
+      origin: "http://evil.test",
+      body: { username: "admin", password: TEST_PASSWORD, clientLabel: "web-x", appId: "com.test.app" },
+    });
+    expect(badOrigin.status).toBe(403);
+    expect(badOrigin.data.error.code).toBe("origin_not_allowed");
+
+    const unknownApp = await jsonReq(t.app, "POST", "/api/auth/login", {
+      origin: "http://host.test",
+      body: { username: "admin", password: TEST_PASSWORD, clientLabel: "web-x", appId: "nope" },
+    });
+    expect(unknownApp.status).toBe(404);
+    expect(unknownApp.data.error.code).toBe("unknown_app");
+
+    // 原生 Flutter 不发送 Origin：不按浏览器来源校验（仍须声明 appId）。
+    const native = await t.app.request("http://localhost/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        username: "admin",
+        password: TEST_PASSWORD,
+        clientLabel: "native-x",
+        appId: "com.test.app",
+      }),
+    });
+    expect(native.status).toBe(200);
   });
 
   it("登录限流：窗口内多次失败后 429", async () => {
@@ -62,8 +113,15 @@ describe("认证", () => {
   it("会话列表与撤销：revoke 指定会话后其 bearer 立即失效", async () => {
     const t = makeTestApp();
     const cookie = await loginAsAdmin(t);
+    await seedApp(t, cookie);
     const cli = await jsonReq(t.app, "POST", "/api/auth/login", {
-      body: { username: "admin", password: TEST_PASSWORD, clientLabel: "device-x" },
+      origin: "http://host.test",
+      body: {
+        username: "admin",
+        password: TEST_PASSWORD,
+        clientLabel: "device-x",
+        appId: "com.test.app",
+      },
     });
     const list = await jsonReq(t.app, "GET", "/api/auth/sessions", { cookie });
     expect(list.status).toBe(200);

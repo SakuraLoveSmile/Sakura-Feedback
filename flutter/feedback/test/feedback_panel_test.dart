@@ -89,17 +89,34 @@ void main() {
     await tester.pump(const Duration(seconds: 30));
   }
 
-  testWidgets('未登录时展示登录表单，登录成功后进入撰写视图', (tester) async {
+  testWidgets('未登录仍可编辑；点击「登录并提交」在当前面板展开表单，登录成功后自动提交', (tester) async {
     store = MemoryTokenStore();
     server.respond('POST /api/auth/login', {
       'ok': true,
       'token': 'fresh-token',
-      'expiresAt': '2030-01-01T00:00:00Z'
+      'expiresAt': '2030-01-01T00:00:00Z',
+      'user': {'id': 'u1', 'username': 'admin', 'role': 'user'},
+      'quota': {
+        'dailyLimit': 3,
+        'used': 0,
+        'remaining': 3,
+        'resetAt': '2030-01-01T16:00:00Z'
+      },
     });
+    server.respond(
+        'POST /api/feedback', {'feedbackId': 'f-login', 'status': 'received'}, 201);
     await _pumpPanel(tester, server: server, tokenStore: store);
 
+    // 未登录：可直接编辑；登录表单尚未展开，也不打开任何窗口。
+    expect(find.byKey(input), findsOneWidget);
+    expect(find.byKey(const Key('feedback-login-username')), findsNothing);
+
+    await tester.enterText(find.byKey(input), '未登录也能写');
+    await tester.pump();
+    await tester.tap(find.byKey(submit)); // 展开面板内登录表单
+    await tester.pump();
     expect(find.byKey(const Key('feedback-login-username')), findsOneWidget);
-    expect(find.byKey(input), findsNothing);
+    expect(find.byKey(const Key('feedback-login-password')), findsOneWidget);
 
     await tester.enterText(
         find.byKey(const Key('feedback-login-username')), 'admin');
@@ -109,22 +126,23 @@ void main() {
     await tester.pump();
     await tester.pump();
 
-    // 令牌入库；请求携带 clientLabel（平台名 + 时间）。
+    // 令牌入库；请求携带 clientLabel（平台名 + 时间）与 appId。
     expect(await store.read(), 'fresh-token');
     final body = jsonDecode(server.lastMatching('POST /api/auth/login').body)
         as Map<String, Object?>;
     expect(body['username'], 'admin');
     expect(body['password'], 's3cret-pw');
+    expect(body['appId'], 'com.example.app');
     final label = body['clientLabel'] as String;
     expect(label, startsWith('flutter-'));
     expect(label, contains('20')); // ISO 时间
-    // 登录成功：进入撰写视图（密码不写日志、不驻留明文 UI）。
-    expect(find.byKey(input), findsOneWidget);
+    // 登录成功后只自动提交一次（同内容不重复提交）。
+    expect(server.requests.where((r) => r.url.path == '/api/feedback').length, 1);
 
     await teardown(tester);
   });
 
-  testWidgets('登录凭据错误：401 显示错误且不进入撰写视图', (tester) async {
+  testWidgets('登录凭据错误：401 显示错误、保留草稿、仍可编辑', (tester) async {
     store = MemoryTokenStore();
     server.respond(
         'POST /api/auth/login',
@@ -134,6 +152,10 @@ void main() {
         401);
     await _pumpPanel(tester, server: server, tokenStore: store);
 
+    await tester.enterText(find.byKey(input), '草稿不丢');
+    await tester.pump();
+    await tester.tap(find.byKey(submit));
+    await tester.pump();
     await tester.enterText(
         find.byKey(const Key('feedback-login-username')), 'admin');
     await tester.enterText(
@@ -144,8 +166,35 @@ void main() {
 
     expect(find.byKey(const Key('feedback-login-error')), findsOneWidget);
     expect(find.text('用户名或密码错误'), findsOneWidget);
-    expect(find.byKey(input), findsNothing);
+    expect(find.byKey(input), findsOneWidget);
+    expect(tester.widget<TextField>(find.byKey(input)).controller!.text, '草稿不丢');
     expect(await store.read(), isNull);
+    expect(server.requests.where((r) => r.url.path == '/api/feedback'), isEmpty);
+
+    await teardown(tester);
+  });
+
+  testWidgets('已登录显示今日剩余次数；额度用尽禁止新提交并提示', (tester) async {
+    server.respond('GET /api/auth/session', {
+      'authenticated': true,
+      'user': {'id': 'u1', 'username': 'admin', 'role': 'user'},
+      'quota': {
+        'dailyLimit': 3,
+        'used': 3,
+        'remaining': 0,
+        'resetAt': '2030-01-01T16:00:00Z'
+      },
+    });
+    await _pumpPanel(tester, server: server, tokenStore: store);
+    await tester.pump(); // 刷新额度完成
+
+    expect(find.byKey(const Key('feedback-quota')), findsOneWidget);
+    await tester.enterText(find.byKey(input), '额度用尽仍保留');
+    await tester.pump();
+    expect(tester.widget<FilledButton>(find.byKey(submit)).onPressed, isNull);
+    expect(find.byKey(const Key('feedback-quota-blocked')), findsOneWidget);
+    expect(tester.widget<TextField>(find.byKey(input)).controller!.text,
+        '额度用尽仍保留');
 
     await teardown(tester);
   });
@@ -375,13 +424,13 @@ void main() {
     await teardown(tester);
   });
 
-  testWidgets('任意认证接口 401：清除令牌并回到登录视图，草稿保留', (tester) async {
-    server.respond(
-        'POST /api/feedback',
-        {
-          'error': {'code': 'unauthorized', 'message': '令牌无效'}
-        },
-        401);
+  testWidgets('提交返回 401：清除令牌并回到未登录态，草稿保留', (tester) async {
+    // 第一次提交 401（令牌失效）；重新登录后的自动续交成功。
+    server.on('POST /api/feedback',
+        (r) async => jsonResponse({'error': {'code': 'unauthorized', 'message': '令牌无效'}}, 401));
+    server.on('POST /api/feedback',
+        (r) async => jsonResponse({'feedbackId': 'f-re', 'status': 'received'}, 201));
+    server.respond('POST /api/auth/login', {'ok': true, 'token': 're-token'});
     await _pumpPanel(tester, server: server, tokenStore: store);
 
     await tester.enterText(find.byKey(input), '令牌过期时的草稿');
@@ -391,9 +440,13 @@ void main() {
     await tester.pump();
 
     expect(await store.read(), isNull); // 401 清 token
-    expect(find.byKey(const Key('feedback-login-username')), findsOneWidget);
-    // 重新登录后草稿仍在。
-    server.respond('POST /api/auth/login', {'ok': true, 'token': 're-token'});
+    expect(find.byKey(input), findsOneWidget); // 仍可编辑
+    expect(tester.widget<TextField>(find.byKey(input)).controller!.text,
+        '令牌过期时的草稿');
+
+    // 未登录：点击提交展开面板内表单，重新登录后草稿仍在并通过自动续交提交。
+    await tester.tap(find.byKey(submit));
+    await tester.pump();
     await tester.enterText(
         find.byKey(const Key('feedback-login-username')), 'u');
     await tester.enterText(
@@ -401,8 +454,10 @@ void main() {
     await tester.tap(find.byKey(const Key('feedback-login-submit')));
     await tester.pump();
     await tester.pump();
-    expect(tester.widget<TextField>(find.byKey(input)).controller!.text,
-        '令牌过期时的草稿');
+
+    expect(await store.read(), 're-token'); // 重新登录成功
+    // 自动续交成功：进入已接收状态（草稿被服务端接收）。
+    expect(find.text('已接收'), findsOneWidget);
 
     await teardown(tester);
   });

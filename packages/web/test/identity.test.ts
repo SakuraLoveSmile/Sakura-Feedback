@@ -14,11 +14,12 @@ import {
   API_BASE,
   cleanup,
   completeLogin,
-  deliverAuthMessage,
+  installAuthFetch,
   httpResponse,
+  loginResponse,
   mount,
   setTextarea,
-  stubWindowOpen,
+  submitLoginForm,
   type Mounted,
 } from './helpers';
 
@@ -136,11 +137,10 @@ afterEach(() => {
 
 describe('服务身份隔离：api-base 切换 = 完整身份切换', () => {
   it('在途 submit 的迟到响应被丢弃：不清草稿、不改相位、不派发事件、不轮询', async () => {
-    stubWindowOpen({ closed: false });
     const m = mount();
     const pending = deferred<unknown>();
     const { calls } = stubFetch(() => pending.promise);
-    completeLogin(m);
+    await completeLogin(m);
     const events: CustomEvent[] = [];
     m.widget.addEventListener('feedback-submitted', (ev) => events.push(ev as CustomEvent));
 
@@ -166,13 +166,12 @@ describe('服务身份隔离：api-base 切换 = 完整身份切换', () => {
   });
 
   it('在途 pollTick 的迟到记录不写入新身份（不更新 lastRecord / phase）', async () => {
-    stubWindowOpen({ closed: false });
     const m = mount();
     const pendingGet = deferred<unknown>();
     const { calls } = stubFetch((call) =>
       call.method === 'POST' ? httpResponse(201, { feedbackId: 'fb-1', status: 'received' }) : pendingGet.promise,
     );
-    completeLogin(m);
+    await completeLogin(m);
     setTextarea(m, '轮询中的反馈');
     m.submitBtn.click();
     await flush();
@@ -192,7 +191,6 @@ describe('服务身份隔离：api-base 切换 = 完整身份切换', () => {
   });
 
   it('切换时清空令牌 / 任务态 / 草稿，并停止旧服务的轮询', async () => {
-    stubWindowOpen({ closed: false });
     const m = mount();
     m.widget.captureProvider = vi.fn(async () => ({ blob: PNG('shot'), width: 100, height: 100 }));
     const { calls } = stubFetch((call) =>
@@ -200,7 +198,7 @@ describe('服务身份隔离：api-base 切换 = 完整身份切换', () => {
         ? httpResponse(201, { feedbackId: 'fb-1', status: 'received' })
         : httpResponse(200, feedbackRecord('processing')),
     );
-    completeLogin(m);
+    await completeLogin(m);
     setTextarea(m, '切换前的反馈');
     m.submitBtn.click();
     await flush();
@@ -225,10 +223,9 @@ describe('服务身份隔离：api-base 切换 = 完整身份切换', () => {
   });
 
   it('新服务绝不收到旧服务的 Authorization：切换后必须重新登录，请求只带新令牌', async () => {
-    const { urls } = stubWindowOpen({ closed: false });
     const m = mount();
     const { calls } = stubFetch(() => httpResponse(201, { feedbackId: 'fb-b', status: 'received' }));
-    completeLogin(m); // A 登录成功：令牌 test-access-token
+    await completeLogin(m); // A 登录成功：令牌 test-access-token
     expect(m.panel.querySelector('.fb-login')).toBeNull();
 
     m.widget.setAttribute('api-base', API_BASE_B);
@@ -239,11 +236,11 @@ describe('服务身份隔离：api-base 切换 = 完整身份切换', () => {
     await flush();
     // 未登录 B → 不发送任何请求：尤其不存在携带 A 的 Authorization 的请求
     expect(calls).toHaveLength(0);
-    expect(urls[urls.length - 1]).toContain(`${API_BASE_B}/login`); // 登录页绑定新服务
+    expect(m.root.querySelector<HTMLDivElement>('.fb-login-panel')?.hidden).toBe(false); // 面板内登录表单已展开
 
-    // 完成 B 的登录：自动续交
-    const nonce = new URL(urls[urls.length - 1] as string).searchParams.get('nonce') as string;
-    deliverAuthMessage({ token: 'b-token', nonce, origin: API_BASE_B });
+    // 完成 B 的登录（表单在当前面板内）：自动续交
+    installAuthFetch('b-token');
+    submitLoginForm(m);
     await flush();
 
     const sent = posts(calls);
@@ -253,15 +250,27 @@ describe('服务身份隔离：api-base 切换 = 完整身份切换', () => {
     expect(calls.some((c) => c.headers['Authorization'] === 'Bearer test-access-token')).toBe(false);
   });
 
-  it('丢弃旧服务迟到的登录令牌（握手回调）', async () => {
-    stubWindowOpen({ closed: false });
+  it('丢弃旧服务迟到的登录结果（登录响应绑定身份世代）', async () => {
     const m = mount();
     const { calls } = stubFetch(() => httpResponse(201, { feedbackId: 'fb-x', status: 'received' }));
-    const loginUrl = m.widget.startLogin(); // A 的握手
-    const nonce = new URL(loginUrl).searchParams.get('nonce') as string;
+    const pendingLogin = deferred<unknown>();
+    const inner = globalThis.fetch as unknown;
+    vi.stubGlobal('fetch', async (input: unknown, init?: unknown) => {
+      const url = String(input);
+      if (url.includes('/api/auth/login')) return pendingLogin.promise;
+      if (url.includes('/api/auth/session')) return httpResponse(200, {});
+      return (inner as (i: unknown, n?: unknown) => Promise<unknown>)(input, init);
+    });
 
-    m.widget.setAttribute('api-base', API_BASE_B);
-    deliverAuthMessage({ token: 'a-token', nonce, origin: API_BASE }); // A 迟到交付
+    setTextarea(m, 'A 的反馈');
+    m.submitBtn.click();
+    await flush();
+    submitLoginForm(m); // A 的登录请求挂起
+    await flush();
+
+    m.widget.setAttribute('api-base', API_BASE_B); // 切换身份
+    pendingLogin.resolve(loginResponse('a-token')); // A 迟到返回
+    await flush();
 
     setTextarea(m, 'B 的反馈');
     m.submitBtn.click();
@@ -271,12 +280,11 @@ describe('服务身份隔离：api-base 切换 = 完整身份切换', () => {
   });
 
   it('清空「结果未知的原请求」等旧服务状态', async () => {
-    stubWindowOpen({ closed: false });
     const m = mount();
     stubFetch(() => {
       throw new Error('network down');
     });
-    completeLogin(m);
+    await completeLogin(m);
     setTextarea(m, '第一次');
     m.submitBtn.click();
     await flush();
@@ -292,7 +300,6 @@ describe('服务身份隔离：api-base 切换 = 完整身份切换', () => {
   });
 
   it('失效旧服务的捕获会话：迟到截图不写入新身份', async () => {
-    stubWindowOpen({ closed: false });
     const m = mount();
     const pendingShot = deferred<{ blob: Blob; width: number; height: number }>();
     m.widget.captureProvider = vi.fn(() => pendingShot.promise);
@@ -310,11 +317,10 @@ describe('服务身份隔离：api-base 切换 = 完整身份切换', () => {
 
 describe('服务身份隔离：app-id 切换（同服务）', () => {
   it('使在途 submit 结果失效：不写新身份状态、不锁死编辑', async () => {
-    stubWindowOpen({ closed: false });
     const m = mount();
     const pending = deferred<unknown>();
     const { calls } = stubFetch(() => pending.promise);
-    completeLogin(m);
+    await completeLogin(m);
     const events: CustomEvent[] = [];
     m.widget.addEventListener('feedback-submitted', (ev) => events.push(ev as CustomEvent));
 
@@ -340,14 +346,13 @@ describe('服务身份隔离：app-id 切换（同服务）', () => {
   });
 
   it('重置任务态与轮询，但保留令牌（同一服务）', async () => {
-    stubWindowOpen({ closed: false });
     const m = mount();
     const { calls } = stubFetch((call) =>
       call.method === 'POST'
         ? httpResponse(201, { feedbackId: 'fb-1', status: 'received' })
         : httpResponse(200, feedbackRecord('processing')),
     );
-    completeLogin(m);
+    await completeLogin(m);
     setTextarea(m, '旧应用的反馈');
     m.submitBtn.click();
     await flush();
@@ -374,15 +379,27 @@ describe('服务身份隔离：app-id 切换（同服务）', () => {
     expect(jsonBody(sent[1] as RawCall).appId).toBe(OTHER_APP_ID);
   });
 
-  it('旧身份的登录令牌不被接受（握手回调绑定身份世代）', async () => {
-    stubWindowOpen({ closed: false });
+  it('旧身份的登录结果不被接受（登录响应绑定身份世代）', async () => {
     const m = mount();
     const { calls } = stubFetch(() => httpResponse(201, { feedbackId: 'fb-x', status: 'received' }));
-    const loginUrl = m.widget.startLogin(); // 旧 appId 的握手
-    const nonce = new URL(loginUrl).searchParams.get('nonce') as string;
+    const pendingLogin = deferred<unknown>();
+    const inner = globalThis.fetch as unknown;
+    vi.stubGlobal('fetch', async (input: unknown, init?: unknown) => {
+      const url = String(input);
+      if (url.includes('/api/auth/login')) return pendingLogin.promise;
+      if (url.includes('/api/auth/session')) return httpResponse(200, {});
+      return (inner as (i: unknown, n?: unknown) => Promise<unknown>)(input, init);
+    });
+
+    setTextarea(m, '旧应用的内容');
+    m.submitBtn.click();
+    await flush();
+    submitLoginForm(m); // 旧 appId 的登录请求挂起
+    await flush();
 
     m.widget.setAttribute('app-id', OTHER_APP_ID);
-    deliverAuthMessage({ token: 'stale-token', nonce, origin: API_BASE });
+    pendingLogin.resolve(loginResponse('stale-token')); // 旧身份迟到返回
+    await flush();
 
     setTextarea(m, '新应用的内容');
     m.submitBtn.click();
@@ -394,11 +411,10 @@ describe('服务身份隔离：app-id 切换（同服务）', () => {
 
 describe('非身份属性的变化不销毁草稿', () => {
   it('page-label / app-version / theme 变化保留草稿、令牌、截图与头部信息刷新', async () => {
-    stubWindowOpen({ closed: false });
     const m = mount();
     m.widget.captureProvider = vi.fn(async () => ({ blob: PNG('keep'), width: 100, height: 100 }));
     stubFetch(() => httpResponse(201, { feedbackId: 'fb-1', status: 'received' }));
-    completeLogin(m);
+    await completeLogin(m);
     await m.widget.captureAndOpen();
     setTextarea(m, '不该被清空的草稿');
     const shotSrc = m.screenshotThumb.src;
@@ -417,14 +433,13 @@ describe('非身份属性的变化不销毁草稿', () => {
   });
 
   it('page-label / app-version / theme 变化不打断进行中的轮询与任务态', async () => {
-    stubWindowOpen({ closed: false });
     const m = mount();
     const { calls } = stubFetch((call) =>
       call.method === 'POST'
         ? httpResponse(201, { feedbackId: 'fb-1', status: 'received' })
         : httpResponse(200, feedbackRecord('processing')),
     );
-    completeLogin(m);
+    await completeLogin(m);
     setTextarea(m, '进行中的反馈');
     m.submitBtn.click();
     await flush();
@@ -441,7 +456,6 @@ describe('非身份属性的变化不销毁草稿', () => {
   });
 
   it('page-label 变化不改变已冻结快照的字节与元数据（重试同 key 同字节）', async () => {
-    stubWindowOpen({ closed: false });
     const m = mount();
     m.widget.captureProvider = vi.fn(async () => ({ blob: PNG('image1'), width: 100, height: 100 }));
     let first = true;
@@ -452,7 +466,7 @@ describe('非身份属性的变化不销毁草稿', () => {
       }
       return httpResponse(201, { feedbackId: 'fb-2', status: 'received' });
     });
-    completeLogin(m);
+    await completeLogin(m);
     await m.widget.captureAndOpen();
     setTextarea(m, '冻结期间的来源变化');
     m.submitBtn.click();
@@ -482,14 +496,13 @@ describe('失败路径：服务端已接收 vs 提交未到达', () => {
     m: Mounted;
     calls: RawCall[];
   }> {
-    stubWindowOpen({ closed: false });
     const m = mount();
     const { calls } = stubFetch((call) =>
       call.method === 'POST'
         ? httpResponse(201, { feedbackId: 'fb-1', status: 'received' })
         : httpResponse(200, feedbackRecord('failed', { errorSummary: 'AI 整理失败' })),
     );
-    completeLogin(m);
+    await completeLogin(m);
     setTextarea(m, '会失败的反馈');
     m.submitBtn.click();
     await flush();
@@ -528,7 +541,6 @@ describe('失败路径：服务端已接收 vs 提交未到达', () => {
   });
 
   it('刷新到 archived 后展示任务链接，仍不重复提交', async () => {
-    stubWindowOpen({ closed: false });
     const m = mount();
     let getCount = 0;
     const { calls } = stubFetch((call) => {
@@ -537,7 +549,7 @@ describe('失败路径：服务端已接收 vs 提交未到达', () => {
       if (getCount === 1) return httpResponse(200, feedbackRecord('failed', { errorSummary: 'AI 整理失败' }));
       return httpResponse(200, feedbackRecord('archived', { kaneoUrl: 'https://kaneo.test/task/42' }));
     });
-    completeLogin(m);
+    await completeLogin(m);
     setTextarea(m, '稍后归档的反馈');
     m.submitBtn.click();
     await flush();
@@ -567,7 +579,6 @@ describe('失败路径：服务端已接收 vs 提交未到达', () => {
   });
 
   it('提交未到达服务：只提供重试提交，重试复用同一幂等键与同一字节', async () => {
-    stubWindowOpen({ closed: false });
     const m = mount();
     m.widget.captureProvider = vi.fn(async () => ({ blob: PNG('image1'), width: 100, height: 100 }));
     let first = true;
@@ -578,7 +589,7 @@ describe('失败路径：服务端已接收 vs 提交未到达', () => {
       }
       return httpResponse(201, { feedbackId: 'fb-net', status: 'received' });
     });
-    completeLogin(m);
+    await completeLogin(m);
     await m.widget.captureAndOpen();
     setTextarea(m, '未到达服务的内容');
     m.submitBtn.click();

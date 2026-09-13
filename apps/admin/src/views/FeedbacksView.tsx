@@ -77,6 +77,7 @@ export default function FeedbacksView() {
             <tr>
               <th>时间</th>
               <th>软件</th>
+              <th>提交账号</th>
               <th>标题 / 摘要</th>
               <th>状态</th>
               <th>Kaneo</th>
@@ -88,6 +89,7 @@ export default function FeedbacksView() {
               <tr key={it.id}>
                 <td className="muted">{new Date(it.createdAt).toLocaleString()}</td>
                 <td>{it.appId}</td>
+                <td>{it.username ?? <span className="muted">—</span>}</td>
                 <td>{it.title ?? <span className="muted">{(it.errorSummary ?? "—").slice(0, 60)}</span>}</td>
                 <td>
                   <span className={`tag ${it.status}`}>{STATUS_LABELS[it.status] ?? it.status}</span>
@@ -110,7 +112,7 @@ export default function FeedbacksView() {
             ))}
             {items.length === 0 && (
               <tr>
-                <td colSpan={6} className="muted" style={{ padding: 20 }}>
+                <td colSpan={7} className="muted" style={{ padding: 20 }}>
                   暂无记录
                 </td>
               </tr>
@@ -148,6 +150,8 @@ function DetailPane({
         <code>{detail.id}</code>
         <span>软件</span>
         <span>{detail.appId}</span>
+        <span>提交账号</span>
+        <span>{detail.username ?? "—"}</span>
         <span>提交时间</span>
         <span>{new Date(detail.createdAt).toLocaleString()}</span>
         <span>处理轮次</span>

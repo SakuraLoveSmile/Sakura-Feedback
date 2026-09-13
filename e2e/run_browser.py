@@ -2,14 +2,14 @@
 """
 Feedback Web 组件真实浏览器端到端验证（Chromium via Playwright）。
 
-原有场景：加载/呼出/Esc/焦点恢复、草稿保留、超限禁提交、登录握手提交→归档、
-AI 失败保留输入与重试、跨域会话恢复（Cookie 静默握手）、窄屏布局、Vue 示例接入。
+原有场景：加载/呼出/Esc/焦点恢复、草稿保留、超限禁提交、面板内登录后提交→归档、
+AI 失败保留输入与重试、刷新后重新登录、窄屏布局、Vue 示例接入。
 
 新增场景（见 e2e/browser_paths.py，宿主页在 e2e/pages/，由本文件托管在 :5189）：
 P1 灵感球拖动 → 落点记录/使用 → 截图就是宿主视口（灵感球不在图里）
 P2 遮罩：[data-feedback-capture-mask] 与 input[type=password] 在最终 PNG 上的像素级验证
 P3 遮挡失败规则：可见敏感区无法遮挡 → 整次截图失败（旧草稿/旧截图保留 + 用户被告知）
-P4 登录握手：真实弹窗+postMessage 严格校验的负例（异源 / nonce 不匹配）+ api-base 切换后的凭据隔离
+P4 面板内登录：不打开窗口、确认文案、登录后额度显示；api-base 切换后的凭据隔离
 P5 截图区可见性：默认 capture-mode=off 下截图区真的隐藏、且面板里必须有「截取当前页面」入口；
    viewport 模式「移除截图」后回到首个入口并保留文字（[hidden] 级联回归）
 P6 默认 off 模式的手动截图：侧边标签打开不自动截图（blob URL 计数为 0）→ 先写文字 →
@@ -33,7 +33,7 @@ P7 窄屏(390x844)+键盘：入口可点不溢出、无空白破图占位、Ente
    脚本原来是「先点提交，再点 .fb-login 期待开窗」。另外 `.fb-login-area` 这个类在
    packages/web/** 与两个示例产物里都不存在（只出现在脚本里），组件未登录时是把主按钮
    改成 `.fb-submit.fb-login` 并把状态文案设为「需要登录」（element.ts:1599）。
-   因此 T5/T8/T10 改为「点提交 → expect_page → 弹窗内完成登录」，并断言
+   因此 T5/T8/T10 改为「点提交 → 在当前面板展开表单 → 填账号密码完成登录」，并断言
    「主按钮文案 = 登录并提交」「状态含 需要登录」。
 """
 
@@ -63,6 +63,11 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVER = "http://localhost:8787"
 SERVER2 = "http://localhost:8788"
 ADMIN_USER, ADMIN_PASS = "admin", "e2e-browser-pass-1"
+# 组件登录专用普通账号（额度调高，避免 E2E 多次提交触发每日额度）
+E2E_USER, E2E_PASS = "e2e-user", "e2e-browser-user-pw"
+# 登录生命周期路径（P5）的专用账号：登录限流按「IP|用户名」计数，
+# 单独开号可避免给主链路额外消耗登录次数预算。
+E2E_USER2, E2E_PASS2 = "e2e-user-2", "e2e-browser-user2-pw"
 REACT_ORIGIN = "http://localhost:5187"
 VUE_ORIGIN = "http://localhost:5188"
 PAGES_ORIGIN = "http://localhost:5189"
@@ -227,6 +232,13 @@ def configure_service(base, app_ids):
                    {"appId": app_id, "name": name, "allowedOrigins": origins,
                     "kaneoProjectId": "p-e2e", "kaneoColumnSlug": "triage"}, base=base)
         assert s == 201, s
+    # 组件在面板内用账号密码登录（Bearer），需要一个额度足够高的普通账号。
+    s, _ = api("POST", "/api/admin/users",
+               {"username": E2E_USER, "password": E2E_PASS, "dailyLimit": 200}, base=base)
+    assert s in (201, 409), s
+    s, _ = api("POST", "/api/admin/users",
+               {"username": E2E_USER2, "password": E2E_PASS2, "dailyLimit": 200}, base=base)
+    assert s in (201, 409), s
     return login_status
 
 
@@ -393,35 +405,24 @@ def open_panel(page, timeout=60000):
     page.locator(".fb-panel").wait_for(state="visible", timeout=timeout)
 
 
-def wait_form_or_close(popup, timeout=40):
-    """登录弹窗：等密码表单出现，或等它自己关掉（有 Cookie 时静默握手）。"""
-    form = popup.locator("#login-form")
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            if form.is_visible():
-                return True
-            if popup.is_closed():
-                return False
-        except Exception:
-            return False
-        time.sleep(0.15)
-    return False
+def login_in_panel(page, user=E2E_USER, pw=E2E_PASS):
+    """在当前反馈面板内完成登录（不打开任何窗口）。
 
-
-def finish_login(popup):
-    """在真实登录弹窗里完成登录，返回是否走了密码表单。"""
-    popup.wait_for_load_state()
-    used_form = wait_form_or_close(popup)
-    if used_form:
-        popup.locator("#username").fill(ADMIN_USER)
-        popup.locator("#password").fill(ADMIN_PASS)
-        popup.locator("#submit").click()
-    try:
-        popup.wait_for_event("close", timeout=30000)
-    except Exception:
-        pass
-    return used_form
+    未登录时主按钮点击会展开账号密码表单；确认后调用
+    POST /api/auth/login（clientLabel + appId），Bearer 仅存内存。
+    """
+    if page.locator(".fb-login-panel").is_hidden():
+        page.locator(".fb-submit").click()
+        page.locator(".fb-login-panel").wait_for(state="visible", timeout=15000)
+    page.locator(".fb-login-username").fill(user)
+    page.locator(".fb-login-password").fill(pw)
+    page.locator(".fb-login-confirm").click()
+    page.wait_for_function(
+        "() => { const sr = document.querySelector('feedback-widget').shadowRoot;"
+        " const p = sr.querySelector('.fb-login-panel');"
+        " return !!p && p.hidden; }",
+        timeout=30000,
+    )
 
 
 def request_body(req):
@@ -567,22 +568,27 @@ def scenarios(page, ctx, shot, browser, shots):
         check("提交按钮禁用", page.locator(".fb-submit").is_disabled())
         page.locator(".fb-textarea").fill("")
 
-        step("T5 未登录提交 → 弹窗握手 → 归档")
+        step("T5 未登录提交 → 面板内登录 → 归档")
         text1 = "深色模式下导出 CSV 会卡住，希望支持后台导出"
         page.locator(".fb-textarea").fill(text1)
-        # 未登录点「提交」：submit() → beginLogin(true) → handshake.openPopup()（element.ts:1183/1500）
-        with ctx.expect_page() as pop_info:
-            page.locator(".fb-submit").click()
-        popup = pop_info.value
-        popup.wait_for_load_state()
-        login_btn = page.locator(".fb-login")
-        check("未登录时主按钮变为登录入口", login_btn.count() > 0 and login_btn.inner_text().strip() == "登录并提交",
-              login_btn.inner_text() if login_btn.count() else "no .fb-login")
+        # 未登录点「提交」：submit() → beginLogin(true) → 在当前面板展开账号密码表单（不打开窗口）
+        pages_before = len(ctx.pages)
+        login_btn = page.locator(".fb-submit")
+        check("未登录时主按钮变为登录入口", login_btn.inner_text().strip() == "登录并提交",
+              login_btn.inner_text())
+        login_btn.click()
+        page.locator(".fb-login-panel").wait_for(state="visible", timeout=15000)
+        check("未打开任何新窗口", len(ctx.pages) == pages_before, str(len(ctx.pages)))
         check("状态提示需要登录", "需要登录" in page.locator(".fb-status").inner_text(),
               page.locator(".fb-status").inner_text())
-        check("登录弹窗打到 <apiBase>/login", popup.url.startswith(f"{SERVER}/login?"), popup.url)
-        used_form = finish_login(popup)
-        check("首次登录走密码表单", used_form is True, str(used_form))
+        check("表单确认按钮同样写「登录并提交」",
+              page.locator(".fb-login-confirm").inner_text().strip() == "登录并提交",
+              page.locator(".fb-login-confirm").inner_text())
+        check("登录表单绑定当前面板（可见且含用户名/密码）",
+              page.locator(".fb-login-username").count() == 1 and page.locator(".fb-login-password").count() == 1)
+        login_in_panel(page)
+        check("面板内登录后进入已登录态（令牌仅存内存）",
+              page.locator(".fb-quota").count() == 1, "no .fb-quota")
         status = page.locator(".fb-status")
         status.wait_for(state="visible")
         # 等「服务已接收」：文档化行为 = 201/200 之后才清空草稿与输入（README §提交流程）。
@@ -596,7 +602,7 @@ def scenarios(page, ctx, shot, browser, shots):
             " return ta.value === '' && st.textContent.trim() !== ''; }",
             timeout=30000,
         )
-        check("握手后自动提交且清空输入", page.locator(".fb-textarea").input_value() == "")
+        check("面板内登录后自动提交且清空输入", page.locator(".fb-textarea").input_value() == "")
         page.wait_for_selector(".fb-task-link", timeout=60000)
         link = page.locator(".fb-task-link").get_attribute("href")
         check("归档状态与任务链接", "/dashboard/workspace/ws-e2e/project/p-e2e/task/" in (link or ""), str(link))
@@ -703,17 +709,15 @@ def scenarios(page, ctx, shot, browser, shots):
         check("重试成功落库（管理端记录数 +1）", len(admin_records()) == records_before + 1,
               f"{records_before} -> {len(admin_records())}")
 
-        step("T8 跨域会话恢复（刷新后 Cookie 静默握手）")
+        step("T8 刷新后内存令牌丢失：面板内重新登录并提交")
         page.reload(wait_until="networkidle")
         open_panel(page)
         text3 = "重开软件后的会话恢复验证"
         page.locator(".fb-textarea").fill(text3)
-        with ctx.expect_page() as pop_info:
-            page.locator(".fb-submit").click()
-        popup = pop_info.value
-        # 有 cookie：无表单，直接握手并自动关闭
-        used_form = finish_login(popup)
-        check("恢复会话跳过密码表单", used_form is False, str(used_form))
+        page.locator(".fb-submit").click()
+        page.locator(".fb-login-panel").wait_for(state="visible", timeout=15000)
+        check("刷新后需在面板内重新登录（不打开窗口）", page.locator(".fb-login-password").count() == 1)
+        login_in_panel(page)
         page.wait_for_selector(".fb-task-link", timeout=60000)
         tasks = plain_get("http://127.0.0.1:8898/__mock/tasks")["tasks"]
         check("恢复后提交成功（共 3 任务）", len(tasks) == 3, str(len(tasks)))
@@ -721,7 +725,7 @@ def scenarios(page, ctx, shot, browser, shots):
         step("T9 窄屏全屏布局")
         # T8 结束时面板仍开着（归档态），先关闭避免入口变成 toggle。
         # 注意 Esc 只在焦点位于组件内部时生效（element.ts:1785 的 inside 判定），
-        # 登录弹窗关闭后焦点回到宿主页 body，所以这里先把焦点点回面板再按 Esc。
+        # 先把焦点点回面板再按 Esc（Esc 仅在焦点位于组件内部时生效）。
         page.locator(".fb-textarea").click()
         page.keyboard.press("Escape")
         page.locator(".fb-panel").wait_for(state="hidden", timeout=5000)
@@ -743,11 +747,10 @@ def scenarios(page, ctx, shot, browser, shots):
         vpage.locator(".fb-panel").wait_for(state="visible", timeout=60000)
         text4 = "Vue 应用反馈链路验证"
         vpage.locator(".fb-textarea").fill(text4)
-        with ctx.expect_page() as pop_info:
-            vpage.locator(".fb-submit").click()
-        popup = pop_info.value
-        used_form = finish_login(popup)
-        check("Vue 侧沿用已有 Cookie（无表单静默握手）", used_form is False, str(used_form))
+        vpage.locator(".fb-submit").click()
+        vpage.locator(".fb-login-panel").wait_for(state="visible", timeout=15000)
+        check("Vue 侧同样在面板内登录（不打开窗口）", vpage.locator(".fb-login-password").count() == 1)
+        login_in_panel(vpage)
         vpage.wait_for_selector(".fb-task-link", timeout=60000)
         tasks = plain_get("http://127.0.0.1:8898/__mock/tasks")["tasks"]
         check("Vue 链路归档（共 4 任务）", len(tasks) == 4, str(len(tasks)))
@@ -862,6 +865,10 @@ def scenarios(page, ctx, shot, browser, shots):
         "app_id": APP_ID,
         "admin_user": ADMIN_USER,
         "admin_pass": ADMIN_PASS,
+        "panel_user": E2E_USER,
+        "panel_pass": E2E_PASS,
+        "panel_user2": E2E_USER2,
+        "panel_pass2": E2E_PASS2,
         "shots_dir": shots,
         "pages_dir": PAGES_DIR,
         "pixel_results": [],

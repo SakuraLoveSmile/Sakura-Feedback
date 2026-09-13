@@ -115,10 +115,25 @@ FeedbackWidget(
 
 ## 登录
 
-- **原生端**：面板内用户名/密码表单 → `POST /api/auth/login`（携带
-  `clientLabel`，形如 `flutter-macos-<iso 时间>`），返回的长期令牌存入
-  flutter_secure_storage；后续请求带 `Authorization: Bearer`；
-  401 时清除令牌并回到登录视图。密码不写日志。
+- **Web 与原生统一**：未登录也可在面板内编辑反馈；点击主按钮「登录并提交」
+  就地展开用户名/密码表单（**不打开任何窗口**）→ `POST /api/auth/login`
+  （携带 `clientLabel`，形如 `flutter-macos-<iso 时间>`，以及 `appId`）。
+  成功后立即提交一次；取消只收起表单，草稿与截图保留。密码不写日志、不留存 UI。
+- **令牌存储**：原生端存入 flutter_secure_storage；Web 端**仅存内存**
+  （刷新后重新登录）。后续请求带 `Authorization: Bearer`。401 按**请求发出时
+  捕获的令牌与认证世代**做条件清除（内部协调层串行化登录写入与条件清除）：
+  只有确认请求仍属于当前认证世代才清除令牌并回到未登录面板，草稿保留——
+  重新登录后，旧请求迟到的 401 不会把新登录的账号退出；确已失效的会话照常
+  回到登录视图。
+- **安全存储写入失败**：登录成功但令牌无法持久化（如 macOS Keychain 缺少
+  entitlement）时，面板提示「无法保存登录状态，请检查应用的安全存储配置」，
+  保留草稿、清空密码、不自动提交；不回退内存 / 明文存储。
+- **每日额度**：每个账号默认每天 3 次（北京时间零点刷新，跨项目/设备共用）。
+  撰写区显示「今日剩余 N 次」；额度用尽时提交按钮禁用并提示，草稿保留。
+  刷新调度：额度用尽每 30 秒重查，其余状态按服务端 `resetAt` 定时单次查询；
+  打开面板 / 回到前台的刷新被在途查询或忙碌挡下时登记「待立即刷新」，
+  旧查询结束或忙碌结束后立即补发一次（多次登记合并为一次；关闭 / 退后台 /
+  401 清除意图）。
 - **令牌存储键按服务身份隔离**：原生键由 `apiBase` + `appId` 派生
   （`feedbackTokenStorageKey(config)` →
   `feedback_widget.bearer_token.<base64url(apiBase + "\u0000" + appId)>`，
@@ -128,10 +143,6 @@ FeedbackWidget(
   跨服务复用凭据**；键确定性、且只含平台存储后端安全字符
   （`A–Z a–z 0–9 - _ .`）。`SecureFeedbackTokenStore(config: ...)` 需要
   传入 `FeedbackConfig`（`createDefaultTokenStore(config)` 同样如此）。
-- **Web 端**：`window.open("<apiBase>/login?appId=..&nonce=..&cb=..")`
-  弹出登录窗口，监听 `postMessage` 并严格校验 `origin + type + nonce`，
-  短期令牌**仅存内存**（不持久化，故无需服务隔离键）；弹窗被拦截时提供
-  「打开登录窗口」按钮入口。
 
 ## 开发与验证
 

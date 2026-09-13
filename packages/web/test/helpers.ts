@@ -1,8 +1,9 @@
-import { vi, expect } from 'vitest';
+import { vi } from 'vitest';
 import type { FeedbackWidget } from '../src/element';
 
 export const API_BASE = 'http://api.test:8787';
 export const APP_ID = 'com.example.app';
+export const TEST_TOKEN = 'test-access-token';
 
 export interface Mounted {
   widget: FeedbackWidget;
@@ -71,8 +72,44 @@ export function httpResponse(status: number, body: unknown): {
   return { status, ok: status >= 200 && status < 300, json: async () => body };
 }
 
-export function apiError(status: number, code: string, message: string): unknown {
-  return { error: { code, message } };
+export function apiError(status: number, code: string, message: string, extra?: Record<string, unknown>): unknown {
+  return { error: { code, message }, ...(extra ?? {}) };
+}
+
+function futureIso(ms: number): string {
+  return new Date(Date.now() + ms).toISOString();
+}
+
+export function authUser(): { id: string; username: string; role: 'admin' } {
+  return { id: 'user-1', username: 'admin', role: 'admin' };
+}
+
+/**
+ * 额度桩：`resetAt` 用固定未来时间（而非 `Date.now()` 相对值），
+ * 使「登录 / 会话响应里带的额度」可以按字面比较，不受用例执行毫秒差影响。
+ */
+export function quota(over: Partial<{ dailyLimit: number; used: number; remaining: number; resetAt: string }> = {}) {
+  return { dailyLimit: 3, used: 0, remaining: 3, resetAt: '2030-01-01T16:00:00.000Z', ...over };
+}
+
+export function loginResponse(token = TEST_TOKEN) {
+  return httpResponse(200, {
+    ok: true,
+    token,
+    expiresAt: futureIso(3_600_000),
+    user: authUser(),
+    quota: quota(),
+  });
+}
+
+export function sessionResponse() {
+  return httpResponse(200, {
+    authenticated: true,
+    kind: 'client',
+    expiresAt: futureIso(3_600_000),
+    user: authUser(),
+    quota: quota(),
+  });
 }
 
 export interface FetchCall {
@@ -82,57 +119,83 @@ export interface FetchCall {
   body: Record<string, unknown> | undefined;
 }
 
+/**
+ * 记录业务请求的 fetch 桩。
+ * 认证端点（/api/auth/login、/api/auth/session）由桩直接应答且**不计入 calls**：
+ * 打开面板会刷新额度、重新登录会发起会话请求，这些噪声不应干扰业务断言。
+ */
 export function recordFetch(
   impl: (url: string, init: { method?: string; body?: string }) => Promise<unknown>,
-): { calls: FetchCall[]; fetchMock: ReturnType<typeof vi.fn> } {
+  opts: { token?: string } = {},
+): { calls: FetchCall[]; authCalls: string[]; fetchMock: ReturnType<typeof vi.fn> } {
   const calls: FetchCall[] = [];
-  const fetchMock = vi.fn(async (input: unknown, init?: { method?: string; headers?: Record<string, string>; body?: string }) => {
-    const url = String(input);
-    const body = typeof init?.body === 'string' ? (JSON.parse(init.body) as Record<string, unknown>) : undefined;
-    calls.push({ url, method: init?.method ?? 'GET', headers: init?.headers ?? {}, body });
-    return impl(url, { method: init?.method, body: init?.body });
-  });
+  const authCalls: string[] = [];
+  const fetchMock = vi.fn(
+    async (input: unknown, init?: { method?: string; headers?: Record<string, string>; body?: string }) => {
+      const url = String(input);
+      if (url.includes('/api/auth/login')) {
+        authCalls.push(url);
+        return loginResponse(opts.token);
+      }
+      if (url.includes('/api/auth/session')) {
+        authCalls.push(url);
+        return sessionResponse();
+      }
+      const body = typeof init?.body === 'string' ? (JSON.parse(init.body) as Record<string, unknown>) : undefined;
+      calls.push({ url, method: init?.method ?? 'GET', headers: init?.headers ?? {}, body });
+      return impl(url, { method: init?.method, body: init?.body });
+    },
+  );
   vi.stubGlobal('fetch', fetchMock);
-  return { calls, fetchMock };
+  return { calls, authCalls, fetchMock };
 }
 
-/** 拦截 window.open；returns=桩弹窗（null 模拟弹窗被拦截）。 */
-export function stubWindowOpen(popup: { closed: boolean } | null) {
-  const urls: string[] = [];
-  const spy = vi.spyOn(window, 'open').mockImplementation(((url?: string | URL) => {
-    urls.push(String(url ?? ''));
-    return popup as unknown as Window | null;
-  }) as unknown as typeof window.open);
-  return { spy, urls };
+/** 等待链式 promise 完成（登录 -> 状态同步）。使用微任务，兼容 fake timers。 */
+export async function flushPromises(): Promise<void> {
+  for (let i = 0; i < 30; i++) await Promise.resolve();
 }
 
 /**
- * 完成一次登录握手：startLogin 弹窗（window.open 已打桩），
- * 从登录页 URL 提取 nonce 并按契约 postMessage 交付令牌。
+ * 安装“认证感知”的 fetch 包装：登录 / 会话查询由包装直接应答（不计入业务请求），
+ * 其余请求委托给当前 fetch 桩（保留记录与故障注入）。
  */
-export function completeLogin(m: Mounted, token = 'test-access-token'): string {
-  const loginUrl = m.widget.startLogin();
-  expect(loginUrl).toContain('/login?');
-  const nonce = new URL(loginUrl).searchParams.get('nonce') as string;
-  deliverAuthMessage({ token, nonce });
-  return loginUrl;
+export function installAuthFetch(token = TEST_TOKEN): void {
+  const inner = globalThis.fetch as unknown;
+  vi.stubGlobal('fetch', async (input: unknown, init?: unknown) => {
+    const url = String(input);
+    if (url.includes('/api/auth/login')) return loginResponse(token);
+    if (url.includes('/api/auth/session')) return sessionResponse();
+    if (inner) return (inner as (i: unknown, n?: unknown) => Promise<unknown>)(input, init);
+    throw new Error(`unexpected fetch ${url}`);
+  });
 }
 
-export function deliverAuthMessage(opts: {
-  token?: string;
-  nonce?: string;
-  origin?: string;
-  type?: string;
-  expiresAt?: string;
-}): void {
-  const data: Record<string, unknown> = {
-    type: opts.type ?? 'feedback:auth',
-    nonce: opts.nonce,
-    accessToken: opts.token,
-    expiresAt: opts.expiresAt ?? new Date(Date.now() + 15 * 60_000).toISOString(),
-  };
-  const ev = new MessageEvent('message', { origin: opts.origin ?? API_BASE, data });
-  window.dispatchEvent(ev);
+/**
+ * 通过面板内登录表单完成登录（不打开新窗口）：
+ * 展开表单 → 填入账号密码 → 点击「登录并提交」→ 等待令牌写入。
+ */
+export async function completeLogin(m: Mounted, token = TEST_TOKEN): Promise<void> {
+  installAuthFetch(token);
+  m.widget.startLogin();
+  const username = m.root.querySelector<HTMLInputElement>('.fb-login-username');
+  const password = m.root.querySelector<HTMLInputElement>('.fb-login-password');
+  const confirm = m.root.querySelector<HTMLButtonElement>('.fb-login-confirm');
+  if (!username || !password || !confirm) throw new Error('面板内登录表单未渲染');
+  username.value = 'admin';
+  password.value = 'secret';
+  confirm.click();
+  await flushPromises();
+}
+
+/** 在登录表单中输入凭据并确认（用于重新登录 / 自动续交场景）。 */
+export function submitLoginForm(m: Mounted, username = 'admin', password = 'secret'): void {
+  const u = m.root.querySelector<HTMLInputElement>('.fb-login-username');
+  const p = m.root.querySelector<HTMLInputElement>('.fb-login-password');
+  const confirm = m.root.querySelector<HTMLButtonElement>('.fb-login-confirm');
+  if (!u || !p || !confirm) throw new Error('面板内登录表单未渲染');
+  u.value = username;
+  p.value = password;
+  confirm.click();
 }
 
 export function cleanup(): void {

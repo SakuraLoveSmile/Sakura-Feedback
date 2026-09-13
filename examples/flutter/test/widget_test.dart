@@ -75,20 +75,18 @@ void main() {
     // captureMode=viewport：呼出走"先截图后开面板"——截图完成后才挂载
     // 面板，需以轮询等待（真实异步的图像栅格化与编码）。
     await tester.tap(find.byKey(const Key('feedback-orb')));
-    bool panelReady = false;
-    for (int i = 0; i < 200 && !panelReady; i++) {
-      await tester.pump(const Duration(milliseconds: 50));
-      await tester.runAsync(() async {
-        await Future<void>.delayed(const Duration(milliseconds: 20));
-      });
-      panelReady = find
-          .byKey(const Key('feedback-login-username'))
-          .evaluate()
-          .isNotEmpty;
-    }
-    // 令牌仓库（flutter_secure_storage）在单测环境不可用：
-    // 面板容错后应回落到登录表单视图。
-    expect(panelReady, isTrue, reason: '截图完成后面板应挂载并回落到登录视图');
+    await pumpUntil(tester,
+        () => find.byKey(const Key('feedback-input')).evaluate().isNotEmpty);
+    // 令牌仓库（flutter_secure_storage）在单测环境不可用：面板容错后回落为
+    // 「未登录也可继续编辑」的撰写视图；登录表单在点击「登录并提交」后
+    // 就地展开（不再打开任何窗口）。
+    expect(find.byKey(const Key('feedback-login-username')), findsNothing);
+    await tester.enterText(find.byKey(const Key('feedback-input')), '示例冒烟');
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('feedback-submit')));
+    await tester.pump();
+    expect(find.byKey(const Key('feedback-login-username')), findsOneWidget,
+        reason: '未登录点「登录并提交」应在当前面板展开登录表单');
   });
 
   testWidgets('结构：组件挂在 Navigator 之上，切换路由不重建组件/控制器/面板', (tester) async {
@@ -108,8 +106,7 @@ void main() {
     await tester.tap(find.byKey(const Key('feedback-orb')));
     await pumpUntil(
       tester,
-      () =>
-          find.byKey(const Key('feedback-login-username')).evaluate().isNotEmpty,
+      () => find.byKey(const Key('feedback-input')).evaluate().isNotEmpty,
     );
     final FeedbackPanelState panelBefore = tester.state<FeedbackPanelState>(
         find.byType(FeedbackPanel, skipOffstage: false));
@@ -211,6 +208,10 @@ void main() {
     expect(matches, greaterThan(expectedPixels),
         reason: '对话框演示色必须以实际布局面积出现在截取到的位图中'
             '（证明宿主对话框被拍进去了；期望 > $expectedPixels，实际 $matches）');
+
+    // 收尾：推进假时钟越过面板会话恢复的 2 秒超时兜底，避免测试结束时
+    // 仍有一个挂起 Timer 触发 flutter_test 的 invariant 断言（间歇失败）。
+    await tester.pump(const Duration(seconds: 3));
   });
 
   testWidgets('应用根释放控制器：整棵树卸载后控制器已 dispose', (tester) async {

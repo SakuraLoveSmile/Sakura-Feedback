@@ -660,7 +660,9 @@ class _FeedbackWidgetState extends State<FeedbackWidget> {
                     : Visibility(
                         visible: open && !_temporarilyHideForCapture,
                         maintainState: true,
-                        child: _buildPanel(config),
+                        // 传真实开关状态（用户是否打开面板）：截图期间暂时
+                        // 隐藏不算关闭，不得据此取消登录接续或清除状态。
+                        child: _buildPanel(config, visible: open),
                       ),
               ),
               if (!open && config.showLauncher)
@@ -795,7 +797,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget> {
     );
   }
 
-  Widget _buildPanel(FeedbackConfig config) {
+  Widget _buildPanel(FeedbackConfig config, {required bool visible}) {
     return Shortcuts(
       shortcuts: <ShortcutActivator, Intent>{
         const SingleActivator(LogicalKeyboardKey.escape):
@@ -813,6 +815,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget> {
         child: FeedbackPanel(
           key: _panelKey,
           config: config,
+          visible: visible,
           onRequestClose: _close,
           onRetakeScreenshot: _retakeScreenshot,
           httpClient: widget.httpClient,

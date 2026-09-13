@@ -31,3 +31,11 @@ __pycache__/
 *.pyc
 # flutter pub get 生成的插件清单
 .flutter-plugins-dependencies
+# Mimosa 安全扫描钩子的临时状态
+.mimosa/
+# Playwright MCP 会话产物
+.playwright-mcp/
+
+# T1-C 默认存储验收运行产物
+e2e/t1c-runs/
+examples/flutter/t1c-defines.json

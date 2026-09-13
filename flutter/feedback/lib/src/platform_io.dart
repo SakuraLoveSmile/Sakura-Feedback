@@ -1,10 +1,9 @@
 // 原生平台实现：令牌持久化于 flutter_secure_storage；
-// 登录走面板内用户名/密码表单（POST /api/auth/login + clientLabel）。
+// 登录走面板内用户名/密码表单（POST /api/auth/login + clientLabel + appId）。
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import 'config.dart';
 import 'token_store.dart';
-import 'web_handshake.dart';
 
 /// 基于 flutter_secure_storage 的原生令牌仓库。
 ///
@@ -42,12 +41,3 @@ class SecureFeedbackTokenStore implements FeedbackTokenStore {
 /// 原生默认仓库（存储键按服务身份隔离）。
 FeedbackTokenStore createDefaultTokenStore(FeedbackConfig config) =>
     SecureFeedbackTokenStore(config: config);
-
-/// 原生平台不支持 Web 弹窗握手（应使用登录表单）。
-Future<WebHandshakeResult> startWebLoginHandshake({
-  required String apiBase,
-  required String appId,
-  Duration timeout = const Duration(minutes: 5),
-}) async {
-  return const WebHandshakeResult.fail('Web 登录握手仅在 Web 平台可用');
-}

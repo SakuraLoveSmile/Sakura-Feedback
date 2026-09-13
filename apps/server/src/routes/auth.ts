@@ -6,11 +6,14 @@ import {
   createUser,
   type Db,
   getAppByAppId,
+  getQuota,
   getUser,
+  getUserByUsername,
   listSessions,
   revokeSession,
   revokeSessionsByIds,
   type SessionRow,
+  type UserRow,
 } from "../db/repos.ts";
 import type { ServerConfig } from "../env.ts";
 import {
@@ -23,7 +26,9 @@ import {
   fail,
   isErr,
   readJson,
+  requireAdminCookie,
   requireSession,
+  sessionUser,
   setSessionCookie,
 } from "../http.ts";
 
@@ -33,11 +38,16 @@ export interface AuthDeps {
   loginLimiter: RateLimiter;
 }
 
+/** 对外暴露的最小账号信息（绝不返回密码或哈希）。 */
+export function publicUser(u: Pick<UserRow, "id" | "username" | "role">) {
+  return { id: u.id, username: u.username, role: u.role };
+}
+
 /** 初始账号由部署配置建立，不开放注册。返回是否新建。 */
 export function ensureInitialUser(db: Db, config: ServerConfig): boolean {
   if (getUser(db)) return false;
   if (!config.adminUser || !config.adminPassword) return false;
-  createUser(db, config.adminUser, hashPassword(config.adminPassword));
+  createUser(db, config.adminUser, hashPassword(config.adminPassword), { role: "admin" });
   return true;
 }
 
@@ -67,12 +77,28 @@ function validateHandshakeTarget(db: Db, appId: string, origin: string): Err | n
   return null;
 }
 
-/** 仅 Cookie 会话的管理守卫（含同源检查）。 */
+/** 客户端令牌登录的来源校验：按目标应用的允许来源校验浏览器 Origin。 */
+function validateClientOrigin(db: Db, appId: string, originHeader: string | undefined): Err | null {
+  const app = getAppByAppId(db, appId);
+  if (!app) return err("unknown_app", "appId 未配置", 404);
+  if (!originHeader) return null; // 原生客户端不携带 Origin
+  const normalized = normalizeOrigin(originHeader);
+  if (!normalized) return err("origin_not_allowed", "来源不合法", 400);
+  let list: unknown;
+  try {
+    list = JSON.parse(app.allowed_origins);
+  } catch {
+    list = [];
+  }
+  const allowed = Array.isArray(list) ? (list as string[]) : [];
+  if (!allowed.includes(normalized)) return err("origin_not_allowed", "该来源未被允许登录", 403);
+  return null;
+}
+
+/** 后台/会话管理守卫：Cookie 会话 + 管理员角色 + 同源检查。 */
 function cookieAdmin(deps: AuthDeps, c: Parameters<typeof requireSession>[1]): SessionRow | Response {
-  const s = requireSession(deps.db, c, ["cookie"]);
+  const s = requireAdminCookie(deps.db, c, deps.config);
   if (isErr(s)) return fail(c, s);
-  const o = checkSameOrigin(c, s, deps.config);
-  if (o) return fail(c, o);
   return s;
 }
 
@@ -81,7 +107,12 @@ export function authRoutes(deps: AuthDeps): Hono {
   const routes = new Hono();
 
   routes.post("/login", async (c) => {
-    const body = await readJson<{ username?: string; password?: string; clientLabel?: string }>(c);
+    const body = await readJson<{
+      username?: string;
+      password?: string;
+      clientLabel?: string;
+      appId?: string;
+    }>(c);
     if (isErr(body)) return fail(c, body);
     const username = typeof body.username === "string" ? body.username.trim() : "";
     const password = typeof body.password === "string" ? body.password : "";
@@ -89,6 +120,7 @@ export function authRoutes(deps: AuthDeps): Hono {
       typeof body.clientLabel === "string" && body.clientLabel.trim() !== ""
         ? body.clientLabel.trim().slice(0, 100)
         : null;
+    const appId = typeof body.appId === "string" ? body.appId.trim() : "";
 
     const limited = checkLimiter(deps.loginLimiter, `${clientIp(c)}|${username}`);
     if (limited) {
@@ -96,19 +128,31 @@ export function authRoutes(deps: AuthDeps): Hono {
       return fail(c, limited);
     }
 
-    const user = getUser(db);
-    if (!user || username !== user.username || password === "" || !verifyPassword(password, user.pass_hash)) {
+    const user = getUserByUsername(db, username);
+    if (user?.enabled !== 1 || password === "" || !verifyPassword(password, user.pass_hash)) {
       return fail(c, err("invalid_credentials", "用户名或密码错误", 401));
+    }
+
+    // 令牌登录（Web / Flutter）：必须声明 appId，浏览器来源按该应用允许来源校验。
+    if (clientLabel) {
+      if (!appId) return fail(c, err("invalid_request", "令牌登录必须携带 appId", 400));
+      const originErr = validateClientOrigin(db, appId, c.req.header("origin"));
+      if (originErr) return fail(c, originErr);
     }
 
     const kind: SessionRow["kind"] = clientLabel ? "client" : "cookie";
     const ttl = clientLabel ? config.clientTokenTtlMs : config.sessionTtlMs;
     const { row, token } = createSession(db, user.id, kind, ttl, clientLabel ?? undefined);
-    setSessionCookie(c, config, token, row.expires_at);
+    if (!clientLabel) setSessionCookie(c, config, token, row.expires_at);
 
-    return c.json(
-      clientLabel ? { ok: true, token, expiresAt: row.expires_at } : { ok: true, expiresAt: row.expires_at },
-    );
+    const quota = getQuota(db, user);
+    return c.json({
+      ok: true,
+      ...(clientLabel ? { token } : {}),
+      expiresAt: row.expires_at,
+      user: publicUser(user),
+      quota,
+    });
   });
 
   routes.post("/logout", (c) => {
@@ -122,11 +166,15 @@ export function authRoutes(deps: AuthDeps): Hono {
   routes.get("/session", (c) => {
     const s = requireSession(db, c, ["cookie", "client", "handshake"]);
     if (isErr(s)) return fail(c, s);
+    const user = sessionUser(db, s);
+    if (!user) return fail(c, err("unauthorized", "需要登录", 401));
     return c.json({
       authenticated: true,
       kind: s.kind,
       clientLabel: s.client_label,
       expiresAt: s.expires_at,
+      user: publicUser(user),
+      quota: getQuota(db, user),
     });
   });
 
@@ -148,7 +196,9 @@ export function authRoutes(deps: AuthDeps): Hono {
     if (isErr(body)) return fail(c, body);
     const check = validateHandshakeTarget(db, body.appId ?? "", body.origin ?? "");
     if (check) return fail(c, check);
-    const user = getUser(db)!;
+    // 旧握手签发必须绑定当前登录用户（而非数据库首个账号）。
+    const user = sessionUser(db, s);
+    if (!user) return fail(c, err("unauthorized", "需要登录", 401));
     const { row, token } = createSession(db, user.id, "handshake", config.handshakeTtlMs, `web:${body.appId}`);
     return c.json({
       accessToken: token,

@@ -27,12 +27,13 @@ vi.mock('html2canvas-pro', async () => {
 import '../src/index';
 import {
   cleanup,
-  deliverAuthMessage,
   httpResponse,
   mount,
   setTextarea,
-  stubWindowOpen,
   completeLogin,
+  loginResponse,
+  sessionResponse,
+  submitLoginForm,
 } from './helpers';
 import { addNode, blobToPng, installGeometryPatch, isCoverPixel, pixelColor } from './pixel-fixture';
 
@@ -259,7 +260,7 @@ describe('捕获会话', () => {
     await m.widget.captureAndOpen();
     expect(m.screenshotWrap.hidden).toBe(false);
 
-    completeLogin(m);
+    await completeLogin(m);
     setTextarea(m, '带遮挡证明的反馈');
     let meta: Record<string, unknown> | null = null;
     const fetchMock = vi.fn(async (_u: unknown, init?: { body?: FormData }) => {
@@ -283,7 +284,7 @@ describe('冻结提交快照', () => {
     const fetchMock = vi.fn(() => d.promise as Promise<unknown>);
     vi.stubGlobal('fetch', fetchMock);
     const m = mount();
-    completeLogin(m);
+    await completeLogin(m);
     setTextarea(m, '快照文字');
     m.submitBtn.click();
     await tick(5);
@@ -310,7 +311,7 @@ describe('冻结提交快照', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
     const m = mount();
-    completeLogin(m);
+    await completeLogin(m);
     setTextarea(m, '重试内容');
     m.submitBtn.click();
     await tick();
@@ -330,7 +331,7 @@ describe('冻结提交快照', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
     const m = mount();
-    completeLogin(m);
+    await completeLogin(m);
     setTextarea(m, '第一次');
     m.submitBtn.click();
     await tick();
@@ -350,7 +351,7 @@ describe('冻结提交快照', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
     const m = mount();
-    completeLogin(m);
+    await completeLogin(m);
     setTextarea(m, '冲突内容');
     m.submitBtn.click();
     await tick();
@@ -379,7 +380,7 @@ describe('冻结提交快照', () => {
 
   it('登录挂起期间迟到的捕获不进入请求；提交冻结后无图片', async () => {
     const m = mount();
-    completeLogin(m);
+    await completeLogin(m);
     const d = deferred<Shot>();
     m.widget.captureProvider = vi.fn(() => d.promise);
     const capturePromise = m.widget.captureAndOpen();
@@ -409,11 +410,10 @@ describe('冻结提交快照', () => {
     expect(m.screenshotThumb.src).toContain('blob:mock-6');
     setTextarea(m, '交错测试');
 
-    // 2) 未登录点击提交 → 冻结快照（key K1，未发送）+ 登录挂起
-    const { urls } = stubWindowOpen({ closed: false });
+    // 2) 未登录点击提交 → 展开面板内登录表单（不打开窗口）
     m.submitBtn.click();
     await tick(5);
-    expect(urls).toHaveLength(1);
+    expect(m.root.querySelector<HTMLDivElement>('.fb-login-panel')?.hidden).toBe(false);
 
     // 3) 登录挂起期间重拍 image2 并完成（会话有效：草稿被替换）
     m.widget.captureProvider = vi.fn(async () => ({ blob: PNG('image2'), width: 100, height: 100 }));
@@ -421,21 +421,25 @@ describe('冻结提交快照', () => {
     expect(m.screenshotThumb.src).toContain('blob:mock-6'); // 'image2' size=6 同长——用字节断言区分
 
     let formBody: FormData | null = null;
-    const fetchMock = vi.fn(async (_u: unknown, init?: { body?: FormData }) => {
+    let feedbackCalls = 0;
+    const fetchMock = vi.fn(async (input: unknown, init?: { body?: FormData }) => {
+      const url = String(input);
+      if (url.includes('/api/auth/login')) return loginResponse('tok');
+      if (url.includes('/api/auth/session')) return sessionResponse();
+      feedbackCalls += 1;
       formBody = init?.body ?? null;
       return httpResponse(201, { feedbackId: 'f4', status: 'received' });
     });
     vi.stubGlobal('fetch', fetchMock);
 
     // 4) 登录完成 → 自动提交：草稿已变 → 新快照新 key + image2 字节
-    const nonce = new URL(urls[0]!).searchParams.get('nonce')!;
-    deliverAuthMessage({ token: 'tok', nonce });
+    submitLoginForm(m);
     await tick(20);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(feedbackCalls).toBe(1);
     expect(formBody).toBeInstanceOf(FormData);
     const meta = JSON.parse(((formBody as unknown) as FormData).get('metadata') as string);
     expect(meta.text).toBe('交错测试');
-    expect(meta.idempotencyKey).toBeTruthy(); // K1 从未上线，实际发出的是新 key
+    expect(meta.idempotencyKey).toBeTruthy(); // 尚无线上快照，实际发出的是新 key
     const shot = ((formBody as unknown) as FormData).get('screenshot') as Blob;
     expect(shot).toBeInstanceOf(Blob);
     expect(new TextDecoder().decode(await shot.arrayBuffer())).toBe('image2');
@@ -445,7 +449,7 @@ describe('冻结提交快照', () => {
 describe('遮挡失败时的提交行为（内置路径）', () => {
   async function mountLoggedIn(): Promise<ReturnType<typeof mount>> {
     const m = mount();
-    completeLogin(m);
+    await completeLogin(m);
     return m;
   }
 

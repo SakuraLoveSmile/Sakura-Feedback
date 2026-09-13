@@ -340,10 +340,19 @@ export async function seedApp(
   return r.data;
 }
 
-/** 提交一条反馈并返回 { bearer }（通过 client 令牌）。 */
-export async function loginAsClient(feedbackApp: FeedbackApp): Promise<string> {
+/** 用 client 令牌登录（令牌模式需携带 appId；浏览器来源按该应用允许来源校验）。 */
+export async function loginAsClient(
+  feedbackApp: FeedbackApp,
+  opts: { appId?: string; origin?: string } = {},
+): Promise<string> {
   const r = await jsonReq(feedbackApp.app, "POST", "/api/auth/login", {
-    body: { username: "admin", password: TEST_PASSWORD, clientLabel: "test-client" },
+    origin: opts.origin ?? "http://host.test",
+    body: {
+      username: "admin",
+      password: TEST_PASSWORD,
+      clientLabel: "test-client",
+      appId: opts.appId ?? "com.test.app",
+    },
   });
   if (r.status !== 200) throw new Error(`client 登录失败 ${r.status}: ${r.text}`);
   return r.data.token as string;
