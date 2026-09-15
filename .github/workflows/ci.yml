@@ -53,7 +53,9 @@ jobs:
           version: 11.23.0
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          # Pin the sqlite-tested runtime; the floating 22 channel can change
+          # the worker behavior between release runs.
+          node-version: "22.23.2"
           cache: pnpm
       - name: pnpm install --frozen-lockfile
         run: pnpm install --frozen-lockfile
