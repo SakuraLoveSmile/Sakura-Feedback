@@ -100,7 +100,10 @@ interface Harness {
 const apps: FeedbackApp[] = [];
 
 afterEach(() => {
-  for (const app of apps.splice(0)) app.close();
+  for (const app of apps.splice(0)) {
+    app.close();
+    app.db.close();
+  }
 });
 
 async function makeHarness(
