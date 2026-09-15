@@ -67,6 +67,24 @@ importers:
         specifier: ^3.2.0
         version: 3.2.7(@types/node@24.13.3)(happy-dom@18.0.1)(supports-color@7.2.0)(tsx@4.23.13)
 
+  apps/updater:
+    devDependencies:
+      '@biomejs/biome':
+        specifier: ^2.0.0
+        version: 2.5.12
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.13.3
+      tsx:
+        specifier: ^4.20.0
+        version: 4.23.13
+      typescript:
+        specifier: ^5.8.0
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.0
+        version: 3.2.7(@types/node@24.13.3)(happy-dom@18.0.1)(supports-color@7.2.0)(tsx@4.23.13)
+
   examples/html: {}
 
   examples/react:

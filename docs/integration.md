@@ -82,14 +82,14 @@
 
 ### 2.1 Web：通过构建出的 npm tarball 安装（打包器宿主推荐）
 
-包名 `@feedback/web`，当前版本 `0.1.0`，因此 tarball 文件名为 **`feedback-web-0.1.0.tgz`**（版本变了文件名跟着变）。
+包名 `@feedback/web`，当前版本 `0.3.0`，因此 tarball 文件名为 **`feedback-web-0.3.0.tgz`**（版本变了文件名跟着变）。
 
 ```bash
 # ① 在仓库根构建组件包
 pnpm install
 pnpm --filter @feedback/web build
 
-# ② 打成 tarball（真实产物：/tmp/fbpack/feedback-web-0.1.0.tgz）
+# ② 打成 tarball（真实产物：/tmp/fbpack/feedback-web-0.3.0.tgz）
 mkdir -p /tmp/fbpack
 pnpm --filter @feedback/web pack --pack-destination /tmp/fbpack
 ```
@@ -98,8 +98,8 @@ tarball 内含 `dist/` 全部产物（含 ESM 懒加载分块）、`package.json
 
 ```bash
 # ③ 在你的宿主项目里安装这个 tgz
-pnpm add /tmp/fbpack/feedback-web-0.1.0.tgz
-# 等价写法：npm install /tmp/fbpack/feedback-web-0.1.0.tgz
+pnpm add /tmp/fbpack/feedback-web-0.3.0.tgz
+# 等价写法：npm install /tmp/fbpack/feedback-web-0.3.0.tgz
 ```
 
 ```ts
@@ -186,6 +186,57 @@ dependencies:
 cd your_app && flutter pub get
 ```
 
+### 2.4.1 `flutter_secure_storage` 版本兼容与宿主义务（9 / 10 / 11）
+
+`feedback_widget` 对安全存储的约束是 **`flutter_secure_storage: '>=9.2.2 <12.0.0'`**
+（[`flutter/feedback/pubspec.yaml`](../flutter/feedback/pubspec.yaml)）。组件只使用三版共有的
+`read` / `write` / `delete`，**接口、存储键（`feedbackTokenStorageKey`）与「写入失败不回退内存/明文」的语义不变**，
+`flutter/feedback/lib` 相对上一提交零 diff。
+
+三档隔离矩阵实测（同一份组件测试源码，每档 `analyze` + `test` 全绿）：
+
+| 固定版本 | 解析结果 | `darwin` | `macos` | `windows` | `platform_interface` |
+|---|---|---|---|---|---|
+| 9.2.2 | 9.2.2 | 无 | 3.1.3（走 `_macos`） | 3.1.2 | 1.1.2 |
+| 10.3.1 | 10.3.1 | 0.3.2（取代 `_macos`） | 不再出现 | 4.2.2 | 2.1.0 |
+| 11.0.0 | 11.0.0 | 0.4.2（取代 `_macos`） | 不再出现 | 4.2.2 | 2.1.0 |
+
+**注意换包时点是「从 10.x 起」，不是 11 才有**：`darwin` 取代 `_macos`、`windows` 3.x→4.x、
+`platform_interface` 1.x→2.x 在 10.3.1 档就已发生。
+
+**平台要求分两半**：
+
+- **本组件不抬高自己的下限**：仍是 `sdk: ^3.6.0` / `flutter: ">=3.27.0"`，旧宿主（Dart 3.6 / Flutter 3.27）可继续用。
+- **使用 11 的宿主必须自行满足**：Dart `>=3.8.0`、Android `minSdk 24`、
+  Android `compileSdk 37`（插件 `flutter_secure_storage-11.0.0` 的元数据）。
+  本机 Flutter 3.41.3 默认 `compileSdk` 是 **36**，所以必须**显式**写 `compileSdk = 37`，
+  不能沿用默认值（示例已在 [`examples/flutter/android/app/build.gradle.kts`](../examples/flutter/android/app/build.gradle.kts) 落实：
+  `compileSdk = 37`、`minSdk = maxOf(flutter.minSdkVersion, 24)`）。
+- **Music 的记录（不属于本仓库改动）**：Music 用 `flutter_secure_storage: ^11.0.0`，
+  且 `android/app/build.gradle.kts` 直接继承 `flutter.compileSdkVersion`（Flutter 3.41.3 上是 36），
+  因此 **Music 自身也需要显式 `compileSdk = 37`**。来源逐条见
+  [`tools/flutter-storage-matrix/MUSIC-CONSTRAINTS.md`](../tools/flutter-storage-matrix/MUSIC-CONSTRAINTS.md)。
+- **版本固定不使用依赖覆盖**：三档矩阵只用普通版本约束固定版本，**全仓无真实依赖覆盖声明**，
+  并由 `tools/flutter-storage-matrix/check_tier.py` 逐档断言（同样的检查也跑在 CI 的矩阵 job 里）。
+- **易混淆点**：`examples/flutter` 的 `ios/Podfile.lock`、`macos/Podfile.lock` 里写的
+  `flutter_secure_storage_darwin (10.0.0)` 是 **CocoaPods podspec 版本**；
+  对应的 **pub 包版本是 `0.4.2`**（见上表 11.0.0 档）。按 pub 版本对照时不要被这个数字误导。
+
+**迁移边界（务必先读再升级）**：
+
+- 放宽版本范围**不会自动迁移数据**；Android 已实测同 applicationId + 同签名逐档 `adb install -r`
+  可跨 9→10→11 读回旧令牌，**macOS / iOS 本次未做 Keychain 运行时验证**，需自行验证。
+- **旧宿主维持锁定版本**：已提交 `pubspec.lock` 的宿主会继续解析到原版本，不需要为了本次变更升级。
+- **不能直接从 9 跳到 11**：中间 10.x 就换过平台实现包，请逐档验证。
+- **本次不自动升级其他已接入应用**，**不要求升级 Feedback 服务端**，不新增日志附件，
+  不改独立登录方式，也**不迁移 Music 现有凭据**（本组不读写、不删改 Music 侧任何条目）。
+
+**验证范围**：Android 9→10→11 迁移实测通过（真实模拟器 + 真实 APK）；
+macOS / iOS 只做构建，**未做 Keychain 运行时验证**；Windows / Linux 不在本次范围（未尝试、不建阻塞条目）。
+
+📄 完整矩阵、证据追溯与复现命令：[`docs/flutter-storage-compat.md`](flutter-storage-compat.md)
+（权威记录：[`VERIFICATION.md`](../VERIFICATION.md) 的「Flutter 安全存储兼容」一节）。
+
 ### 2.5 工具版本要求
 
 | 工具 | 要求 | 依据 |
@@ -198,6 +249,9 @@ cd your_app && flutter pub get
 补充：服务端有一个原生依赖 `sharp`（截图的校验与重编码），安装时会带平台相关的 libvips 二进制；
 数据库是 Node 内置的 `node:sqlite`，不需要额外 SQLite 模块。
 
+使用 `flutter_secure_storage` 的宿主另有自己的下限（使用 11 需 Dart `>=3.8`、Android `minSdk 24` / `compileSdk 37`），
+与本节 Flutter / Dart 下限是两回事，见 §2.4.1。
+
 ### 2.6 本次交付**不包含**的内容（明确边界）
 
 - ❌ **不发布 `@feedback/web` 到 npm registry**：只在本仓库 `build` + `pack`，由宿主安装本地 tgz。
@@ -207,24 +261,44 @@ cd your_app && flutter pub get
 - ⏳ **云端上线**：生产 compose 与 Nginx 模板已交付（[`deploy/`](../deploy)），但域名/证书/入口尚待填写，
   因此**尚未声称云端已上线**，也没有加入 SSH 自动部署。
 
-### 2.7 服务端镜像：拉取、私有仓库认证、升级（本轮新增）
+### 2.7 服务端镜像与更新执行器：拉取、私有仓库认证、升级（本轮新增）
 
-组件（Web tgz / Flutter 包）与服务端镜像**一起**出自同一轮 Actions，见
-[`.github/workflows/release.yml`](../.github/workflows/release.yml)。PR 只跑检查、**不发布**；
-推送 `v*` 标签或手动触发才构建并推送镜像。
+组件（Web tgz / Flutter 包）、反馈服务镜像与**更新执行器镜像**出自同一轮 Actions，见
+[`.github/workflows/release.yml`](../.github/workflows/release.yml)。PR 只跑检查、**不发布**。
+
+**稳定渠道判定（权威口径，与 [`docs/release.md`](./release.md) 一致）**
+
+只有 4 个条件同时成立，才产出稳定版本（`release-manifest.json` + 公开 Release）：
+
+1. 事件是**标签推送**（不是 `workflow_dispatch` 手动触发）；
+2. 标签是**正式版本** `vX.Y.Z`（没有 `-rc.1` 之类的预发布后缀）；
+3. 标签严格等于 `v<根 package.json 的 version>`；
+4. 标签指向本次运行的提交（`git rev-parse refs/tags/<标签>^{commit}` == `github.sha`）。
+
+条件 3、4 不成立 → **在推送任何镜像之前就失败退出**；条件 1、2 不成立（手动触发、预发布标签）→
+仍可构建推送镜像（用于验证），但**不产出稳定清单、不创建任何 Release**。
+**这是有意收紧**：更新执行器按
+`https://github.com/<owner>/<repo>/releases/latest/download/release-manifest.json` 取清单，
+任何非稳定内容都不能出现在 Releases 里，否则生产更新会被引到未发布的版本上。
 
 **镜像坐标与标签**
 
 | 项 | 值 |
 |---|---|
-| 镜像名 | `ghcr.io/sakuralovesmile/sakura-feedback` |
+| 反馈服务镜像 | `ghcr.io/sakuralovesmile/sakura-feedback` |
+| 更新执行器镜像 | `ghcr.io/sakuralovesmile/sakura-feedback-updater`（自身版本 `0.1.0`，与反馈服务版本解耦；另带 `vX.Y.Z` 标签表示「随该版本一起构建」） |
 | 平台 | 仅 **linux/amd64** |
-| 标签 | 版本标签（`v*`）、提交 SHA 标签（`sha-<40位>`）、以及 digest |
+| 标签 | 版本标签（`v*`）、提交 SHA 标签（`sha-<40位>`）、以及 digest（`latest` 由 docker metadata-action 在标签构建时自动附加，指向同一 digest，仅供人读） |
 | 生产引用 | **固定 digest**（`@sha256:...`），不使用 `latest` |
 
 一次发布的产物（同一轮构建）：Web `.tgz`、完整浏览器 `dist` 压缩包、管理页 `dist` 压缩包、
-`SHA256SUMS` 清单、`SOURCE.txt`（含来源提交），以及 `image-digest.txt`（镜像 digest）。
-标签推送时这些还会挂到 GitHub Release。
+`SHA256SUMS` 清单、`SOURCE.txt`（含来源提交）、两个镜像的 digest
+（`feedback-image-digest.txt`、`updater-image-digest.txt`）与稳定清单 `release-manifest.json`
+（清单字段见 [`docs/release.md`](./release.md)）。
+
+**draft → 公开的顺序**：标签推送时先创建 **draft** Release，把上述全部产物与清单传上去，**复查资产齐全**
+（缺一即失败退出、保持 draft），**最后一步才公开**。流水线不改动已公开的 Release，
+因此不存在「已公开但产物缺失」的中间状态。
 
 **在生产机拉取（私有 GHCR，只读凭据）**
 
@@ -247,7 +321,13 @@ Nginx TLS 模板见 [`deploy/nginx/feedback.conf.template`](../deploy/nginx/feed
 
 **升级**
 
-1. 取新版本 digest（Actions 的 `image-digest.txt` 产物或 Release 说明）。
+装了 updater 容器（`apps/updater`，U1 批次）时，后台「系统更新」会按 Release 上的
+`release-manifest.json` 自动完成等价动作（取 digest → 改 `FEEDBACK_IMAGE` → 重建 feedback 服务）；
+未装 updater 或需要手工操作（例如回退）时按下面的手工步骤来，
+细节以 [`docs/deployment.md`](./deployment.md) 与 [`apps/updater/README.md`](../apps/updater/README.md) 为准：
+
+1. 取新版本 digest：`gh release view vX.Y.Z` 里的 `feedback-image-digest.txt` 资产，
+   或 Actions 工作流产物 `feedback-image-digest`（更新执行器镜像同理，见 `updater-image-digest.txt`）。
 2. 改 `deploy/.env.prod` 的 `FEEDBACK_IMAGE=...@sha256:<新 digest>`。
 3. `docker compose --env-file deploy/.env.prod -f deploy/compose.prod.yml up -d`。
 
@@ -304,6 +384,10 @@ pnpm --filter @feedback/example-html serve            # http://127.0.0.1:8080/
 
 <script>
   const widget = document.getElementById('widget');
+  // 可选：注册日志提供者，在打开面板时自动收集（至多 3 份，每份 ≤1MiB，3秒超时保护）
+  widget.logProvider = async () => [
+    { filename: 'console.log', blob: new Blob(['2026-09-14 12:00:00 [INFO] app loaded\n'], { type: 'text/plain' }) }
+  ];
   widget.addEventListener('feedback-submitted', (event) => {
     const { feedbackId, status, replayed } = event.detail;   // 服务端已接收
   });
@@ -345,11 +429,15 @@ pnpm --filter @feedback/example-react dev
    事件订阅的 effect 依赖"元素身份"，因此 StrictMode 的双调用（setup → cleanup → setup）
    与 ref 的 detach / reattach 都能正确对应 `addEventListener` / `removeEventListener`。
 
-3. **事件清理必须成对**：
+3. **事件清理与日志提供者配置**：
 
    ```tsx
    useEffect(() => {
      if (!widget) return;
+     // 可选：注入日志采集回调（打开面板自动收集，3秒超时保护）
+     widget.logProvider = async () => [
+       { filename: 'client.log', blob: new Blob(['app runtime diagnostic logs...\n'], { type: 'text/plain' }) },
+     ];
      const onSubmit = (ev: Event) => { const d = (ev as CustomEvent).detail; };
      widget.addEventListener('feedback-submitted', onSubmit);
      return () => widget.removeEventListener('feedback-submitted', onSubmit);
@@ -408,7 +496,15 @@ import type { FeedbackWidget } from '@feedback/web';
 
 const widget = useTemplateRef<FeedbackWidget>('widget');   // 用模板 ref，不要 document.querySelector
 
-onMounted(() => widget.value?.addEventListener('feedback-submitted', onSubmitted));
+onMounted(() => {
+  if (widget.value) {
+    // 可选：设置自动日志采集提供者
+    widget.value.logProvider = async () => [
+      { filename: 'frontend.log', blob: new Blob(['vue runtime logs\n'], { type: 'text/plain' }) },
+    ];
+    widget.value.addEventListener('feedback-submitted', onSubmitted);
+  }
+});
 onBeforeUnmount(() => widget.value?.removeEventListener('feedback-submitted', onSubmitted));
 </script>
 
@@ -457,6 +553,9 @@ node --input-type=module -e "await import('./packages/web/dist/feedback-web.js')
 <script type="module">
   await import('/vendor/@feedback/web/feedback-web.js');       // 仅客户端
   const widget = document.getElementById('widget');
+  widget.logProvider = async () => [
+    { filename: 'ssr-client.log', blob: new Blob(['browser hydration complete\n'], { type: 'text/plain' }) }
+  ];
   widget.addEventListener('feedback-submitted', (e) => { /* e.detail = { feedbackId, status, replayed } */ });
   document.getElementById('btn-open').addEventListener('click', () => widget.open());
   document.getElementById('btn-capture').addEventListener('click', () => widget.captureAndOpen());
@@ -513,6 +612,13 @@ MaterialApp(
             side: FeedbackSide.right,
             launcherMode: FeedbackLauncherMode.orb,      // 默认 tab，必须显式写
             captureMode: FeedbackCaptureMode.viewport,   // 默认 off，必须显式写
+            // 可选：日志采集提供者（面板打开自动抓取，至多 3 份，每份 ≤1MiB，3秒超时容错）
+            logProvider: () async => [
+              FeedbackLogFile(
+                filename: 'app.log',
+                bytes: Uint8List.fromList(utf8.encode('flutter runtime logs\n')),
+              ),
+            ],
           ),
           controller: _feedback,           // 由应用根持有
           child: child ?? const SizedBox.shrink(),
@@ -557,6 +663,7 @@ MaterialApp(
 | `launcher-bottom` | `launcherBottom` | CSS 长度字符串（百分比或像素，如 `25%` / `80px`） | `25%` | 入口距底部的垂直位置 | 纯展示 |
 | `launcher-mode` | `launcherMode` | `tab`（贴边标签） \| `orb`（**灵感球**，可拖拽指出位置并截图） | **`tab`** | 入口形态 | 纯展示；切到 `orb` 时标签隐藏、切到 `tab` 时灵感球隐藏。**不影响草稿与截图开关** |
 | `capture-mode` | `captureMode` | `off` \| `viewport` | **`off`** | 呼出时是否**自动**截取当前应用视口 | 只改下一次呼出的行为；**不清空草稿**。`off` 只关闭**自动**截图：面板里始终有手动的「截取当前页面」 |
+| — | `logProvider` | `FeedbackLogProvider?`（即 `() => Promise<FeedbackLogFile[]> \| FeedbackLogFile[]`） | `undefined` | 自动日志采集提供者；呼出面板时调用（3秒超时容错），至多采集 3 份附件，单文件 ≤1MiB | 仅 property，替换后下一次呼出面板生效；**不清空草稿** |
 
 **明确结论（易踩坑）**：
 
@@ -583,6 +690,8 @@ MaterialApp(
 | `launcherBottom` | `String` | `'25%'` | 入口距可用区域底部的位置；支持百分比（`25%`）、像素（`80px`）或裸数字；**解析失败回落 25%** |
 | `launcherMode` | `FeedbackLauncherMode.tab` \| `.orb` | **`.tab`** | 经典侧边悬浮按钮 / 灵感球 |
 | `captureMode` | `FeedbackCaptureMode.off` \| `.viewport` | **`.off`** | 关闭截图 / 呼出时捕获当前视口完整截图 |
+| `logProvider` | `FeedbackLogProvider?`（即 `FutureOr<List<FeedbackLogFile>> Function()?`） | `null` | 自动日志采集提供者；呼出面板时调用（3秒超时容错），至多采集 3 份附件，单文件 ≤1MiB |
+| `filePicker` | `FeedbackFilePicker?`（即 `FutureOr<List<FeedbackLogFile>> Function()?`） | `null` | 手动选择日志回调；用户点击「添加日志」时调用，未提供时默认使用 `file_selector` 打开系统文件选择器 |
 
 **`position` 的优先级规则**（[`flutter/feedback/lib/src/widget.dart`](../flutter/feedback/lib/src/widget.dart)）：
 
@@ -810,6 +919,36 @@ Flutter 端见 [`flutter/feedback/README.md`](../flutter/feedback/README.md) 的
 Flutter 端**没有**等价的 `captureProvider` 扩展点（`feedback_widget` 未导出该能力）——
 Flutter 端只提供内置视口截图 + `FeedbackCaptureMask` 遮挡。
 
+### 6.5 日志附件规范、隐私保护与 AI 分析边界
+
+#### 1) 附件规格与硬约束（两端与服务端严格一致）
+
+| 规则 | 约束值 | 违规后果 |
+|---|---|---|
+| 文件数量 | 至多 **3 份** | 超出返回 `400 invalid_log`，整条请求拒绝，零落盘 |
+| 单文件体积 | **> 0 且 ≤ 1 MiB**（1,048,576 字节） | 超出返回 `413 too_large`，空文件返回 `400 invalid_log` |
+| 文件格式 | 扩展名仅限 `.log`, `.txt`, `.json`, `.jsonl` | 违规返回 `400 invalid_log` |
+| 字符编码 | 严格为有效 **UTF-8 文本** | 非法编码返回 `400 invalid_log` |
+| 总请求体 | multipart 请求体上限 **10 MiB** | 超出返回 `413 too_large` |
+
+#### 2) 客户端采集与交互
+- **自动采集**：宿主通过 `logProvider` 注入，面板呼出时自动执行，享有 **3 秒超时保护**；超时或抛错静默忽略，不阻碍面板打开与文字输入。
+- **手动选择**：面板提供「添加日志」按钮（Web 端自动呼起系统文件选择器；Flutter 端通过 `filePicker` 回调或默认通道），支持手动添加日志。
+- **安全预览与移除**：面板以只读纯文本弹窗展示日志内容，用户可在提交前点击单行预览并手动移除任意附件。
+- **快照冻结与幂等**：提交瞬间冻结文本、截图与全部日志（`SubmitSnapshot` / `_FrozenSubmit`）。提交失败重试沿用相同快照与幂等键；用户增删或修改日志即刻使旧键失效并生成新键。
+
+#### 3) 隐私与防注入边界（AI 分析与 Kaneo 归档）
+- **日志是不可信诊断材料**：服务端向大模型构造提示词时，将日志置于独立的诊断材料块中，显式声明原话与日志中的任何指令均不予执行，严防针对 AI 整理的 Prompt Injection 攻击。
+- **截断算法**：为保证上下文可控与模型推理效率，服务端在送入 AI 整理前执行 Unicode 码点截断：
+  - **单文件截取尾部至多 8,000 Unicode 码点**（针对最新运行异常与崩溃调用栈）；
+  - **全部日志文件总计至多 24,000 Unicode 码点**，超出部分直接截断或舍弃；
+  - 截断按真正的 Unicode 码点计（非 UTF-16 code units），Emoji 与多字节文字不截断乱码。
+- **人工排查与 Kaneo 归档**：
+  - Kaneo 任务描述追加清晰的格式化日志清单（文件名、来源、体积、SHA-256 摘要）；
+  - Kaneo 截图评论中附带日志文件名与体积线索；
+  - 每一份日志均作为独立附件上传至 Kaneo 存储，并通过 `downloadAsset` 下载并比对 SHA-256 完整性摘要，确认一致后创建日志独立附件评论；全部附件（截图与所有日志）均确认归档后，反馈状态才标记为 `archived`（`archive_stage: "complete"`）；
+  - 管理员可在管理后台列表直接看到日志计数（`logCount`），并在详情页一键下载原始文件（`application/octet-stream`）或浏览器纯文本预览（`text/plain`）；若个别日志远端上传或评论核对失败，反馈进入 `needs_review`，管理员可在详情页发起单文件 `retry_log` 针对性重试。
+
 ---
 
 ## 7. 登录、网络与平台配置
@@ -874,6 +1013,7 @@ Flutter 端只提供内置视口截图 + `FeedbackCaptureMask` 遮挡。
 | Vue 3 + Vite | [`examples/vue`](../examples/vue) | ✅ 本轮：`pnpm -C examples/vue build` exit 0；`typecheck` exit 0；`isCustomElement` 已证明（产物中 `resolveComponent` 计数 0） | ✅ 真实浏览器加载该示例产物 + 真实服务端跑通完整链路（Kaneo / AI 为 mock） |
 | SSR（客户端动态加载） | [`examples/ssr`](../examples/ssr) | ✅ 本轮：`typecheck` exit 0；`start` 后 `/` 返回 200 且含 `feedback-widget` 标记（`grep -c` = 2），vendor 产物 `feedback-web.js` 与懒加载分块 `html2canvas-pro.esm-CQ8baKsv.js` 均 `HTTP/1.1 200 OK` | ❌ **未验证** |
 | Flutter 组件与示例 | `flutter/feedback`、[`examples/flutter`](../examples/flutter) | ✅ 本轮：`flutter analyze` → `No issues found!`（exit 0）；`flutter test` → 4 个用例全过（exit 0） | ❌ **未验证**（未连真实服务端跑完整提交） |
+| Flutter 安全存储兼容（`flutter_secure_storage` 9 / 10 / 11，2026-09-14） | [`flutter/feedback/pubspec.yaml`](../flutter/feedback/pubspec.yaml)、[`tools/flutter-storage-matrix`](../tools/flutter-storage-matrix)、[`docs/flutter-storage-compat.md`](flutter-storage-compat.md) | ✅ 组件 `analyze` + `test` **112/112** exit 0；示例 `test` **37/37** exit 0；三档矩阵（9.2.2 / 10.3.1 / 11.0.0）各 116 例全绿；`build apk --debug` / `build macos --release` / `build ios --no-codesign` 全部 exit 0 | ⚠️ **部分验证**：Android 9→10→11 迁移在真实模拟器 + 真实 APK 上实测通过；**macOS / iOS 只做构建、未做 Keychain 运行时验证**；Windows / Linux 不在本次范围。结论与证据见 `VERIFICATION.md` 的「Flutter 安全存储兼容」一节 |
 | 浏览器端到端（登录握手 / 提交 / 草稿 / 窄屏等） | `e2e/run_browser.py` | ✅ 第 4 轮：`python3 e2e/run_browser.py` **237/237 通过**（真实系统 Chrome + 真实服务端），含灵感球拖动落点、像素级遮挡、异源 / 错 nonce 登录、切换 `api-base` 后的凭据隔离、**默认 `capture-mode=off` 下截图区必须真的隐藏且必须能看到「截取当前页面」**（`[hidden]` 级联回归），以及**真实侧边标签 → 打开不自动截图 → 手动截图 → 像素 / 放大 / 重拍 → multipart 落库**（P6）与**窄屏 + 键盘 Enter 的手动截图**（P7） | ✅ Web 端已在真实浏览器 + 真实服务端跑通「登录 → 截图 → 反馈 → 归档」（Kaneo / AI 为 mock） |
 | 像素级遮挡安全性 | Web：`packages/web/test/masking.test.ts`；Flutter：`test/capture_mask_pixel_test.dart` | ✅ 自动化像素断言通过；**第 3 轮补上真实浏览器像素验证**（Pillow 解码最终 PNG：遮罩区 68676/68676、密码框区 14868/14868 全为 `rgb(110,110,115)`；泄漏型 provider 被拒且从未上传） | ✅ 真实浏览器遮挡断言已验证 |
 | 真实 Kaneo + AI 图文归档 | [`apps/server/src/pipeline/worker.ts`](../apps/server/src/pipeline/worker.ts)、[`apps/server/src/services/kaneo-http.ts`](../apps/server/src/services/kaneo-http.ts) | ✅ 真实 AI + 真实 Kaneo 的**纯文字**闭环已跑通（落库任务链接指向真实 Kaneo 任务） | ⚠️ **图文闭环 BLOCKED（且当前会「静默降级」）**：截图采集/上传/入库全部正常（`hasScreenshot: true`、`capture.releasePoint` 已持久化），但所配 AI **看不到图**——当前端点是编码套餐 `.../api/coding/v3`，视觉模型在该端点一律 404；用纯红图探针实测当前模型 `deepseek-v4-flash` 带图与不带图回答完全相同（图片被静默丢弃）。**同一条生产路径有时返回 400（硬失败）、有时返回 200 并照常归档**，即"AI 从未看过截图却归档成功"。**接入方务必自测**：`POST /api/feedback` 带截图后确认 AI 输出确实引用了截图中可见的界面内容；换支持视觉的模型/端点前不得认为图文能力可用 |
@@ -969,6 +1109,9 @@ Flutter 端只提供内置视口截图 + `FeedbackCaptureMask` 遮挡。
 | 默认 `capture-mode="off"` 时找不到截图入口 / 输入文字后无法补拍 | 这里的 `off` 只表示**不自动截图**；面板里应始终有手动的「截取当前页面」，无截图时不应出现缩略图或「重新截图 / 移除截图」 | 升级到本轮修复后的 Web 组件；面板内点「截取当前页面」即可手动截图（与文字草稿互不影响）。若按钮不可见，检查宿主是否用 CSS 压掉了 `[hidden]`（组件已内置 `[hidden]{display:none!important}` 兜底） |
 | Flutter 面板里输入框选择浮层 / 截图放大预览异常 | 组件挂载位置缺少 `Overlay` / `Navigator` 祖先 | 按 3.5 用 `MaterialApp.builder` + 外层 Navigator 包裹 |
 | Flutter 宿主对话框压住灵感球，或不出现在截图里 | `showDialog` 默认 `useRootNavigator: true`，对话框被推到组件上方 | 用 `useRootNavigator: false` 让对话框落在应用自己的 Navigator 里 |
+| Android 构建因插件所需 `compileSdk` 高于应用而失败（AGP 的 AAR metadata 校验） | 宿主继承的默认 `compileSdk` 低于插件要求（Flutter 3.41.3 默认 36） | 在 `android/app/build.gradle.kts` 显式写 `compileSdk = 37`，并保证 `minSdk >= 24`（见 2.4.1） |
+| macOS 编译报找不到 `flutter_secure_storage_macos` / 插件注册不匹配 | 用 11.x 但 `GeneratedPluginRegistrant.swift` 仍是 `_macos`（11 起改用 `flutter_secure_storage_darwin`） | `flutter pub get` 后重新构建以再生成 `macos/Flutter/GeneratedPluginRegistrant.swift`，确认导入 `flutter_secure_storage_darwin`；`ios/macos` 的 `Podfile.lock` 也应由 CocoaPods 重新生成 |
+| 升级 `flutter_secure_storage` 大版本后读不到旧令牌 | 平台实现包在 10.x 起换名（见 2.4.1）；放宽约束**不会**自动迁移数据 | 先在目标的真实签名环境里按 2.4.1 逐档验证（Android 用**同 applicationId + 同签名**的 `adb install -r` 覆盖安装）；旧宿主可以保持锁定版本、不升级 |
 
 ---
 
@@ -981,6 +1124,7 @@ Flutter 端只提供内置视口截图 + `FeedbackCaptureMask` 遮挡。
 | [`README.md`](../README.md) | 项目总览、仓库结构、关键设计 |
 | [`packages/web/README.md`](../packages/web/README.md) | Web 组件权威参考：属性 / 方法 / 事件 / 截图与遮挡 / `captureProvider` 契约 / 包体与懒加载 |
 | [`flutter/feedback/README.md`](../flutter/feedback/README.md) | Flutter 包权威参考：平台支持、遮挡、捕获会话、草稿与提交、登录、令牌存储键 |
+| [`docs/flutter-storage-compat.md`](flutter-storage-compat.md) | Flutter 安全存储兼容：9/10/11 版本矩阵、宿主义务、迁移边界与步骤、验证范围、待提交信息 |
 | [`examples/html/README.md`](../examples/html/README.md) | 原生 HTML：UMD 自托管与静态服务 |
 | [`examples/react/README.md`](../examples/react/README.md) | React 19 + Vite：类型声明、StrictMode、事件清理 |
 | [`examples/vue/README.md`](../examples/vue/README.md) | Vue 3 + Vite：`isCustomElement`、模板 ref |

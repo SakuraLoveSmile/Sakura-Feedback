@@ -8,11 +8,21 @@ import { decryptSecret } from "./crypto/secret.ts";
 import { type Db, openDb } from "./db/db.ts";
 import { findResumable, getSetting } from "./db/repos.ts";
 import type { ServerConfig } from "./env.ts";
+import { requireWritesAllowed } from "./http.ts";
 import { loginPageHtml } from "./pages/login.ts";
 import { createWorker, type Worker } from "./pipeline/worker.ts";
 import { adminRoutes } from "./routes/admin.ts";
 import { authRoutes, ensureInitialUser } from "./routes/auth.ts";
 import { feedbackRoutes } from "./routes/feedback.ts";
+import {
+  createControlPlane,
+  createSystemUpdateService,
+  createUpdaterClient,
+  SERVER_VERSION,
+  type SystemUpdateService,
+  systemUpdateRoutes,
+  type UpdaterClient,
+} from "./routes/system-update.ts";
 import { type AiClient, createAiClient } from "./services/ai.ts";
 import type { KaneoClient } from "./services/kaneo.ts";
 import { createKaneoHttpClient } from "./services/kaneo-http.ts";
@@ -24,6 +34,10 @@ export interface AppDeps {
   workerSleep?: (ms: number) => Promise<void>;
   /** 测试注入：可控服务端时钟（额度按北京时间日切分）。 */
   now?: () => number;
+  /** 测试注入：updater 客户端（默认按 FEEDBACK_UPDATE_* 配置创建）。 */
+  updaterClient?: UpdaterClient;
+  /** 测试注入：控制目录读取缓存时长（毫秒）；0 表示每次读盘。 */
+  controlTtlMs?: number;
 }
 
 export interface FeedbackApp {
@@ -31,11 +45,32 @@ export interface FeedbackApp {
   db: Db;
   config: ServerConfig;
   worker: Worker;
+  /** U1-4：系统更新聚合（检查/更新代理/暂停状态）。 */
+  system: SystemUpdateService;
+  /** 释放后台定时器（不影响数据库连接的生命周期）。 */
+  close: () => void;
 }
 
 export function createApp(config: ServerConfig, deps: AppDeps = {}): FeedbackApp {
   const db = openDb(config.dataDir);
   ensureInitialUser(db, config);
+
+  // U1-4：控制目录（只读挂载）→ 暂停标记与任务进度；令牌只在请求上游时按需从文件读取。
+  const control = createControlPlane({
+    controlDir: config.updateControlDir ?? null,
+    ...(deps.controlTtlMs !== undefined ? { ttlMs: deps.controlTtlMs } : {}),
+    ...(deps.now ? { now: deps.now } : {}),
+  });
+  const updaterClient =
+    deps.updaterClient ??
+    createUpdaterClient({ baseUrl: config.updateUrl ?? null, tokenFile: config.updateTokenFile ?? null });
+  const system = createSystemUpdateService({
+    currentVersion: SERVER_VERSION,
+    control,
+    client: updaterClient,
+    checkIntervalMs: config.updateCheckIntervalMs ?? 0,
+    ...(deps.now ? { now: deps.now } : {}),
+  });
 
   const ai = deps.ai ?? createAiClient(db, config.masterKey);
   /** 当前 Kaneo 连接配置（含解密密钥）。每次操作只读取一次，之后整轮固定（worker bind）。 */
@@ -61,12 +96,31 @@ export function createApp(config: ServerConfig, deps: AppDeps = {}): FeedbackApp
     ai,
     kaneo,
     snapshotKaneoSettings,
+    writesPaused: () => control.isWritePaused(),
     ...(deps.workerSleep ? { sleep: deps.workerSleep } : {}),
   });
 
   const app = new Hono();
 
   app.get("/healthz", (c) => c.json({ ok: true }));
+
+  // U1-4：更新暂停闸门。paused 标记存在时拒绝业务写入（503 update_paused），
+  // 纯拦截、不进入路由处理：更新期间不会触发任何 worker 入队或远端归档调用。
+  // GET/HEAD 一律放行（后台读进度），/api/admin/system/update* 的检查与放行也显式豁免。
+  const pauseGate = requireWritesAllowed(control);
+  app.use("/api/feedback", pauseGate);
+  app.use("/api/feedback/*", pauseGate);
+  // 管理写入同样先拦截（只放行读方法）；系统更新自己的检查/放行入口必须始终可用，
+  // 因此对 /api/admin/system/update* 显式豁免——否则一旦暂停标记残留，后台将无法自愈。
+  app.use("/api/admin", pauseGate);
+  app.use("/api/admin/*", async (c, next) => {
+    // 挂载点内的路径可能带尾斜杠（/api/admin/system/update/），统一规范化后再判断。
+    const path = new URL(c.req.url).pathname.replace(/\/+$/, "");
+    if (path === "/api/admin/system/update" || path.startsWith("/api/admin/system/update/")) {
+      return next();
+    }
+    return pauseGate(c, next);
+  });
 
   // 宿主应用与反馈服务通常跨源：/api/feedback* 使用 Bearer（非 Cookie）鉴权，
   // 仅对已在任一软件配置中登记的 allowedOrigins 回显 CORS。
@@ -135,6 +189,8 @@ export function createApp(config: ServerConfig, deps: AppDeps = {}): FeedbackApp
     }),
   );
   app.route("/api/admin", adminRoutes({ db, masterKey: config.masterKey, config, kaneo, ai }));
+  // U1-4：系统更新接口（同样是 /api/admin 下的管理员守卫路由）。
+  app.route("/api/admin/system", systemUpdateRoutes({ db, config, system }));
 
   app.notFound((c) => c.json({ error: { code: "not_found", message: "接口不存在" } }, 404));
   app.onError((e, c) => {
@@ -161,7 +217,7 @@ export function createApp(config: ServerConfig, deps: AppDeps = {}): FeedbackApp
   }
   app.get("/admin", (c) => c.redirect("/admin/"));
 
-  return { app, db, config, worker };
+  return { app, db, config, worker, system, close: () => system.close() };
 }
 
 /** origin 是否已在任一软件配置中登记（用于跨源反馈接口的 CORS 回显）。 */

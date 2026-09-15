@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { createApp, resumeWorker } from "../src/app.ts";
 import { type Db, getFeedback, getFeedbackScreenshot, updateFeedback } from "../src/db/repos.ts";
-import { type ArchiveDataV1, loadArchiveData, saveArchiveData } from "../src/pipeline/archive-data.ts";
+import {
+  type ArchiveData,
+  type ArchiveDataV1,
+  loadArchiveData,
+  saveArchiveData,
+} from "../src/pipeline/archive-data.ts";
 import {
   createTestPng,
   defaultSubmitBody,
@@ -19,7 +24,7 @@ import {
   submitMultipartFeedback,
 } from "./helpers.ts";
 
-function expectValidArchive(db: Db, id: string): ArchiveDataV1 {
+function expectValidArchive(db: Db, id: string): ArchiveData {
   const parsed = loadArchiveData(db, id);
   if (parsed.kind !== "valid") throw new Error(`期望合法归档数据，实际 ${parsed.kind}`);
   return parsed.data;

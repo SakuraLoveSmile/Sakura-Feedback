@@ -36,6 +36,10 @@ __pycache__/
 # Playwright MCP 会话产物
 .playwright-mcp/
 
+# Flutter 原生/矩阵验证生成的工作副本与构建产物
+e2e/flutter_matrix/work/
+e2e/flutter_native/work/
+
 # T1-C 默认存储验收运行产物
 e2e/t1c-runs/
 examples/flutter/t1c-defines.json

@@ -85,6 +85,19 @@ export interface FeedbackRecovery {
   actionTargets: Record<string, string>;
   /** 动作风险说明：点击前展示给操作人（如 retry_comment 仍可能产生重复评论）。 */
   actionNotes: Record<string, string>;
+  /** 待处理的日志附件 ID 列表（供 retry_log 使用）。 */
+  pendingLogIds?: string[];
+}
+
+export interface FeedbackLogMeta {
+  id: string;
+  feedbackId: string;
+  sortOrder: number;
+  filename: string;
+  source: "auto" | "manual";
+  byteSize: number;
+  sha256: string;
+  createdAt: string;
 }
 
 export interface FeedbackDetail extends FeedbackListItem {
@@ -99,6 +112,7 @@ export interface FeedbackDetail extends FeedbackListItem {
   lastError: string | null;
   recovery?: FeedbackRecovery | null;
   screenshot?: FeedbackScreenshotMeta | null;
+  logs?: FeedbackLogMeta[] | null;
 }
 
 export interface AppItem {
@@ -138,6 +152,96 @@ export interface KaneoTestResult {
   columns?: { id: string; slug: string; name: string }[];
   reason?: string;
 }
+
+/** 当前会话账号（GET /api/auth/session 的 user 字段；绝不包含口令或哈希）。 */
+export interface SessionUser {
+  id: string;
+  username: string;
+  role: string;
+}
+
+// ---------- U1-4：后台「系统更新」 ----------
+
+/** 检查状态：ok=有新版本 / up_to_date=已是最新 / incompatible=执行器协议不兼容 / failed=检查失败 / never=尚未检查 */
+export type UpdateCheckState = "ok" | "up_to_date" | "incompatible" | "failed" | "never";
+
+export interface UpdateCheckView {
+  state: UpdateCheckState;
+  checkedAt: string | null;
+  source: string | null;
+  latest: {
+    version: string;
+    notes: string | null;
+    publishedAt: string | null;
+    digest: string | null;
+    image: string | null;
+    requiredUpdaterProtocol: number | null;
+  } | null;
+  compatible: boolean;
+  requiredProtocol: number | null;
+  supportedProtocol: number;
+  guidance: string | null;
+  failedCode: string | null;
+  failedMessage: string | null;
+  warnings: string[];
+}
+
+export interface UpdateOperationView {
+  operationId: string;
+  requestId: string | null;
+  version: string | null;
+  digest: string | null;
+  status: string;
+  outcome: string | null;
+  /** 「更新失败，已恢复旧版本」/「需要处理」等终态文案（服务端给出）。 */
+  outcomeLabel: string | null;
+  phase: string;
+  phaseLabel: string;
+  message: string;
+  createdAt: string;
+  updatedAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  failure: { phase: string; code: string; message: string } | null;
+  recoveryHint: string | null;
+  warnings: string[];
+  evidence: { at: string; phase: string; step: string; ok: boolean; detail?: string }[];
+}
+
+export interface UpdatePauseState {
+  paused: boolean;
+  since: string | null;
+  marker: {
+    phase: string | null;
+    phaseLabel: string | null;
+    message: string | null;
+    operationId: string | null;
+    version: string | null;
+    updatedAt: string | null;
+    parseError: string | null;
+  } | null;
+}
+
+export interface SystemUpdateStatus {
+  current: { version: string; protocol: number };
+  config: {
+    updateConfigured: boolean;
+    updaterBaseUrl: string | null;
+    tokenFile: string | null;
+    controlDir: string | null;
+    protocolSupported: number;
+    checkIntervalMs: number;
+  };
+  pause: UpdatePauseState;
+  check: UpdateCheckView;
+  recentOperations: UpdateOperationView[];
+}
+
+/** 任务查询结果：unreachable **不等于** 失败（服务重启期间取不到进度属正常过程）。 */
+export type UpdateOperationResult =
+  | { status: "known"; fromControlDir: boolean; operation: UpdateOperationView }
+  | { status: "unknown"; operationId: string }
+  | { status: "unreachable"; operationId: string; error: { code: string; message: string } };
 
 export const STATUS_LABELS: Record<string, string> = {
   received: "已接收",

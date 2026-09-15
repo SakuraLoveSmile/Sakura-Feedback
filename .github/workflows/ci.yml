@@ -89,3 +89,31 @@ jobs:
           flutter pub get
           flutter analyze
           flutter test
+
+  # 安全存储三版本回归矩阵：组件包的约束是 >=9.2.2 <12.0.0，这里把
+  # flutter_secure_storage 分别固定到 9.2.2 / 10.3.1 / 11.0.0 逐档跑
+  # （隔离宿主 + 复用组件测试），确保不是“只验最新版”。矩阵策略每个 job 一档，
+  # 任何一档失败都会让 CI 失败（因此也会挡住 release.yml 的发布）。
+  flutter-storage-matrix:
+    name: flutter_secure_storage ${{ matrix.storage }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        storage: ["9.2.2", "10.3.1", "11.0.0"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.41.3
+          channel: stable
+          cache: true
+      - name: 固定 ${{ matrix.storage }} 跑组件 analyze + test（隔离宿主，不使用 dependency_overrides）
+        run: bash tools/flutter-storage-matrix/run.sh "${{ matrix.storage }}"
+      - name: 归档本档证据（日志、解析版本、校验结论）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flutter-storage-matrix-${{ matrix.storage }}
+          path: tools/flutter-storage-matrix/out/
+          if-no-files-found: warn

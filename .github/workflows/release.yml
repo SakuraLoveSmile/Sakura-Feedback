@@ -1,8 +1,10 @@
 name: Release
 
-# 只有以下两种情况发布镜像；PR 永远不会发布（见 ci.yml）。
-#   - 推送版本标签 v*（例如 v0.1.0）
-#   - 手动触发（workflow_dispatch），可选填写版本标签
+# 触发与渠道（判定规则与不变量见 docs/release.md）：
+#   - 推送正式版本标签 v*（例如 v0.3.0）：唯一进入「稳定渠道」的方式——构建并推送 feedback 与
+#     updater 两个镜像，生成 release-manifest.json，创建 draft Release，全部资产齐全后最后一步才公开。
+#   - 手动触发（workflow_dispatch）：只构建并按 sha 标签推送，不创建 Release、不产出稳定清单。
+#   - PR 永远不会发布（见 ci.yml）。
 # 发布前必须先通过 CI：调用 ci.yml（workflow_call），检查不通过则不构建、不推送。
 on:
   push:
@@ -10,28 +12,124 @@ on:
   workflow_dispatch:
     inputs:
       version_tag:
-        description: 版本标签（例如 v0.1.0）。留空则只发布 sha 标签。
+        description: 版本标签（例如 v0.3.0）。留空则只发布 sha 标签；手动触发不产出稳定清单。
         required: false
         default: ""
 
-# 顶层只读；packages: write 仅授予 publish job，contents: write 仅用于挂 Release 资产。
+# 顶层只读；packages: write 仅授予 publish job，contents: write 仅授予最后公开 Release 的 job。
 permissions:
   contents: read
 
+# 同一 ref 的发布串行化：避免两次运行同时改同一个 draft Release。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
+  # 两个镜像：updater 与反馈服务版本解耦、各自独立发布（见 apps/updater/README.md）。
   IMAGE_NAME: ghcr.io/sakuralovesmile/sakura-feedback
+  UPDATER_IMAGE_NAME: ghcr.io/sakuralovesmile/sakura-feedback-updater
+  # 清单契约的冻结值（执行器协议 v1，见 apps/updater/src/version.ts）。
+  UPDATER_PROTOCOL_VERSION: "1"
+  PLATFORM: linux/amd64
 
 jobs:
   checks:
     uses: ./.github/workflows/ci.yml
 
-  # 与镜像同一轮构建：Web .tgz、完整浏览器 dist、SHA-256 清单、来源提交。
-  # 不读取任何生产 .env / 数据库 / AI / Kaneo 凭据。
-  artifacts:
+  # 版本与渠道判定放在任何构建之前：标签/版本写错时，在推送任何镜像之前就失败。
+  # 稳定渠道 =「正式 v<源码版本> 标签」且该标签指向本次运行的提交。
+  plan:
     needs: [checks]
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
+    outputs:
+      version: ${{ steps.classify.outputs.version }}
+      updater_version: ${{ steps.classify.outputs.updater_version }}
+      channel: ${{ steps.classify.outputs.channel }}
+      stable: ${{ steps.classify.outputs.stable }}
+      tag: ${{ steps.classify.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 需要完整历史与标签，才能断言「标签指向本次提交」
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: 判定版本与渠道
+        id: classify
+        env:
+          # 外部值一律经 env 传入，不插值进 shell 命令文本
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          TAG_NAME: ${{ github.ref_name }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          read_version() {
+            python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['version'])" "$1"
+          }
+          version="$(read_version package.json)"
+          updater_version="$(read_version apps/updater/package.json)"
+          for candidate in "$version" "$updater_version"; do
+            if ! printf '%s' "$candidate" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::package.json 的 version 必须是 X.Y.Z：$candidate"; exit 1
+            fi
+          done
+
+          stable="false"
+          channel="manual"
+          tag=""
+
+          if [ "$EVENT_NAME" = "push" ] && [ "$REF_TYPE" = "tag" ]; then
+            tag="$TAG_NAME"
+            # 标签名来自外部，先做白名单校验再使用
+            if ! printf '%s' "$TAG_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+              echo "::error::标签名不符合 v* 命名约定：$TAG_NAME"; exit 1
+            fi
+            if printf '%s' "$TAG_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+              # 正式版本：必须与源码版本一致（否则清单的版本与标签会互相矛盾）
+              if [ "$TAG_NAME" != "v$version" ]; then
+                echo "::error::标签 $TAG_NAME 与根 package.json 版本 v$version 不一致；稳定渠道只接受匹配源码版本的正式标签"; exit 1
+              fi
+              # 并且标签必须指向本次运行的提交
+              tag_commit="$(git rev-parse --verify --quiet "refs/tags/$TAG_NAME^{commit}" 2>/dev/null || true)"
+              if [ -z "$tag_commit" ]; then
+                git fetch --no-tags --depth=1 origin "+refs/tags/$TAG_NAME:refs/tags/$TAG_NAME" >/dev/null 2>&1 || true
+                tag_commit="$(git rev-parse --verify --quiet "refs/tags/$TAG_NAME^{commit}" 2>/dev/null || true)"
+              fi
+              if [ -z "$tag_commit" ]; then
+                echo "::error::无法解析标签 $TAG_NAME 指向的提交（fail-closed，拒绝进入稳定渠道）"; exit 1
+              fi
+              if [ "$tag_commit" != "$HEAD_SHA" ]; then
+                echo "::error::标签 $TAG_NAME 指向 $tag_commit，本次运行提交为 $HEAD_SHA（不一致）"; exit 1
+              fi
+              stable="true"
+              channel="stable"
+            else
+              # 预发布标签（如 v0.3.0-rc.1）：可以构建推镜像，但不进入稳定渠道、不产出清单、不动 Release
+              channel="prerelease"
+            fi
+          fi
+
+          {
+            echo "version=$version"
+            echo "updater_version=$updater_version"
+            echo "channel=$channel"
+            echo "stable=$stable"
+            echo "tag=$tag"
+          } >> "$GITHUB_OUTPUT"
+          echo "版本 v$version / updater $updater_version / 渠道 $channel / stable=$stable / 标签 ${tag:-<none>}"
+
+  # 与镜像同一轮构建：Web .tgz、完整浏览器 dist、SHA-256 清单、来源提交。
+  # 不读取任何生产 .env / 数据库 / AI / Kaneo 凭据；本 job 不接触 GitHub Release（只有 release job 能写 Release）。
+  artifacts:
+    needs: [plan]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -58,7 +156,12 @@ jobs:
           cd "$GITHUB_WORKSPACE/apps/admin" && zip -qr "$GITHUB_WORKSPACE/out/feedback-admin-dist.zip" dist
 
       - name: 生成 SHA-256 清单与来源提交
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          CHANNEL: ${{ needs.plan.outputs.channel }}
+          TAG: ${{ needs.plan.outputs.tag }}
         run: |
+          set -euo pipefail
           cd out
           sha256sum ./*.tgz ./*.zip > SHA256SUMS
           {
@@ -67,6 +170,9 @@ jobs:
             echo "run=$GITHUB_RUN_ID"
             echo "node=$(node -v)"
             echo "pnpm=$(pnpm -v)"
+            echo "version=$VERSION"
+            echo "channel=$CHANNEL"
+            echo "tag=${TAG:-<none>}"
           } > SOURCE.txt
           cat SHA256SUMS SOURCE.txt
 
@@ -78,26 +184,15 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
-      - name: 标签推送时挂到 GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          # 标签名来自外部，先做白名单校验再使用
-          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9A-Za-z._-]+$'; then
-            echo "::error::标签名不符合 v* 命名约定：$TAG"; exit 1
-          fi
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --generate-notes
-          gh release upload "$TAG" out/*.tgz out/*.zip out/SHA256SUMS out/SOURCE.txt --clobber
-
   publish:
-    needs: [artifacts]
+    needs: [plan, artifacts]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write # 仅此 job 有发布权限
+    outputs:
+      feedback_digest: ${{ steps.build-feedback.outputs.digest }}
+      updater_digest: ${{ steps.build-updater.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
 
@@ -111,8 +206,8 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # 标签由 metadata-action 生成，不把 ref 插值进 shell
-      - name: 生成镜像标签
-        id: meta
+      - name: 生成 feedback 镜像标签
+        id: meta-feedback
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE_NAME }}
@@ -121,37 +216,458 @@ jobs:
             type=raw,value=${{ inputs.version_tag }},enable=${{ inputs.version_tag != '' }}
             type=sha,format=long
 
-      - name: 构建并推送 linux/amd64 镜像
-        id: build
+      - name: 构建并推送 linux/amd64 feedback 服务镜像
+        id: build-feedback
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64
+          file: ./Dockerfile
+          platforms: ${{ env.PLATFORM }}
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.meta-feedback.outputs.tags }}
+          labels: ${{ steps.meta-feedback.outputs.labels }}
           provenance: true
           sbom: true
 
-      - name: 记录 digest（生产部署按 digest 固定）
+      # updater 与反馈服务版本解耦：额外带上 updater 自己的版本标签（读自 apps/updater/package.json，非硬编码）
+      - name: 生成 updater 镜像标签
+        id: meta-updater
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.UPDATER_IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ needs.plan.outputs.updater_version }}
+            type=ref,event=tag
+            type=raw,value=${{ inputs.version_tag }},enable=${{ inputs.version_tag != '' }}
+            type=sha,format=long
+
+      - name: 构建并推送 linux/amd64 updater 镜像（上下文为仓库根）
+        id: build-updater
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./apps/updater/Dockerfile
+          platforms: ${{ env.PLATFORM }}
+          push: true
+          tags: ${{ steps.meta-updater.outputs.tags }}
+          labels: ${{ steps.meta-updater.outputs.labels }}
+          provenance: true
+          sbom: true
+
+      - name: 记录并校验两个镜像的 digest（任一缺失/为空即失败）
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
-          TAGS: ${{ steps.meta.outputs.tags }}
+          FEEDBACK_DIGEST: ${{ steps.build-feedback.outputs.digest }}
+          UPDATER_DIGEST: ${{ steps.build-updater.outputs.digest }}
+          FEEDBACK_TAGS: ${{ steps.meta-feedback.outputs.tags }}
+          UPDATER_TAGS: ${{ steps.meta-updater.outputs.tags }}
         run: |
-          {
-            echo "image: $IMAGE_NAME"
-            echo "digest: $DIGEST"
-            echo "tags:"
-            printf '%s\n' "$TAGS" | sed 's/^/  - /'
-          } > image-digest.txt
+          set -euo pipefail
+          mkdir -p digests
+          write_digest() {
+            local label="$1" image="$2" digest="$3" tags="$4" target="$5"
+            if [ -z "$digest" ]; then
+              echo "::error::$label 镜像 digest 为空（镜像未推送成功），不产出清单"; exit 1
+            fi
+            if ! printf '%s' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+              echo "::error::$label 镜像 digest 格式非法：$digest"; exit 1
+            fi
+            {
+              echo "image: $image"
+              echo "digest: $digest"
+              echo "tags:"
+              printf '%s\n' "$tags" | sed 's/^/  - /'
+            } > "$target"
+            echo "$label → ${image}@${digest}"
+          }
+          write_digest feedback "$IMAGE_NAME" "$FEEDBACK_DIGEST" "$FEEDBACK_TAGS" digests/feedback-image-digest.txt
+          write_digest updater "$UPDATER_IMAGE_NAME" "$UPDATER_DIGEST" "$UPDATER_TAGS" digests/updater-image-digest.txt
           echo "### 生产固定引用" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo "${IMAGE_NAME}@${DIGEST}" >> "$GITHUB_STEP_SUMMARY"
+          echo "${IMAGE_NAME}@${FEEDBACK_DIGEST}" >> "$GITHUB_STEP_SUMMARY"
+          echo "${UPDATER_IMAGE_NAME}@${UPDATER_DIGEST}" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
-      - name: 上传 digest 清单
+      - name: 上传 feedback digest
         uses: actions/upload-artifact@v4
         with:
           name: feedback-image-digest
-          path: image-digest.txt
+          path: digests/feedback-image-digest.txt
           retention-days: 90
+
+      - name: 上传 updater digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: updater-image-digest
+          path: digests/updater-image-digest.txt
+          retention-days: 90
+
+  # 稳定清单只在 checks 通过、且两个镜像 digest 都已记录后生成；缺任一项都走不到这里。
+  manifest:
+    needs: [plan, artifacts, publish]
+    if: needs.plan.outputs.stable == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: feedback-image-digest
+          path: digests
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: updater-image-digest
+          path: digests
+
+      - name: 生成 release-manifest.json
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          CHANNEL: ${{ needs.plan.outputs.channel }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          COMMIT: ${{ github.sha }}
+          FEEDBACK_DIGEST: ${{ needs.publish.outputs.feedback_digest }}
+          UPDATER_DIGEST: ${{ needs.publish.outputs.updater_digest }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import datetime
+          import json
+          import os
+          import pathlib
+          import re
+          import sys
+
+          DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+          SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
+          COMMIT_RE = re.compile(r"^[0-9a-f]{7,40}$")
+
+
+          def fail(message):
+              print(f"::error::{message}")
+              sys.exit(1)
+
+
+          def require_env(name):
+              value = (os.environ.get(name) or "").strip()
+              if not value:
+                  fail(f"环境变量 {name} 缺失")
+              return value
+
+
+          def read_digest(path, label):
+              file = pathlib.Path(path)
+              if not file.is_file():
+                  fail(f"{label} 的 digest 文件不存在：{path}（镜像未推送成功或产物缺失）")
+              match = re.search(r"^digest:\s*(\S+)\s*$", file.read_text(encoding="utf-8"), re.MULTILINE)
+              if not match:
+                  fail(f"{label} 的 digest 文件缺少 digest 行：{path}")
+              value = match.group(1)
+              if not DIGEST_RE.match(value):
+                  fail(f"{label} 的 digest 格式非法：{value}")
+              return value
+
+
+          version = require_env("VERSION")
+          channel = require_env("CHANNEL")
+          tag = require_env("TAG")
+          commit = require_env("COMMIT")
+          feedback_image = require_env("IMAGE_NAME")
+          updater_image = require_env("UPDATER_IMAGE_NAME")
+          platform = require_env("PLATFORM")
+
+          if channel != "stable":
+              fail(f"渠道不是 stable（{channel}），拒绝生成稳定清单")
+          if not SEMVER_RE.match(version):
+              fail(f"源码版本不是正式语义版本：{version}")
+          if tag != f"v{version}":
+              fail(f"标签 {tag} 与源码版本 v{version} 不一致")
+          if not COMMIT_RE.match(commit):
+              fail(f"提交号非法：{commit}")
+
+          feedback_digest = read_digest("digests/feedback-image-digest.txt", "feedback")
+          updater_digest = read_digest("digests/updater-image-digest.txt", "updater")
+
+          # 与 publish job 的 job output 交叉核对：任一侧丢失或被替换都会被发现
+          for name, recorded in (("FEEDBACK_DIGEST", feedback_digest), ("UPDATER_DIGEST", updater_digest)):
+              value = require_env(name)
+              if not DIGEST_RE.match(value):
+                  fail(f"{name} 格式非法：{value}")
+              if value != recorded:
+                  fail(f"{name} 与 digest 文件不一致（记录文件：{recorded}）")
+
+          # dbSchemaVersion 取服务端迁移常量的当前值：读源码而不是硬编码猜测
+          db_source = pathlib.Path("apps/server/src/db/db.ts")
+          if not db_source.is_file():
+              fail(f"读不到服务端 schema 版本来源：{db_source}")
+          migrations = [int(value) for value in re.findall(r"PRAGMA\s+user_version\s*=\s*(\d+)", db_source.read_text(encoding="utf-8"))]
+          if not migrations:
+              fail("apps/server/src/db/db.ts 中找不到 PRAGMA user_version 迁移常量")
+          db_schema_version = max(migrations)
+
+          try:
+              protocol = int(require_env("UPDATER_PROTOCOL_VERSION"))
+          except ValueError:
+              fail("UPDATER_PROTOCOL_VERSION 不是整数")
+          if protocol < 1:
+              fail(f"UPDATER_PROTOCOL_VERSION 必须 ≥1：{protocol}")
+
+          manifest = {
+              "manifestVersion": 1,
+              "version": version,
+              "commit": commit,
+              "tag": tag,
+              "channel": channel,
+              "services": {
+                  "feedback": {"image": feedback_image, "digest": feedback_digest},
+                  "updater": {"image": updater_image, "digest": updater_digest},
+              },
+              "platform": platform,
+              "dbSchemaVersion": db_schema_version,
+              "requiredUpdaterProtocol": protocol,
+              "publishedAt": datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+          }
+
+          required_fields = [
+              "manifestVersion", "version", "commit", "tag", "channel", "services",
+              "platform", "dbSchemaVersion", "requiredUpdaterProtocol", "publishedAt",
+          ]
+          missing = [field for field in required_fields if field not in manifest]
+          if missing:
+              fail(f"清单缺少字段：{', '.join(missing)}")
+
+          text = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
+          pathlib.Path("release-manifest.json").write_text(text, encoding="utf-8")
+          print(text)
+          print(f"::notice::release-manifest.json 已生成（version={version} channel={channel} dbSchemaVersion={db_schema_version} requiredUpdaterProtocol={protocol}）")
+          PY
+
+      # 用执行器自己的解析器校验清单：清单必须真的能被 updater 接受，才允许进入 Release。
+      # 零依赖：Node 22 的类型剥离直接跑 TS，不需要 pnpm install。
+      - name: 用执行器解析器校验清单（apps/updater/src/manifest.ts）
+        env:
+          MANIFEST_FILE: release-manifest.json
+        run: |
+          set -euo pipefail
+          node --experimental-strip-types --input-type=module --no-warnings - <<'JS'
+          import fs from "node:fs";
+          import { parseManifest } from "./apps/updater/src/manifest.ts";
+
+          const file = process.env.MANIFEST_FILE;
+          const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+          const parsed = parseManifest(raw, "stable");
+          if (parsed.services.updater === null) {
+            throw new Error("清单缺少 services.updater（执行器无法确认 updater 镜像）");
+          }
+          if (parsed.dbSchemaVersion === null) {
+            throw new Error("清单缺少 dbSchemaVersion");
+          }
+          console.log("清单被 apps/updater 的解析器接受：", JSON.stringify({
+            version: parsed.version,
+            channel: parsed.channel,
+            commit: parsed.commit,
+            feedback: `${parsed.services.feedback.image}@${parsed.services.feedback.digest}`,
+            updater: `${parsed.services.updater.image}@${parsed.services.updater.digest}`,
+            platform: parsed.platform,
+            dbSchemaVersion: parsed.dbSchemaVersion,
+            requiredUpdaterProtocol: parsed.requiredUpdaterProtocol,
+          }));
+          JS
+
+      - name: 上传稳定清单
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-manifest
+          path: release-manifest.json
+          retention-days: 90
+
+  # 唯一能写 Release 的 job：先创建 draft、上传全部资产、复查远端齐全，最后一步才公开。
+  # 因此不存在「已公开但产物缺失」的中间状态；任一环节失败只会停在 draft。
+  release:
+    needs: [plan, artifacts, publish, manifest]
+    if: needs.plan.outputs.stable == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 仅此 job 可写 Release
+    steps:
+      # 只为 gh 提供仓库上下文（不读取任何构建产物）
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: feedback-web-${{ github.sha }}
+          path: out
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: feedback-image-digest
+          path: digests
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: updater-image-digest
+          path: digests
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-manifest
+          path: manifest
+
+      - name: 校验本地产物齐全且互相一致
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          ls -l out digests manifest
+          ( cd out && sha256sum -c SHA256SUMS )
+          python3 - <<'PY'
+          import glob
+          import json
+          import os
+          import pathlib
+          import re
+          import sys
+
+          DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+          def fail(message):
+              print(f"::error::{message}")
+              sys.exit(1)
+
+
+          def digest_of(path):
+              file = pathlib.Path(path)
+              if not file.is_file():
+                  fail(f"缺少镜像 digest 文件：{path}")
+              match = re.search(r"^digest:\s*(\S+)\s*$", file.read_text(encoding="utf-8"), re.MULTILINE)
+              if not match or not DIGEST_RE.match(match.group(1)):
+                  fail(f"镜像 digest 文件内容非法：{path}")
+              return match.group(1)
+
+
+          manifest = json.loads(pathlib.Path("manifest/release-manifest.json").read_text(encoding="utf-8"))
+          feedback_digest = digest_of("digests/feedback-image-digest.txt")
+          updater_digest = digest_of("digests/updater-image-digest.txt")
+
+          if manifest.get("services", {}).get("feedback", {}).get("digest") != feedback_digest:
+              fail("清单的 feedback digest 与 digest 文件不一致")
+          if manifest.get("services", {}).get("updater", {}).get("digest") != updater_digest:
+              fail("清单的 updater digest 与 digest 文件不一致")
+          if manifest.get("channel") != "stable":
+              fail(f"清单渠道不是 stable：{manifest.get('channel')}")
+
+          for field, env_name in (("version", "VERSION"), ("tag", "TAG"), ("commit", "COMMIT")):
+              expected = (os.environ.get(env_name) or "").strip()
+              if str(manifest.get(field)) != expected:
+                  fail(f"清单字段 {field}={manifest.get(field)!r} 与本次运行 {env_name}={expected!r} 不一致")
+
+          tgz = sorted(glob.glob("out/*.tgz"))
+          zips = sorted(glob.glob("out/*.zip"))
+          if not tgz:
+              fail("缺少 Web npm tarball（out/*.tgz）")
+          if len(zips) < 2:
+              fail(f"缺少完整浏览器 dist 压缩包（期望 ≥2 个 out/*.zip，实得 {len(zips)}）")
+          for extra in ("out/SHA256SUMS", "out/SOURCE.txt"):
+              if not pathlib.Path(extra).is_file():
+                  fail(f"缺少 {extra}")
+          print(f"本地产物齐全：{len(tgz)} 个 .tgz、{len(zips)} 个 .zip、SHA256SUMS、SOURCE.txt、两个镜像 digest、稳定清单")
+          PY
+
+      - name: 创建 draft Release 并上传全部资产
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # 标签名来自外部，先做白名单校验再使用
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::标签名不符合 v* 命名约定：$TAG"; exit 1
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            is_draft="$(gh release view "$TAG" --json isDraft --jq '.isDraft')"
+            if [ "$is_draft" != "true" ]; then
+              echo "::error::Release $TAG 已公开，重跑不会改动已公开版本（如需重发请先人工删除该 Release）"; exit 1
+            fi
+          else
+            gh release create "$TAG" --draft --title "$TAG" --generate-notes
+          fi
+          gh release upload "$TAG" \
+            out/*.tgz out/*.zip out/SHA256SUMS out/SOURCE.txt \
+            digests/feedback-image-digest.txt digests/updater-image-digest.txt \
+            manifest/release-manifest.json \
+            --clobber
+
+      - name: 公开前复查远端资产齐全（缺一即退出，Release 保持 draft）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::标签名不符合 v* 命名约定：$TAG"; exit 1
+          fi
+          is_draft="$(gh release view "$TAG" --json isDraft --jq '.isDraft')"
+          if [ "$is_draft" != "true" ]; then
+            echo "::error::Release $TAG 不是 draft；拒绝继续公开流程"; exit 1
+          fi
+          gh release view "$TAG" --json assets --jq '.assets[].name' > release-assets.txt
+          python3 - <<'PY'
+          import glob
+          import pathlib
+          import sys
+
+
+          def fail(message):
+              print(f"::error::{message}")
+              sys.exit(1)
+
+
+          assets = {line.strip() for line in pathlib.Path("release-assets.txt").read_text(encoding="utf-8").splitlines() if line.strip()}
+          if not assets:
+              fail("远端 Release 的资产列表为空")
+
+          expected = set()
+          expected.update(pathlib.Path(path).name for path in glob.glob("out/*.tgz"))
+          expected.update(pathlib.Path(path).name for path in glob.glob("out/*.zip"))
+          expected.update({"SHA256SUMS", "SOURCE.txt"})
+          expected.update(pathlib.Path(path).name for path in glob.glob("digests/*-image-digest.txt"))
+          expected.add("release-manifest.json")
+          expected.discard("")
+
+          missing = sorted(name for name in expected if name not in assets)
+          if missing:
+              fail(f"远端 Release 缺少资产：{', '.join(missing)}（Release 保持 draft，不会公开）")
+          print(f"远端资产齐全（{len(expected)} 项）：{', '.join(sorted(expected))}")
+          PY
+
+      - name: 最后一步：公开 Release（失败即保持 draft）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::标签名不符合 v* 命名约定：$TAG"; exit 1
+          fi
+          gh release edit "$TAG" --draft=false --latest
+          gh release view "$TAG" --json isDraft,isLatest,url > release-final.json
+          cat release-final.json
+          {
+            echo "### 已公开 v$VERSION（$TAG）"
+            echo '```'
+            cat release-final.json
+            echo ''
+            cat digests/feedback-image-digest.txt
+            echo ''
+            cat digests/updater-image-digest.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

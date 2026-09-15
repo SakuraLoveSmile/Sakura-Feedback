@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createApp } from "../src/app.ts";
 import { getFeedback, getFeedbackScreenshot, updateFeedback } from "../src/db/repos.ts";
 import {
-  type ArchiveDataV1,
+  type ArchiveData,
   type ArchiveUpload,
   loadArchiveData,
   saveArchiveData,
@@ -53,7 +53,7 @@ async function buildRig(wrap?: (inner: MockKaneo) => MockKaneo | object): Promis
   return { app: app as unknown as Rig["app"], inner, cookie, bearer };
 }
 
-function validArchive(rig: Rig, id: string): ArchiveDataV1 {
+function validArchive(rig: Rig, id: string): ArchiveData {
   const parsed = loadArchiveData(rig.app.db, id);
   if (parsed.kind !== "valid") throw new Error(`期望合法归档数据，实际 ${parsed.kind}`);
   return parsed.data;

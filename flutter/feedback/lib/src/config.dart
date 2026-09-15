@@ -1,5 +1,7 @@
 import 'dart:ui' show Offset;
 
+import 'api_client.dart' show FeedbackFilePicker, FeedbackLogProvider;
+
 /// 悬浮按钮停靠的侧边。
 enum FeedbackSide {
   /// 左侧。
@@ -60,6 +62,8 @@ class FeedbackConfig {
     this.launcherBottom = '25%',
     this.launcherMode = FeedbackLauncherMode.tab,
     this.captureMode = FeedbackCaptureMode.off,
+    this.logProvider,
+    this.filePicker,
   })  : assert(apiBase.trim().isNotEmpty, 'apiBase 不能为空'),
         assert(appId.trim().isNotEmpty, 'appId 不能为空'),
         assert(_isHttpUrl(apiBase), 'apiBase 必须是 http(s) 地址'),
@@ -98,6 +102,12 @@ class FeedbackConfig {
 
   /// 截图捕获模式，默认关闭 [FeedbackCaptureMode.off]。
   final FeedbackCaptureMode captureMode;
+
+  /// 自动日志采集提供者（可选）。
+  final FeedbackLogProvider? logProvider;
+
+  /// 手动日志文件选择器（可选）。
+  final FeedbackFilePicker? filePicker;
 
   static String _normalize(String base) {
     var b = base.trim();

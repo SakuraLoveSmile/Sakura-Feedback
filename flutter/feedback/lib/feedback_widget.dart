@@ -22,6 +22,9 @@ export 'src/api_client.dart'
         ApiException,
         ApiClient,
         FeedbackCaptureInfo,
+        FeedbackFilePicker,
+        FeedbackLogFile,
+        FeedbackLogProvider,
         FeedbackSubmitResult,
         FeedbackRecord,
         LoginResult;

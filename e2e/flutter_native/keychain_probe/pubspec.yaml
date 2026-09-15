@@ -1,0 +1,27 @@
+name: keychain_probe
+description: "T3 verifier 独立原生验收探针：走组件真实存储路径（SecureFeedbackTokenStore），在真实 macOS / iOS / Android 上验证保存、重启后读取、删除与宿主凭据共存。"
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.6.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  feedback_widget:
+    path: ../../../flutter/feedback
+
+  # 档位由 run_native.sh 改写成精确版本（9.2.2 / 10.3.1 / 11.0.0）。
+  flutter_secure_storage: '11.0.0'
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  integration_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true

@@ -34,6 +34,18 @@ dependencies:
   feedback_widget:
     path: ../../flutter/feedback
 
+  # 示例作为“使用 11 的宿主”固定在这一档：文本与 Music（sakuramusic）一致
+  # （Music/pubspec.yaml: flutter_secure_storage: ^11.0.0），而 11.0.0 也是
+  # tools/flutter-storage-matrix 的 11 档与 MUSIC-CONSTRAINTS.md 里记录的版本。
+  # 组件包本身仍声明宽区间 >=9.2.2 <12.0.0；9/10/11 三档回归由矩阵宿主负责。
+  #
+  # 切换档位只需改这一行再 flutter pub get：
+  #   9.2.2  → flutter_secure_storage: '9.2.2'
+  #   10.3.1 → flutter_secure_storage: '10.3.1'
+  #   11.0.0 → flutter_secure_storage: '11.0.0'
+  # 11 的 Android 要求 minSdk >=24 / compileSdk 37，见 android/app/build.gradle.kts。
+  flutter_secure_storage: '11.0.0'
+
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8

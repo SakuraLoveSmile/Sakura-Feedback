@@ -3,15 +3,15 @@ import type { Db } from "../db/db.ts";
 import { getFeedback, updateFeedback } from "../db/repos.ts";
 
 /**
- * 归档恢复数据（计划 4.1）。
+ * 归档恢复数据（计划 4.1 / L3 升级为 V2）。
  *
  * 复用 feedbacks.archive_data_json 单列，不新增表；Kaneo 任务 ID 继续使用
- * kaneo_task_id / kaneo_task_url 现有字段。结构版本化（version:1）并严格校验：
- * 解析失败、缺字段、类型不符、未知字段、未知版本一律分类为待核对信号，
- * 绝不猜测重建，也绝不批量改写现有数据库。
+ * kaneo_task_id / kaneo_task_url 现有字段。
+ * V2 结构：按稳定附件 ID 保存截图与每个日志的上传、资产、摘要、评论及替换记录；
+ * 兼容读取 V1，保留既有目标、加密信息和 revision 检查。
  */
 
-export const ARCHIVE_DATA_VERSION = 1;
+export const ARCHIVE_DATA_VERSION = 2;
 
 /** 远端写入结果分类：尚未发送 / 已发出但结果未知 / 已确认成功响应。 */
 export type WriteOutcome = "not_sent" | "maybe_sent" | "confirmed";
@@ -44,11 +44,24 @@ export interface ArchiveAsset {
 }
 
 export interface ArchiveComment {
-  /** 评论定位标记：`<feedbackId>|<图片sha256>`。 */
+  /** 评论定位标记：`<feedbackId>|<sha256>` 或 `<feedbackId>|<logId>|<sha256>`。 */
   marker: string;
   /** Kaneo 评论 id；响应缺失时为 null。 */
   id: string | null;
   outcome: WriteOutcome;
+}
+
+/** V2 单个附件恢复记录（按稳定附件 ID 存储）。 */
+export interface ArchiveAttachmentRecord {
+  id: string;
+  kind: "screenshot" | "log";
+  filename: string;
+  byteSize: number;
+  sha256: string;
+  upload?: ArchiveUpload;
+  asset?: ArchiveAsset;
+  comment?: ArchiveComment;
+  replacedKeys?: string[];
 }
 
 export interface ArchiveDataV1 {
@@ -58,20 +71,37 @@ export interface ArchiveDataV1 {
   upload?: ArchiveUpload;
   asset?: ArchiveAsset;
   comment?: ArchiveComment;
-  /**
-   * 被替换掉的旧上传 key 列表（4.4 replace_upload：保留旧 key 恢复记录；
-   * 远端对象不自动删除，此列表用于追溯哪些对象仍留在存储中）。
-   */
   replacedKeys?: string[];
 }
 
+export interface ArchiveDataV2 {
+  version: 2;
+  revision: number;
+  target: ArchiveTarget;
+  attachments: Record<string, ArchiveAttachmentRecord>;
+  // 顶层兼容镜像字段（保留截图的既有访问契约）
+  upload?: ArchiveUpload;
+  asset?: ArchiveAsset;
+  comment?: ArchiveComment;
+  replacedKeys?: string[];
+}
+
+export type ArchiveData = ArchiveDataV1 | ArchiveDataV2;
+
 /** 保存时输入的新数据（version/revision 由 saveArchiveData 统一设置）。 */
-export type ArchiveDataNext = Omit<ArchiveDataV1, "version" | "revision">;
+export interface ArchiveDataNext {
+  target: ArchiveTarget;
+  attachments?: Record<string, ArchiveAttachmentRecord>;
+  upload?: ArchiveUpload;
+  asset?: ArchiveAsset;
+  comment?: ArchiveComment;
+  replacedKeys?: string[];
+}
 
 export type ParsedArchiveData =
   | { kind: "empty" }
   | { kind: "legacy"; assetUrl?: string }
-  | { kind: "valid"; data: ArchiveDataV1 }
+  | { kind: "valid"; data: ArchiveData }
   | { kind: "corrupt"; reason: string }
   | { kind: "unsupported"; version: number };
 
@@ -102,89 +132,114 @@ function fail(reason: string): { kind: "corrupt"; reason: string } {
   return { kind: "corrupt", reason };
 }
 
-/** 严格校验一段 V1 结构；任何不符都返回 null（由调用方归类为损坏）。 */
-function validateV1(v: Record<string, unknown>): ArchiveDataV1 | null {
-  const allowed = new Set(["version", "revision", "target", "upload", "asset", "comment", "replacedKeys"]);
-  for (const key of Object.keys(v)) {
-    if (!allowed.has(key)) return null; // 未知字段：宁可当损坏也不静默丢弃
+function validateUpload(u: unknown): ArchiveUpload | null {
+  if (!isRecord(u)) return null;
+  const uKeys = Object.keys(u);
+  if (uKeys.length !== 4 && uKeys.length !== 5) return null;
+  if (uKeys.length === 5 && !uKeys.includes("recoveries")) return null;
+  if (typeof u.key !== "string" || !u.key || u.key.length > 1024) return null;
+  if (typeof u.credentialsEnc !== "string" || !u.credentialsEnc || u.credentialsEnc.length > 64 * 1024) return null;
+  if (
+    u.expiresAt !== null &&
+    (typeof u.expiresAt !== "string" || !u.expiresAt || Number.isNaN(Date.parse(u.expiresAt)))
+  ) {
+    return null;
   }
-  if (v.version !== ARCHIVE_DATA_VERSION) return null;
-  if (typeof v.revision !== "number" || !Number.isInteger(v.revision) || v.revision < 1) return null;
+  if (!isWriteOutcome(u.outcome)) return null;
+  if (
+    u.recoveries !== undefined &&
+    (typeof u.recoveries !== "number" || !Number.isInteger(u.recoveries) || u.recoveries < 0 || u.recoveries > 1000)
+  ) {
+    return null;
+  }
+  return {
+    key: u.key,
+    credentialsEnc: u.credentialsEnc,
+    expiresAt: u.expiresAt as string | null,
+    outcome: u.outcome,
+    ...(u.recoveries !== undefined ? { recoveries: u.recoveries as number } : {}),
+  };
+}
 
-  const t = v.target;
+function validateAsset(a: unknown): ArchiveAsset | null {
+  if (!isRecord(a)) return null;
+  if (Object.keys(a).length !== 2) return null;
+  if (typeof a.id !== "string" || a.id.length > 200) return null;
+  if (typeof a.url !== "string" || !a.url || !isHttpUrl(a.url) || a.url.length > 2048) return null;
+  return { id: a.id, url: a.url };
+}
+
+function validateComment(c: unknown): ArchiveComment | null {
+  if (!isRecord(c)) return null;
+  if (Object.keys(c).length !== 3) return null;
+  if (typeof c.marker !== "string" || !c.marker || c.marker.length > 400) return null;
+  if (c.id !== null && (typeof c.id !== "string" || c.id.length > 200)) return null;
+  if (!isWriteOutcome(c.outcome)) return null;
+  return { marker: c.marker, id: c.id as string | null, outcome: c.outcome };
+}
+
+function validateReplacedKeys(r: unknown): string[] | null {
+  if (!Array.isArray(r)) return null;
+  if (r.length > 20) return null;
+  for (const k of r) {
+    if (typeof k !== "string" || !k || k.length > 1024) return null;
+  }
+  return r as string[];
+}
+
+function validateTarget(t: unknown): ArchiveTarget | null {
   if (!isRecord(t)) return null;
   if (Object.keys(t).length !== 3) return null;
   if (typeof t.apiBase !== "string" || !t.apiBase || !isHttpUrl(t.apiBase)) return null;
   if (typeof t.projectId !== "string" || !t.projectId || t.projectId.length > 200) return null;
   if (typeof t.workspaceId !== "string" || !t.workspaceId || t.workspaceId.length > 200) return null;
+  return { apiBase: t.apiBase, projectId: t.projectId, workspaceId: t.workspaceId };
+}
+
+/** 严格校验一段 V1 结构；任何不符都返回 null。 */
+function validateV1(v: Record<string, unknown>): ArchiveDataV1 | null {
+  const allowed = new Set(["version", "revision", "target", "upload", "asset", "comment", "replacedKeys"]);
+  for (const key of Object.keys(v)) {
+    if (!allowed.has(key)) return null;
+  }
+  if (v.version !== 1) return null;
+  if (typeof v.revision !== "number" || !Number.isInteger(v.revision) || v.revision < 1) return null;
+
+  const target = validateTarget(v.target);
+  if (!target) return null;
 
   let upload: ArchiveUpload | undefined;
   if (v.upload !== undefined) {
-    const u = v.upload;
-    if (!isRecord(u)) return null;
-    const uKeys = Object.keys(u);
-    // 4 键 = t3 之前写入的记录；5 键 = 带 recoveries 计数
-    if (uKeys.length !== 4 && uKeys.length !== 5) return null;
-    if (uKeys.length === 5 && !uKeys.includes("recoveries")) return null;
-    if (typeof u.key !== "string" || !u.key || u.key.length > 1024) return null;
-    if (typeof u.credentialsEnc !== "string" || !u.credentialsEnc || u.credentialsEnc.length > 64 * 1024) return null;
-    if (
-      u.expiresAt !== null &&
-      (typeof u.expiresAt !== "string" || !u.expiresAt || Number.isNaN(Date.parse(u.expiresAt)))
-    ) {
-      return null;
-    }
-    if (!isWriteOutcome(u.outcome)) return null;
-    if (
-      u.recoveries !== undefined &&
-      (typeof u.recoveries !== "number" || !Number.isInteger(u.recoveries) || u.recoveries < 0 || u.recoveries > 1000)
-    ) {
-      return null;
-    }
-    upload = {
-      key: u.key,
-      credentialsEnc: u.credentialsEnc,
-      expiresAt: u.expiresAt as string | null,
-      outcome: u.outcome,
-      ...(u.recoveries !== undefined ? { recoveries: u.recoveries as number } : {}),
-    };
+    const u = validateUpload(v.upload);
+    if (!u) return null;
+    upload = u;
   }
 
   let asset: ArchiveAsset | undefined;
   if (v.asset !== undefined) {
-    const a = v.asset;
-    if (!isRecord(a)) return null;
-    if (Object.keys(a).length !== 2) return null;
-    if (typeof a.id !== "string" || a.id.length > 200) return null;
-    if (typeof a.url !== "string" || !a.url || !isHttpUrl(a.url) || a.url.length > 2048) return null;
-    asset = { id: a.id, url: a.url };
-  }
-
-  let replacedKeys: string[] | undefined;
-  if (v.replacedKeys !== undefined) {
-    if (!Array.isArray(v.replacedKeys)) return null;
-    if (v.replacedKeys.length > 20) return null;
-    for (const k of v.replacedKeys) {
-      if (typeof k !== "string" || !k || k.length > 1024) return null;
-    }
-    replacedKeys = v.replacedKeys as string[];
+    const a = validateAsset(v.asset);
+    if (!a) return null;
+    asset = a;
   }
 
   let comment: ArchiveComment | undefined;
   if (v.comment !== undefined) {
-    const c = v.comment;
-    if (!isRecord(c)) return null;
-    if (Object.keys(c).length !== 3) return null;
-    if (typeof c.marker !== "string" || !c.marker || c.marker.length > 400) return null;
-    if (c.id !== null && (typeof c.id !== "string" || c.id.length > 200)) return null;
-    if (!isWriteOutcome(c.outcome)) return null;
-    comment = { marker: c.marker, id: c.id as string | null, outcome: c.outcome };
+    const c = validateComment(v.comment);
+    if (!c) return null;
+    comment = c;
+  }
+
+  let replacedKeys: string[] | undefined;
+  if (v.replacedKeys !== undefined) {
+    const r = validateReplacedKeys(v.replacedKeys);
+    if (!r) return null;
+    replacedKeys = r;
   }
 
   return {
     version: 1,
     revision: v.revision as number,
-    target: { apiBase: t.apiBase, projectId: t.projectId, workspaceId: t.workspaceId },
+    target,
     ...(upload ? { upload } : {}),
     ...(asset ? { asset } : {}),
     ...(comment ? { comment } : {}),
@@ -192,12 +247,197 @@ function validateV1(v: Record<string, unknown>): ArchiveDataV1 | null {
   };
 }
 
+function validateAttachmentRecord(id: string, att: Record<string, unknown>): ArchiveAttachmentRecord | null {
+  const allowed = new Set([
+    "id",
+    "kind",
+    "filename",
+    "byteSize",
+    "sha256",
+    "upload",
+    "asset",
+    "comment",
+    "replacedKeys",
+  ]);
+  for (const k of Object.keys(att)) {
+    if (!allowed.has(k)) return null;
+  }
+  if (att.id !== undefined && att.id !== id) return null;
+  const kind = att.kind;
+  if (kind !== "screenshot" && kind !== "log") return null;
+  if (typeof att.filename !== "string" || !att.filename) return null;
+  if (typeof att.byteSize !== "number" || !Number.isInteger(att.byteSize) || att.byteSize < 0) return null;
+  if (typeof att.sha256 !== "string") return null;
+
+  let upload: ArchiveUpload | undefined;
+  if (att.upload !== undefined) {
+    const u = validateUpload(att.upload);
+    if (!u) return null;
+    upload = u;
+  }
+
+  let asset: ArchiveAsset | undefined;
+  if (att.asset !== undefined) {
+    const a = validateAsset(att.asset);
+    if (!a) return null;
+    asset = a;
+  }
+
+  let comment: ArchiveComment | undefined;
+  if (att.comment !== undefined) {
+    const c = validateComment(att.comment);
+    if (!c) return null;
+    comment = c;
+  }
+
+  let replacedKeys: string[] | undefined;
+  if (att.replacedKeys !== undefined) {
+    const r = validateReplacedKeys(att.replacedKeys);
+    if (!r) return null;
+    replacedKeys = r;
+  }
+
+  return {
+    id,
+    kind,
+    filename: att.filename,
+    byteSize: att.byteSize,
+    sha256: att.sha256,
+    ...(upload ? { upload } : {}),
+    ...(asset ? { asset } : {}),
+    ...(comment ? { comment } : {}),
+    ...(replacedKeys ? { replacedKeys } : {}),
+  };
+}
+
+/** 严格校验一段 V2 结构；任何不符都返回 null。 */
+function validateV2(v: Record<string, unknown>): ArchiveDataV2 | null {
+  const allowed = new Set([
+    "version",
+    "revision",
+    "target",
+    "attachments",
+    "upload",
+    "asset",
+    "comment",
+    "replacedKeys",
+  ]);
+  for (const key of Object.keys(v)) {
+    if (!allowed.has(key)) return null;
+  }
+  if (v.version !== 2) return null;
+  if (typeof v.revision !== "number" || !Number.isInteger(v.revision) || v.revision < 1) return null;
+
+  const target = validateTarget(v.target);
+  if (!target) return null;
+
+  const attachments: Record<string, ArchiveAttachmentRecord> = {};
+  if (v.attachments !== undefined) {
+    if (!isRecord(v.attachments)) return null;
+    for (const [attId, attVal] of Object.entries(v.attachments)) {
+      if (!isRecord(attVal)) return null;
+      const attRecord = validateAttachmentRecord(attId, attVal);
+      if (!attRecord) return null;
+      attachments[attId] = attRecord;
+    }
+  }
+
+  let upload: ArchiveUpload | undefined;
+  if (v.upload !== undefined) {
+    const u = validateUpload(v.upload);
+    if (!u) return null;
+    upload = u;
+  }
+
+  let asset: ArchiveAsset | undefined;
+  if (v.asset !== undefined) {
+    const a = validateAsset(v.asset);
+    if (!a) return null;
+    asset = a;
+  }
+
+  let comment: ArchiveComment | undefined;
+  if (v.comment !== undefined) {
+    const c = validateComment(v.comment);
+    if (!c) return null;
+    comment = c;
+  }
+
+  let replacedKeys: string[] | undefined;
+  if (v.replacedKeys !== undefined) {
+    const r = validateReplacedKeys(v.replacedKeys);
+    if (!r) return null;
+    replacedKeys = r;
+  }
+
+  // 截图附件与顶层字段镜像同步
+  if (attachments.screenshot) {
+    if (!upload && attachments.screenshot.upload) upload = attachments.screenshot.upload;
+    if (!asset && attachments.screenshot.asset) asset = attachments.screenshot.asset;
+    if (!comment && attachments.screenshot.comment) comment = attachments.screenshot.comment;
+    if (!replacedKeys && attachments.screenshot.replacedKeys) replacedKeys = attachments.screenshot.replacedKeys;
+  } else if (upload || asset || comment || replacedKeys) {
+    attachments.screenshot = {
+      id: "screenshot",
+      kind: "screenshot",
+      filename: "screenshot.png",
+      byteSize: 0,
+      sha256: comment?.marker.split("|")[1] ?? "",
+      ...(upload ? { upload } : {}),
+      ...(asset ? { asset } : {}),
+      ...(comment ? { comment } : {}),
+      ...(replacedKeys ? { replacedKeys } : {}),
+    };
+  }
+
+  return {
+    version: 2,
+    revision: v.revision as number,
+    target,
+    attachments,
+    ...(upload ? { upload } : {}),
+    ...(asset ? { asset } : {}),
+    ...(comment ? { comment } : {}),
+    ...(replacedKeys ? { replacedKeys } : {}),
+  };
+}
+
+/** 将 V1 归档数据无损转为 V2 内存表示。 */
+export function normalizeToV2(data: ArchiveData): ArchiveDataV2 {
+  if (data.version === 2) return data;
+  const attachments: Record<string, ArchiveAttachmentRecord> = {};
+  if (data.upload || data.asset || data.comment || data.replacedKeys) {
+    attachments.screenshot = {
+      id: "screenshot",
+      kind: "screenshot",
+      filename: "screenshot.png",
+      byteSize: 0,
+      sha256: data.comment?.marker.split("|")[1] ?? "",
+      ...(data.upload ? { upload: data.upload } : {}),
+      ...(data.asset ? { asset: data.asset } : {}),
+      ...(data.comment ? { comment: data.comment } : {}),
+      ...(data.replacedKeys ? { replacedKeys: data.replacedKeys } : {}),
+    };
+  }
+  return {
+    version: 2,
+    revision: data.revision,
+    target: data.target,
+    attachments,
+    ...(data.upload ? { upload: data.upload } : {}),
+    ...(data.asset ? { asset: data.asset } : {}),
+    ...(data.comment ? { comment: data.comment } : {}),
+    ...(data.replacedKeys ? { replacedKeys: data.replacedKeys } : {}),
+  };
+}
+
 /**
  * 解析 archive_data_json：
  * - 空/空白 → empty；
  * - 旧格式（无 version，仅 { assetUrl? }）→ legacy（assetUrl 供迁移，不猜其他信息）；
- * - version:1 且严格合法 → valid；
- * - version 存在但不是 1 → unsupported（可能由更新版本的服务端写入，绝不覆盖）；
+ * - version:1 且合法 → valid (ArchiveDataV1)；
+ * - version:2 且合法 → valid (ArchiveDataV2)；
+ * - version 存在但不是 1 或 2 → unsupported（可能由未来版本的服务端写入，绝不覆盖）；
  * - 其余（JSON 损坏、类型不符、缺字段、未知字段）→ corrupt。
  */
 export function parseArchiveData(raw: string | null | undefined): ParsedArchiveData {
@@ -211,7 +451,6 @@ export function parseArchiveData(raw: string | null | undefined): ParsedArchiveD
   if (!isRecord(parsed)) return fail("不是 JSON 对象");
   const version = parsed.version;
   if (version === undefined) {
-    // 旧格式仅允许 { assetUrl?: string }
     const keys = Object.keys(parsed);
     const legacyOk =
       keys.every((k) => k === "assetUrl") && (parsed.assetUrl === undefined || typeof parsed.assetUrl === "string");
@@ -219,28 +458,66 @@ export function parseArchiveData(raw: string | null | undefined): ParsedArchiveD
     const assetUrl = typeof parsed.assetUrl === "string" ? parsed.assetUrl : undefined;
     return { kind: "legacy", ...(assetUrl !== undefined ? { assetUrl } : {}) };
   }
-  if (version !== ARCHIVE_DATA_VERSION) {
-    if (typeof version !== "number" || !Number.isInteger(version)) return fail(`version 不是整数: ${String(version)}`);
-    return { kind: "unsupported", version };
+  if (typeof version !== "number" || !Number.isInteger(version)) {
+    return fail(`version 不是整数: ${String(version)}`);
   }
-  const data = validateV1(parsed);
-  if (!data) return fail("v1 结构校验失败（字段缺失/类型不符/未知字段）");
-  return { kind: "valid", data };
+  if (version === 1) {
+    const data = validateV1(parsed);
+    if (!data) return fail("v1 结构校验失败（字段缺失/类型不符/未知字段）");
+    return { kind: "valid", data };
+  }
+  if (version === 2) {
+    const data = validateV2(parsed);
+    if (!data) return fail("v2 结构校验失败（字段缺失/类型不符/未知字段）");
+    return { kind: "valid", data };
+  }
+  return { kind: "unsupported", version };
 }
 
-/** 固定键序序列化：先做写前严格校验，再输出规范化 JSON，保证落盘内容必然可回读。 */
+/** 固定键序序列化：先做写前严格校验，再输出规范化 JSON，保证落盘内容必然可回读（V2）。 */
 export function serializeArchiveData(next: ArchiveDataNext, revision: number): string {
   if (!Number.isInteger(revision) || revision < 1) {
     throw new ArchiveVersionConflictError(`revision 非法: ${String(revision)}`);
   }
-  const probe = validateV1({
+  const attachments: Record<string, ArchiveAttachmentRecord> = {};
+  if (next.attachments) {
+    for (const [k, v] of Object.entries(next.attachments)) {
+      attachments[k] = v;
+    }
+  }
+  let upload = next.upload;
+  let asset = next.asset;
+  let comment = next.comment;
+  let replacedKeys = next.replacedKeys;
+
+  if (attachments.screenshot) {
+    if (!upload && attachments.screenshot.upload) upload = attachments.screenshot.upload;
+    if (!asset && attachments.screenshot.asset) asset = attachments.screenshot.asset;
+    if (!comment && attachments.screenshot.comment) comment = attachments.screenshot.comment;
+    if (!replacedKeys && attachments.screenshot.replacedKeys) replacedKeys = attachments.screenshot.replacedKeys;
+  } else if (upload || asset || comment || replacedKeys) {
+    attachments.screenshot = {
+      id: "screenshot",
+      kind: "screenshot",
+      filename: "screenshot.png",
+      byteSize: 0,
+      sha256: comment?.marker.split("|")[1] ?? "",
+      ...(upload ? { upload } : {}),
+      ...(asset ? { asset } : {}),
+      ...(comment ? { comment } : {}),
+      ...(replacedKeys ? { replacedKeys } : {}),
+    };
+  }
+
+  const probe = validateV2({
     version: ARCHIVE_DATA_VERSION,
     revision,
     target: next.target,
-    ...(next.upload !== undefined ? { upload: next.upload } : {}),
-    ...(next.asset !== undefined ? { asset: next.asset } : {}),
-    ...(next.comment !== undefined ? { comment: next.comment } : {}),
-    ...(next.replacedKeys !== undefined ? { replacedKeys: next.replacedKeys } : {}),
+    attachments,
+    ...(upload !== undefined ? { upload } : {}),
+    ...(asset !== undefined ? { asset } : {}),
+    ...(comment !== undefined ? { comment } : {}),
+    ...(replacedKeys !== undefined ? { replacedKeys } : {}),
   });
   if (!probe) throw new ArchiveVersionConflictError("归档数据未通过写前严格校验，拒绝保存");
   return JSON.stringify(probe);
@@ -253,10 +530,10 @@ export function loadArchiveData(db: Db, feedbackId: string): ParsedArchiveData {
 }
 
 /**
- * 保存下一版归档数据（4.1 持久化）：
+ * 保存下一版归档数据（4.1 持久化 / L3 升级为 V2）：
  * - 保存前重新读取磁盘数据做版本检查：损坏 / 未知版本 → 拒绝覆盖（ArchiveVersionConflictError）；
  * - 期间被并发修改（revision 与调用方基准不一致）→ 拒绝覆盖；
- * - 仅从 empty / legacy / 合法 v1 之上写入；revision 单调递增，version 恒为 1；
+ * - 仅从 empty / legacy / 合法 v1 / 合法 v2 之上写入；revision 单调递增，落盘 version 恒为 2；
  * - SQLite 写入失败抛 ArchivePersistenceError，调用方不得继续下一步远端写入。
  */
 export function saveArchiveData(
@@ -264,14 +541,13 @@ export function saveArchiveData(
   feedbackId: string,
   base: ParsedArchiveData,
   next: ArchiveDataNext,
-): ArchiveDataV1 {
+): ArchiveDataV2 {
   if (base.kind === "corrupt") {
     throw new ArchiveVersionConflictError(`归档数据损坏，拒绝覆盖: ${base.reason}`);
   }
   if (base.kind === "unsupported") {
     throw new ArchiveVersionConflictError(`归档数据版本 v${base.version} 不受支持，拒绝覆盖`);
   }
-  // 保存前版本检查：以磁盘当前内容为准
   let fresh: ParsedArchiveData;
   try {
     fresh = loadArchiveData(db, feedbackId);
@@ -303,18 +579,18 @@ export function saveArchiveData(
   } catch (err) {
     throw new ArchivePersistenceError(`归档恢复信息写入 SQLite 失败: ${(err as Error).message?.slice(0, 150)}`);
   }
-  return JSON.parse(json) as ArchiveDataV1;
+  return JSON.parse(json) as ArchiveDataV2;
 }
 
 // ---------- 恢复目标固定与变更检测 ----------
 
 export type TargetCheck =
-  | { status: "fresh" } // 尚无目标，允许固定
-  | { status: "same" } // 与已固定目标一致（密钥轮换不影响该判定）
+  | { status: "fresh" }
+  | { status: "same" }
   | { status: "changed"; field: "apiBase" | "projectId" | "workspaceId" };
 
 /** 比较已固定目标与当前解析出的目标。 */
-export function checkArchiveTarget(existing: ArchiveDataV1 | null, target: ArchiveTarget): TargetCheck {
+export function checkArchiveTarget(existing: ArchiveData | null, target: ArchiveTarget): TargetCheck {
   if (!existing) return { status: "fresh" };
   const pinned = existing.target;
   if (pinned.apiBase !== target.apiBase) return { status: "changed", field: "apiBase" };
@@ -325,18 +601,15 @@ export function checkArchiveTarget(existing: ArchiveDataV1 | null, target: Archi
 
 // ---------- 预签名凭证加密与到期解析 ----------
 
-/** 预签名上传凭证（明文形态，仅在服务端内存中存在）。 */
 export interface UploadCredentials {
   uploadUrl: string;
   headers: Record<string, string>;
 }
 
-/** 用现有 AES-256-GCM 工具加密预签名 URL 与必要请求头。 */
 export function encryptUploadCredentials(masterKey: Buffer, creds: UploadCredentials): string {
   return encryptSecret(masterKey, JSON.stringify(creds));
 }
 
-/** 解密预签名凭证；密文被篡改 / 主密钥不匹配 / 结构非法时抛错（由调用方转入待核对）。 */
 export function decryptUploadCredentials(masterKey: Buffer, credentialsEnc: string): UploadCredentials {
   let plain: string;
   try {
@@ -365,12 +638,6 @@ export function decryptUploadCredentials(masterKey: Buffer, credentialsEnc: stri
   return { uploadUrl: parsed.uploadUrl, headers };
 }
 
-/**
- * 从预签名 URL 的签名参数可靠解析到期时间（ISO 字符串）：
- * - AWS SigV4：X-Amz-Date（YYYYMMDDTHHMMSSZ）+ X-Amz-Expires（秒，≤30 天）；
- * - v2 签名：Expires（epoch 秒）；
- * - 参数缺失、非法或超出合理范围 → null（未知）。绝不抛错。
- */
 export function parsePresignedExpiry(uploadUrl: string): string | null {
   const MAX_EXPIRES_SECONDS = 30 * 24 * 3600;
   try {
@@ -399,7 +666,6 @@ export function parsePresignedExpiry(uploadUrl: string): string | null {
   }
 }
 
-/** 由预签名响应构造 upload 恢复记录（凭证加密，到期尽力解析，恢复计数从 0 起）。 */
 export function buildUploadRecord(
   masterKey: Buffer,
   presigned: { key: string; uploadUrl: string; headers: Record<string, string> },
@@ -414,7 +680,11 @@ export function buildUploadRecord(
   };
 }
 
-/** 评论定位标记：反馈 ID + 图片摘要足以唯一确定截图评论。 */
 export function commentMarker(feedbackId: string, screenshotSha256: string): string {
   return `${feedbackId}|${screenshotSha256}`;
+}
+
+/** 日志附件评论定位标记：`<feedbackId>|<logId>|<sha256>`。 */
+export function logCommentMarker(feedbackId: string, logId: string, sha256: string): string {
+  return `${feedbackId}|${logId}|${sha256}`;
 }

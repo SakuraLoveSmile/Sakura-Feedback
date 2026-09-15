@@ -135,6 +135,25 @@ function DetailPane({
   onAction: (fn: () => Promise<unknown>) => Promise<void>;
 }) {
   const [lightboxOpen, setLightboxOpen] = useState(false);
+  const [previewLog, setPreviewLog] = useState<{ filename: string; text: string } | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+
+  async function openLogPreview(logId: string, filename: string) {
+    setPreviewLoading(true);
+    try {
+      const res = await fetch(`/api/admin/feedback/${detail.id}/logs/${logId}/preview`);
+      if (!res.ok) {
+        setPreviewLog({ filename, text: `加载日志失败 (${res.status} ${res.statusText})` });
+      } else {
+        const text = await res.text();
+        setPreviewLog({ filename, text });
+      }
+    } catch (errObj) {
+      setPreviewLog({ filename, text: `网络错误: ${(errObj as Error).message}` });
+    } finally {
+      setPreviewLoading(false);
+    }
+  }
   return (
     <aside className="detail-pane" role="dialog" aria-label="反馈详情" aria-modal="true">
       <div className="row spread">
@@ -242,6 +261,94 @@ function DetailPane({
           </div>
         </div>
       )}
+      {detail.logs && detail.logs.length > 0 && (
+        <div style={{ margin: "14px 0" }}>
+          <h3 style={{ marginBottom: 8 }}>日志附件（{detail.logs.length}）</h3>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {detail.logs.map((log) => (
+              <div
+                key={log.id}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  padding: "6px 10px",
+                  background: "#f6f8fa",
+                  borderRadius: 4,
+                  border: "1px solid #d0d3d8",
+                }}
+              >
+                <div>
+                  <strong>{log.filename}</strong>
+                  <span className="muted" style={{ fontSize: 12, marginLeft: 8 }}>
+                    {log.source === "auto" ? "自动采集" : "手动上传"} · {(log.byteSize / 1024).toFixed(1)} KB
+                  </span>
+                </div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  {detail.recovery?.allowedActions.includes("retry_log") &&
+                    detail.recovery?.pendingLogIds?.includes(log.id) && (
+                      <button
+                        type="button"
+                        style={{ padding: "3px 8px", fontSize: 12 }}
+                        onClick={() => {
+                          void onAction(() =>
+                            api.post(`/api/feedback/${detail.id}/recover`, {
+                              action: "retry_log",
+                              expectedRevision: detail.recovery?.revision ?? 0,
+                              logId: log.id,
+                            }),
+                          );
+                        }}
+                      >
+                        重传此日志
+                      </button>
+                    )}
+                  <button
+                    type="button"
+                    style={{ padding: "3px 8px", fontSize: 12 }}
+                    disabled={previewLoading}
+                    onClick={() => openLogPreview(log.id, log.filename)}
+                  >
+                    预览文本
+                  </button>
+                  <a href={`/api/admin/feedback/${detail.id}/logs/${log.id}/download`} download={log.filename}>
+                    <button type="button" style={{ padding: "3px 8px", fontSize: 12 }}>
+                      下载
+                    </button>
+                  </a>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {previewLog && (
+        <div className="screenshot-lightbox-backdrop" role="dialog" aria-modal="true" aria-label="日志预览">
+          <div className="screenshot-lightbox-content" style={{ maxWidth: 800, width: "90%" }}>
+            <h3 style={{ marginTop: 0 }}>日志预览：{previewLog.filename}</h3>
+            <pre
+              style={{
+                maxHeight: 450,
+                overflow: "auto",
+                background: "#f6f8fa",
+                padding: 12,
+                borderRadius: 4,
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-all",
+                fontSize: 12,
+                textAlign: "left",
+              }}
+            >
+              {previewLog.text}
+            </pre>
+            <div className="row" style={{ marginTop: 12, justifyContent: "flex-end" }}>
+              <button type="button" onClick={() => setPreviewLog(null)}>
+                关闭 ✕
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {detail.processed && (
         <>
           <h3>AI 整理结果</h3>
@@ -287,7 +394,9 @@ function DetailPane({
                     ? "重试截图评论"
                     : action === "replace_upload"
                       ? "替换截图上传"
-                      : action;
+                      : action === "retry_log"
+                        ? "重试日志上传"
+                        : action;
           const confirmText =
             action === "force-create"
               ? "确认 Kaneo 中不存在对应任务且无任何已知附件状态？将再次创建，可能产生重复。"
@@ -295,13 +404,17 @@ function DetailPane({
                 ? "将按同一任务重新申请上传地址并替换截图资产；旧对象不会被自动删除。继续？"
                 : action === "retry_comment"
                   ? "重发评论会先查重，只有未命中才发送一次；但远端列表与写入之间存在竞态，仍可能产生重复评论。确认重发？"
-                  : null;
+                  : action === "retry_log"
+                    ? "将重新上传待处理日志并挂载评论。继续？"
+                    : null;
           return (
             <button
               key={action}
               type="button"
               className={
-                action === "retry" || action === "force-create" || action === "replace_upload" ? "primary" : ""
+                action === "retry" || action === "force-create" || action === "replace_upload" || action === "retry_log"
+                  ? "primary"
+                  : ""
               }
               title={note ? `针对${target}：${note}` : `针对${target}`}
               onClick={() => {
@@ -311,7 +424,13 @@ function DetailPane({
                     ? api.post(`/api/feedback/${detail.id}/retry`, { expectedRevision: rev })
                     : action === "recheck" || action === "force-create"
                       ? api.post(`/api/feedback/${detail.id}/resolve`, { action, expectedRevision: rev })
-                      : api.post(`/api/feedback/${detail.id}/recover`, { action, expectedRevision: rev }),
+                      : action === "retry_log"
+                        ? api.post(`/api/feedback/${detail.id}/recover`, {
+                            action,
+                            expectedRevision: rev,
+                            logId: detail.recovery?.pendingLogIds?.[0],
+                          })
+                        : api.post(`/api/feedback/${detail.id}/recover`, { action, expectedRevision: rev }),
                 );
               }}
             >

@@ -142,6 +142,38 @@ export interface ScreenshotMeta {
   created_at: string;
 }
 
+export interface FeedbackLogRow {
+  id: string;
+  feedback_id: string;
+  sort_order: number;
+  filename: string;
+  source: "auto" | "manual";
+  bytes: Uint8Array;
+  byte_size: number;
+  sha256: string;
+  created_at: string;
+}
+
+export interface FeedbackLogMeta {
+  id: string;
+  feedback_id: string;
+  sort_order: number;
+  filename: string;
+  source: "auto" | "manual";
+  byte_size: number;
+  sha256: string;
+  created_at: string;
+}
+
+export interface LogInput {
+  id?: string;
+  filename: string;
+  source: "auto" | "manual";
+  bytes: Uint8Array;
+  byteSize: number;
+  sha256: string;
+}
+
 /**
  * 从 capture 元数据解析输出像素尺寸（线格式定稿：pixelWidth/pixelHeight）。
  * 缺省 → undefined（旧记录兼容；AI 提示回退逻辑视口）。
@@ -165,6 +197,7 @@ export function contentHash(
   text: string,
   context: unknown,
   screenshot?: { sha256: string; releasePoint?: { x: number; y: number } } | null,
+  logs?: Array<{ filename: string; sha256: string; source: "auto" | "manual" }> | null,
 ): string {
   const payload: Record<string, unknown> = { appId, text, context: context ?? null };
   if (screenshot) {
@@ -172,6 +205,13 @@ export function contentHash(
     if (screenshot.releasePoint) {
       payload.releasePoint = screenshot.releasePoint;
     }
+  }
+  if (logs && logs.length > 0) {
+    payload.logs = logs.map((l) => ({
+      filename: l.filename,
+      sha256: l.sha256,
+      source: l.source,
+    }));
   }
   return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
 }
@@ -244,6 +284,48 @@ export function revokeUserSessions(db: Db, userId: string): number {
     db.prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL").run(nowIso(), userId)
       .changes,
   );
+}
+
+/** 管理员改自己凭据的结果：命中 / 账号已不存在 / 新用户名被占用。 */
+export type UpdateAdminCredentialsOutcome = "updated" | "not_found" | "username_conflict";
+
+/**
+ * T2-A：管理员在同一个显式事务内改自己的用户名与密码，并撤销该账号全部会话。
+ * 事务内重新读取账号（会话可能在进入路由后被撤销、禁用或删除）并复查用户名唯一性；
+ * 任一步失败整体 ROLLBACK，用户名与密码都保持原值。
+ * 口令哈希与校验由调用方在事务外完成（scrypt 是 CPU 密集的同步计算，不放进事务）。
+ */
+export function updateAdminCredentialsInTx(
+  db: Db,
+  input: { userId: string; newUsername?: string; newPassHash?: string },
+): UpdateAdminCredentialsOutcome {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const user = getUserById(db, input.userId);
+    if (!user) {
+      db.exec("ROLLBACK");
+      return "not_found";
+    }
+    if (input.newUsername !== undefined && input.newUsername !== user.username) {
+      const taken = getUserByUsername(db, input.newUsername);
+      if (taken && taken.id !== user.id) {
+        db.exec("ROLLBACK");
+        return "username_conflict";
+      }
+    }
+    if (input.newUsername !== undefined) {
+      db.prepare("UPDATE users SET username = ? WHERE id = ?").run(input.newUsername, user.id);
+    }
+    if (input.newPassHash !== undefined) {
+      db.prepare("UPDATE users SET pass_hash = ? WHERE id = ?").run(input.newPassHash, user.id);
+    }
+    revokeUserSessions(db, user.id); // 改凭据即撤销该账号全部会话（含当前会话）
+    db.exec("COMMIT");
+    return "updated";
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
 }
 
 // ---------- daily usage ----------
@@ -414,6 +496,7 @@ export function insertFeedbackWithScreenshot(
     sha256: string;
     captureJson: string | null;
   } | null,
+  logs?: LogInput[] | null,
 ): FeedbackRow {
   const now = nowIso();
   const row: FeedbackRow = {
@@ -442,11 +525,26 @@ export function insertFeedbackWithScreenshot(
   db.exec("BEGIN");
   try {
     insertFeedbackRow(db, row, screenshot ?? null, now);
+    if (logs && logs.length > 0) {
+      insertFeedbackLogs(db, row.id, logs, now);
+    }
     db.exec("COMMIT");
     return row;
   } catch (err) {
     db.exec("ROLLBACK");
     throw err;
+  }
+}
+
+/** 事务内插入日志附件（供原子提交函数复用）。 */
+function insertFeedbackLogs(db: Db, feedbackId: string, logs: LogInput[], now: string): void {
+  const stmt = db.prepare(
+    `INSERT INTO feedback_logs (id, feedback_id, sort_order, filename, source, bytes, byte_size, sha256, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  for (let i = 0; i < logs.length; i++) {
+    const l = logs[i]!;
+    stmt.run(l.id ?? randomUUID(), feedbackId, i, l.filename, l.source, l.bytes, l.byteSize, l.sha256, now);
   }
 }
 
@@ -535,6 +633,7 @@ export function submitFeedbackAtomic(
     sha256: string;
     captureJson: string | null;
   } | null,
+  logs?: LogInput[] | null,
   /** 可控时钟（测试注入；生产默认系统时钟）。 */
   clock: () => number = Date.now,
 ): SubmitOutcome {
@@ -568,7 +667,7 @@ export function submitFeedbackAtomic(
       return { kind: "quota_exceeded", quota };
     }
 
-    // 4. 保存反馈与截图
+    // 4. 保存反馈、截图与日志
     const now = new Date(at).toISOString();
     const row: FeedbackRow = {
       id: randomUUID(),
@@ -593,6 +692,9 @@ export function submitFeedbackAtomic(
       updated_at: now,
     };
     insertFeedbackRow(db, row, screenshot ?? null, now);
+    if (logs && logs.length > 0) {
+      insertFeedbackLogs(db, row.id, logs, now);
+    }
 
     // 5. 增加用量（同日 upsert）
     db.prepare(
@@ -677,6 +779,27 @@ export function getFeedbackScreenshotMeta(db: Db, feedbackId: string): Screensho
   };
 }
 
+export function getFeedbackLogs(db: Db, feedbackId: string): FeedbackLogRow[] {
+  return db
+    .prepare("SELECT * FROM feedback_logs WHERE feedback_id = ? ORDER BY sort_order ASC")
+    .all(feedbackId) as unknown as FeedbackLogRow[];
+}
+
+export function getFeedbackLogsMeta(db: Db, feedbackId: string): FeedbackLogMeta[] {
+  return db
+    .prepare(
+      "SELECT id, feedback_id, sort_order, filename, source, byte_size, sha256, created_at FROM feedback_logs WHERE feedback_id = ? ORDER BY sort_order ASC",
+    )
+    .all(feedbackId) as unknown as FeedbackLogMeta[];
+}
+
+export function getFeedbackLog(db: Db, feedbackId: string, logId: string): FeedbackLogRow | null {
+  const row = db.prepare("SELECT * FROM feedback_logs WHERE feedback_id = ? AND id = ?").get(feedbackId, logId) as
+    | FeedbackLogRow
+    | undefined;
+  return row ?? null;
+}
+
 export function updateFeedback(
   db: Db,
   id: string,
@@ -706,7 +829,10 @@ export function updateFeedback(
 export function listFeedbacks(
   db: Db,
   filter: { status?: FeedbackStatus; appId?: string; cursor?: string; limit: number },
-): { items: (FeedbackRow & { has_screenshot?: number; username?: string | null })[]; nextCursor: string | null } {
+): {
+  items: (FeedbackRow & { has_screenshot?: number; username?: string | null; log_count?: number })[];
+  nextCursor: string | null;
+} {
   const where: string[] = [];
   const params: (string | number)[] = [];
   if (filter.status) {
@@ -731,13 +857,15 @@ export function listFeedbacks(
   const rows = db
     .prepare(
       `SELECT f.*, u.username AS username,
-              (SELECT 1 FROM feedback_screenshots s WHERE s.feedback_id = f.id) AS has_screenshot
+              (SELECT 1 FROM feedback_screenshots s WHERE s.feedback_id = f.id) AS has_screenshot,
+              (SELECT COUNT(*) FROM feedback_logs l WHERE l.feedback_id = f.id) AS log_count
        FROM feedbacks f LEFT JOIN users u ON u.id = f.user_id ${w}
        ORDER BY f.created_at DESC, f.id DESC LIMIT ?`,
     )
     .all(...params, filter.limit + 1) as unknown as (FeedbackRow & {
     has_screenshot?: number;
     username?: string | null;
+    log_count?: number;
   })[];
   const hasMore = rows.length > filter.limit;
   const items = hasMore ? rows.slice(0, filter.limit) : rows;
@@ -757,7 +885,9 @@ export function findResumable(db: Db): { requeue: FeedbackRow[]; uncertain: Feed
 }
 
 /** 管理列表用的轻量字段。 */
-export function toAdminListItem(r: FeedbackRow & { has_screenshot?: number; username?: string | null }) {
+export function toAdminListItem(
+  r: FeedbackRow & { has_screenshot?: number; username?: string | null; log_count?: number },
+) {
   return {
     id: r.id,
     appId: r.app_id,
@@ -770,5 +900,6 @@ export function toAdminListItem(r: FeedbackRow & { has_screenshot?: number; user
     errorSummary: r.error_summary,
     archiveStage: r.archive_stage,
     hasScreenshot: Boolean(r.has_screenshot),
+    logCount: r.log_count ?? 0,
   };
 }

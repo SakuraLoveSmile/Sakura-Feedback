@@ -43,8 +43,8 @@ server {
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "no-referrer" always;
 
-    # 截图走 multipart，服务端上限 6MiB；留出协议开销余量
-    client_max_body_size 10m;
+    # 截图与日志走 multipart，服务端上限 10MiB；留出协议开销余量
+    client_max_body_size 15m;
 
     location / {
         proxy_pass http://__UPSTREAM__;

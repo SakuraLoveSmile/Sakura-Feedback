@@ -1,0 +1,26 @@
+name: feedback_matrix_host
+description: "T3 verifier 独立隔离宿主：path 依赖工作区 flutter/feedback，逐档固定 flutter_secure_storage 版本。"
+version: 0.0.1
+publish_to: none
+
+environment:
+  sdk: ^3.6.0
+  flutter: ">=3.27.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  feedback_widget:
+    path: ../../../flutter/feedback
+
+  # 每档由 run_matrix.sh 改写成精确版本（9.2.2 / 10.3.1 / 11.0.0）；
+  # 不使用 dependency_overrides，走正常解析路径。
+  flutter_secure_storage: '>=9.2.2 <12.0.0'
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:

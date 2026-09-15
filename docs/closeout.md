@@ -49,11 +49,22 @@
 ### 版本交付（GitHub Actions）
 
 - `.github/workflows/ci.yml`：PR / 分支推送只跑检查，**不发布**。
-- `.github/workflows/release.yml`：`v*` 标签或手动触发 → 先复用 CI，通过后构建并推送
-  `ghcr.io/sakuralovesmile/sakura-feedback`（**linux/amd64**），产出版本标签、提交 SHA 标签与 digest。
-  仅 publish job 有 `packages: write`；构建不读取任何生产 `.env` / 数据库 / AI / Kaneo 凭据。
-- 同轮上传 Web `.tgz`、完整浏览器 `dist` 压缩包、管理页 `dist`、`SHA256SUMS`、`SOURCE.txt`（含来源提交）、
-  `image-digest.txt`；标签推送时挂到 GitHub Release。
+- `.github/workflows/release.yml`：**稳定渠道判定以 [`docs/release.md`](release.md) 为权威口径**——
+  4 个条件同时满足才算稳定发布：①事件是标签推送；②标签是正式 `vX.Y.Z`（无预发布后缀）；
+  ③标签严格等于 `v<根 package.json 的 version>`；④标签指向本次运行的提交。满足时构建并推送
+  `ghcr.io/sakuralovesmile/sakura-feedback` 与 `ghcr.io/sakuralovesmile/sakura-feedback-updater`
+  **两个镜像**（**linux/amd64**），产出版本标签、提交 SHA 标签与 digest。
+  仅 `publish` job 有 `packages: write`，仅最后公开 Release 的 job 有 `contents: write`；
+  构建不读取任何生产 `.env` / 数据库 / AI / Kaneo 凭据。
+- 同轮上传 Web `.tgz`、完整浏览器 `dist` 压缩包、管理页 `dist` 压缩包、`SHA256SUMS`、`SOURCE.txt`（含来源提交）、
+  两个镜像的 digest（`feedback-image-digest.txt`、`updater-image-digest.txt`）与稳定清单
+  `release-manifest.json`。标签推送时**先创建 draft Release**，把全部产物与清单传上去并复查资产齐全
+  （缺一即失败退出、保持 draft），**最后一步才公开**；流水线不改动已公开的 Release，
+  因此不会出现「已公开但产物缺失」的状态。
+- **有意收紧（v0.3.0 起）**：预发布标签与 `workflow_dispatch` 手动触发**不再创建 Release**、
+  也不产出稳定清单（手动触发只按 `sha-<40位>` 推送镜像用于验证构建）。原因：更新执行器按
+  `https://github.com/<owner>/<repo>/releases/latest/download/release-manifest.json` 取清单，
+  任何非稳定内容都不能进 Releases，否则生产更新可能被引到未发布的版本上。
 
 **CI 真实运行证据（GitHub，非本地）**
 
@@ -70,6 +81,11 @@
 - 修复：CI 步骤顺序改为 **build → typecheck → lint → test**；修复后本地与 GitHub 均通过。
 
 **发布实跑（v0.1.0，2026-09-11）**
+
+> 以下记录的是 **v0.1.0 时期**的流程与产物：当时只推 feedback 一个镜像、镜像 digest 只作为工作流产物上传、
+> 任何 `v*` 标签推送都会直接创建并公开 Release（Release 上共 5 个资产，没有稳定清单）。
+> v0.3.0 起已改为「两个镜像 + `release-manifest.json` + draft→最后公开」，以本文件上文与
+> [`docs/release.md`](release.md) 为准。这一段保留为历史证据，**不代表当前流程**。
 
 已推 `v0.1.0` 标签触发 `release.yml` 真实运行（run `34602966331`），全部 job 通过：
 
@@ -339,7 +355,9 @@ exp=blue,yellow,purple   got=blue, yellow, magenta
 - 唯一接入指南仍为 [`docs/integration.md`](integration.md)，本轮补充：
   - §2.4 跨仓库 Flutter 依赖改为**已验证**的 SSH + 固定 SHA 写法（含本地 SSH 不通时的一次性 env 覆盖）；
   - §2.6 边界更新（已有发布流水线；云端尚未上线）；
-  - §2.7 新增：镜像坐标/标签/digest、私有 GHCR 只读拉取、生产部署、升级与回退、客户端如何跟上同一版本。
+  - §2.7 新增：镜像坐标/标签/digest、私有 GHCR 只读拉取、生产部署、升级与回退、客户端如何跟上同一版本
+    （U1 轮起该节追加：稳定渠道 4 条件、双镜像与更新执行器镜像、稳定清单 `release-manifest.json`、
+    draft→最后公开的顺序）。
 - 未把访问令牌写入任何依赖 URL；私有 Git 走 SSH 配置，云服务器拉取 GHCR 使用只读凭据。
 
 ### 全新目录独立安装验证（脱离 monorepo）
@@ -427,7 +445,9 @@ flutter build apk --debug \
    "仓库可开源、无隐私泄露风险"，因此按现有配置发布 **public** GHCR 包属于预期行为，不再是阻塞项。
 2. **release.yml 已真实验证通过**（见上文"发布实跑"）：镜像已推送并可从 registry 取回 manifest，
    Release 上的 5 个资产齐全，`SOURCE.txt` 的 `commit=` 与 `v0.1.0` 指向的提交**完全一致**。
-   此项不再是未验证。
+   此项不再是未验证。**但这只覆盖 v0.1.0 时期的单镜像流程**：本轮 U1 把 `release.yml` 扩展为
+   「两个镜像 + 稳定清单 + draft→最后公开」，**扩展部分尚未在真实 GitHub Actions 上运行过**
+   （本机只能做 YAML 与静态校验，见 [`docs/release.md`](release.md) 的验证状态一节）。
 3. ~~**Nginx 模板未做 `nginx -t`**~~ → **已补做**：本轮起了 `nginx:alpine` 容器，模板替换占位符后
    `nginx -t` 通过，并实测 80→443 跳转、HTTPS 反代、`Secure` Cookie、公网 origin 校验
    （详见上文"生产 HTTPS 形态实测"）。**此项完成。** 仍未做的是真实域名 + 公网证书。
@@ -519,3 +539,52 @@ done
 ```
 
 注意：三引擎共用 8787/5189 等端口，**必须串行**；runner 现在会在启动前检测端口占用并 FATAL 退出。
+
+---
+
+## v0.3.0 收尾记录（反馈附带日志、AI 分析与 Kaneo 归档）
+
+> 记录时间：2026-09-14。
+> 本轮交付三个核心目标：反馈能附带日志、日志能用于 AI 分析和人工排查、其他项目能按标准文档自行接入。只修改 Feedback 仓库及其示例，不改动外部项目（RAG、Comic、Kaneo），保留工作区既有改动。
+
+### 1. 任务交付明细
+
+| 子任务 | 范围 | 交付成果与验证指标 | 状态 |
+|---|---|---|---|
+| **L2** | 服务端存储与契约 | 数据库 Schema 升级至版本 4（`PRAGMA user_version = 4`），新增 `feedback_logs` 表与 `(feedback_id, sort_order)` 索引；请求体上限提升至 10 MiB（单日志 ≤1 MiB）；支持 multipart 传输 `logs` 描述符与有序文件流；内容哈希纳入日志摘要；提供管理端下载原始文件（`application/octet-stream`）与纯文本预览（`text/plain; charset=utf-8`）。 | **已完成** |
+| **L1-Web** | Web 组件 SDK | `<feedback-widget>` 支持 `logProvider` 异步属性，呼出面板时自动采集，配有 3 秒超时保护（超时不阻塞编辑）；支持用户手动选择 `.log`, `.txt`, `.json`, `.jsonl` 附件；至多 3 份，单文件 ≤1 MiB；提供纯文本弹窗预览与单项移除；提交瞬间冻结快照，重试复用同一幂等键，修改日志自动生成新键。 | **已完成** |
+| **L1-Flutter** | Flutter 组件 SDK | `FeedbackWidget` / `FeedbackPanel` 支持 `logProvider` 与 `filePicker`；呼出面板自动执行采集并施加 3 秒超时容错；提供手动添加日志、单行信息展示、文本预览弹窗、删除按钮；提交时冻结为 `_FrozenSubmit` 快照；相同快照沿用幂等键，修改日志失效旧键。 | **已完成** |
+| **L3** | AI 分析与 Kaneo 归档 | 服务端日志截断算法：单文件截取尾部至多 8,000 Unicode 码点（按真实码点计数，保护 Emoji/多字节文本），全部附件总计至多 24,000 码点；大模型提示词设立不可信诊断输入防注入隔离区，原话与日志中的任何指令均不予执行；Kaneo 任务描述格式化注入日志元数据（名称、来源、体积、摘要），截图评论附带日志线索；归档恢复状态机完整保持幂等与核对兼容。 | **已完成** |
+| **U1** | 系统更新与版本对齐 | 全仓版本对齐至 `0.3.0`（服务端、Web 组件、Flutter 组件、更新执行器）；`apps/updater` 探针脚本 `REQUIRED_TABLES` 纳入 `feedback_logs`；`compareDbProbes` 支持 `PRAGMA user_version ≥ 4` 核验，并兼容从旧版基线升级（旧版缺少 `feedback_logs` 计数时仅告警不报错）。 | **已完成** |
+| **D1** | 标准接入文档与收尾 | 完善 [`docs/integration.md`](integration.md)（全面覆盖 React、Vue、原生 HTML、SSR、Flutter 的日志采集接入与附件规范）、更新 [`docs/api.md`](api.md)（记录 10 MiB multipart 上限、日志描述符契约与管理下载/预览端点），更新收尾记录。 | **已完成** |
+
+### 2. 自动化验证全绿证据
+
+#### 1) TypeScript 与 Monorepo 代码检查
+- `pnpm typecheck`：8 个 Workspace 项目全通过（`apps/server`, `apps/admin`, `apps/updater`, `packages/web`, `examples/react`, `examples/vue`, `examples/ssr`）。
+- `pnpm build`：全仓构建成功，生产产物正常打包（含 ESM / UMD 分块）。
+
+#### 2) 单元与集成测试套件（全部通过）
+- **`@feedback/server`**：13 个测试文件，**217 passed**
+  - `test/feedback-logs.test.ts`：10 个用例全过，涵盖契约兼容、日志入库、数量/体积限制、格式校验、事务回滚、管理员下载/预览、Unicode 截断算法、防注入边界与 Kaneo 归档。
+  - `test/archive-consistency.test.ts` / `test/fault-injection.test.ts` / `test/pipeline.test.ts`：状态机与恢复逻辑全绿。
+- **`@feedback/updater`**：8 个测试文件，**70 passed**
+  - `test/envfile-dbprobe.test.ts`：数据库探针、`feedback_logs` 表核验与旧版迁移兼容全过。
+  - `test/engine.test.ts` / `test/manifest.test.ts`：更新引擎与清单解析全过。
+- **`@feedback/web`**：14 个测试文件，**151 passed**
+  - `test/feedback-logs.test.ts`：6 个用例全过，覆盖自动采集、3秒超时保护、手动选择、文本预览、快照冻结与重试幂等。
+- **Flutter SDK (`flutter/feedback`)**：
+  - `flutter analyze`：**No issues found!**（零告警，耗时 2.3s）。
+  - `flutter test`：**119 passed**（包含 `feedback_logs_test.dart` 的 6 组日志生命周期与重试幂等用例）。
+
+总计：**557 个单测/集成测试用例全数通过**，无任何破坏性改动。
+
+---
+
+## 2026-09-15 最后两项补修追加收口
+
+本追加记录不改写历史结果。U1 更新探针现在从 SQLite BLOB 实际计算附件 SHA-256 与字节长度，严格拒绝损坏元数据、缺失或重复附件及不可靠更新前基线；L1 Web 组件在卸载、关闭和身份切换时统一失效日志操作，迟到结果和旧 `finally` 不得写入新草稿或忙碌态，重挂载会按面板状态重试被取消的采集。
+
+本轮 `pnpm -r build`、`pnpm -r typecheck`、`pnpm -r lint`、`pnpm -r test` 全部通过；单测结果为 server 218、updater 75、web 153，`npx tsx e2e/u1_engine_boundaries.mts` 为 33/33。当前构建产物的真实 Chromium 隔离验证覆盖卸载/重挂载 2/2，并核对实际 multipart 日志附件元数据与字节。
+
+Docker daemon 恢复后已运行 `python3 e2e/run_u1_upgrade.py`：exit 0，**137/137** 项断言通过，`happy_path`、`verify_failure`、`release_failure`、`fast_rejects`、`env_modified`、`updater_restart` 六个场景全部通过。报告为 [`e2e/shots/u1/upgrade-report.json`](../e2e/shots/u1/upgrade-report.json)，使用隔离本地 registry、临时数据卷与 mock AI/Kaneo；未连接真实 Kaneo、生产数据或执行部署、提交、推送、打标签。历史的 Docker 不可用记录保留在上文，本轮收尾状态更新为**待体验**，交付结论为**具备进入测试部署的条件**。

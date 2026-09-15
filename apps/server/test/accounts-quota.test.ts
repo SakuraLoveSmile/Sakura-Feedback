@@ -105,8 +105,8 @@ function seedLegacyDb(): { dir: string; userId: string } {
   return { dir, userId };
 }
 
-describe("数据库迁移 v2 → v3", () => {
-  it("原有账号迁为管理员、保留密码；历史反馈归属初始账号；版本号推进到 3", () => {
+describe("数据库迁移 v2 → v4", () => {
+  it("原有账号迁为管理员、保留密码；历史反馈归属初始账号；版本号推进到 4 并建立 feedback_logs", () => {
     const { dir, userId } = seedLegacyDb();
     const db = openDb(dir);
     const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId) as any;
@@ -117,7 +117,9 @@ describe("数据库迁移 v2 → v3", () => {
     const fb = db.prepare("SELECT user_id FROM feedbacks WHERE id = 'fb-old'").get() as any;
     expect(fb.user_id).toBe(userId);
     const uv = (db.prepare("PRAGMA user_version").get() as any).user_version;
-    expect(uv).toBe(3);
+    expect(uv).toBe(5);
+    const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as any[]).map((t) => t.name);
+    expect(tables).toContain("feedback_logs");
     db.prepare("INSERT INTO daily_usage (user_id, day, used, reset_at) VALUES (?, '2026-01-01', 0, 'x')").run(userId);
     db.close();
   });
@@ -132,6 +134,26 @@ describe("数据库迁移 v2 → v3", () => {
     const cols = (raw.prepare("PRAGMA table_info(users)").all() as any[]).map((c) => c.name);
     expect(cols).not.toContain("role");
     raw.close();
+  });
+
+  it("从 v3 升级到 v4：保留既有数据并建立 feedback_logs 表", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "fb-v3-upgrade-"));
+    const raw = new DatabaseSync(path.join(dir, "feedback.db"));
+    raw.exec(`
+      PRAGMA journal_mode = WAL;
+      CREATE TABLE users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, pass_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'user', enabled INTEGER NOT NULL DEFAULT 1, daily_limit INTEGER NOT NULL DEFAULT 3, created_at TEXT NOT NULL);
+      CREATE TABLE feedbacks (id TEXT PRIMARY KEY, app_row_id TEXT NOT NULL, app_id TEXT NOT NULL, user_id TEXT NOT NULL DEFAULT '', text TEXT NOT NULL, context_json TEXT, idempotency_key TEXT NOT NULL UNIQUE, content_hash TEXT NOT NULL, status TEXT NOT NULL, title TEXT, processed_json TEXT, kaneo_task_id TEXT, kaneo_task_url TEXT, archive_stage TEXT, archive_data_json TEXT, attempt_count INTEGER NOT NULL DEFAULT 0, last_error TEXT, error_summary TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE TABLE daily_usage (user_id TEXT NOT NULL REFERENCES users(id), day TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 0, reset_at TEXT NOT NULL, PRIMARY KEY (user_id, day));
+      PRAGMA user_version = 3;
+    `);
+    raw.close();
+
+    const db = openDb(dir);
+    const uv = (db.prepare("PRAGMA user_version").get() as any).user_version;
+    expect(uv).toBe(5);
+    const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as any[]).map((t) => t.name);
+    expect(tables).toContain("feedback_logs");
+    db.close();
   });
 });
 
