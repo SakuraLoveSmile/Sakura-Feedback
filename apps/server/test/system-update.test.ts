@@ -854,6 +854,10 @@ describe("U1-4 暂停写入（共享控制文件驱动）", () => {
     const status = await jsonReq(h.feedbackApp.app, "GET", "/api/admin/system/update", { cookie: h.cookie });
     expect(status.data.pause.paused).toBe(true);
     expect(status.data.pause.marker.phaseLabel).toBe("③保留备份并复制");
+
+    // 清理测试中故意保留的暂停队列，否则 worker 会一直轮询而无法退出。
+    await clearPaused(h);
+    await h.feedbackApp.worker.idle();
   });
 
   it("暂停期间队列不丢弃：worker.idle() 立即返回（停机不被卡死），解除暂停后继续处理", async () => {
