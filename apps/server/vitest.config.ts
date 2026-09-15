@@ -6,10 +6,10 @@ export default defineConfig({
     environment: "node",
     testTimeout: 30_000,
     hookTimeout: 15_000,
-    pool: "threads",
+    pool: "forks",
     poolOptions: {
-      threads: {
-        singleThread: true,
+      forks: {
+        singleFork: true,
       },
     },
   },
