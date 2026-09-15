@@ -68,7 +68,7 @@ jobs:
       - name: test
         # GitHub runner 上并行启动多个 Vitest worker 时，SQLite/happy-dom 的子进程
         # 偶发在测试已完成后仍被 pnpm 持有；串行 workspace 测试保持同一断言并确保进程收敛。
-        run: pnpm -r --workspace-concurrency=1 test
+        run: pnpm -r --workspace-concurrency=1 test -- --reporter=verbose
 
   flutter-checks:
     runs-on: ubuntu-latest
