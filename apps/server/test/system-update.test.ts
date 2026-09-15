@@ -992,7 +992,13 @@ describe("U1-4 控制目录与检查结果持久化", () => {
 
   it("控制目录不可写（模拟只读挂载）→ 检查结果退化为内存，服务不受影响", async () => {
     const h = await makeHarness({ responses: [HEALTH_OK, { status: 200, body: manifest() }] });
-    const control = createControlPlane({ controlDir: "/proc/definitely-not-writable" });
+    // 用一个「普通文件」冒充控制目录：其中的 mkdir/write 会立刻以 ENOTDIR 失败，
+    // 既完整保留“控制目录不可写”的契约，又不会像 /proc 下的路径那样在部分内核上阻塞
+    // （该阻塞曾把 CI 的 node-checks 拖到 10 分钟上限）。
+    const readOnlyRoot = mkdtempSync(path.join(tmpdir(), "u1-4-readonly-"));
+    const controlDirAsFile = path.join(readOnlyRoot, "not-a-directory");
+    writeFileSync(controlDirAsFile, "this path is a regular file, not a directory\n");
+    const control = createControlPlane({ controlDir: controlDirAsFile });
     const service = createSystemUpdateService({
       currentVersion: "0.2.1",
       control,
@@ -1007,6 +1013,7 @@ describe("U1-4 控制目录与检查结果持久化", () => {
       expect(control.writeOwnState("x", { a: 1 })).toBe(false);
     } finally {
       service.close();
+      rmSync(readOnlyRoot, { recursive: true, force: true });
     }
   });
 });
