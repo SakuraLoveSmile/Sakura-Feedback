@@ -659,7 +659,29 @@ jobs:
             echo "::error::标签名不符合 v* 命名约定：$TAG"; exit 1
           fi
           gh release edit "$TAG" --draft=false --latest
-          gh release view "$TAG" --json isDraft,isLatest,url > release-final.json
+          # `gh release view --json` 的字段集里**没有** isLatest（只有 list 支持），
+          # 因此「已公开」用 view 断言，「最新」用 list 断言；两者都通过才算成功。
+          gh release view "$TAG" --json isDraft,url,publishedAt,tagName > release-final.json
+          gh release list --limit 100 --json tagName,isLatest > release-list.json
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+
+          tag = os.environ["TAG"]
+          final = json.loads(pathlib.Path("release-final.json").read_text(encoding="utf-8"))
+          listing = json.loads(pathlib.Path("release-list.json").read_text(encoding="utf-8"))
+
+          if final.get("isDraft") is not False:
+              print(f"::error::Release {tag} 仍是 draft，未公开：{final}")
+              sys.exit(1)
+          hit = [item for item in listing if item.get("tagName") == tag]
+          if not hit or hit[0].get("isLatest") is not True:
+              print(f"::error::Release {tag} 没有被标记为 latest：{hit}")
+              sys.exit(1)
+          print(f"Release {tag} 已公开且为 latest：{final.get('url')}")
+          PY
           cat release-final.json
           {
             echo "### 已公开 v$VERSION（$TAG）"
