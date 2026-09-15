@@ -66,9 +66,13 @@ jobs:
       - name: lint
         run: pnpm -r lint
       - name: test
-        # GitHub runner 上并行启动多个 Vitest worker 时，SQLite/happy-dom 的子进程
-        # 偶发在测试已完成后仍被 pnpm 持有；串行 workspace 测试保持同一断言并确保进程收敛。
-        run: pnpm -r --workspace-concurrency=1 test -- --reporter=verbose
+        # 只把 reporter 参数传给真正的 Vitest 包；管理页的占位 test 脚本不接受参数。
+        # 分包串行执行，避免 GitHub runner 上多个 Vitest/SQLite worker 互相影响。
+        run: |
+          pnpm --filter @feedback/admin test
+          pnpm --filter @feedback/server test -- --reporter=verbose
+          pnpm --filter @feedback/updater test -- --reporter=verbose
+          pnpm --filter @feedback/web test -- --reporter=verbose
 
   flutter-checks:
     runs-on: ubuntu-latest
