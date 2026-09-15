@@ -10,6 +10,7 @@ import {
   type AuthUser,
   type FeedbackCaptureInfo,
   type FeedbackContext,
+  type FeedbackLogAttachment,
   type FeedbackRecord,
   type FeedbackStatus,
   type Quota,
@@ -26,11 +27,25 @@ import {
   type CaptureProvider,
 } from './capture';
 
+export interface FeedbackLogFile {
+  filename: string;
+  blob: Blob;
+}
+
+export type FeedbackLogProvider = () =>
+  | Promise<FeedbackLogFile | FeedbackLogFile[] | null | undefined>
+  | FeedbackLogFile
+  | FeedbackLogFile[]
+  | null
+  | undefined;
+
 interface DraftState {
   text: string;
   screenshotBlob: Blob | null;
   screenshotUrl: string | null;
   captureInfo: FeedbackCaptureInfo | null;
+  logs: FeedbackLogAttachment[];
+  logsCollected: boolean;
   /** 草稿版本号：每次内容变更递增，用于判定提交快照是否与当前草稿一致。 */
   version: number;
 }
@@ -51,6 +66,8 @@ interface SubmitSnapshot {
   /** 截图字节与元数据。 */
   blob: Blob | null;
   captureInfo: FeedbackCaptureInfo | null;
+  /** 日志附件快照（冻结）。 */
+  logs: FeedbackLogAttachment[];
   /** 草稿版本：与当前草稿一致时快照可复用（重试同 key 同字节）。 */
   draftVersion: number;
   /** 上一次尝试结果未知（网络错误 / 5xx）：草稿被修改时先保留原请求供核对。 */
@@ -102,6 +119,47 @@ const CAPTURE_BUSY_LABEL = '截取中…';
 /** 记录已进入终态：轮询（或手动刷新）拿到后不再继续跟踪。 */
 function isTerminalStatus(status: FeedbackStatus): boolean {
   return status === 'archived' || status === 'failed' || status === 'needs_review';
+}
+
+function formatBytes(bytes?: number): string {
+  if (bytes === undefined || Number.isNaN(bytes)) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  return `${(bytes / 1024).toFixed(1)} KB`;
+}
+
+const MAX_LOG_FILES = 3;
+const MAX_LOG_BYTES = 1024 * 1024; // 1 MiB
+const ALLOWED_LOG_EXTENSIONS = new Set(['.log', '.txt', '.json', '.jsonl']);
+
+function getLogExtension(name: string): string {
+  const dot = name.lastIndexOf('.');
+  if (dot === -1) return '';
+  return name.slice(dot).toLowerCase();
+}
+
+function areLogsEqual(a: FeedbackLogAttachment[], b: FeedbackLogAttachment[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const itemA = a[i];
+    const itemB = b[i];
+    if (!itemA || !itemB) return false;
+    if (itemA.blob !== itemB.blob || itemA.filename !== itemB.filename || itemA.source !== itemB.source) {
+      return false;
+    }
+  }
+  return true;
+}
+
+async function readBlobText(blob: Blob): Promise<string> {
+  if (typeof blob.text === 'function') {
+    return await blob.text();
+  }
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsText(blob, 'utf-8');
+  });
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(
@@ -241,6 +299,23 @@ export class FeedbackWidget extends HTMLElement {
   private loginConfirmBtn!: HTMLButtonElement;
   private loginCancelBtn!: HTMLButtonElement;
 
+  /** 日志附件区 */
+  private logsArea!: HTMLDivElement;
+  private logsCountEl!: HTMLSpanElement;
+  private logsList!: HTMLUListElement;
+  private addLogBtn!: HTMLButtonElement;
+  private logFileInput!: HTMLInputElement;
+  private logStatusEl!: HTMLSpanElement;
+  private logErrorEl!: HTMLDivElement;
+  private logPreviewModal!: HTMLDivElement;
+  private logPreviewTitle!: HTMLHeadingElement;
+  private logPreviewBody!: HTMLPreElement;
+  private logPreviewCloseBtn!: HTMLButtonElement;
+
+  private _logProvider?: FeedbackLogProvider;
+  private logsCollecting = false;
+  private logTimeout: ReturnType<typeof setTimeout> | null = null;
+
   private phase: Phase = 'idle';
   private polling = false;
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -320,6 +395,8 @@ export class FeedbackWidget extends HTMLElement {
     screenshotBlob: null,
     screenshotUrl: null,
     captureInfo: null,
+    logs: [],
+    logsCollected: false,
     version: 0,
   };
 
@@ -327,6 +404,32 @@ export class FeedbackWidget extends HTMLElement {
   private submitSnapshot: SubmitSnapshot | null = null;
   /** 结果未知的原提交请求：草稿被修改时保留供人工核对，不静默覆盖。 */
   private unconfirmedRequest: { key: string; capturedAt: string | null; textSummary: string } | null = null;
+
+  /** 日志采集异步操作序号，防止迟到结果写入已切换的身份或草稿。 */
+  private logOpSeq = 0;
+
+  private invalidateLogCollection(): void {
+    this.logOpSeq++;
+    this.logsCollecting = false;
+    if (this.logTimeout !== null) {
+      clearTimeout(this.logTimeout);
+      this.logTimeout = null;
+    }
+  }
+
+  /**
+   * 自定义日志提供者（L1-Web）：
+   * 自动采集环境日志或诊断信息。返回单个或多个日志文件对象。
+   */
+  get logProvider(): FeedbackLogProvider | undefined {
+    return this._logProvider;
+  }
+  set logProvider(p: FeedbackLogProvider | undefined) {
+    this._logProvider = p;
+    if (p && this.openState && !this.draft.logsCollected && this.draft.logs.length === 0) {
+      void this.collectLogs();
+    }
+  }
 
   /**
    * 自定义截图提供者（扩展契约，实施计划 2.1）：
@@ -469,6 +572,11 @@ export class FeedbackWidget extends HTMLElement {
     // 打开面板即刷新额度（已登录时）；跨 resetAt 后由服务端给出新额度。
     void this.refreshQuota();
 
+    // 打开面板时若配置了 logProvider 且尚未采集过日志，则自动采集
+    if (this._logProvider && !this.draft.logsCollected && this.draft.logs.length === 0) {
+      void this.collectLogs();
+    }
+
     // 键盘监听：Esc 与 Tab
     this.keydownHandler = (ev: KeyboardEvent) => this.onKeydown(ev);
     document.addEventListener('keydown', this.keydownHandler, true);
@@ -485,6 +593,7 @@ export class FeedbackWidget extends HTMLElement {
     this.invalidateLogin();
     this.invalidateQuotaRefresh();
     this.quotaRefreshPending = false;
+    this.invalidateLogCollection();
     // 即使面板尚未打开（先截图后开面板阶段），关闭也必须取消进行中的截图
     this.invalidateCaptureSession();
     this.captureInFlight = null;
@@ -493,6 +602,7 @@ export class FeedbackWidget extends HTMLElement {
     if (!this.openState) return;
     this.openState = false;
     this.closeZoomModal();
+    this.closeLogPreview();
     this.panel.classList.remove('is-open');
     window.setTimeout(() => {
       if (!this.openState) this.panel.hidden = true;
@@ -557,9 +667,13 @@ export class FeedbackWidget extends HTMLElement {
     this.syncShotUi();
   }
 
-  /** 草稿是否已有内容（有文字或截图的草稿再次呼出时恢复草稿、不重拍）。 */
+  /** 草稿是否已有内容（有文字、截图或日志的草稿再次呼出时恢复草稿、不重拍）。 */
   private isDraftDirty(): boolean {
-    return this.draft.text.trim().length > 0 || this.draft.screenshotBlob !== null;
+    return (
+      this.draft.text.trim().length > 0 ||
+      this.draft.screenshotBlob !== null ||
+      this.draft.logs.length > 0
+    );
   }
 
   /** 组件自身 UI 不参与截图，也不计入宿主页面敏感区域。 */
@@ -842,6 +956,8 @@ export class FeedbackWidget extends HTMLElement {
     }
     this.draft.screenshotBlob = null;
     this.draft.captureInfo = null;
+    this.draft.logs = [];
+    this.draft.logsCollected = false;
     this.draft.version++;
   }
 
@@ -905,10 +1021,21 @@ export class FeedbackWidget extends HTMLElement {
       };
       document.addEventListener('visibilitychange', this.visibilityHandler);
     }
+    if (
+      this.openState &&
+      this._logProvider &&
+      !this.draft.logsCollected &&
+      this.draft.logs.length === 0 &&
+      !this.logsCollecting &&
+      this.phase !== 'submitting'
+    ) {
+      void this.collectLogs();
+    }
     this.syncUi();
   }
 
   disconnectedCallback(): void {
+    this.invalidateLogCollection();
     // 卸载使进行中的捕获会话失效：旧截图结果不得再写入草稿
     this.invalidateCaptureSession();
     this.captureInFlight = null;
@@ -963,6 +1090,7 @@ export class FeedbackWidget extends HTMLElement {
    * 新服务必须重新登录，旧令牌绝不外泄给新基址；旧服务的迟到响应由 epoch 校验丢弃。
    */
   private resetForServiceSwitch(): void {
+    this.invalidateLogCollection();
     this.invalidateCaptureSession();
     this.invalidateLogin();
     this.invalidateQuotaRefresh();
@@ -1001,6 +1129,7 @@ export class FeedbackWidget extends HTMLElement {
    * 但旧身份的草稿 / 捕获 / 提交结果 / 轮询 / 握手全部作废。
    */
   private resetForAppIdSwitch(): void {
+    this.invalidateLogCollection();
     this.invalidateCaptureSession();
     this.invalidateLogin();
     this.invalidateQuotaRefresh();
@@ -1318,7 +1447,44 @@ export class FeedbackWidget extends HTMLElement {
       }
     });
 
-    body.append(this.shotArea, promptLabel, textareaWrap, this.statusRegion, this.errorRegion, footer);
+    // 日志附件区 DOM 构建
+    this.logsArea = el('div', 'fb-logs-area');
+    const logsHeader = el('div', 'fb-logs-header');
+    const logsLabel = el('span', undefined, '日志附件');
+    this.logsCountEl = el('span', 'fb-logs-count', ' (0/3)');
+    logsLabel.append(this.logsCountEl);
+
+    const logsActions = el('div', 'fb-logs-actions');
+    this.addLogBtn = el('button', 'fb-btn-add-log', '添加日志');
+    this.addLogBtn.type = 'button';
+    this.addLogBtn.setAttribute('aria-label', '手动添加日志文件');
+
+    this.logFileInput = el('input');
+    this.logFileInput.type = 'file';
+    this.logFileInput.accept = '.log,.txt,.json,.jsonl';
+    this.logFileInput.multiple = true;
+    this.logFileInput.hidden = true;
+
+    this.addLogBtn.addEventListener('click', () => {
+      this.logFileInput.click();
+    });
+    this.logFileInput.addEventListener('change', () => {
+      this.handleLogFileSelect();
+    });
+
+    logsActions.append(this.addLogBtn, this.logFileInput);
+    logsHeader.append(logsLabel, logsActions);
+
+    this.logStatusEl = el('span', 'fb-log-status');
+    this.logStatusEl.hidden = true;
+
+    this.logErrorEl = el('div', 'fb-log-error');
+    this.logErrorEl.hidden = true;
+
+    this.logsList = el('ul', 'fb-logs-list');
+    this.logsArea.append(logsHeader, this.logStatusEl, this.logErrorEl, this.logsList);
+
+    body.append(this.shotArea, promptLabel, textareaWrap, this.logsArea, this.statusRegion, this.errorRegion, footer);
     this.panel.append(header, body);
 
     // 大图预览弹窗 (Zoom Modal)
@@ -1343,10 +1509,261 @@ export class FeedbackWidget extends HTMLElement {
       }
     });
 
-    this.root.append(style, this.launcher, this.orb, this.panel, this.zoomModal);
+    // 日志文本预览弹窗
+    this.logPreviewModal = el('div', 'fb-log-preview-modal');
+    this.logPreviewModal.setAttribute('role', 'dialog');
+    this.logPreviewModal.setAttribute('aria-label', '日志预览');
+
+    const previewCard = el('div', 'fb-log-preview-card');
+    const previewHeader = el('div', 'fb-header');
+    this.logPreviewTitle = el('h3', undefined, '日志预览');
+    this.logPreviewCloseBtn = el('button', 'fb-close');
+    this.logPreviewCloseBtn.type = 'button';
+    this.logPreviewCloseBtn.setAttribute('aria-label', '关闭日志预览');
+    this.logPreviewCloseBtn.append(svgCloseIcon());
+    this.logPreviewCloseBtn.addEventListener('click', () => this.closeLogPreview());
+    previewHeader.append(this.logPreviewTitle, this.logPreviewCloseBtn);
+
+    this.logPreviewBody = el('pre', 'fb-log-preview-body');
+    previewCard.append(previewHeader, this.logPreviewBody);
+    this.logPreviewModal.append(previewCard);
+    this.logPreviewModal.addEventListener('click', (ev) => {
+      if (ev.target === this.logPreviewModal) {
+        this.closeLogPreview();
+      }
+    });
+
+    this.root.append(style, this.launcher, this.orb, this.panel, this.zoomModal, this.logPreviewModal);
 
     // 监听按键（支持 ⌘/Ctrl + Enter 提交）
     this.addEventListener('keydown', (ev: KeyboardEvent) => this.onKeydown(ev));
+  }
+
+  // ---------- 日志附件处理 ----------
+
+  private async collectLogs(): Promise<void> {
+    const provider = this._logProvider;
+    if (!provider || this.logsCollecting) return;
+    const epoch = this.identityEpoch;
+    const draft = this.draft;
+    const opSeq = ++this.logOpSeq;
+    this.logsCollecting = true;
+    this.logStatusEl.hidden = false;
+    this.logStatusEl.textContent = '正在自动采集日志…';
+    this.logErrorEl.hidden = true;
+    this.logErrorEl.textContent = '';
+    this.syncLogsUi();
+
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    const clearOwnTimeout = (): void => {
+      if (timeoutId !== null && this.logTimeout === timeoutId) {
+        clearTimeout(timeoutId);
+        this.logTimeout = null;
+      }
+    };
+    try {
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error('采集日志超时（超过 3 秒）')), 3000);
+        this.logTimeout = timeoutId;
+      });
+      const providerPromise = Promise.resolve(provider());
+      const res = await Promise.race([providerPromise, timeoutPromise]);
+      clearOwnTimeout();
+
+      if (
+        !this.isConnected ||
+        this.draft !== draft ||
+        epoch !== this.identityEpoch ||
+        opSeq !== this.logOpSeq ||
+        !this.openState ||
+        this.phase === 'submitting'
+      ) {
+        return;
+      }
+
+      if (res) {
+        const rawFiles = Array.isArray(res) ? res : [res];
+        for (const file of rawFiles) {
+          if (!file || !file.filename || !file.blob) continue;
+          if (this.draft.logs.length >= MAX_LOG_FILES) {
+            this.logErrorEl.hidden = false;
+            this.logErrorEl.textContent = `最多附加 ${MAX_LOG_FILES} 个日志文件`;
+            break;
+          }
+          const ext = getLogExtension(file.filename);
+          if (!ALLOWED_LOG_EXTENSIONS.has(ext)) {
+            this.logErrorEl.hidden = false;
+            this.logErrorEl.textContent = `日志 ${file.filename} 格式不受支持（仅支持 .log / .txt / .json / .jsonl）`;
+            continue;
+          }
+          if (file.blob.size > MAX_LOG_BYTES) {
+            this.logErrorEl.hidden = false;
+            this.logErrorEl.textContent = `日志 ${file.filename} 超过 1MiB 限制`;
+            continue;
+          }
+          if (file.blob.size === 0) {
+            this.logErrorEl.hidden = false;
+            this.logErrorEl.textContent = `日志 ${file.filename} 不能为空文件`;
+            continue;
+          }
+          this.draft.logs.push({
+            filename: file.filename,
+            source: 'auto',
+            blob: file.blob,
+            byteSize: file.blob.size,
+          });
+          this.draft.version++;
+        }
+      }
+      if (
+        !this.isConnected ||
+        this.draft !== draft ||
+        epoch !== this.identityEpoch ||
+        opSeq !== this.logOpSeq ||
+        !this.openState
+      ) {
+        return;
+      }
+      this.draft.logsCollected = true;
+      this.logStatusEl.hidden = true;
+      this.logStatusEl.textContent = '';
+    } catch (err: unknown) {
+      clearOwnTimeout();
+      if (
+        !this.isConnected ||
+        this.draft !== draft ||
+        epoch !== this.identityEpoch ||
+        opSeq !== this.logOpSeq ||
+        !this.openState ||
+        this.phase === 'submitting'
+      ) {
+        return;
+      }
+      const msg = err instanceof Error ? err.message : '日志自动采集失败';
+      this.logErrorEl.hidden = false;
+      this.logErrorEl.textContent = msg;
+      this.logStatusEl.hidden = true;
+      this.logStatusEl.textContent = '';
+    } finally {
+      clearOwnTimeout();
+      if (this.isConnected && this.draft === draft && epoch === this.identityEpoch && opSeq === this.logOpSeq) {
+        this.logsCollecting = false;
+        this.syncLogsUi();
+        this.syncUi();
+      }
+    }
+  }
+
+  private handleLogFileSelect(): void {
+    if (this.phase === 'submitting') return;
+    const files = Array.from(this.logFileInput.files || []);
+    if (files.length === 0) return;
+    this.logErrorEl.hidden = true;
+    this.logErrorEl.textContent = '';
+
+    for (const file of files) {
+      if (this.draft.logs.length >= MAX_LOG_FILES) {
+        this.logErrorEl.hidden = false;
+        this.logErrorEl.textContent = `最多附加 ${MAX_LOG_FILES} 个日志文件`;
+        break;
+      }
+      const ext = getLogExtension(file.name);
+      if (!ALLOWED_LOG_EXTENSIONS.has(ext)) {
+        this.logErrorEl.hidden = false;
+        this.logErrorEl.textContent = `日志 ${file.name} 格式不受支持（仅支持 .log / .txt / .json / .jsonl）`;
+        continue;
+      }
+      if (file.size > MAX_LOG_BYTES) {
+        this.logErrorEl.hidden = false;
+        this.logErrorEl.textContent = `日志 ${file.name} 超过 1MiB 限制`;
+        continue;
+      }
+      if (file.size === 0) {
+        this.logErrorEl.hidden = false;
+        this.logErrorEl.textContent = `日志 ${file.name} 不能为空文件`;
+        continue;
+      }
+      this.draft.logs.push({
+        filename: file.name,
+        source: 'manual',
+        blob: file,
+        byteSize: file.size,
+      });
+      this.draft.version++;
+    }
+    this.logFileInput.value = '';
+    this.syncLogsUi();
+    this.syncUi();
+  }
+
+  private removeLog(index: number): void {
+    if (index >= 0 && index < this.draft.logs.length) {
+      this.draft.logs.splice(index, 1);
+      this.draft.version++;
+      this.syncLogsUi();
+      this.syncUi();
+    }
+  }
+
+  private async openLogPreview(log: FeedbackLogAttachment): Promise<void> {
+    this.logPreviewTitle.textContent = log.filename;
+    this.logPreviewBody.textContent = '读取中…';
+    this.logPreviewModal.classList.add('is-open');
+    try {
+      const text = await readBlobText(log.blob);
+      this.logPreviewBody.textContent = text;
+    } catch {
+      this.logPreviewBody.textContent = '读取日志内容失败';
+    }
+  }
+
+  private closeLogPreview(): void {
+    if (this.logPreviewModal) {
+      this.logPreviewModal.classList.remove('is-open');
+    }
+  }
+
+  private syncLogsUi(): void {
+    const logs = this.draft.logs;
+    this.logsCountEl.textContent = ` (${logs.length}/${MAX_LOG_FILES})`;
+
+    const busy = this.phase === 'submitting' || this.polling || this.logsCollecting;
+    this.addLogBtn.disabled = busy || logs.length >= MAX_LOG_FILES;
+    this.addLogBtn.hidden = logs.length >= MAX_LOG_FILES;
+
+    this.logsList.innerHTML = '';
+    for (let i = 0; i < logs.length; i++) {
+      const log = logs[i];
+      if (!log) continue;
+      const li = el('li', 'fb-log-item');
+
+      const info = el('div', 'fb-log-info');
+      const name = el('span', 'fb-log-name', log.filename);
+      name.title = log.filename;
+      const badge = el('span', 'fb-log-badge', log.source === 'auto' ? '自动' : '手动');
+      const size = el('span', 'fb-log-size', formatBytes(log.byteSize || log.blob.size));
+      info.append(name, badge, size);
+
+      const btns = el('div', 'fb-log-btns');
+      const previewBtn = el('button', 'fb-log-btn-preview', '预览');
+      previewBtn.type = 'button';
+      previewBtn.setAttribute('aria-label', `预览 ${log.filename}`);
+      previewBtn.addEventListener('click', () => {
+        void this.openLogPreview(log);
+      });
+
+      const removeBtn = el('button', 'fb-log-btn-remove', '删除');
+      removeBtn.type = 'button';
+      removeBtn.setAttribute('aria-label', `删除 ${log.filename}`);
+      removeBtn.disabled = busy;
+      removeBtn.addEventListener('click', () => {
+        this.removeLog(i);
+      });
+
+      btns.append(previewBtn, removeBtn);
+      li.append(info, btns);
+      this.logsList.append(li);
+    }
   }
 
   // ---------- 提交流程与认证 ----------
@@ -1406,7 +1823,8 @@ export class FeedbackWidget extends HTMLElement {
       snap0.unknownOutcome &&
       snap0.draftVersion === this.draft.version &&
       snap0.text === this.textarea.value &&
-      snap0.blob === this.draft.screenshotBlob;
+      snap0.blob === this.draft.screenshotBlob &&
+      areLogsEqual(snap0.logs, this.draft.logs);
     if (this.quota !== null && this.quota.remaining <= 0 && !retryingUnknown) {
       this.phase = 'quota';
       this.lastErrorSummary = '今日提交次数已用完，请在额度刷新后重试。文字与截图已保留。';
@@ -1424,6 +1842,7 @@ export class FeedbackWidget extends HTMLElement {
       snap.draftVersion === this.draft.version &&
       snap.text === this.textarea.value &&
       snap.blob === this.draft.screenshotBlob &&
+      areLogsEqual(snap.logs, this.draft.logs) &&
       snap.apiBase === apiBase &&
       snap.appId === appId;
     if (!snap || !snapshotMatchesDraft) {
@@ -1451,6 +1870,7 @@ export class FeedbackWidget extends HTMLElement {
         text,
         blob: this.draft.screenshotBlob,
         captureInfo: this.draft.captureInfo ? { ...this.draft.captureInfo } : null,
+        logs: [...this.draft.logs],
         draftVersion: this.draft.version,
         unknownOutcome: false,
       };
@@ -1487,6 +1907,7 @@ export class FeedbackWidget extends HTMLElement {
         ...(Object.keys(frozen.context).length ? { context: frozen.context } : {}),
         ...(frozen.captureInfo ? { capture: frozen.captureInfo } : {}),
         ...(frozen.blob ? { screenshot: frozen.blob } : {}),
+        ...(frozen.logs.length > 0 ? { logs: frozen.logs } : {}),
       });
 
       // 201/200 后才清空输入与截图，快照随之消费
@@ -2095,7 +2516,8 @@ export class FeedbackWidget extends HTMLElement {
       snap.unknownOutcome &&
       snap.draftVersion === this.draft.version &&
       snap.text === this.textarea.value &&
-      snap.blob === this.draft.screenshotBlob;
+      snap.blob === this.draft.screenshotBlob &&
+      areLogsEqual(snap.logs, this.draft.logs);
     const quotaBlocked = isAuthed && this.quota !== null && this.quota.remaining <= 0 && !retryingUnknown;
 
     // 额度显示：仅在已登录且已取得额度时出现。
@@ -2132,6 +2554,9 @@ export class FeedbackWidget extends HTMLElement {
 
     // 截图区同步：预览 / 首个截图入口 / 重拍 / 移除
     this.syncShotUi();
+
+    // 日志区同步：列表 / 数量 / 按钮状态
+    this.syncLogsUi();
 
     // 禁用态
     this.textarea.disabled = this.phase === 'submitting';
@@ -2310,8 +2735,13 @@ export class FeedbackWidget extends HTMLElement {
       }
     }
 
-    // Esc 关闭：先关闭全屏截图预览，再关闭反馈面板
+    // Esc 关闭：先关闭日志文本预览，再关闭全屏截图预览，最后关闭反馈面板
     if (ev.key === 'Escape') {
+      if (this.logPreviewModal && this.logPreviewModal.classList.contains('is-open')) {
+        ev.preventDefault();
+        this.closeLogPreview();
+        return;
+      }
       if (this.zoomModal && this.zoomModal.classList.contains('is-open')) {
         ev.preventDefault();
         this.closeZoomModal();

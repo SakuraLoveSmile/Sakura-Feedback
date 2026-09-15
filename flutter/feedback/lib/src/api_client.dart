@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data' show Uint8List;
 import 'dart:ui' show Offset;
@@ -150,6 +151,41 @@ class FeedbackCaptureInfo {
           },
       };
 }
+
+/// 反馈附带的日志文件（契约 docs/api.md v1）。
+class FeedbackLogFile {
+  /// 构造日志文件。
+  const FeedbackLogFile({
+    required this.filename,
+    required this.bytes,
+    this.source = 'auto',
+    this.sha256,
+  });
+
+  /// 文件名（如 `app.log`、`console.json`）。
+  final String filename;
+
+  /// 二进制内容（UTF-8 文本）。
+  final Uint8List bytes;
+
+  /// 采集来源：'auto'（自动采集）或 'manual'（手动附加）。
+  final String source;
+
+  /// 可选的客户端 SHA-256 摘要；若未提供则由服务端计算。
+  final String? sha256;
+
+  /// 字节大小。
+  int get byteSize => bytes.length;
+
+  /// 纯文本内容（UTF-8 解析，用于预览）。
+  String get text => utf8.decode(bytes, allowMalformed: true);
+}
+
+/// 自动日志提供者。
+typedef FeedbackLogProvider = FutureOr<List<FeedbackLogFile>?> Function();
+
+/// 手动日志文件选择器。
+typedef FeedbackFilePicker = FutureOr<List<FeedbackLogFile>?> Function();
 
 /// `POST /api/feedback` 的解析结果。
 class FeedbackSubmitResult {
@@ -419,6 +455,7 @@ class ApiClient {
     required String text,
     FeedbackCaptureInfo? captureInfo,
     Uint8List? screenshotBytes,
+    List<FeedbackLogFile>? logs,
   }) async {
     final Map<String, Object?> context = <String, Object?>{};
     final String? appVersion = config.appVersion;
@@ -428,8 +465,9 @@ class ApiClient {
 
     final http.Response response;
     final TokenLease lease = await _tokens.lease(); // 请求发出前捕获令牌与世代
+    final bool hasLogs = logs != null && logs.isNotEmpty;
     try {
-      if (screenshotBytes != null) {
+      if (screenshotBytes != null || hasLogs) {
         final http.MultipartRequest req =
             http.MultipartRequest('POST', _uri('/api/feedback'));
         final String? token = lease.token;
@@ -444,15 +482,37 @@ class ApiClient {
           'text': text,
           if (context.isNotEmpty) 'context': context,
           if (captureInfo != null) 'capture': captureInfo.toJson(),
+          if (hasLogs)
+            'logs': logs
+                .map((FeedbackLogFile l) => <String, Object?>{
+                      'filename': l.filename,
+                      'source': l.source,
+                      if (l.sha256 != null && l.sha256!.isNotEmpty)
+                        'sha256': l.sha256,
+                    })
+                .toList(),
         };
         req.fields['metadata'] = jsonEncode(metadata);
-        req.files.add(
-          http.MultipartFile.fromBytes(
-            'screenshot',
-            screenshotBytes,
-            filename: 'screenshot.png',
-          ),
-        );
+        if (screenshotBytes != null) {
+          req.files.add(
+            http.MultipartFile.fromBytes(
+              'screenshot',
+              screenshotBytes,
+              filename: 'screenshot.png',
+            ),
+          );
+        }
+        if (hasLogs) {
+          for (final FeedbackLogFile log in logs) {
+            req.files.add(
+              http.MultipartFile.fromBytes(
+                'logs',
+                log.bytes,
+                filename: log.filename,
+              ),
+            );
+          }
+        }
         final http.StreamedResponse streamed =
             await _client.send(req).timeout(_requestTimeout);
         response = await http.Response.fromStream(streamed);

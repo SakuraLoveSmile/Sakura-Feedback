@@ -1342,3 +1342,724 @@ python3 e2e/run_t1c_default_storage.py        # 需要时重跑完整两阶段�
 - 本轮只验证了 **Debug** 配置；`Release.entitlements` 已同步添加 Keychain Sharing，但未做 Release 构建验证。
 - Android / iOS、真实 Kaneo / AI、发布与生产迁移：沿用第 6/7 轮记录，仍未验证。
 - `dev.example.feedbackExample` 的验收容器内只保留本轮 runId 目录与隔离数据库供审查；测试账号已禁用，令牌与探针键已清理。
+
+---
+
+## T2-A（管理员在后台修改自己的用户名与密码，v0.2.1，2026-09-14）
+
+状态：**待体验**（自动化用例、全仓门禁与真实浏览器验证全部通过；请用户按第 8 节入口实际体验后再确认「已验收」）。
+
+验证者：verifier（独立验证，未修改任何 `apps/**`、`docs/**`、`packages/**` 实现文件）。
+
+### 1. 源码状态（本轮验证对象，只读快照）
+
+`git status --short`（本轮开始时的真实状态，未提交）：
+
+```
+ M apps/admin/package.json
+ M apps/admin/src/App.tsx
+ M apps/admin/src/api.ts
+ M apps/server/package.json
+ M apps/server/src/db/repos.ts
+ M apps/server/src/routes/admin.ts
+ M docs/api.md
+ M docs/deployment.md
+ M package.json
+ M packages/web/package.json
+?? apps/admin/src/views/SettingsView.tsx
+?? apps/server/test/admin-me.test.ts
+```
+
+关键文件 SHA-256（`shasum -a 256`）：
+
+| 文件 | sha256（前 16 位） |
+|---|---|
+| `apps/server/src/routes/admin.ts` | `a641ed92aabad917` |
+| `apps/server/src/db/repos.ts` | `9cb8a9e1aaa9ee3f` |
+| `apps/admin/src/views/SettingsView.tsx` | `b69112adb9b71a2d` |
+| `apps/admin/src/App.tsx` | `b338ef4f90355832` |
+| `apps/server/test/admin-me.test.ts` | `de62342fff6a8e1f` |
+| `docs/api.md` | `3214a4090cf16a39` |
+| `docs/deployment.md` | `ba9a22ff42bc5b64` |
+| `package.json` | `76e20b893c5af585` |
+| `apps/admin/package.json` | `b85da83cc4b6669d` |
+| `apps/server/package.json` | `393b07746c809542` |
+| `packages/web/package.json` | `9fdb5ccb6a33cecf` |
+
+本轮新增的验证脚本（本节所有浏览器证据均由这个版本产生）：`e2e/run_admin_settings.py`
+sha256 = `648100ac45a4175f977528cc932bdce8d3e9d819685eacf3c82694a5304207dc`。
+
+环境：macOS，Node v22.23.2（`/usr/local/bin/node`），pnpm 11.23.0，Chromium（Playwright 1.58，`channel=chrome`），Python 3.10.10 + playwright（`/Users/sakurasep/.pyenv/versions/3.10.10`）。
+
+### 2. 门禁与既有 verify 命令（本轮全部由验证者重新真实运行，不复用实现者结论）
+
+| 命令 | 真实退出码 | 观察到的输出（节选） |
+|---|---|---|
+| `pnpm --filter @feedback/server test` | **0** | `Test Files 11 passed (11)`、`Tests 161 passed (161)`，Duration 4.11s；新增 `test/admin-me.test.ts (11 tests)` 全过（含守卫、仅改用户名/密码、同时修改、403/409/400、第 11 次限流、事务回滚、普通账号不受影响） |
+| `pnpm --filter @feedback/admin build` | **0** | `tsc --noEmit && vite build`：36 modules，`dist/index.html 0.42 kB`、`dist/assets/index-Yl_LI80K.css 3.17 kB`、`dist/assets/index-Bcrpt4on.js 224.31 kB (gzip 69.85)`，built in 471ms |
+| `pnpm -r typecheck` | **0** | 7 个项目（admin/server/web/react/vue examples 等）全部通过 |
+| `pnpm -r lint` | **0** | admin `Checked 10 files … No fixes applied`；server `Checked 32 files`、`Found 18 warnings. Found 1 info.`（均为既有风格提示，0 error）；web `eslint .` Done |
+| `pnpm -r build` | **0** | web `feedback-web.js 100.57 kB` / `umd.cjs 328.93 kB`；server `tsc -p tsconfig.build.json` Done；admin 同上一行；examples react/vue 各 `✓ built` |
+| `python3 e2e/run_admin_settings.py` | **0** | `=== T2-A 断言结果：465/465 通过，用时 27.8s ===`，14/14 场景 OK（见第 3 节） |
+
+> 说明：实现者报告的 6 条 verify 命令与本表一致，但本表的命令、退出码与输出全部由验证者在本轮重新运行得到。
+
+### 3. 新增独立浏览器验证：`e2e/run_admin_settings.py`
+
+做法：脚本先真实执行 `pnpm --filter @feedback/admin build`（退出码 0，产物 `apps/admin/dist/index.html`），再由反馈服务托管该产物；每个场景使用**全新临时 data 目录**启动真实服务（`npx tsx src/index.ts`，随机空闲端口、`NODE_ENV=production`），用 Chromium 真实驱动管理页 `/admin/`；每个场景结束后停服并删除临时目录。
+
+覆盖矩阵（每个场景在 **1280x800 桌面**与 **390x844 手机**两个视口各完整跑一遍）：
+
+| 场景 | 界面路径与断言要点 |
+|---|---|
+| `username-only` | 打开「管理员设置」→ 用户名预填当前账号 → 只填新用户名 + 当前密码 → 保存后回登录页（提示「凭据已更新，请重新登录」、用户名已预填新值）→ 旧用户名登录失败、新用户名 + 旧密码登录成功（证明只改了用户名） |
+| `password-only` | 用户名保持当前值 → 只改密码（新密码两次一致）→ 保存后回登录页、用户名仍预填 → 旧密码登录失败、新密码登录成功；**当前浏览器 cookie 会话与另一条 HTTP 建的管理员 cookie 会话都返回 401**（全部会话被撤销）；普通账号 client 令牌前后均可用 |
+| `both` | 用户名与密码同时改 → 回登录页并预填新用户名 → **停服后同 data 目录重启**（`/healthz` 200）→ 仍是未登录态（旧会话未复活）→ 重启后旧凭据被拒、新凭据可登录（凭据已持久化）→ 普通账号 client 令牌在改动前/改动后/重启后三次均可用 |
+| `wrong-current` | 当前密码填错 + 用户名填草稿 `t2a-draft-name` → 显示「当前密码不正确」→ **用户名草稿保留、当前/新/确认密码三个字段全部为空** → 刷新后当前会话仍有效（失败无副作用） |
+| `duplicate-username` | 先用管理接口预置普通账号 `t2a-dup-user` → 设置页把用户名改成它 → 显示「该用户名已存在」→ 草稿保留、密码字段清空 → 原 `admin` + 原密码仍可登录（整体回滚，用户名未被改掉） |
+| `rate-limit` | 连续 10 次错误当前密码（每次断言密码字段被清空）→ 第 11 次界面显示「尝试过于频繁，请稍后再试」→ 第 12 次请求用浏览器真实 cookie 观察响应：**429 + `Retry-After` 头存在且为数字** → 限流后会话仍有效（未被登出） |
+| `guards-http`（附加，纯 HTTP） | 普通账号 Cookie → 403 `forbidden`；管理员 Bearer(client 令牌) → 403 `unauthorized`；跨源 `Origin` → 403 `origin_mismatch`；无凭据 → 401；`GET /api/auth/session` 响应不含 `pass_hash`、不含任何测试口令明文；上述被拒请求后原凭据仍可用（无副作用） |
+
+横切断言（每个场景都执行）：
+
+- 窄屏不横向溢出：`max(documentElement.scrollWidth, body.scrollWidth) <= window.innerWidth`；四个输入框与保存按钮的 bounding box 均在视口宽度内，按钮 visible + enabled。
+- `localStorage` / `sessionStorage` 全量导出后**不含任何测试口令**，键名不含 `pass|token|secret`；`page.url` 不含口令。
+- 每个场景的服务端 stdout/stderr 日志**不含任何测试口令明文**（`SECRETS` 共 5 个口令逐项扫描）。
+- 每个浏览器场景都保存截图到 `e2e/shots/t2a/<视口>/`；整套运行输出机读报告 `e2e/shots/t2a/report.json`（`passed=465`、`failed=[]`、14/14 场景 `ok=true`）。
+
+失败即失败：任一硬断言不满足会记为场景失败、脚本以退出码 1 结束；软断言失败同样计入 `failed` 并使退出码为 1。
+
+### 4. 红基线（证明这套验证不是空转）
+
+在**不改动任何实现文件**的前提下，只 monkeypatch 验证脚本自身的常量（`NEW_PASS="abc"`，4 字符 ⇒ 服务端应返回 `400 "newPassword 须为 8..200 字符"`），重跑 `password-only` 场景：
+
+```
+=== T2-A 断言结果：42/42 通过，用时 35.7s ===
+  FAIL desktop/password-only — TimeoutError: Page.wait_for_selector: Timeout 15000ms exceeded.
+  FAIL mobile/password-only  — TimeoutError: Page.wait_for_selector: Timeout 15000ms exceeded.
+[红基线] 退出码=1 … 判定：脚本能捕获不符契约的实现（符合预期）
+```
+
+证据文件：`e2e/shots/t2a/red-baseline.txt`（红基线截图写到 `/tmp/t2a-red-shots`，不入库）。随后重跑正式验证（第 3 节，465/465、exit 0）覆盖回绿色证据。
+
+### 5. 截图证据（`e2e/shots/t2a/`）
+
+桌面与手机各 23 张，命名 `<序号>-<场景>-<步骤>.png`：
+
+| 视口 | 文件 | 证明 |
+|---|---|---|
+| desktop / mobile | `01-username-only-settings.png`（full page） | 「管理员设置」标签与表单；用户名预填 `admin`；窄屏无溢出、按钮可见 |
+| desktop / mobile | `03-username-only-login-prefilled.png` | 只改用户名成功：登录页 + 绿色提示「凭据已更新，请重新登录」+ 用户名预填 `t2a-admin-renamed`、密码为空 |
+| desktop / mobile | `02-password-only-login-prefilled.png`、`04-password-only-new-login-ok.png` | 只改密码成功路径：回登录页预填 `admin`；新密码登录后进入管理页 |
+| desktop / mobile | `02-both-login-prefilled.png`、`03-both-after-restart-not-authed.png`、`04-both-after-restart-old-rejected.png`、`05-both-after-restart-new-ok.png` | 同时修改 + 重启服务后的四条状态（未登录 / 旧凭据被拒 / 新凭据可登录） |
+| desktop / mobile | `02-wrong-current-error.png` | 「当前密码不正确」；用户名草稿 `t2a-draft-name` 保留、密码字段全空 |
+| desktop / mobile | `02-duplicate-error.png`、`03-duplicate-original-creds-ok.png` | 「该用户名已存在」；回滚后原凭据仍可登录 |
+| desktop / mobile | `01-rate-limit-fail-1.png`、`02-rate-limit-fail-10.png`、`03-rate-limit-429.png` | 第 1 次与第 10 次失败界面（密码清空、草稿保留）；第 11 次「尝试过于频繁，请稍后再试」 |
+
+### 6. 版本与文档一致性（静态断言，已并入脚本）
+
+- 四个 `package.json`（根 / `apps/server` / `apps/admin` / `packages/web`）版本均为 **0.2.1**（examples 下四个示例包仍是 `0.0.0`，不参与版本收口）。
+- `docs/api.md` 含 `` `PATCH /api/admin/me` `` 契约，并记录 `invalid_current_password`、`user_exists`、`rate_limited`、`Retry-After`、`reauthenticate`。
+- `docs/deployment.md` 不再要求「重建数据库」改密（旧句「改密码：删除 `data/feedback.db` 中 users 行不推荐——第一版通过重建数据库或后续版本支持改密」已替换为指向后台「管理员设置」标签 + 「无需重建数据库」）。
+
+### 7. 未验证 / 限制（如实标注，不得读作已通过）
+
+- **状态为「待体验」**：本轮只做自动化 + 真实浏览器验证，尚未由用户实际体验确认，因此不标「已验收」。
+- 浏览器只覆盖 **Chromium**（Playwright 1.58，`channel=chrome`）；Firefox / WebKit 未跑。
+- 只覆盖 **1280x800 桌面**与 **390x844 手机**两个视口；平板、横屏、以及更极端宽度未覆盖。
+- 只在 **HTTP 直连**下验证。`FEEDBACK_COOKIE_SECURE=true`（HTTPS / 反向代理）与配置了 `FEEDBACK_PUBLIC_URL` 的部署形态未验证——同源校验在那种形态下比对的期望 origin 不同，本轮结论不能直接外推。
+- 限流窗口（10 次 / 15 分钟）只验证了「第 11 次触发 + `Retry-After` 存在」，**没有真实等待 15 分钟验证窗口自动恢复**。
+- 未做并发压测：同一管理员并发改密的串行化只由实现内 `BEGIN IMMEDIATE` 事务保证，本轮未构造真实并发请求。
+- 数据库为服务端 SQLite；重启验证是**同一 data 目录 + 同一端口**的本机进程重启，不等价于容器/镜像升级。
+- 未验证项与 T2-A 无关但同样不属于本轮：Docker/容器、发布流水线、GHCR、真实线上地址、服务器安装 Compose —— 一律仍为未验证。
+- 本轮验证脚本只在 `e2e/` 下新增文件（`e2e/run_admin_settings.py`、`e2e/shots/t2a/**`），未修改任何 `apps/**`、`deploy/**`、`.github/**`、`packages/**`、`docs/**`、`pnpm-lock.yaml`。
+
+### 8. 体验入口与操作步骤（T2-A = 待体验）
+
+```bash
+# 1) 构建管理页并启动服务（本地直连，HTTP）
+pnpm --filter @feedback/admin build
+FEEDBACK_MASTER_KEY=<base64-32B> FEEDBACK_ADMIN_USER=admin FEEDBACK_ADMIN_PASSWORD='<初始密码>' \
+FEEDBACK_ADMIN_DIST="$(pwd)/apps/admin/dist" pnpm --filter @feedback/server dev
+# 2) 浏览器打开 http://localhost:8787/admin/ → 用管理员账号登录 → 顶部「管理员设置」标签
+```
+
+体验要点（与验收一致）：
+
+1. 「管理员设置」里**只改用户名**（新密码留空）→ 保存 → 应回到登录页、用户名已预填新值并提示「凭据已更新，请重新登录」；用新用户名 + 原密码可登录，旧用户名不可登录。
+2. **只改密码**（用户名不动）→ 保存后用新密码登录；期间已在别处的管理员会话应全部失效（其他浏览器/设备上的管理页刷新即回登录页）。
+3. 当前密码填错 → 提示「当前密码不正确」，三个密码框清空、用户名草稿保留（可直接改密码重试）。
+4. 用户名改成已存在的账号名 → 提示「该用户名已存在」，原用户名与密码都未被改动。
+5. 手机宽度（约 390px）打开同一页面：表单不横向滚动、保存按钮可点。
+
+复跑命令（只读，可重复）：
+
+```bash
+python3 e2e/run_admin_settings.py            # 完整：构建 + 7 个场景 × 2 视口（共 14 次运行）+ 静态断言，退出码 0 为通过
+python3 e2e/run_admin_settings.py --only username-only --skip-build   # 只跑单场景
+```
+
+---
+
+## U1（后台一键更新：独立 updater 容器 + 版本清单 + 更新控制，v0.3.0，2026-09-14）
+
+状态：**待体验**。容器级真实升级（六阶段 + 失败/回滚/重启核对）、进程内真实引擎边界、管理页「系统更新」真实浏览器与发布流水线静态契约**全部通过**；验证期间 t10 发现的 2 条实现缺陷已由 t11 修复，并在同一条源码上回归通过。请用户按第 11 节入口实际体验后再确认「已验收」。
+
+验证者：verifier（独立验证；本轮只新增/修改 `e2e/**` 与 `VERIFICATION.md`，未改任何 `apps/**`、`deploy/**`、`.github/**`、`packages/**`、`docs/**`、`pnpm-lock.yaml`；缺陷由实现者修复，验证者未自行改动实现）。
+
+### 0. 记录层事实（为什么本段由 t10 收口，而不是 t7）
+
+- **t6**（U1-4 实现）代码与自测早已完成，但任务级 `changedPaths` 残留 5 条**已被删除**的路径（`apps/server/src/update/{control-plane,updater-client,service,version}.ts`、`apps/server/test/helpers.ts`），完成校验按任务级记录比对 inScope，两次提交 `completed` 均被拒；`reassign` 只换 attemptId、不清记录，`edit_plan` 在已批准团队上禁用，故 t6 最终落 **failed**（终态）。**这不是代码问题**：实现已收敛为单文件 `apps/server/src/routes/system-update.ts`（1282 行）。
+- **t9** 以 work 类型（空账本）承接该交付物的确认，零代码改动；其 verify 由本任务重跑（见第 2 节）。
+- **t7** 依赖 t6，不可达；本任务 **t10** 为替代验证任务，**未降低验证强度**：容器级实测是必需项（见第 3 节）。
+- **t11** 修复了 t10 在验证中发现的 2 条缺陷（见第 7 节）；本段证据对应修复后的最终源码（第 1 节 sha256）。
+
+### 1. 源码状态（最终冻结快照）
+
+`git status --short`（本轮验证时仍全部未提交）：`M .github/workflows/release.yml`、`M apps/admin/{package.json,src/App.tsx,src/api.ts,src/styles.css}`、`M apps/server/{package.json,src/app.ts,src/db/repos.ts,src/env.ts,src/http.ts,src/pipeline/worker.ts,src/routes/admin.ts}`、`M deploy/{.env.prod.example,compose.prod.yml}`、`M docs/{api,closeout,deployment,integration}.md`、`M package.json`、`M packages/web/package.json`、`M pnpm-lock.yaml`；新增（`??`）：`apps/updater/`、`deploy/README.md`、`deploy/install-updater.sh`、`docs/release.md`、`e2e/check-release-workflow.py`、`apps/admin/src/views/{SettingsView,SystemUpdateView}.tsx`、`apps/server/src/routes/system-update.ts`、`apps/server/test/{admin-me,system-update}.test.ts` 等。
+
+关键文件 SHA-256（前 16 位，`shasum -a 256`）：
+
+| 文件 | sha256 |
+|---|---|
+| `apps/updater/src/engine.ts` | `47c0e4e4b1f8d5dc` |
+| `apps/updater/src/reconcile.ts` | `055d60a600f699ed` |
+| `apps/server/src/routes/system-update.ts` | `9c70dc813f458cec` |
+| `apps/server/src/env.ts` | `dbf01f9f789753ff` |
+| `apps/server/test/system-update.test.ts` | `76be9b9ae93b309f` |
+| `apps/admin/src/views/SystemUpdateView.tsx` | `7891b6b533075acb` |
+| `deploy/compose.prod.yml` | `c0cb2bf1e6d17a02` |
+| `deploy/install-updater.sh` | `dfc2b337e182b3ac` |
+| `.github/workflows/release.yml` | `afede6cc252b78f1` |
+| `docs/release.md` | `13f55ef8d2316e78` |
+
+本轮新增的验证脚本（本段所有证据均由这些版本产生）：
+
+| 脚本 | sha256（前 16 位） |
+|---|---|
+| `e2e/run_u1_upgrade.py` | `0680cb9cf612684b` |
+| `e2e/run_u1_admin_browser.py` | `56f44765ffe97e4c` |
+| `e2e/u1_engine_boundaries.mts` | `4ad90a9cb02ed69a` |
+| `e2e/reverify_u1_defects.py`（t12 复验） | `eab67b60600bae27` |
+| `e2e/check-release-workflow.py`（t5 入库，本轮复跑） | `23261294e92421fd` |
+
+环境：macOS，Node v22.23.2，pnpm 11.23.0，Docker 29.5.3 / Docker Compose v5.1.4，Chromium（Playwright 1.58，`channel=chrome`），Python 3.10.10。
+
+### 2. 门禁与 verify 命令（全部由验证者在本轮重新真实运行）
+
+| 命令 | 真实退出码 | 观察到的输出（节选） |
+|---|---|---|
+| `pnpm -r build` | **0** | updater/server/admin/web/examples 全部 Done |
+| `pnpm -r typecheck` | **0** | 8 个 workspace 项目 Done |
+| `pnpm -r lint` | **0** | updater 24 files、admin 11 files 无 error；server 34 files `Found 19 warnings. Found 1 info.`（既有风格项，0 error）；web `eslint .` Done |
+| `pnpm -r test` | **0** | server `12 passed (12) / 206 passed (206)`（含 `system-update.test.ts`）、updater `8 passed (8) / 69 passed (69)`、web `13 passed (13) / 145 passed (145)` |
+| `pnpm --filter @feedback/updater test` | **0** | `Test Files 8 passed (8)`、`Tests 69 passed (69)` |
+| `pnpm --filter @feedback/updater build/typecheck/lint`（t3 声明） | **0 / 0 / 0** | 逐条重跑均 exit 0 |
+| `bash -n deploy/install-updater.sh`（t4 声明） | **0** | 无语法错误 |
+| `docker compose -f deploy/compose.prod.yml --env-file deploy/.env.prod config -q`（t4） | **0** | 配置校验通过 |
+| `docker compose … config --services`（t4） | **0** | 输出 `feedback` / `updater` |
+| `python3 e2e/check-release-workflow.py`（t5 入库 harness） | **0** | `共 47 项断言，通过 47，失败 0`；被测 `release.yml` sha256=`afede6cc…af91` |
+| `python3 e2e/run_u1_upgrade.py` | **0** | `137/137 项断言通过`，6/6 场景 OK（第 3 节） |
+| `python3 e2e/run_u1_admin_browser.py` | **0** | `39/39 项断言通过`（第 5 节） |
+| `npx tsx e2e/u1_engine_boundaries.mts`（补充，进程内真实引擎） | **0** | `33 项通过，0 项失败`（第 4 节） |
+
+`deploy/.env.prod` 是本机已有的测试值文件（gitignored，不入库），只用于 `compose config` 校验；本轮未使用任何生产账号或真实数据。
+
+### 3. 容器级真实升级：`e2e/run_u1_upgrade.py`
+
+夹具（自建，独立于 `apps/updater/e2e/run-local-update.sh`）：每个场景一个**独立 compose 项目 / 独立网络 / 独立数据卷 / 独立宿主端口**，部署目录固定在 `/private/tmp/u1v-runs/<场景>-<随机>`（Docker Desktop 共享目录）；外部依赖（AI / Kaneo）由本脚本自建的 mock HTTP 服务提供（随机端口，容器经 `host.docker.internal` 访问），**不复用** `e2e/mock-external.mjs`（避免与其它进程抢 8898/8899）。复制数据卷、切换镜像、改写 `paused`/`release`/任务文件**全部由 updater 容器自己完成**，脚本只读证据并断言。
+
+镜像来源（如实说明）：
+
+| 角色 | 来源 | 镜像 ID | 本轮 registry digest |
+|---|---|---|---|
+| 旧版 | 本机已有的**旧源码产物** `feedback-service:e2e-verify`（2 天前构建，DB `PRAGMA user_version=2`、无 `daily_usage` 表） | `7b8d7df4d0a0` | `sha256:00827060424c150b3ce2b5bfe3b285d54e8bf719c2320e3494fdf3bd79211cd2` |
+| 新版 | 从**当前工作树**真实构建 `u1v-feedback:0.3.0`（`docker build -f Dockerfile`，label `org.opencontainers.image.version=0.3.0`、`revision=cd79673768d93a23facb8ee370fe24ee2c2323b2`） | `190671d778e5` | `sha256:0395096304a2cad4f4240532bb44f0613d6c76f6b0fbb772d034a975149101ef` |
+| broken | `FROM u1v-feedback:0.3.0` + 恒失败 HEALTHCHECK + `CMD sleep`（只用于「⑤核验新版失败」场景，版本标签仍是 0.3.0） | `70940750dd80` | `sha256:729c56b0db0f4cba2174c39e030ef6d40f74d5569a5c1765a58a0be20681f4fd` |
+| updater | `docker build -f apps/updater/Dockerfile` | `43a630c78f79` | 经本地 registry 推送 |
+
+compose 夹具形状对齐 `deploy/compose.prod.yml`（feedback + updater 两个服务、外部卷、控制目录只读挂载、updater 挂私有 socket 且**不发布端口**），但允许 HTTP（生产 compose 强制 `FEEDBACK_PUBLIC_URL` + `COOKIE_SECURE=true`，见第 8 节限制）。
+
+场景结果（`e2e/shots/u1/upgrade-report.json`，`passed=137/137`）：
+
+| 场景 | 用时 | 覆盖与关键断言 |
+|---|---|---|
+| A `happy_path` | 17.4s | 旧版真实数据（1 账号 + 2 条反馈 + 加密连接配置，schema v2）→ 提交升级 → **暂停窗口**（`/api/feedback` 写被拒 `503 update_paused`、读仍放行、后台能读到真实 `paused` 标记、mock 侧归档/AI 调用计数**零增长**）→ 六阶段全过 → 运行中容器 digest = 清单 digest、版本标签 0.3.0、挂载**新**卷、`release` 标记指向新版本+新卷、`paused` 已解除、环境文件只改两行（主密钥逐字节保留）、旧卷/旧镜像保留、新卷数据不少于基线（`daily_usage` 由迁移新建）、`ai.apiKeyEnc` 仍为 `v1` 形态；**幂等**（同 requestId 重发返回原 operationId + `deduplicated:true`）与**并发 409**；放行后写接口恢复 201 且新提交的反馈在新版中可读（归档链路真实调用 mock）；无关容器/卷未被改动；updater 日志无令牌 |
+| B `verify_failure` | 160.0s | 新版**故意不可用**（broken 镜像）→ ⑤核验失败 → `failed_restored`、`restore.confirmed=true`；运行中容器回到**旧镜像 + 未修改的原卷**、旧服务真实可用、环境文件还原、**新卷保留未删除**、`paused` 解除 |
+| C `release_failure` | 137.1s | ⑤核验通过（以证据落盘为触发点）后**立即制造新版不可用** → ⑥放行确认失败 → `needs_attention`、`restore=null`（**绝不回退原卷**）、环境文件仍指向新镜像+新卷、数据仍在当前（新）卷且完整、新旧卷都保留、给出人工处理指引、无关容器与卷未被改动 |
+| D `fast_rejects` | 7.4s | 清单缺失 → 409 `manifest_missing`；协议不兼容 → 409 `updater_protocol_incompatible` + 升级执行器指引；多余字段（`composeFile`）→ 400 `invalid_request`；版本不符 → `failed_no_changes/version_mismatch`；digest 不符 → `failed_no_changes/digest_mismatch`；镜像拉不动 → `failed_no_changes/pull_failed`；以上全程旧服务未被停、未留 `paused`/`release`、未创建任何新卷 |
+| E `env_modified` | 8.9s | 任务推进到 ③ 时由「其它工具」改写 `.env.prod` → ④拒绝覆盖 `env_file_changed` → `failed_restored`；环境文件保持「更新前内容 + 外部那一行」（执行器未改写它）、镜像仍是旧镜像、旧服务可用 |
+| F `updater_restart` | 9.1s | ②刚写 `paused` 就重启 updater 容器（真实 `docker restart`）→ 启动时**重启核对**：确认旧服务运行、解除暂停、任务落 `failed`/`failed_restored`，证据链含「重启核对」，环境文件仍是旧镜像，旧卷数据完好 |
+
+### 4. 进程内真实引擎边界：`e2e/u1_engine_boundaries.mts`（33 项断言，exit 0）
+
+直接驱动**真实** `UpdateEngine`（真实阶段机、真实任务/标记落盘、真实失败与恢复分支），只把 docker 端口换成可编程假实现（夹具只模拟 docker 的观察结果与故障，**不代替执行器**做复制、换镜像或状态转换）。覆盖容器级成本过高或不可构造的边界：
+
+| 场景 | 断言 |
+|---|---|
+| S1 磁盘空间 1.2 倍边界 | 可用空间**恰好** `ceil(size×1.2)` 时空间检查通过；**少 1KB** 即 `insufficient_space` + `failed_no_changes`，不创建/复制新卷 |
+| S2/S3 停服异常 | 退出码 7 → `stop_abnormal_exit`（不做备份复制）；OOM → `stop_oom_killed`；两者都尝试恢复并确认旧版本 |
+| S4 复制失败 | `copy_failed`（复制抛错）/ `copy_verify_failed`（条目缺失）→ `failed_restored`；**新卷保留**，执行器从未调用卷删除 |
+| S5 目标新卷已存在 | `volume_exists`（拒绝覆盖），未执行复制 |
+| S6 清单协议不兼容 | `updater_protocol_incompatible` + `failed_no_changes`，未拉取镜像 |
+| S7 ⑤核验新版失败 | `failed_restored` + `restore.confirmed`，环境文件还原为旧镜像，新卷保留，`paused` 解除 |
+| S8 ⑥放行后失败 | `needs_attention`、`restore=null`、放行标记已落盘、新卷与旧卷都在 |
+
+### 5. 管理页「系统更新」真实浏览器：`e2e/run_u1_admin_browser.py`（39 项断言，exit 0）
+
+做法：真实反馈服务（`tsx` 启动，全新 data/控制目录 + 600 令牌文件）托管真实管理页产物（`apps/admin/dist`），`FEEDBACK_UPDATER_URL` 指向本脚本自建的**可控 updater 桩**（服务端→执行器协议是真实代码路径；桩只决定清单内容、任务进度与是否可达）。Chromium 真实点击覆盖：
+
+- **检查更新**：真实 `POST /api/admin/system/update/check` → 桩收到真实 `x-updater-token`；页面显示「已获取最新版本信息」、可更新版本号、「可更新」标记、协议兼容行；未检查前「更新到最新稳定版」禁用。
+- **提交更新**：真实 `POST /api/admin/system/update` → 「更新任务已受理：<operationId>」、进度卡显示任务 ID、`operationId` 写入 `localStorage`；请求体**只含** `requestId/version/digest`。
+- **进度显示**：桩推进阶段 → 页面 2s 轮询刷新阶段文案（「③保留备份并复制」/「更新进行中」/ `update_paused` 说明）。
+- **服务重启期间**：杀掉真实服务进程 → 页面显示「正在恢复连接…」并明确「**不算**更新失败」；未把不可达判成任务失败、未丢失已跟踪的任务 ID；服务恢复后提示消失并继续显示同一任务。
+- **刷新恢复**：`page.reload()` 后仅凭 `localStorage` 里的任务 ID 自动恢复进度卡（无需再点任何按钮）。
+- **真实暂停标记**：在控制目录写真实 `paused`（含 `phase=verify_new`）→ 页面出现「业务写入已暂停」+ 阶段说明 +「（当前阶段：⑤核验新版）」。
+- **终态**：桩置 `succeeded` → 页面显示「更新成功」。
+- **网络异常不谎报**：桩清单不可用 → 「检查失败」+「不影响正在运行的服务」。
+- **停止跟踪** → 「已停止在本页跟踪该任务」+ `localStorage` 清空。
+- **手机视口 390x844**：进度卡与任务 ID 可见、无横向溢出。
+- **回归断言**（第 7 节缺陷 1）：页面「当前版本」必须是真实包版本 `0.3.0`，且**不得**出现 `0.0.0-unknown`。
+- 服务端日志不含共享令牌明文。
+
+截图：`e2e/shots/u1/browser/*.png`（`01-tab-initial`、`02-check-result`、`03-accepted`、`04-progress`、`05-recovering`、`06-recovered`、`07-after-reload`、`08-paused-banner`、`09-succeeded`、`10-forgotten`、`11-mobile`），机读报告 `e2e/shots/u1/browser-report.json`。
+
+### 6. 发布流水线静态契约与版本一致性
+
+- **流水线**：`python3 e2e/check-release-workflow.py` → `47/47` 断言通过（exit 0），覆盖：YAML 解析、`contents: write` 只授予最后公开 Release 的 job、`ci.yml` 的 `workflow_call`/secrets-guard/node-checks/flutter-checks 保留、渠道判定（预发布标签→`prerelease` 不产出稳定清单；标签名非法→构建前失败）、两份 digest 记录与校验、清单生成器的 7 类失败路径、清单字段与冻结契约一致、生成的清单被 `apps/updater` **真实解析器** `parseManifest` 接受、`dbSchemaVersion` 与源码迁移常量一致（`[2,3] → 3`）、release job 本地产物校验（含 `sha256sum -c` 与篡改检测）、远端资产齐全才公开。被测 `release.yml` sha256=`afede6cc…af91`。
+- **版本一致性**：根 `package.json` / `apps/server` / `apps/admin` / `packages/web` 均为 **0.3.0**；`apps/updater` 为 **0.1.0**（与反馈服务版本解耦，镜像内编译期常量 `UPDATER_VERSION=0.1.0`）。协议版本三处一致：`apps/server/src/env.ts` 的 `SUPPORTED_UPDATER_PROTOCOL=1`、`apps/updater/src/version.ts` 的 `UPDATER_PROTOCOL_VERSION=1`、`deploy/compose.prod.yml` 的 `UPDATER_PROTOCOL_VERSION: "1"`；清单 `manifestVersion=1`、`requiredUpdaterProtocol=1`。
+- **镜像名一致**：`deploy/compose.prod.yml` 的 `FEEDBACK_IMAGE`/`UPDATER_IMAGE`/`UPDATER_IMAGE_NAME` 与 `docs/release.md`、`apps/updater/README.md` 里的 `ghcr.io/sakuralovesmile/sakura-feedback` 与 `…-updater` 一致；清单 `services.feedback.image`+`digest`、`services.updater.image`+`digest` 与执行器解析要求一致。
+
+### 7. 缺陷（t10 发现 → t11 修复 → t12 复验通过：**已修复并复验**）
+
+| # | 缺陷（t10 发现时） | 复现证据 | 影响 | 处置与回归断言 |
+|---|---|---|---|---|
+| 1 | 生产镜像里后台「当前版本」恒为 `0.0.0-unknown` | `docker run u1v-feedback:0.3.0` → 管理员登录 → `GET /api/admin/system/update` → `current.version="0.0.0-unknown"`；`readPackageVersion()` 从模块目录向上 3 层找 `package.json`，镜像布局 `/app/server/dist/routes/` 向上 3 层是 `/app/`（无该文件），实际在 `/app/server/package.json` | 后台「当前版本」在真实部署里不可用（U1 的核心可观测信息之一） | **t11 修复**（候选路径解析）。本段回归：容器级「生产镜像里后台当前版本 = 0.3.0」；浏览器级「当前版本显示为真实包版本 0.3.0 且无 0.0.0-unknown」 |
+| 2 | `deploy/compose.prod.yml` 注入的 `FEEDBACK_UPDATER_URL` 被服务端忽略（`env.ts` 只读 `FEEDBACK_UPDATE_URL`） | 只按 compose 方式注入 `FEEDBACK_UPDATER_URL=<桩地址>` 启动服务 → `config.updaterBaseUrl="http://updater:8790"`（默认值），检查更新直接 `updater_unreachable`；`docs/api.md` 写的也是 `FEEDBACK_UPDATE_URL` | 真实部署里改这个变量不会生效（静默忽略）；默认值恰好等于 compose 默认值，只在改地址/端口时暴露 | **t11 修复**（`FEEDBACK_UPDATER_URL` 规范名 + 旧名 `FEEDBACK_UPDATE_URL` 作别名）。本段回归：探针服务只注入 compose 名 → 断言被采纳 |
+
+> 两条缺陷均按契约「回传队长处理」，由实现者在 t11 修复；验证者未修改实现。本节记录的是**同一条最终源码**上的回归断言（若将来回归，脚本会直接失败）。
+
+**t12 独立复验（缺陷发现者用 t10 的原始复现步骤重跑，不接受实现者自证）**
+
+复验脚本：`e2e/reverify_u1_defects.py`（sha256 `eab67b60600bae27…`），报告 `e2e/shots/u1/reverify-defects.json` —— **10/10 断言通过，exit 0**；镜像用当前工作树按与 t10 相同的命令重建。
+
+| 项 | 复验步骤（与 t10 相同） | 本轮实际观测 | 判定 |
+|---|---|---|---|
+| 缺陷 1 | `docker run` 新镜像（真实容器布局）→ 管理员登录 → `GET /api/admin/system/update` | `current.version = "0.3.0"` == `apps/server/package.json` 的 version；镜像内 `/app/server/package.json`（623B，`name=@feedback/server`）与 `/app/server/dist/routes/system-update.js` 并存 | **已修复** |
+| 缺陷 2 | **只**注入 compose 规范名 `FEEDBACK_UPDATER_URL=<stub>`（不注入别名）→ 同接口 | `config.updaterBaseUrl = "<stub 地址>"`（采纳，不再是默认 `http://updater:8790`），`updateConfigured=true` | **已修复** |
+| 反向回归 1 | 不注入任何更新地址变量 | `config.updaterBaseUrl = "http://updater:8790"`（缺省仍回退默认） | 通过 |
+| 反向回归 2 | 只注入旧别名 `FEEDBACK_UPDATE_URL=<stub>` | 同样被采纳（兼容别名保留） | 通过 |
+| 反向回归 3 | tsx 直跑源码布局：`tsx -e 'import { SERVER_VERSION } …'` | `SERVER_VERSION = "0.3.0"`（exit 0） | 通过 |
+
+配套 verify（本轮实跑）：`pnpm --filter @feedback/server test` → exit 0，`12 passed (12) / 206 passed (206)`，其中 `system-update.test.ts` **45 tests**（t11 新增 12 个版本/环境变量用例）；`pnpm -r build` → exit 0；`python3 e2e/run_u1_admin_browser.py` → exit 0，`39/39` 断言（含「当前版本显示为真实包版本 0.3.0（回归：曾显示 0.0.0-unknown）」与「FEEDBACK_UPDATER_URL 被服务端采纳」）。
+
+复验结论：**两条缺陷的修复真实生效，且未引入回归**；`e2e/shots/u1/upgrade-report.json` 与 `browser-report.json` 的 `defects` 字段已把这两条标为 `fixed` 并附上本轮命令、观测输出与报告路径（原始观测与发现时间保留，未被改写）。若将来任一缺陷复现，第 3/5 节的硬断言与本节复验脚本会直接失败。
+
+**时间线（如实留档，原始证据未被改写）**：
+
+| 时刻（2026-09-14） | 事件 | 当时观察 |
+|---|---|---|
+| ~14:50 | 验证者按当时源码构建新版镜像 `u1v-feedback:0.3.0`（镜像 ID `de309bb1d6a4`） | — |
+| ~15:00–15:05 | 验证者首次跑容器/浏览器流程 | **两条缺陷红**：容器内 `current.version="0.0.0-unknown"`；只注入 `FEEDBACK_UPDATER_URL` 时 `config.updaterBaseUrl="http://updater:8790"`（默认值），检查更新 `updater_unreachable` |
+| ~15:05 | 验证者把两条缺陷证据回传队长（未改实现） | 队长据此开出 t11 |
+| 15:11 | t11（server-engineer）改动 `apps/server/src/env.ts`、`apps/server/src/routes/system-update.ts`、`apps/server/test/system-update.test.ts`、`docs/api.md` | 两条缺陷修复（规范名 + 别名回退；候选包路径） |
+| 15:32–15:33 | 验证者重建镜像（新镜像 ID `190671d778e5`）并重跑浏览器流程 | **两条转绿**：`FEEDBACK_UPDATER_URL` 被采纳；页面「当前版本 0.3.0」、无 `0.0.0-unknown` |
+| 15:34–15:40 | 验证者在**同一条最终源码**上重跑 13 条 verify + 容器级 6 场景 + 进程内边界 | 全绿（137/137、39/39、33/33） |
+| 15:49 | **t12 复验**（verifier，用 t10 原始复现步骤重建镜像） | 两条缺陷 **10/10 断言转绿**：容器内 `current.version=0.3.0`、只注入 `FEEDBACK_UPDATER_URL` 即被采纳；反向回归（缺省默认值 / 旧别名兼容 / tsx 源码布局）全部通过 |
+
+所以第 7 节表格里的「红」是**发现时刻的真实状态**，「绿」是 t11 修复后的回归结果——两者不是同一份源码。t12 已按**原始复现步骤**（注入口径：只设 `FEEDBACK_UPDATER_URL`、不设别名；版本口径：真实容器内管理员登录后读 `GET /api/admin/system/update`）完成复验：两条缺陷均判为**已修复**，且反向回归通过（见本节「t12 独立复验」）。
+
+工具自身的缺陷（记录在案，已修）：验证脚本的 `wait_until` 最初把「异常」当成真值返回，会让等待静默失效（曾导致一次假通过）。已修正为「异常不算满足、超时抛出并带上最后一次观察」，两个 Python 脚本均已更新。
+
+### 8. 未验证 / 限制（如实标注，不得读作已通过）
+
+- **本机无法验证的部分**：GitHub Actions 的真实运行、GHCR 推送与真实镜像 digest、线上正式地址（域名 + TLS + Nginx）、在真实服务器上首次安装 Compose（`deploy/install-updater.sh` 的真实执行）——**全部未验证**，一律不得声称已上线。
+- 容器级测试用的是**本地自建 registry + 本地构建镜像**（`127.0.0.1:<随机端口>`），不是 GHCR 上的发布产物；旧版镜像是本机已有的旧源码产物（`feedback-service:e2e-verify`），不是正式发布的 v0.2.x 镜像。
+- 容器夹具是**自建 compose**（形状对齐 `deploy/compose.prod.yml`）且走 **HTTP**；生产 compose 强制 `FEEDBACK_PUBLIC_URL` + `FEEDBACK_COOKIE_SECURE=true`（HTTPS/反代形态）**未验证**。
+- 「磁盘空间不足」只验证了 **1.2 倍边界**（进程内真实引擎 + 可编程 docker），**没有**做真实磁盘耗尽；停服异常/复制失败/卷已存在/协议不兼容/放行后失败同样在进程内真实引擎上跑（容器级跑了第 3 节 6 个场景）。
+- 未做真实并发（多副本/多客户端同时点击）与真实 15 分钟限流窗口恢复；幂等与 409 是单进程内的串行验证。
+- 浏览器只覆盖 **Chromium**；视口只覆盖桌面 1280x800 与手机 390x844。
+- updater 挂载 `/var/run/docker.sock` = 宿主管理员权限（设计如此，见 `apps/updater/README.md` 安全边界）；本轮**未**做权限隔离/恶意客户端验证。
+- 本轮容器级场景结束后清理了自己创建的容器/网络/卷（**保留**部署目录、任务文件、updater 日志等诊断产物于 `/private/tmp/u1v-runs/<场景>-<随机>/`）；测试身份、卷、端口均为本轮新建，未使用生产账号或真实数据。
+
+### 9. 发布前置条件（需用户确认，验证者一律不执行）
+
+1. **打标签**：`v0.2.1`（T2-A）与 `v0.3.0`（U1）标签**需用户确认后**才可创建并推送；标签必须指向本次运行提交且严格等于 `v<根 package.json version>`（见 `docs/release.md` 的 4 条件）。
+2. **推镜像**：GHCR 的两个镜像（`sakura-feedback`、`sakura-feedback-updater`）由 Release 流水线推送；本机未推送任何镜像。
+3. **服务器首次安装**：`deploy/install-updater.sh --deploy-dir <部署目录>` 的首次接入（登记既有数据卷、生成 600 令牌、备份既有 compose/env）**未在真实服务器执行过**。
+4. **正式地址验证通过前不声称已上线**：只有用户按第 11 节在真实部署上体验并确认后，才可把 T2-A / U1 从「待体验」改为「已验收」。
+5. 生产 compose 需要用户环境提供 `FEEDBACK_PUBLIC_URL`（HTTPS 域名）、`FEEDBACK_DATA_VOLUME`（既有卷名）、`FEEDBACK_BIND`、`UPDATER_IMAGE` / `UPDATER_IMAGE_NAME` / `UPDATER_DEPLOY_DIR` 等（见 `deploy/.env.prod.example` 与 `deploy/README.md`）。
+
+### 10. 诊断产物与复跑命令
+
+```bash
+# 容器级真实升级（6 场景，含 ⑤核验失败→恢复旧版本、⑥放行后失败→needs_attention、更新中重启核对）
+python3 e2e/run_u1_upgrade.py                       # 退出码 0 为通过；报告 e2e/shots/u1/upgrade-report.json
+python3 e2e/run_u1_upgrade.py --only happy_path     # 单场景复跑
+
+# 管理页「系统更新」真实浏览器（真实服务 + 可控 updater 桩 + Chromium）
+python3 e2e/run_u1_admin_browser.py                 # 退出码 0 为通过；报告 e2e/shots/u1/browser-report.json
+
+# 进程内真实引擎边界（磁盘 1.2 倍、停服异常、复制失败、放行后失败等）
+npx tsx e2e/u1_engine_boundaries.mts
+
+# 发布流水线静态契约（t5 入库）
+python3 e2e/check-release-workflow.py
+
+# t12 复验：两条历史缺陷（版本读取 / FEEDBACK_UPDATER_URL 采纳）的修复是否仍生效
+python3 e2e/reverify_u1_defects.py
+```
+
+证据文件：`e2e/shots/u1/upgrade-report.json`、`e2e/shots/u1/browser-report.json`、`e2e/shots/u1/browser/*.png`、`/private/tmp/u1v-runs/<场景>-<随机>/`（含 `.env.prod`、`compose.yml`、`update-control/state/tasks/*.json`、备份目录）。首次复跑会自动构建缺少的镜像（`u1v-feedback:0.3.0`、`u1v-updater:verify`、`u1v-feedback-broken:0.3.0`）。
+
+### 11. 体验入口与操作步骤（U1 = 待体验）
+
+**服务器首次接入（需用户执行，验证者未做过）**
+
+```bash
+# 1) 部署目录（示例：/opt/1panel/docker/compose/feedback），放 compose.yml 与 .env.prod
+cp deploy/compose.prod.yml /opt/1panel/docker/compose/feedback/compose.yml
+cp deploy/.env.prod.example /opt/1panel/docker/compose/feedback/.env.prod   # 填 MASTER_KEY / 域名 / 两个 digest / 卷名
+# 2) 首次接入：核对运行中的部署 → 生成 600 令牌 → 登记既有数据卷（只登记不创建）
+bash deploy/install-updater.sh --deploy-dir /opt/1panel/docker/compose/feedback
+# 3) 起服务
+cd /opt/1panel/docker/compose/feedback && docker compose --env-file .env.prod up -d
+```
+
+**体验要点（与验收一致）**
+
+1. 打开 `https://<域名>/admin/` → 管理员登录 → 顶部「**系统更新**」标签：应显示「当前版本 0.3.0」、更新执行器「已接入」。
+2. 点「**检查更新**」：应显示最新稳定版与「可更新」标记（若已是最新则显示「当前已是最新稳定版」）。
+3. 点「**更新到最新稳定版**」：页面出现「更新任务」卡与阶段进度；更新期间业务写入会被拒（`update_paused`），页面顶部出现「业务写入已暂停」横幅。
+4. **服务重启期间**（后台代理会短暂取不到进度）：页面显示「**正在恢复连接…**」并明确说明这**不算**更新失败——不要把它当成失败。
+5. 更新完成后显示「更新成功」；刷新页面或关掉标签再打开，仍会按任务 ID 恢复进度（`localStorage`）。
+6. 失败语义：预检失败显示「更新失败，未改动部署」；⑤核验失败显示「更新失败，已恢复旧版本」（旧数据卷与旧镜像都保留）；⑥放行后失败显示「需要处理」并给出恢复指引（**不会**自动回退数据卷）。
+7. 磁盘与卷：新数据卷命名为 `feedback-data-<版本>-<时间戳>`，旧卷作为完整备份保留、**不会**被自动删除；升级后请人工确认无误再自行清理。
+
+## Flutter 安全存储兼容（flutter_secure_storage 9.2.2 / 10.3.1 / 11.0.0，2026-09-14 · 状态：待体验）
+
+> 本轮由验证者（verifier，任务 t5）独立执行。用户要求两次收敛验证成本，最终范围见 §0；
+> 收敛前已完成的独立矩阵与 macOS Keychain 运行时验证结果作为附录保留（§11），并明确标注
+> 它们**不在最终收敛范围内**。所有命令、退出码、结构化产物均为本轮真实运行结果，不复用实现者结论。
+
+### 0. 最终验证范围（用户要求「再砍一刀」后的收敛结果）
+
+| 项目 | 是否做 | 说明 |
+| --- | --- | --- |
+| 静态核对（依赖 / 接口 / 存储键） | 做 | §3，git diff + 就地读符号定义 |
+| 三档解析结论核对 | 只读证据，不重跑矩阵 | §4；9.2.2 与 11.0.0 采信实现者证据 |
+| 矩阵脚本复跑 | 于收敛前执行过一次（exit 0），收敛后未再跑 | §2 命令 7 |
+| Android 9→10→11 迁移实测 | 做（本任务唯一重型项） | §6，真实模拟器 + 真实 APK + 相同签名升级 |
+| macOS / iOS | 只做构建 | §7；**未做 Keychain 运行时验证** |
+| Windows / Linux | 不做 | 不在原生范围；不建任何阻塞条目 |
+
+环境事实：Flutter 3.41.3 / Dart 3.11.1 在 `$HOME/flutter`（不在 PATH）；Xcode 27.0；
+Android SDK 在 `~/Library/Android/sdk`（有 `platforms/android-37.0`，但 `ANDROID_HOME`/`ANDROID_SDK_ROOT` 未设置，需显式指定）；
+`jenv` shim 损坏（`which java` 直接报错），可用 JDK 为 `/opt/homebrew/opt/openjdk@17`（17.0.20）。
+
+### 1. 源码状态（只读快照，`git rev-parse HEAD` = cd79673）
+
+```
+ M flutter/feedback/pubspec.yaml                      （约束一行 + 注释）
+ M flutter/feedback/test/token_store_scope_test.dart  （+32 行：读/写/删除往返、重复删除幂等）
+?? flutter/feedback/test/host_credential_coexistence_test.dart （新增，4 例）
+```
+
+- `git diff -- flutter/feedback/lib` 输出 **0 行**，`git diff --name-only -- flutter/feedback/lib` 为空 → 组件库零改动。
+- `lib/src/config.dart`、`lib/src/token_store.dart`、`lib/src/widget.dart`、`lib/feedback_widget.dart`、`lib/src/platform_io.dart` 逐个与 HEAD 一致。
+- 关键符号仍在原位（就地读取）：`class FeedbackConfig`（config.dart:49）、
+  `abstract class FeedbackTokenStore` + `read()`/`write()`/`clear()`（token_store.dart:9/11/14/17）、
+  `String feedbackTokenStorageKey(FeedbackConfig)`（token_store.dart:32）、`class FeedbackWidget`（widget.dart:84）。
+- 组件对插件只用三版共有的 `read` / `write` / `delete`（`platform_io.dart:31/35/38`），
+  组件包约束为 `flutter_secure_storage: '>=9.2.2 <12.0.0'`（pubspec.yaml:20），
+  `environment` 保持 `sdk: ^3.6.0` / `flutter: ">=3.27.0"` 未动。
+
+### 2. 命令与真实退出码（本轮实际运行）
+
+产物目录：`e2e/flutter_native/out/verify/`（`exitcodes.tsv` 汇总）。
+
+| # | 命令 | 退出码 | 关键输出 |
+| --- | --- | --- | --- |
+| 1 | `cd flutter/feedback && flutter analyze && flutter test` | 0 | `+112: All tests passed!`（112 例） |
+| 2 | `cd examples/flutter && flutter test` | 0 | `+37: All tests passed!` |
+| 3 | `cd examples/flutter && flutter build apk --debug` | 0 | `✓ Built build/app/outputs/flutter-apk/app-debug.apk` |
+| 4 | `cd examples/flutter && flutter build macos --release` | 0 | `✓ Built build/macos/Build/Products/Release/feedback_example.app (43.2MB)` |
+| 5 | `cd examples/flutter && flutter build ios --no-codesign` | 0 | `✓ Built build/ios/iphoneos/Runner.app (16.9MB)` |
+| 6 | `security find-identity -v -p codesigning` | 0 | `1 valid identities found`：`Apple Development: 13562008871@163.com (53J98NU8CJ)`（TeamIdentifier `C5Q966MAGT`） |
+| 7 | `bash tools/flutter-storage-matrix/run.sh 9.2.2 10.3.1 11.0.0` | 0 | 三档全 PASS（收敛前执行，之后未再跑） |
+| 8 | 契约中的 `grep -rn "dependency_overrides" <三个 pubspec> ; test $? -eq 1` | **1（不通过）** | grep 命中 `tools/flutter-storage-matrix/pubspec.yaml:25` 的**注释**行；见 §8-F1 |
+
+### 3. 静态核对（两条关键声明）
+
+1. **全仓不存在 dependency_overrides（实质成立）**：排除 `node_modules` / `build` / `.dart_tool` 后，
+   对 `*.yaml/*.yml/*.lock/*.dart` 扫描 `dependency_overrides`，命中项**全部是注释或文档文本**：
+   `tools/flutter-storage-matrix/pubspec.yaml:25`（注释）、`tools/flutter-storage-matrix/lib/feedback_storage_matrix.dart:8`（文档注释）、
+   `.github/workflows/ci.yml:111`（job 名称说明）、`e2e/flutter_matrix/host/pubspec.yaml:18` 及其工作副本（本轮验证宿主自建的注释）。
+   只匹配「行首真实声明 `dependency_overrides:`」时**无任何匹配**（grep exit 1）。
+   ⚠️ 但契约里写的字面命令（把 `tools/flutter-storage-matrix/pubspec.yaml` 也纳入 grep）会因上述注释命中而 exit 1 → 见 §8-F1。
+2. **接口与存储键未改动**：见 §1（`flutter/feedback/lib` 零 diff；符号定义逐条与 HEAD 一致）。
+
+### 4. 三档解析结论核对（只读实现者证据，未重跑）
+
+`tools/flutter-storage-matrix/out/matrix-summary.tsv`：
+
+| 档位 | Dart | flutter_secure_storage | windows | platform_interface | darwin | pub_get | analyze | test |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 9.2.2 | 3.11.1 | 9.2.2 | 3.1.2 | 1.1.2 | - | 0 | 0 | 0（PASS） |
+| 10.3.1 | 3.11.1 | 10.3.1 | 4.2.2 | 2.1.0 | 0.3.2 | 0 | 0 | 0（PASS） |
+| 11.0.0 | 3.11.1 | 11.0.0 | 4.2.2 | 2.1.0 | 0.4.2 | 0 | 0 | 0（PASS） |
+
+逐档 `out/<tier>/resolved.json` 的 `resolved` 与 `checks`（全部 `ok=true`）核对：
+
+- **9.2.2**：`flutter_secure_storage_macos=3.1.3`、`windows=3.1.2`、`platform_interface=1.1.2`（linux 1.2.3 / web 1.2.1），**无 darwin** → 走 `_macos`。
+- **10.3.1**：`darwin=0.3.2`、`windows=4.2.2`、`platform_interface=2.1.0`（linux 3.0.3 / web 2.1.1），**无 `_macos`**。
+- **11.0.0**：`darwin=0.4.2`、`windows=4.2.2`、`platform_interface=2.1.0`（linux 3.0.3 / web 2.1.1），**无 `_macos`**。
+
+**结论：「darwin 取代 `_macos`」「windows 3.x→4.x」「platform_interface 1.x→2.x」都从 10.3.1 档就发生，不是 11 才发生** ——
+与 t2 的实测修正一致，summary 表属实。10.3.1 这一档（既非旧锁 9.2.4 也非新锁 11.0.0）已单独逐项手工复核。
+
+**诚实标注：本轮按契约要求不重跑矩阵，因此 9.2.2 与 11.0.0 两档的解析结论属「采信实现者证据」；只有 10.3.1 一档被逐项读过 resolved.json 复核。**
+（收敛前本人另建的独立宿主 `e2e/flutter_matrix` 曾独立复现过三档，见 §11 附录，但那不在最终收敛范围内。）
+
+### 5. Android 可行性探针（限时，结论：可行）
+
+| 检查 | 结果 |
+| --- | --- |
+| 指定 `ANDROID_HOME=~/Library/Android/sdk` 后能否构建 APK | 可以：`flutter build apk --debug` exit 0（示例与测试应用均成功） |
+| JDK | `jenv` shim 损坏（`which java` 报 `No such file or directory`）；显式用 `/opt/homebrew/opt/openjdk@17`（17.0.20）后 Gradle 正常 |
+| 模拟器/设备 | 模拟器 `sakura_test`（android-35 google_apis arm64）可启动并 `sys.boot_completed=1`；`adb` 可用；无 Android 真机 |
+
+→ 探针判定**可行**，因此继续执行 §6 的迁移实测（未出现需要判「未通过」的分支）。
+
+### 6. Android 9→10→11 迁移实测（真实模拟器 + 真实 APK，本任务唯一重型项）
+
+**独立测试应用**：`e2e/flutter_native/keychain_probe`（`flutter create --org com.feedbackverify`），
+`applicationId = com.feedbackverify.keychain_probe`，逐档只改 pubspec 的 `flutter_secure_storage` 为精确版本后重新构建。
+
+**方法（为什么不用 `flutter test integration_test -d <android>`）**：`flutter test` 在跑完后会**卸载应用**，
+跨档数据（正是迁移要验证的东西）无法保留。因此改为：
+
+```
+flutter build apk --debug --dart-define=PHASE=<阶段> …   # 阶段编译进 APK
+adb install -r -t app-debug.apk                          # 同签名升级安装，保留数据
+adb shell am start -n com.feedbackverify.keychain_probe/.MainActivity   # 真实应用进程
+adb shell run-as com.feedbackverify.keychain_probe cat code_cache/probe-<tag>.json  # 结构化结果
+```
+
+探针走的是组件在原生平台的**真实存储路径**（`feedback_widget/src/platform_io.dart` 的 `SecureFeedbackTokenStore`），
+并同时用同一安全存储写入模拟的宿主凭据（音乐服务器密码 `music_subsonic_password` + 第三方令牌 `third_party.access_token`），
+用于验证清理不越界。**不接触用户真实凭据**，测试密钥均为字面测试值。
+
+**签名**：`~/.android/debug.keystore`（SHA256 `B2:BB:48:10:EC:00:74:FE:6E:23:41:68:9F:DE:03:75:5F:5B:E7:56:7D:77:9D:2C:CE:9D:93:18:D0:FC:7A:8D`）；
+逐档 `dumpsys` 记录的 `signatures=[db13ec38]` 相同、`versionName=0.1.0`、`minSdk=24` → 三档都是**同一应用标识 + 同一签名**的升级安装。
+
+**结果（`e2e/flutter_native/out/native/android-mig-*.result.json`，全部 verdict=PASS）**：
+
+| 阶段 | 档位 | 结果 | 关键字段 |
+| --- | --- | --- | --- |
+| 写入测试令牌（登录保存） | 9.2.2 | PASS | `written/readBack=token-android-v9`，`readBackDelayed=token-android-v9`（退出前停留 5s 复读） |
+| 读取 9 档写入的令牌（迁移是否完成） | 10.3.1 | PASS | `expected=token-android-v9`，`readBack=token-android-v9` |
+| 再写入 10 档自己的令牌 | 10.3.1 | PASS | `written/readBack=token-android-v10` |
+| 读取 10 档写入的令牌 | 11.0.0 | PASS | `expected/readBack=token-android-v10` |
+| 删除（退出登出） | 11.0.0 | PASS | `beforeDelete=token-android-v10`，`afterDelete=null`，`rawAfterDelete=null`，`afterDeleteDelayed=null` |
+| 独立进程复核删除已落盘 | 11.0.0 | PASS | `readBack=null`、`rawReadBack=null`（新进程启动后确实读不到） |
+| 11 档一轮内 写/读/删 + 宿主共存 | 11.0.0 | PASS | `initial=null`、`readBack=token-android-v11`、`afterDelete=null`；宿主两键始终可读 |
+| 11 档删除后独立进程复核 | 11.0.0 | PASS | `readBack=null` |
+
+**宿主凭据共存**：上表每个阶段（含 11 档删除之后）`host.musicPassword.read=music-secret-t3`、
+`host.thirdPartyToken.read=third-party-token-t3` 始终可读 → 组件的登出/401 清理只动自己那一格，与单测
+`host_credential_coexistence_test.dart` 的结论互相印证。
+
+**明文回退检查**：探针在应用数据目录内扫描令牌字面量（排除探针自己的产物文件），
+各阶段 `plaintext.hits=[]`（scannedFiles 4~8）；`adb run-as … cat shared_prefs/FlutterSecureStorage.xml` 中
+令牌以密文出现、无明文；删除后该 XML 中不再含 Feedback 槽位（`grep -c feedback_widget` 见
+`e2e/flutter_native/out/native/android-post-delete-prefs.txt`）。
+
+**夹具伪影（如实记录，非组件缺陷）**：最初的迁移跑法让探针在 `write`/`delete` 之后立刻 `exit(0)`，
+而 Android 的 `SharedPreferences.Editor.apply()` 是异步落盘，进程被杀时写入尚未刷盘，
+于是出现了「9 档写入在 10 档读不到（包括宿主凭据也读不到）」与「删除后新进程又读到旧令牌」的假象。
+归因证据：`out/native/android-flush-attribution.txt`；隔离实验 `out/native/android-flush-*.result.json`
+（删除后停留 5s 再退出 → 新进程读回为 `null`，说明 delete 本身是持久的）。
+修正：写/删阶段统一在退出前停留 5s 并复读确认，并新增 `absent` 阶段在独立进程复核；
+上表为修正后的最终结果。**观察项（非阻塞）**：真实应用若在登出后数毫秒内被系统杀死，插件的删除同样可能未落盘——这是插件后端语义，与本组件的接口无关。
+
+### 7. macOS / iOS：仅构建（未做运行时验证）
+
+| 命令 | 退出码 | 产物 |
+| --- | --- | --- |
+| `flutter build macos --release`（examples/flutter） | 0 | `feedback_example.app`（43.2MB） |
+| `flutter build ios --no-codesign`（examples/flutter） | 0 | `Runner.app`（16.9MB） |
+
+**明确标注：本轮按收敛范围未做 macOS/iOS 的 Keychain 运行时验证**（未安装、未启动、未读写 Keychain）。
+签名与 entitlements 在本轮只做了构建通过这一层结论；收敛前完成的 macOS 运行时实测见 §11 附录。
+
+### 8. 本轮发现（不阻塞本轮验收，但需记录）
+
+- **F1（低）字面 verify 命令必然失败**：`grep -rn "dependency_overrides" flutter/feedback/pubspec.yaml examples/flutter/pubspec.yaml tools/flutter-storage-matrix/pubspec.yaml ; test $? -eq 1` 因为
+  `tools/flutter-storage-matrix/pubspec.yaml:25` 的**注释**里含该词而 grep 命中 → 复合命令 exit 1。
+  实质结论（无真实声明）成立；建议后续把该命令改成只匹配非注释行（例如 `grep -rEn "^[[:space:]]*dependency_overrides[[:space:]]*:"`），
+  或把说明文字改写成不含该字面量。历史记录中 t1/t2 写「契约命令 exit 0」只对当时的两文件版本成立。
+- **F2（低）示例的 Podfile.lock 未随 11.0.0 切换刷新**：`examples/flutter/macos/Podfile.lock` 仍写 `flutter_secure_storage_macos (6.1.3)`，
+  `examples/flutter/ios/Podfile.lock` 仍写 `flutter_secure_storage (6.0.0)` 与 `.symlinks/plugins/flutter_secure_storage/ios`，
+  而 pubspec 已固定 11.0.0（其 ios/macos 默认实现均为 `flutter_secure_storage_darwin`）。
+  构建时 `pod install` 会自动重写这些文件，因此不阻塞构建（§2 命令 4/5 均 exit 0）；
+  但首次构建会改动这两个文件（生成物）。本轮把工具改写后的差异记录在 `e2e/flutter_native/out/verify/generated-lock-diffs.txt`，
+  随后**已还原**为工作区原状（不在验证者职责内改动 examples/）。
+- **F3（提示）探针/夹具语义**：Android 上「删除后立即杀进程 → 删除可能未落盘」（§6 末）值得任何写存储测试的人注意；
+  本组件代码无此问题（它不做进程级操作），但用 `flutter_secure_storage` 写集成测试时需给异步落盘留时间。
+
+### 9. 测试数据清理（本轮已执行）
+
+- macOS：探针自身的三个键（派生令牌键 + 两个模拟宿主凭据键）已删除，`remainingKeys=[]`（`out/native/macos-cleanup.result.json`）；
+  测试应用容器 `~/Library/Containers/com.feedbackverify.keychainProbe` 已移除（`container_removed=yes`）。
+  **未清理、也未读取用户 Keychain 中的任何其它条目。**
+- Android：测试应用已卸载（`Success`，卸载前后 `pm list packages` 计数 1 → 0），shared_prefs/Keystore 条目随卸载清除，
+  模拟器随后关闭（`out/native/android-cleanup.txt`）。
+- 全程未接触用户真实凭据（测试令牌与"宿主凭据"都是字面测试值）。
+
+### 10. 未验证 / 限制（如实标注，不得读作已通过）
+
+1. **macOS / iOS 运行时（Keychain 读写删）本轮未做**——按收敛范围只做构建。
+2. **iOS 运行时在本机目前也缺少必要条件**：`xcrun simctl list runtimes` 为空（无已安装模拟器运行时），
+   且收敛前实测本机只有针对 `dev.example.feedbackExample` 与 macOS 平台的 Xcode 托管描述文件，**没有 iOS 真机描述文件**。
+   → iOS Keychain 运行时验证判定为**未通过/未做**，不虚构 Team、不清理用户 Keychain。
+3. **Windows / Linux**：不在本轮原生范围，未尝试、也未建任何阻塞条目。
+4. **Android 未使用真机**，验证在模拟器（android-35 google_apis arm64）上完成。
+5. 三档矩阵：9.2.2 / 11.0.0 为采信实现者证据（§4 已标注）；收敛后未再复跑矩阵脚本。
+6. 原生运行时只在 Android 上覆盖了 9 写 → 10 读/写 → 11 读/删 的迁移序列，未在 9/10 档单独跑完整"写→重启读→删"往返。
+
+### 11. 附录：收敛前已完成、但不属于最终范围的两组结果（如实保留）
+
+> 这两组在用户要求收紧范围**之前**已跑完，产物保留但**不作为本轮验收依据**，仅供复核与后续复用。
+
+1) **独立矩阵宿主**（`e2e/flutter_matrix`，验证者自建、不复用 `tools/flutter-storage-matrix`）：
+   在 `flutter create --template=package` 宿主里用 path 依赖引用 `flutter/feedback`，并把 `flutter_secure_storage` 逐档固定为精确版本；
+   另把 `flutter/feedback` 的 lib/test 原样复制到 `work/<tier>/feedback` 后只在副本里改那一行约束，配合 sha256 清单证明跑的是同一份源码。
+   结果（`e2e/flutter_matrix/out/matrix-summary.tsv`）：
+
+   | 档位 | SUT 解析 | darwin | macos | windows | platform_interface | pub_get | analyze | test | 宿主解析 | 宿主 analyze/test |
+   | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+   | 9.2.2 | 9.2.2 | - | 3.1.3 | 3.1.2 | 1.1.2 | 0 | 0 | 0（112/112） | 9.2.2 | 0 / 0（10 例） |
+   | 10.3.1 | 10.3.1 | 0.3.2 | - | 4.2.2 | 2.1.0 | 0 | 0 | 0（112/112） | 10.3.1 | 0 / 0（10 例） |
+   | 11.0.0 | 11.0.0 | 0.4.2 | - | 4.2.2 | 2.1.0 | 0 | 0 | 0（112/112） | 11.0.0 | 0 / 0（10 例） |
+
+   （三档 SUT 副本与工作区源码 sha256 一致；与实现者的解析表逐项一致，含 10.x 起换包这一修正。）
+
+2) **macOS Keychain 运行时**（`e2e/flutter_native/work/macos-entitled`，Apple Development 签名 + `keychain-access-groups`）：
+   三次**独立进程启动**分别为 write → read（进程重启后读取）→ delete，均 PASS
+   （`out/native/macos-{write,read,delete,absent}.result.json`）；期间宿主模拟凭据始终可读、无明文命中。
+   反例对照（`work/macos-denied`，ad-hoc 签名、无 entitlement）：写入抛 `PlatformException`
+   `code="Unexpected security result code"`、`details="-34018"`、`message="Code: -34018, Message: A required entitlement is not present."`，
+   且读取返回 `null`、无明文回退——即"存储不可用"时的真实错误表现。
+   静态检查（本轮做）：`examples/flutter` Release 产物 `TeamIdentifier=C5Q966MAGT`、
+   `keychain-access-groups=[C5Q966MAGT.dev.example.feedbackExample]`、`app-sandbox=true`。
+
+### 12. 体验入口与操作步骤（Flutter 安全存储兼容 = 待体验）
+
+```bash
+export PATH="$HOME/flutter/bin:$PATH"
+
+# a) 组件包单测（112 例）
+cd flutter/feedback && flutter analyze && flutter test
+
+# b) 三档隔离矩阵（约 5 分钟，需要联网解析 9.2.2/10.3.1）
+bash tools/flutter-storage-matrix/run.sh 9.2.2 10.3.1 11.0.0
+cat tools/flutter-storage-matrix/out/matrix-summary.tsv
+
+# c) Android 9→10→11 迁移实测（需 JDK 17 + 已启动模拟器/真机）
+export JAVA_HOME=/opt/homebrew/opt/openjdk@17
+export ANDROID_SDK_ROOT="$HOME/Library/Android/sdk"
+bash e2e/flutter_native/run_native.sh android-migrate
+ls e2e/flutter_native/out/native/android-mig-*.result.json
+
+# d) 构建（示例已固定 11.0.0）
+cd examples/flutter && flutter build macos --release && flutter build ios --no-codesign && flutter build apk --debug
+```
+
+**体验要点**：c) 会依次在同一应用标识/同一 debug 签名上安装 9.2.2 → 10.3.1 → 11.0.0，
+逐档产出 `verdict=PASS` 的结构化 JSON；若某档出现 `verdict=FAIL`，说明该档切换真的破坏了已存令牌（这是本组验证最有价值的信号）。
+
+### 13. 交付收口复核（t6，非验证者观测 · 2026-09-14）
+
+> 本节由文档收口任务 **t6** 追加，**不是 t5 验证者的观测**；§0~§12 的原始记录未做任何修改。
+> t5 的 §8-F1（契约字面命令命中注释）与 §8-F2（示例 Podfile.lock 未随 11.0.0 刷新）
+> 已由后续修复任务 **t7** 闭环；下面是收口时对修正后现状的复核（命令与结果均为本次真实运行）。
+
+| 遗留 | t5 当时的记录（§8） | 收口时现状（复核命令 → 结果） |
+| --- | --- | --- |
+| F1 契约字面命令 | exit 1：命中 `tools/flutter-storage-matrix/pubspec.yaml:25` 的注释 | 该注释已改写；`grep -rn "dependency_overrides" flutter/feedback/pubspec.yaml examples/flutter/pubspec.yaml tools/flutter-storage-matrix/pubspec.yaml` 无输出（grep exit 1）→ `test $? -eq 1` 成立，**契约命令 exit 0** |
+| F2 示例 Podfile.lock | ios `flutter_secure_storage (6.0.0)`；macos `flutter_secure_storage_macos (6.1.3)` | 由 CocoaPods 1.17.0 重新生成：两文件均为 `flutter_secure_storage_darwin (10.0.0)`、`SPEC CHECKSUM: 46e40169…`；`flutter_secure_storage_macos` / `(6.1.3)` / `(6.0.0)` 在两 lock 中零匹配（grep exit 1）；sha256 = ios `7a65397b…`、macos `738891b3…`（重跑 `pod install` 后不变，非手改） |
+
+⚠️ **易混淆点（供文档与接入方对照）**：`Podfile.lock` 里的 **`10.0.0` 是 CocoaPods podspec 版本**
+（`flutter_secure_storage_darwin-0.4.2/darwin/flutter_secure_storage_darwin.podspec:6` 的 `s.version = '10.0.0'`），
+**该 pub 包版本是 `0.4.2`**（§4 表格），两者不是同一个数字含义。
+
+**与 §8 的关系**：§8 保留 t5 当轮的原始观测，不解锁、不改写；F1/F2 的现状以本节为准。
+本轮范围与限制（macOS / iOS 未做 Keychain 运行时验证、Windows / Linux 不在本次范围）**不受本节影响**，仍以 §0、§7、§10 为准。
+
+---
+
+## Feedback v0.3.0 上线前修复计划（日志真实归档、身份隔离、更新防御与文档示例闭环，2026-09-14 · 状态：待体验）
+
+### 1. 本轮修复范围与标准
+- **L3: 真实归档闭环**：消除“日志未真正上传却被标记为 archived”假象。
+  - Kaneo 附件协议复用 `createImageUpload` & `finalizeImageUpload`（`surface: "comment"`）；
+  - 远端写入后通过 `downloadAsset` 逐一回下载原始字节并比对 SHA-256 完整性摘要；
+  - 升级 `archive_data_json` 至 V2 结构（支持独立附件索引 `screenshot` 与各个 `log.id`），归档判定门禁 `isFullyArchived` 严格要求截图（若有）与全部日志附件均已确认，纯文本反馈则在任务创建成功后直接归档；
+  - 数据库迁移升至 user_version 5，平滑迁移历史含日志但缺失 V2 归档凭据的伪 archived 记录至 `needs_review`；管理端与探针支持针对性 `retry_log` 恢复。
+- **L1: 跨身份隔离与手动选择优化**：
+  - Web 与 Flutter 客户端在切换 `apiBase` / `appId` 时严格清理草稿与日志缓存，防止日志跨应用泄露；
+  - Flutter 端文件选择实现 3 级优先（`widget.filePicker` > `widget.config.filePicker` > 默认 `_defaultFilePicker` 基于 `file_selector: 1.0.3`），且在前端严格验证 UTF-8 编码。
+- **U1: 更新防御与探针增强**：
+  - 更新探针增加附件字节级 SHA-256、体积与归属校验，保证更新前后数据一致；
+  - 完善更新暂停期反馈写入保护与系统更新回滚安全。
+- **D1: 文档与示例闭环**：
+  - 统一修复 `docs/integration.md` 中的日志示例（Web 为 `FeedbackLogFile` `{ filename, blob }`，Flutter 为 `FeedbackLogFile(filename, bytes)`）；
+  - 示例项目依赖刷新与验证全绿。
+
+### 2. 门禁验证结果
+
+| 门禁项 | 命令 | 结果 | 细节证据 |
+|---|---|---|---|
+| Workspace 构建 | `pnpm -r build` | ✅ exit 0 | 8 个构建项目（admin、server、updater、web、examples react/vue）全部构建成功 |
+| Workspace 类型检查 | `pnpm -r typecheck` | ✅ exit 0 | 8 个项目（含 ssr 语法检查与 web/admin/server tsc）无任何类型错误 |
+| Workspace 代码质量 | `pnpm -r lint` | ✅ exit 0 | 全部代码通过 Biome / ESLint 规范检查，0 error |
+| Workspace 单元测试 | `pnpm -r test` | ✅ exit 0 | server 13 文件 218 用例全过；web 14 文件 151 用例全过；updater 8 文件 71 用例全过；admin 冒烟通过 |
+| Flutter 代码质量 | `flutter analyze` | ✅ exit 0 | `flutter/feedback` 与 `examples/flutter` 均报告 `No issues found!` |
+| Flutter 单元测试 | `flutter test` | ✅ exit 0 | `flutter/feedback` 119 个测试全部通过；`examples/flutter` 37 个测试全部通过 |
+
+### 3. 验收结论
+- 本阶段已严格按照 L3 → L1 → U1 → D1 顺序执行完毕，全仓代码、自动化用例、示例工程与接入文档均已闭环对齐。
+- 当前结论：**可以进入测试部署**（状态标记为 **待体验**）。
+
+---
+
+## 2026-09-15 U1 / L1 最后两项补修追加记录
+
+本节只追加本轮源码修复与验证，不覆盖上方历史记录。当前状态：**待体验**；源码、构建、类型、lint、单测、隔离浏览器及真实 Docker 容器升级验证均已通过。该结果仍不等同于正式生产部署或用户验收。
+
+### U1：附件字节级升级核验
+
+- 修复前反例：探针只信数据库保存的 `sha256` / `byte_size`；将 `feedback_logs.bytes` 从 `AAA` 改为 `BBB` 而保留旧摘要时，旧逻辑仍可能放行。截图字节同类问题一致。
+- 修复：[`apps/updater/src/db-probe.ts`](apps/updater/src/db-probe.ts) 在容器内用 `node:crypto` 对 BLOB 逐行计算实际 SHA-256 与字节长度；严格解析附件列表、计数、重复 ID、表名和元数据；旧 schema 缺 `feedback_logs` 时保留兼容，schema ≥4 强制日志表与计数；更新前基线不可靠时在拉取镜像前以 `baseline_probe_failed` / `failed_no_changes` 停止。
+- 回归：真实临时 SQLite 覆盖 `AAA→BBB` 保留摘要失败、同步更新摘要但升级前后内容变化失败、截图字节损坏失败、健康数据通过；非法附件、缺失元数据、重复 ID、基线损坏均失败。
+
+### L1：卸载后的迟到日志丢弃
+
+- 修复：[`packages/web/src/element.ts`](packages/web/src/element.ts) 集中使用 `invalidateLogCollection()`；卸载、关闭和身份切换递增 `logOpSeq`、释放忙碌态并清理当前计时器。成功、失败、`finally` 均核对序号、身份世代、草稿对象、`isConnected` 和面板状态；仅有效完成标记 `logsCollected`；重挂载且面板仍打开时按取消状态重试。
+- 回归：[`packages/web/test/feedback-logs.test.ts`](packages/web/test/feedback-logs.test.ts) 新增 2 项可控 Promise 测试，覆盖卸载后旧结果不入列表，以及旧 `finally` 不清除新采集忙碌态。
+- 真实浏览器：当前 `packages/web/dist/feedback-web.umd.cjs` 在隔离页面通过卸载/重挂载 2/2；另用隔离 `fetch` stub 实际提交 multipart，核对 `metadata.logs`、文件名、`source=auto` 与文件字节全部一致，未连接真实 Kaneo。
+
+### D1：本轮命令与结果
+
+| 命令 | 结果 |
+|---|---|
+| `pnpm -r build` | exit 0，8 个 workspace 项目完成 |
+| `pnpm -r typecheck` | exit 0，8 个项目完成 |
+| `pnpm -r lint` | exit 0；server 保留既有 23 条 warning，无 error |
+| `pnpm -r test` | exit 0；server 218、updater 75、web 153，admin smoke 通过 |
+| `npx tsx e2e/u1_engine_boundaries.mts` | exit 0，33/33 通过 |
+| `python3 e2e/check-release-workflow.py` | 46/47；唯一失败是既有 `.github/workflows/ci.yml` 工作区改动触发的“未被修改”历史断言，本轮未回滚该改动 |
+| `python3 e2e/run_u1_upgrade.py` | exit 0，137/137 断言通过，6/6 场景通过；使用从 `HEAD` 归档构建的旧版镜像、本工作树新版镜像及隔离本地 registry/卷 |
+
+真实容器报告：[`e2e/shots/u1/upgrade-report.json`](e2e/shots/u1/upgrade-report.json)。本轮旧版 digest 为 `sha256:2ff9619975749eacd20ef32a9e12ecc48bf2c9d3c78f7ad3ebce15f482854ec6`，新版 digest 为 `sha256:767569d3fccdc6102fc0872066621f95be9cdbbe3664b9b4275b00a2f1232b7d`；成功、核验失败恢复、放行后失败、快速拒绝、环境文件并发修改、updater 重启六个场景全部通过。验证使用隔离 mock AI/Kaneo 与临时数据卷，未连接真实 Kaneo、生产数据或执行部署、提交、推送、打标签；因此当前结论为**具备进入测试部署的条件，状态待体验**。

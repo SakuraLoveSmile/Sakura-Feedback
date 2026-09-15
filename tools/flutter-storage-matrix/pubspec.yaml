@@ -1,0 +1,34 @@
+name: feedback_storage_matrix
+description: >-
+  flutter_secure_storage 9/10/11 三版本隔离矩阵宿主：以 path 依赖引用 flutter/feedback，
+  由 run.sh 按档固定插件精确版本后运行复用的组件测试。
+version: 0.0.1
+publish_to: none
+
+environment:
+  # 与 Music（sakuramusic）使用 flutter_secure_storage 11 的前提一致：Dart >=3.8。
+  # 来源不是猜测：Music 的 pubspec 声明 `flutter_secure_storage: ^11.0.0`，
+  # 而 11.0.0 的 environment.sdk 是 '>=3.8.0 <4.0.0'（见 MUSIC-CONSTRAINTS.md）。
+  sdk: ^3.8.0
+  # feedback_widget 自身的最低 Flutter 下限（flutter/feedback/pubspec.yaml）。
+  flutter: ">=3.27.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # 被测组件包：path 依赖，保证矩阵跑的就是本工作区的实现，而不是 pub.dev 上的副本。
+  feedback_widget:
+    path: ../../flutter/feedback
+
+  # run.sh 会把这一行改写为按档精确版本（9.2.2 / 10.3.1 / 11.0.0），跑完再还原成本区间。
+  # 只用普通版本约束做固定——本项目任何位置都不写“依赖覆盖”（override）段，
+  # 也不接受任何绕过正常解析的写法（校验见 check_tier.py 的“禁用依赖覆盖”一项）。
+  flutter_secure_storage: '>=9.2.2 <12.0.0'
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  # 复用的 flutter/feedback/test 用例里 import 了 http / http/testing。
+  http: ^1.2.0
+  flutter_lints: ^6.0.0

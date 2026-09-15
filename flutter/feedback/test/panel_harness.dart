@@ -18,10 +18,10 @@ http.Response jsonResponse(Object body, [int status = 200]) =>
 /// 可编程 mock 服务：按 `METHOD path` 匹配响应脚本，并记录全部请求。
 class PanelServer {
   /// 全部收到的请求（按时间顺序）。
-  final List<http.Request> requests = <http.Request>[];
+  final List<http.BaseRequest> requests = <http.BaseRequest>[];
 
-  final Map<String, List<Future<http.Response> Function(http.Request)>>
-      _handlers = <String, List<Future<http.Response> Function(http.Request)>>{};
+  final Map<String, List<Future<http.Response> Function(http.BaseRequest)>>
+      _handlers = <String, List<Future<http.Response> Function(http.BaseRequest)>>{};
 
   /// MockClient（注入 [FeedbackPanel.httpClient]）。
   http.Client get client => MockClient((request) async {
@@ -39,8 +39,8 @@ class PanelServer {
       });
 
   /// 追加一个处理器；同 key 多个响应按注册顺序弹出，最后一个常驻。
-  void on(String key, Future<http.Response> Function(http.Request) handler) {
-    (_handlers[key] ??= <Future<http.Response> Function(http.Request)>[])
+  void on(String key, Future<http.Response> Function(http.BaseRequest) handler) {
+    (_handlers[key] ??= <Future<http.Response> Function(http.BaseRequest)>[])
         .add(handler);
   }
 
@@ -55,8 +55,15 @@ class PanelServer {
       .length;
 
   /// 最近一次命中指定 `METHOD path` 的请求。
-  http.Request lastMatching(String methodPath) => requests.lastWhere(
+  http.BaseRequest lastMatching(String methodPath) => requests.lastWhere(
       (r) => '${r.method} ${Uri.parse(r.url.toString()).path}' == methodPath);
+}
+
+extension RequestBodyExtension on http.BaseRequest {
+  String get body {
+    if (this is http.Request) return (this as http.Request).body;
+    return '';
+  }
 }
 
 /// 记录写入 / 清除次数的令牌仓库：验证「失效的登录不调用令牌写入」。

@@ -110,12 +110,39 @@ export function buildScreenshotComment(meta: {
   sha256: string;
   width: number;
   height: number;
+  logs?: { filename: string; source: "auto" | "manual"; byteSize: number; sha256?: string }[];
 }): string {
-  return [
+  const parts = [
     `![反馈截图](${meta.assetUrl})`,
     "---",
     `**反馈ID**：${meta.feedbackId}`,
     `**截图摘要**：\`${meta.sha256}\` · ${meta.width}×${meta.height}`,
+  ];
+  if (meta.logs && meta.logs.length > 0) {
+    const logItems = meta.logs.map(
+      (l) => `\`${l.filename}\` (${l.source === "auto" ? "自动" : "手动"} · ${l.byteSize} 字节)`,
+    );
+    parts.push(`**附带日志**：${logItems.join("、")}`);
+  }
+  return parts.join("\n\n");
+}
+
+/** 生成日志附件评论内容（标准 Markdown 普通附件链接）。 */
+export function buildLogComment(meta: {
+  feedbackId: string;
+  logId: string;
+  filename: string;
+  assetUrl: string;
+  sha256: string;
+  byteSize: number;
+  source: "auto" | "manual";
+}): string {
+  return [
+    `📎 **日志附件**：[${meta.filename}](${meta.assetUrl})`,
+    "---",
+    `**反馈ID**：${meta.feedbackId}`,
+    `**日志ID**：${meta.logId}`,
+    `**日志摘要**：\`${meta.sha256}\` · 大小: ${meta.byteSize} 字节 · 来源: ${meta.source === "auto" ? "自动采集" : "手动附加"}`,
   ].join("\n\n");
 }
 
@@ -130,6 +157,7 @@ export function buildTaskDescription(
     pageLabel?: string;
     submittedAt: string;
     text: string;
+    logs?: { filename: string; source: "auto" | "manual"; byteSize: number; sha256?: string }[];
   },
 ): string {
   const parts: string[] = [];
@@ -153,6 +181,13 @@ export function buildTaskDescription(
     .map((l) => `> ${l}`)
     .join("\n");
   parts.push(`**用户原话**：\n\n${quoted}`);
+  if (meta.logs && meta.logs.length > 0) {
+    const logItems = meta.logs.map(
+      (l) =>
+        `- \`${l.filename}\` (${l.source === "auto" ? "自动" : "手动"} · ${l.byteSize} 字节${l.sha256 ? ` · \`${l.sha256.slice(0, 8)}\`` : ""})`,
+    );
+    parts.push(`**日志附件 (${meta.logs.length})**：\n\n${logItems.join("\n")}`);
+  }
   parts.push(`**反馈ID**：${feedbackId}`);
   return parts.join("\n\n");
 }

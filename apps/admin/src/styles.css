@@ -235,3 +235,25 @@ code {
     box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);
   }
 }
+
+/* ---------- U1-4「系统更新」 ---------- */
+.card h2 {
+  font-size: 15px;
+}
+details summary {
+  cursor: pointer;
+  font-size: 13px;
+}
+details summary:hover {
+  color: #2563eb;
+}
+.pause-banner {
+  border-color: #f59e0b;
+  background: #fffbeb;
+}
+.pause-banner strong {
+  color: #92400e;
+}
+.update-note {
+  margin: 6px 0 0;
+}

@@ -11,6 +11,30 @@
 
 web、android、ios、windows、macos、linux（平台差异经条件导入隔离）。
 
+## 依赖版本兼容（flutter_secure_storage 9 / 10 / 11）
+
+依赖约束是 **`flutter_secure_storage: '>=9.2.2 <12.0.0'`**（`pubspec.yaml`），
+组件只使用三版共有的 `read` / `write` / `delete`（`lib/src/platform_io.dart`），
+因此同一份组件代码可被固定在 9.2.2 / 10.3.1 / 11.0.0 的宿主使用；
+接口、存储键（`feedbackTokenStorageKey`）与「写入失败不回退内存/明文」的语义不变。
+
+三档隔离矩阵实测（同一份组件测试源码，每档 analyze + test 全绿）：
+
+| 固定版本 | `darwin` | `macos` | `windows` | `platform_interface` |
+| --- | --- | --- | --- | --- |
+| 9.2.2 | 无 | 3.1.3（走 `_macos`） | 3.1.2 | 1.1.2 |
+| 10.3.1 | 0.3.2（取代 `_macos`） | 不再出现 | 4.2.2 | 2.1.0 |
+| 11.0.0 | 0.4.2（取代 `_macos`） | 不再出现 | 4.2.2 | 2.1.0 |
+
+**`darwin` 取代 `_macos`、`windows` 3.x→4.x 是从 10.x 档就发生，不是 11 才发生。**
+
+平台要求分两半：**本包不抬高自己的下限**（仍是 `sdk: ^3.6.0` / `flutter: ">=3.27.0"`）；
+**使用 11 的宿主必须自行满足** Dart `>=3.8.0`、Android `minSdk 24`、`compileSdk 37`。
+放宽范围**不会自动迁移数据**，也不能从 9 直接跳到 11。
+
+📄 完整的版本矩阵、平台要求、迁移步骤与边界、验证范围与证据追溯：
+[`docs/flutter-storage-compat.md`](../../docs/flutter-storage-compat.md)（权威记录见 `VERIFICATION.md`）。
+
 ## 使用
 
 ```dart
@@ -151,6 +175,10 @@ flutter analyze
 flutter test
 ```
 
+当前实测：`flutter analyze` 无问题、`flutter test` **112/112 通过**。
+依赖三档（9.2.2 / 10.3.1 / 11.0.0）在上面的隔离矩阵里各跑一遍同一批用例
+（`bash tools/flutter-storage-matrix/run.sh`）。
+
 回归测试覆盖：像素级遮挡（敏感区不透明覆盖、周围布局、变换 AABB 多遮、
 透明遮挡色、obscureText、双实例隔离、几何失效中止、统一图片限制边界）与
 异步生命周期（先截图后开面板、A/B 交错、取消/关闭/销毁/控制器替换、
@@ -163,5 +191,9 @@ flutter test
 （`test/submit_failure_class_test.dart`：Class A 同 key 同字节 / 换图换 key、
 Class B 零重发 + 刷新 + 复制 ID；`test/token_store_scope_test.dart`：
 不同服务 / 不同 appId 键不同、读不到别家令牌）。
+
+安全存储兼容新增：`test/token_store_scope_test.dart` 补了令牌读 / 写 / 删除往返与重复删除幂等；
+`test/host_credential_coexistence_test.dart` 用 4 例证明组件的清除不越界
+（宿主模拟的音乐服务器密码与第三方令牌在清理 / 登出 / 重登 / 默认仓库下始终可读）。
 
 示例应用见仓库 `examples/flutter`（含像素遮挡演示区）。

@@ -1,5 +1,6 @@
 import { Hono } from "hono";
-import { hashPassword } from "../auth/password.ts";
+import { hashPassword, verifyPassword } from "../auth/password.ts";
+import { createRateLimiter } from "../auth/ratelimit.ts";
 import { encryptSecret } from "../crypto/secret.ts";
 import {
   type AppRow,
@@ -10,6 +11,8 @@ import {
   type FeedbackStatus,
   getAppByAppId,
   getFeedback,
+  getFeedbackLog,
+  getFeedbackLogsMeta,
   getFeedbackScreenshot,
   getFeedbackScreenshotMeta,
   getQuota,
@@ -25,11 +28,22 @@ import {
   setUserPassword,
   toAdminListItem,
   type UserRow,
+  updateAdminCredentialsInTx,
   updateApp,
   updateUser,
 } from "../db/repos.ts";
 import type { ServerConfig } from "../env.ts";
-import { type Err, err, fail, isErr, readJson, requireAdminCookie } from "../http.ts";
+import {
+  checkLimiter,
+  clearSessionCookie,
+  type Err,
+  err,
+  fail,
+  isErr,
+  readJson,
+  requireAdminCookie,
+  sessionUser,
+} from "../http.ts";
 import { parseArchiveData } from "../pipeline/archive-data.ts";
 import type { AiClient } from "../services/ai.ts";
 import type { KaneoClient } from "../services/kaneo.ts";
@@ -112,6 +126,68 @@ export function adminRoutes(deps: AdminDeps): Hono {
     await next();
   });
 
+  /** 改自己凭据的独立限流：按管理员 id 计时（不复用登录限流，避免互相影响）。 */
+  const meLimiter = createRateLimiter(10, 15 * 60 * 1000);
+
+  // ---------- 管理员设置（T2-A：只能改当前会话账号自己的用户名与密码） ----------
+
+  /**
+   * `PATCH /api/admin/me` body `{ currentPassword, username?, newPassword? }`。
+   * 目标恒为当前会话账号：不接受任何可指定他人的字段（多余字段一律忽略）。
+   * 成功返回 `{ ok: true, reauthenticate: true }` 并清除会话 Cookie；
+   * 该账号全部会话（含当前）已在事务内撤销，客户端必须重新登录。
+   */
+  routes.patch("/me", async (c) => {
+    const s = requireAdminCookie(db, c, config);
+    if (isErr(s)) return fail(c, s);
+
+    // 限流在任何写操作之前，且必须显式下发 Retry-After（checkLimiter 不代设）。
+    const limited = checkLimiter(meLimiter, s.user_id);
+    if (limited) {
+      c.header("retry-after", String((limited as Err & { retryAfter?: number }).retryAfter ?? 60));
+      return fail(c, limited);
+    }
+
+    const body = await readJson<{ currentPassword?: unknown; username?: unknown; newPassword?: unknown }>(c);
+    if (isErr(body)) return fail(c, body);
+
+    const currentPassword = typeof body.currentPassword === "string" ? body.currentPassword : "";
+    if (currentPassword === "") {
+      return fail(c, err("invalid_request", "currentPassword 必填", 400));
+    }
+
+    // 两个可选字段都以「提供空白字符串」视作未提供：新密码不去除首尾空格。
+    const usernameRaw = typeof body.username === "string" ? body.username.trim() : "";
+    const newPasswordRaw = typeof body.newPassword === "string" ? body.newPassword : "";
+    if (usernameRaw === "" && newPasswordRaw === "") {
+      return fail(c, err("invalid_request", "至少提供 username 或 newPassword 之一", 400));
+    }
+    if (usernameRaw !== "" && usernameRaw.length > 100) {
+      return fail(c, err("invalid_request", "username 须为 1..100 字符", 400));
+    }
+    if (newPasswordRaw !== "" && (newPasswordRaw.length < 8 || newPasswordRaw.length > 200)) {
+      return fail(c, err("invalid_request", "newPassword 须为 8..200 字符", 400));
+    }
+
+    const user = sessionUser(db, s);
+    if (!user) return fail(c, err("unauthorized", "需要登录", 401));
+    if (!verifyPassword(currentPassword, user.pass_hash)) {
+      return fail(c, err("invalid_current_password", "当前密码不正确", 403));
+    }
+
+    // scrypt 在事务外完成：事务内不做 CPU 密集计算。
+    const outcome = updateAdminCredentialsInTx(db, {
+      userId: user.id,
+      ...(usernameRaw !== "" ? { newUsername: usernameRaw } : {}),
+      ...(newPasswordRaw !== "" ? { newPassHash: hashPassword(newPasswordRaw) } : {}),
+    });
+    if (outcome === "not_found") return fail(c, err("unauthorized", "需要登录", 401));
+    if (outcome === "username_conflict") return fail(c, err("user_exists", "该用户名已存在", 409));
+
+    clearSessionCookie(c);
+    return c.json({ ok: true, reauthenticate: true });
+  });
+
   // ---------- 账号管理（只管理普通账号；管理员保留，不提供删除与角色修改） ----------
 
   function quotaUserView(u: UserRow) {
@@ -141,7 +217,7 @@ export function adminRoutes(deps: AdminDeps): Hono {
   /** 目标必须是可管理的普通账号（管理员不在本页管理范围）。 */
   function ordinaryUserOr404(id: string): UserRow | Err {
     const u = getUserById(db, id);
-    if (!u || u.role !== "user") return err("not_found", "账号不存在", 404);
+    if (u?.role !== "user") return err("not_found", "账号不存在", 404);
     return u;
   }
 
@@ -362,6 +438,7 @@ export function adminRoutes(deps: AdminDeps): Hono {
     }
     const screenshotMeta = getFeedbackScreenshotMeta(db, row.id);
     const submitter = row.user_id ? getUserById(db, row.user_id) : null;
+    const logsMeta = getFeedbackLogsMeta(db, row.id);
     return c.json({
       ...toAdminListItem(row),
       username: submitter?.username ?? null,
@@ -382,6 +459,16 @@ export function adminRoutes(deps: AdminDeps): Hono {
             createdAt: screenshotMeta.created_at,
           }
         : null,
+      logs: logsMeta.map((l) => ({
+        id: l.id,
+        feedbackId: l.feedback_id,
+        sortOrder: l.sort_order,
+        filename: l.filename,
+        source: l.source,
+        byteSize: l.byte_size,
+        sha256: l.sha256,
+        createdAt: l.created_at,
+      })),
     });
   });
 
@@ -398,6 +485,58 @@ export function adminRoutes(deps: AdminDeps): Hono {
     });
   });
 
+  routes.get("/feedback/:id/logs/:logId/download", (c) => {
+    const feedbackId = c.req.param("id");
+    const logId = c.req.param("logId");
+    const log = getFeedbackLog(db, feedbackId, logId);
+    if (!log) return fail(c, err("not_found", "日志附件不存在", 404));
+
+    const safeFilename = encodeURIComponent(log.filename).replace(/['()]/g, escape);
+    return new Response(log.bytes as unknown as BodyInit, {
+      status: 200,
+      headers: {
+        "content-type": "application/octet-stream",
+        "content-disposition": `attachment; filename="${log.filename}"; filename*=UTF-8''${safeFilename}`,
+        "cache-control": "no-store",
+        "content-length": String(log.byte_size),
+      },
+    });
+  });
+
+  routes.get("/feedback/:id/logs/:logId/preview", (c) => {
+    const feedbackId = c.req.param("id");
+    const logId = c.req.param("logId");
+    const log = getFeedbackLog(db, feedbackId, logId);
+    if (!log) return fail(c, err("not_found", "日志附件不存在", 404));
+
+    return new Response(log.bytes as unknown as BodyInit, {
+      status: 200,
+      headers: {
+        "content-type": "text/plain; charset=utf-8",
+        "content-disposition": "inline",
+        "cache-control": "no-store",
+        "content-length": String(log.byte_size),
+      },
+    });
+  });
+
+  routes.get("/feedback/:id/logs/:logId", (c) => {
+    const feedbackId = c.req.param("id");
+    const logId = c.req.param("logId");
+    const log = getFeedbackLog(db, feedbackId, logId);
+    if (!log) return fail(c, err("not_found", "日志附件不存在", 404));
+
+    return new Response(log.bytes as unknown as BodyInit, {
+      status: 200,
+      headers: {
+        "content-type": "text/plain; charset=utf-8",
+        "content-disposition": "inline",
+        "cache-control": "no-store",
+        "content-length": String(log.byte_size),
+      },
+    });
+  });
+
   return routes;
 }
 
@@ -410,6 +549,7 @@ const ACTION_TARGETS: Record<string, string> = {
   "force-create": "任务创建",
   retry_comment: "评论",
   replace_upload: "图片",
+  retry_log: "日志",
 };
 
 /**
@@ -422,6 +562,7 @@ const ACTION_NOTES: Record<string, string> = {
   replace_upload: "会申请新上传地址并复用原任务替换图片；旧对象与旧 key 记录保留，不自动删除远端文件。",
   recheck: "只读取远端结果并确认，不会重发任何评论或图片。",
   "force-create": "仅在确认 Kaneo 中不存在对应任务时使用，可能产生重复任务。",
+  retry_log: "针对指定日志文件重新执行上传、远端 SHA-256 摘要核对并补发评论。",
 };
 
 /**
@@ -429,18 +570,28 @@ const ACTION_NOTES: Record<string, string> = {
  * - failed → retry；
  * - needs_review → recheck 恒可用；已有 task ID 且资产已知 → retry_comment；
  *   已有 task ID 且有截图 → replace_upload（**过期/被拒绝的上传的唯一出路**，不要求资产已知）；
- *   仅当任务创建结果未知且无任何已知 task/附件状态 → force-create。
+ *   仅当任务创建结果未知且无任何已知 task/附件状态 → force-create；
+ *   已有 task ID 且含未确认日志 → retry_log。
  */
 function recoveryInfo(db: Db, row: FeedbackRow) {
   const parsed = parseArchiveData(row.archive_data_json);
-  const revision = parsed.kind === "valid" ? parsed.data.revision : 0;
-  const uploadOutcome = parsed.kind === "valid" ? (parsed.data.upload?.outcome ?? null) : null;
-  const assetKnown = parsed.kind === "valid" ? Boolean(parsed.data.asset?.url) : false;
-  const commentOutcome = parsed.kind === "valid" ? (parsed.data.comment?.outcome ?? null) : null;
+  const data = parsed.kind === "valid" ? parsed.data : null;
+  const revision = data ? data.revision : 0;
+  const uploadOutcome = data ? (data.upload?.outcome ?? null) : null;
+  const assetKnown = data ? Boolean(data.asset?.url) : false;
+  const commentOutcome = data ? (data.comment?.outcome ?? null) : null;
   const hasKnownTask = Boolean(row.kaneo_task_id);
+  const attachments = data && "attachments" in data && data.attachments ? data.attachments : {};
   const knownAttachment =
-    parsed.kind === "valid" && Boolean(parsed.data.upload || parsed.data.asset || parsed.data.comment);
+    Boolean(data) && Boolean(data?.upload || data?.asset || data?.comment || Object.keys(attachments).length > 0);
   const hasScreenshot = getFeedbackScreenshotMeta(db, row.id) !== null;
+  const logs = getFeedbackLogsMeta(db, row.id);
+  const pendingLogIds = logs
+    .filter((l) => {
+      const att = attachments[l.id];
+      return att?.comment?.outcome !== "confirmed";
+    })
+    .map((l) => l.id);
 
   const allowedActions: string[] = [];
   if (row.status === "failed") allowedActions.push("retry");
@@ -449,6 +600,7 @@ function recoveryInfo(db: Db, row: FeedbackRow) {
     if (!hasKnownTask && !knownAttachment) allowedActions.push("force-create");
     if (hasKnownTask && assetKnown) allowedActions.push("retry_comment");
     if (hasKnownTask && hasScreenshot) allowedActions.push("replace_upload");
+    if (hasKnownTask && pendingLogIds.length > 0) allowedActions.push("retry_log");
   }
   return {
     revision,
@@ -460,6 +612,7 @@ function recoveryInfo(db: Db, row: FeedbackRow) {
     allowedActions,
     actionTargets: ACTION_TARGETS,
     actionNotes: ACTION_NOTES,
+    pendingLogIds,
   };
 }
 

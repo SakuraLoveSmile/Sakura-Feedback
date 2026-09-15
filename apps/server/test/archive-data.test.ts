@@ -143,10 +143,10 @@ describe("ArchiveDataV1 严格解析", () => {
 
   it("未知版本 → unsupported；损坏 JSON → corrupt", () => {
     expect(
-      parseArchiveData('{"version":2,"revision":1,"target":{"apiBase":"http://a","projectId":"p","workspaceId":"w"}}'),
+      parseArchiveData('{"version":3,"revision":1,"target":{"apiBase":"http://a","projectId":"p","workspaceId":"w"}}'),
     ).toEqual({
       kind: "unsupported",
-      version: 2,
+      version: 3,
     });
     expect(parseArchiveData("{not json").kind).toBe("corrupt");
     expect(parseArchiveData('{"version":"1"}').kind).toBe("corrupt");
@@ -169,7 +169,7 @@ describe("ArchiveDataV1 序列化与 revision 持久化", () => {
     expect(parsed.data.revision).toBe(4);
     expect(parsed.data.upload?.expiresAt).toBeNull();
     // 键序固定，version/revision 在前
-    expect(json.startsWith('{"version":1,"revision":4,"target":{"apiBase"')).toBe(true);
+    expect(json.startsWith('{"version":2,"revision":4,"target":{"apiBase"')).toBe(true);
   });
 
   it("revision 单调递增；并发基准过期时拒绝覆盖", () => {
@@ -191,14 +191,14 @@ describe("ArchiveDataV1 序列化与 revision 持久化", () => {
     updateFeedback(db, id, { archive_data_json: "{broken" });
     expect(() => saveArchiveData(db, id, loadArchiveData(db, id), validNext())).toThrow(ArchiveVersionConflictError);
     updateFeedback(db, id, {
-      archive_data_json: '{"version":2,"revision":1,"target":{"apiBase":"http://a","projectId":"p","workspaceId":"w"}}',
+      archive_data_json: '{"version":3,"revision":1,"target":{"apiBase":"http://a","projectId":"p","workspaceId":"w"}}',
     });
     expect(() => saveArchiveData(db, id, loadArchiveData(db, id), validNext())).toThrow(ArchiveVersionConflictError);
     // legacy 之上允许首写（单记录迁移，非批量改写）
     updateFeedback(db, id, { archive_data_json: '{"assetUrl":"http://a/b.png"}' });
     const saved = saveArchiveData(db, id, loadArchiveData(db, id), validNext());
     expect(saved.revision).toBe(1);
-    expect(getFeedback(db, id)?.archive_data_json).toContain('"version":1');
+    expect(getFeedback(db, id)?.archive_data_json).toContain('"version":2');
   });
 
   it("SQLite 写入失败 → ArchivePersistenceError", () => {
@@ -314,7 +314,7 @@ describe("worker 集成：目标固定、凭证落盘门禁与损坏数据停止
     const parsed = parseArchiveData(row?.archive_data_json ?? null);
     expect(parsed.kind).toBe("valid");
     if (parsed.kind !== "valid") return;
-    expect(parsed.data.version).toBe(1);
+    expect(parsed.data.version).toBe(2);
     expect(parsed.data.revision).toBeGreaterThanOrEqual(1);
     expect(parsed.data.target).toEqual({ apiBase: "http://kaneo.test/api", projectId: "proj-1", workspaceId: "ws-1" });
     expect(parsed.data.upload?.outcome).toBe("confirmed");
@@ -365,7 +365,7 @@ describe("worker 集成：目标固定、凭证落盘门禁与损坏数据停止
       status: "received",
       archive_stage: "task_pending",
       archive_data_json: JSON.stringify({
-        version: 2,
+        version: 3,
         revision: 1,
         target: { apiBase: "http://kaneo.test/api", projectId: "proj-1", workspaceId: "ws-1" },
       }),
@@ -374,7 +374,7 @@ describe("worker 集成：目标固定、凭证落盘门禁与损坏数据停止
     await h.feedbackApp.worker.idle();
     row = getFeedback(h.feedbackApp.db, r.data.feedbackId);
     expect(row?.status).toBe("needs_review");
-    expect(row?.error_summary).toContain("v2 不受支持");
+    expect(row?.error_summary).toContain("v3 不受支持");
     expect(h.kaneo.created.length).toBe(1);
     expect(h.kaneo.uploads.length).toBe(0);
   });

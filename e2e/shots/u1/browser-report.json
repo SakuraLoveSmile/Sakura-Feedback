@@ -1,0 +1,350 @@
+{
+  "generatedAt": "2026-09-14T15:50:36",
+  "total": 39,
+  "passed": 39,
+  "failed": [],
+  "assertions": [
+    {
+      "name": "[browser] 探针服务可用",
+      "ok": true,
+      "detail": "200"
+    },
+    {
+      "name": "[browser] FEEDBACK_UPDATER_URL 被服务端采纳",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[browser] 标签页显示当前版本",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[browser] 当前版本显示为真实包版本 0.3.0（回归：曾显示 0.0.0-unknown）",
+      "ok": true,
+      "detail": "Feedback 管理\n退出登录\n反馈\n软件配置\n连接配置\n账号\n会话\n管理员设置\n系统更新\n当前版本\n0.3.0（更新执行器协议 v1）\n更新执行器\n已接入 http://127.0.0.1:58044（控制目录已挂载）\n自动检查\n已关闭自动检查（仅手动）\n版本状态\n检查更新\n更新到最新稳定版\n\n尚未检查过。点击「检"
+    },
+    {
+      "name": "[browser] 显示更新执行器「已接入」",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[browser] 尚未检查过时给出引导",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[browser] 未检查前不允许提交更新",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[browser] 检查成功提示",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[browser] 展示可更新版本号",
+      "ok": true,
+      "detail": "Feedback 管理\n退出登录\n反馈\n软件配置\n连接配置\n账号\n会话\n管理员设置\n系统更新\n\n已获取最新版本信息\n\n当前版本\n0.3.0（更新执行器协议 v1）\n更新执行器\n已接入 http://127.0.0.1:58044（控制目录已挂载）\n自动检查\n已关闭自动检查（仅手动）\n版本状态\n检查更新\n更新到最新稳定版\n最新稳定版\n0.4.0 可更新\n发布时间\n2026/9/14 08:00:00"
+    },
+    {
+      "name": "[browser] 展示「可更新」标记",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[browser] 展示协议兼容行",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[browser] 桩收到真实令牌",
+      "ok": true,
+      "detail": "token_ok=True"
+    },
+    {
+      "name": "[browser] 检查后可提交更新",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[browser] 提示已受理并给出任务 ID",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[browser] 进度卡显示任务 ID",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[browser] operationId 写入 localStorage",
+      "ok": true,
+      "detail": "stored='op-browser-63c906e4'"
+    },
+    {
+      "name": "[browser] 提交体只含 requestId/version/digest",
+      "ok": true,
+      "detail": "[{\"method\": \"POST\", \"path\": \"/tasks\", \"body\": \"{\\\"requestId\\\":\\\"web-fc3dd278-42cd-471f-bbb8-e584a6f56b42\\\",\\\"version\\\":\\\"0.4.0\\\",\\\"digest\\\":\\\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\"}\"}]"
+    },
+    {
+      "name": "[browser] 进度阶段实时更新",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[browser] 运行中显示「更新进行中」",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[browser] 说明了暂停写入语义",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[browser] 重启期间显示「正在恢复连接…」",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[browser] 明确说明「不算更新失败」",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[browser] 未把不可达判为任务失败",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[browser] 未清空已跟踪的任务 ID",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[browser] 恢复后不再显示恢复连接",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[browser] 恢复后继续显示同一任务",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[browser] 刷新后自动恢复同一任务",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[browser] 刷新后仍显示阶段进度",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[browser] 暂停横幅出现",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[browser] 横幅显示执行器写入的阶段",
+      "ok": true,
+      "detail": "Feedback 管理\n退出登录\n反馈\n软件配置\n连接配置\n账号\n会话\n管理员设置\n系统更新\n业务写入已暂停\n\n新版已启动，等待核验，写入仍暂停（当前阶段：⑤核验新版）\n\n开始于 2026/9/14 08:01:00；更新完成后本服务会自动恢复写入，无需人工操作。\n\n当前版本\n0.3.0（更新执行器协议 v1）\n更新执行器\n已接入 http://127.0.0.1:58044（控制目录已挂载）\n自"
+    },
+    {
+      "name": "[browser] 横幅显示阶段说明",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[browser] 终态显示「更新成功」",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[browser] 不可达时提示检查失败",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[browser] 明确不影响正在运行的服务",
+      "ok": true,
+      "detail": "Feedback 管理\n退出登录\n反馈\n软件配置\n连接配置\n账号\n会话\n管理员设置\n系统更新\n\n检查失败（不影响正在运行的服务，可稍后重试）\n\n当前版本\n0.3.0（更新执行器协议 v1）\n更新执行器\n已接入 http://127.0.0.1:58044（控制目录已挂载）\n自动检查\n已关闭自动检查（仅手动）\n版本状态\n检查更新\n更新到最新稳定版\n\n检查失败：manifest_missing（upd"
+    },
+    {
+      "name": "[browser] 停止跟踪后不再显示任务卡",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[browser] 停止跟踪清空 localStorage",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[browser] 手机视口显示进度与任务 ID",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[browser] 手机视口无横向溢出",
+      "ok": true,
+      "detail": "scrollWidth=390 innerWidth=390"
+    },
+    {
+      "name": "[browser] 服务端日志不含 updater 令牌明文",
+      "ok": true,
+      "detail": ""
+    }
+  ],
+  "defects": [
+    {
+      "id": "U1-D1-version-unknown",
+      "status": "fixed",
+      "fixedIn": "t11（apps/server/src/routes/system-update.ts 候选包路径；apps/server/src/env.ts 规范名 + 别名）",
+      "originalObservation": "t10（修复前，~15:00）：current.version=\"0.0.0-unknown\"",
+      "discoveredAt": "t10 验证窗口内（~2026-09-14T15:00，修复前源码）",
+      "reverifiedAt": "2026-09-14T15:50:54",
+      "reverifiedBy": "t12 复验（verifier，用 t10 相同的复现步骤）",
+      "reverifyCommands": [
+        "python3 e2e/reverify_u1_defects.py",
+        "pnpm --filter @feedback/server test",
+        "pnpm -r build",
+        "python3 e2e/run_u1_admin_browser.py"
+      ],
+      "reverifyObserved": [
+        {
+          "about": "defect1",
+          "observed": [
+            {
+              "current.version": "0.3.0"
+            }
+          ]
+        },
+        {
+          "about": "defect1-layout",
+          "observed": [
+            "-rw-r--r--    1 root     root         40067 Sep 14 07:12 /app/server/dist/routes/system-update.js\n-rw-r--r--    1 root     root           623 Sep 14 07:12 /app/server/package.json"
+          ]
+        },
+        {
+          "about": "defect2",
+          "observed": [
+            {
+              "config.updaterBaseUrl": "http://127.0.0.1:57743",
+              "updateConfigured": true
+            }
+          ]
+        },
+        {
+          "about": "regression-default",
+          "observed": [
+            {
+              "config.updaterBaseUrl": "http://updater:8790"
+            }
+          ]
+        },
+        {
+          "about": "regression-alias",
+          "observed": [
+            {
+              "config.updaterBaseUrl": "http://127.0.0.1:57743"
+            }
+          ]
+        },
+        {
+          "about": "regression-tsx",
+          "observed": [
+            {
+              "SERVER_VERSION": "0.3.0"
+            }
+          ]
+        }
+      ],
+      "reverifyReport": "e2e/shots/u1/reverify-defects.json",
+      "reverifyResult": "10/10 断言通过（exit 0）",
+      "serverTestEvidence": "pnpm --filter @feedback/server test → 12 文件 206 用例全过（system-update.test.ts 45 tests，t11 新增 12 个版本/环境变量用例）",
+      "browserEvidence": "python3 e2e/run_u1_admin_browser.py → 39/39 断言（含「当前版本显示为真实包版本 0.3.0（回归：曾显示 0.0.0-unknown）」与「FEEDBACK_UPDATER_URL 被服务端采纳」）"
+    },
+    {
+      "id": "U1-D2-updater-url-ignored",
+      "status": "fixed",
+      "fixedIn": "t11（apps/server/src/routes/system-update.ts 候选包路径；apps/server/src/env.ts 规范名 + 别名）",
+      "originalObservation": "t10（修复前，~15:00）：只注入 FEEDBACK_UPDATER_URL 时 config.updaterBaseUrl=\"http://updater:8790\"（被忽略）",
+      "discoveredAt": "t10 验证窗口内（~2026-09-14T15:00，修复前源码）",
+      "reverifiedAt": "2026-09-14T15:50:54",
+      "reverifiedBy": "t12 复验（verifier，用 t10 相同的复现步骤）",
+      "reverifyCommands": [
+        "python3 e2e/reverify_u1_defects.py",
+        "pnpm --filter @feedback/server test",
+        "pnpm -r build",
+        "python3 e2e/run_u1_admin_browser.py"
+      ],
+      "reverifyObserved": [
+        {
+          "about": "defect1",
+          "observed": [
+            {
+              "current.version": "0.3.0"
+            }
+          ]
+        },
+        {
+          "about": "defect1-layout",
+          "observed": [
+            "-rw-r--r--    1 root     root         40067 Sep 14 07:12 /app/server/dist/routes/system-update.js\n-rw-r--r--    1 root     root           623 Sep 14 07:12 /app/server/package.json"
+          ]
+        },
+        {
+          "about": "defect2",
+          "observed": [
+            {
+              "config.updaterBaseUrl": "http://127.0.0.1:57743",
+              "updateConfigured": true
+            }
+          ]
+        },
+        {
+          "about": "regression-default",
+          "observed": [
+            {
+              "config.updaterBaseUrl": "http://updater:8790"
+            }
+          ]
+        },
+        {
+          "about": "regression-alias",
+          "observed": [
+            {
+              "config.updaterBaseUrl": "http://127.0.0.1:57743"
+            }
+          ]
+        },
+        {
+          "about": "regression-tsx",
+          "observed": [
+            {
+              "SERVER_VERSION": "0.3.0"
+            }
+          ]
+        }
+      ],
+      "reverifyReport": "e2e/shots/u1/reverify-defects.json",
+      "reverifyResult": "10/10 断言通过（exit 0）",
+      "serverTestEvidence": "pnpm --filter @feedback/server test → 12 文件 206 用例全过（system-update.test.ts 45 tests，t11 新增 12 个版本/环境变量用例）",
+      "browserEvidence": "python3 e2e/run_u1_admin_browser.py → 39/39 断言（含「当前版本显示为真实包版本 0.3.0（回归：曾显示 0.0.0-unknown）」与「FEEDBACK_UPDATER_URL 被服务端采纳」）"
+    }
+  ],
+  "updaterRequests": [
+    {
+      "method": "POST",
+      "path": "/tasks",
+      "body": "{\"requestId\":\"web-fc3dd278-42cd-471f-bbb8-e584a6f56b42\",\"version\":\"0.4.0\",\"digest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+    }
+  ],
+  "serverLog": "/var/folders/3f/d270m3fx56b4ff4x8l0xcn8m0000gn/T/u1v-browser-server-58045.log",
+  "defectsNote": "本报告由修复后的源码运行产生，因此运行期 defects 为空。以下两条是 t10 在修复前源码上发现、t11 修复、t12 用原始复现步骤复验通过的历史缺陷（原始观测与发现时间保留）。"
+}

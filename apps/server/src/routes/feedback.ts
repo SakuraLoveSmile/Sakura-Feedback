@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { RateLimiter } from "../auth/ratelimit.ts";
-import type { Db, FeedbackStatus, SessionRow } from "../db/repos.ts";
+import type { Db, FeedbackStatus, LogInput, SessionRow } from "../db/repos.ts";
 import { contentHash, getAppByAppId, getFeedback, getFeedbackScreenshot, submitFeedbackAtomic } from "../db/repos.ts";
 import type { ServerConfig } from "../env.ts";
 import {
@@ -16,10 +16,11 @@ import {
 } from "../http.ts";
 import type { Worker, WorkerOpResult } from "../pipeline/worker.ts";
 import { ImageValidationError, type SanitizedImage, validateAndSanitizePng } from "../services/image.ts";
+import { LogValidationError, type RawLogPart, validateAllLogs } from "../services/log-validator.ts";
 import { publicUser } from "./auth.ts";
 
 const MAX_TEXT_CODEPOINTS = 10_000;
-const MAX_MULTIPART_BYTES = 6 * 1024 * 1024; // 6MiB
+const MAX_MULTIPART_BYTES = 10 * 1024 * 1024; // 10MiB
 
 export interface FeedbackDeps {
   db: Db;
@@ -75,11 +76,13 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
     let contextInput: unknown = null;
     let captureInput: unknown = null;
     let screenshotBuffer: Buffer | null = null;
+    const rawLogParts: RawLogPart[] = [];
+    let logsDescRaw: unknown;
 
     if (contentType.includes("multipart/form-data")) {
       const len = Number(c.req.header("content-length") ?? 0);
       if (len > MAX_MULTIPART_BYTES) {
-        return fail(c, err("too_large", "请求体超过 6MiB 上限", 413));
+        return fail(c, err("too_large", "请求体超过 10MiB 上限", 413));
       }
 
       const reader = c.req.raw.body?.getReader();
@@ -91,7 +94,7 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
         if (done) break;
         totalBytes += value.byteLength;
         if (totalBytes > MAX_MULTIPART_BYTES) {
-          return fail(c, err("too_large", "请求体超过 6MiB 上限", 413));
+          return fail(c, err("too_large", "请求体超过 10MiB 上限", 413));
         }
         chunks.push(value);
       }
@@ -124,6 +127,7 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
       text = typeof metaParsed.text === "string" ? metaParsed.text : "";
       contextInput = metaParsed.context;
       captureInput = metaParsed.capture;
+      logsDescRaw = metaParsed.logs;
 
       const fileField = formData.get("screenshot");
       if (fileField && typeof fileField === "object" && "arrayBuffer" in fileField) {
@@ -132,14 +136,27 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
           screenshotBuffer = Buffer.from(ab);
         }
       }
+
+      const logEntries = formData.getAll("logs");
+      for (const entry of logEntries) {
+        if (entry && typeof entry === "object" && "arrayBuffer" in entry) {
+          const ab = await (entry as Blob).arrayBuffer();
+          const filename = (entry as { name?: string }).name;
+          rawLogParts.push({ bytes: Buffer.from(ab), filename });
+        }
+      }
     } else {
       const body = await readJson<{
         idempotencyKey?: unknown;
         appId?: unknown;
         text?: unknown;
         context?: unknown;
+        logs?: unknown;
       }>(c);
       if (isErr(body)) return fail(c, body);
+      if (body.logs !== undefined) {
+        return fail(c, err("invalid_request", "日志附件必须通过 multipart 表单上传", 400));
+      }
 
       idempotencyKey = typeof body.idempotencyKey === "string" ? body.idempotencyKey.trim() : "";
       appId = typeof body.appId === "string" ? body.appId.trim() : "";
@@ -222,6 +239,16 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
       }
     }
 
+    let validatedLogs: LogInput[] = [];
+    try {
+      validatedLogs = validateAllLogs(rawLogParts, logsDescRaw);
+    } catch (errObj) {
+      if (errObj instanceof LogValidationError) {
+        return fail(c, err(errObj.code, errObj.message, errObj.status));
+      }
+      return fail(c, err("invalid_log", (errObj as Error).message, 400));
+    }
+
     const app = getAppByAppId(db, appId);
     if (!app) return fail(c, err("unknown_app", "appId 未在服务端配置", 404));
 
@@ -230,6 +257,7 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
       text,
       context,
       sanitizedImage ? { sha256: sanitizedImage.sha256, releasePoint: capture?.releasePoint } : null,
+      validatedLogs.length > 0 ? validatedLogs : null,
     );
 
     const outcome = submitFeedbackAtomic(
@@ -253,6 +281,7 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
             captureJson: capture ? JSON.stringify(capture) : null,
           }
         : null,
+      validatedLogs.length > 0 ? validatedLogs : null,
       deps.now,
     );
 
@@ -414,7 +443,7 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
   routes.post("/:id/recover", async (c) => {
     const g = cookieGuard(c);
     if (g instanceof Response) return g;
-    const body = await readJson<{ action?: unknown; expectedRevision?: unknown }>(c);
+    const body = await readJson<{ action?: unknown; expectedRevision?: unknown; logId?: unknown }>(c);
     if (isErr(body)) return fail(c, body);
     const id = c.req.param("id");
     const rev = parseExpectedRevision(body.expectedRevision);
@@ -428,8 +457,13 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
         r = await worker.recoverRetryComment(id, rev);
       } else if (body.action === "replace_upload") {
         r = await worker.recoverReplaceUpload(id, rev);
+      } else if (body.action === "retry_log") {
+        if (typeof body.logId !== "string" || !body.logId) {
+          return fail(c, err("invalid_request", "retry_log 操作必须携带 logId", 400));
+        }
+        r = await worker.recoverRetryLog(id, rev, body.logId);
       } else {
-        return fail(c, err("invalid_request", 'action 必须为 "retry_comment" 或 "replace_upload"', 400));
+        return fail(c, err("invalid_request", 'action 必须为 "retry_comment"、"replace_upload" 或 "retry_log"', 400));
       }
     } catch (errObj) {
       return fail(c, err("recover_failed", `恢复操作失败：${(errObj as Error).message.slice(0, 200)}`, 502));

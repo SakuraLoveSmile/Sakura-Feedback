@@ -96,4 +96,36 @@ void main() {
       expect(await createDefaultTokenStore(configA()).read(), 'token-default-a');
     });
   });
+
+  // 插件 9/10/11 三版共有的 API 契约：组件只用 read / write / delete，
+  // 且删除必须是真的移除（而不是写空值），重复删除也不能抛异常。
+  // 这一段由 tools/flutter-storage-matrix 在三档下逐档复跑。
+  group('插件 API 契约：read / write / delete（三版共有）', () {
+    test('读/写/删除往返：写入后可读、删除后不可读', () async {
+      final store = SecureFeedbackTokenStore(config: configA());
+      expect(await store.read(), isNull, reason: '未写入时必须返回 null');
+
+      await store.write('token-roundtrip');
+      expect(await store.read(), 'token-roundtrip');
+      expect(backend[store.storageKey], 'token-roundtrip',
+          reason: '令牌必须落在派生键上');
+
+      await store.clear();
+      expect(await store.read(), isNull, reason: '删除后不得再读到');
+      expect(backend.containsKey(store.storageKey), isFalse,
+          reason: '删除必须是移除该键，而不是写入空值');
+    });
+
+    test('删除不存在的键、重复删除都幂等（登出 / 401 清理可重复调用）', () async {
+      final store = SecureFeedbackTokenStore(config: configA());
+
+      await expectLater(store.clear(), completes); // 从未写入过
+      await store.write('token-once');
+      await store.clear();
+      await expectLater(store.clear(), completes); // 重复删除
+
+      expect(await store.read(), isNull);
+      expect(backend, isEmpty);
+    });
+  });
 }

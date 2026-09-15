@@ -1,0 +1,132 @@
+{
+  "generatedAt": "2026-09-14T15:49:30",
+  "purpose": "复验 t10 发现的两条 U1 缺陷（t11 修复）是否真实生效；用 t10 的原始复现步骤",
+  "image": "u1v-feedback:0.3.0",
+  "imageId": "sha256:190671d778e5204d5d04d48f63eb51c094cc3578701c9d621123be3293de9470",
+  "serverPackageVersion": "0.3.0",
+  "defects": [
+    {
+      "id": "U1-D1-version-unknown",
+      "status": "fixed",
+      "originalObservation": "t10（修复前，~15:00）：current.version=\"0.0.0-unknown\"",
+      "reverifiedAt": "2026-09-14T15:49:30",
+      "reverifyEvidence": "e2e/shots/u1/reverify-defects.json（step=defect1）"
+    },
+    {
+      "id": "U1-D2-updater-url-ignored",
+      "status": "fixed",
+      "originalObservation": "t10（修复前，~15:00）：只注入 FEEDBACK_UPDATER_URL 时 config.updaterBaseUrl=\"http://updater:8790\"（被忽略）",
+      "reverifiedAt": "2026-09-14T15:49:30",
+      "reverifyEvidence": "e2e/shots/u1/reverify-defects.json（step=defect2）"
+    }
+  ],
+  "total": 10,
+  "passed": 10,
+  "failed": [],
+  "assertions": [
+    {
+      "name": "[build] docker build exit 0",
+      "ok": true,
+      "detail": "\n#25 exporting layers done\n#25 writing image sha256:190671d778e5204d5d04d48f63eb51c094cc3578701c9d621123be3293de9470 done\n#25 naming to docker.io/library/u1v-feedback:0.3.0 done\n#25 DONE 0.0s\n\nView build details: docker-desktop://dashboard/build/desktop-linux/desktop-linux/xbgslhndnb1v7ly89wqc34aod\n"
+    },
+    {
+      "name": "[d1] 后台状态接口 200",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "name": "[d1] current.version == apps/server/package.json version（0.3.0）",
+      "ok": true,
+      "detail": "got '0.3.0'"
+    },
+    {
+      "name": "[d1] current.version 不再是 0.0.0-unknown",
+      "ok": true,
+      "detail": "got '0.3.0'"
+    },
+    {
+      "name": "[d2] 后台状态接口 200",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "name": "[d2] updaterBaseUrl == 注入的 stub 地址（采纳，非默认值）",
+      "ok": true,
+      "detail": "got 'http://127.0.0.1:57743'"
+    },
+    {
+      "name": "[d2] updaterBaseUrl 不是默认 http://updater:8790",
+      "ok": true,
+      "detail": "got 'http://127.0.0.1:57743'"
+    },
+    {
+      "name": "[r1] 缺省仍回退默认 http://updater:8790",
+      "ok": true,
+      "detail": "got 'http://updater:8790'"
+    },
+    {
+      "name": "[r2] 旧别名仍被采纳（兼容性保留）",
+      "ok": true,
+      "detail": "got 'http://127.0.0.1:57743'"
+    },
+    {
+      "name": "[r3] tsx 源码布局下版本读取正确",
+      "ok": true,
+      "detail": "exit=0 value='0.3.0'"
+    }
+  ],
+  "observations": [
+    {
+      "step": "build",
+      "image": "u1v-feedback:0.3.0",
+      "imageId": "sha256:190671d778e5204d5d04d48f63eb51c094cc3578701c9d621123be3293de9470",
+      "labels": {
+        "org.opencontainers.image.revision": "cd79673768d93a23facb8ee370fe24ee2c2323b2",
+        "org.opencontainers.image.version": "0.3.0"
+      },
+      "commit": "cd79673768d93a23facb8ee370fe24ee2c2323b2"
+    },
+    {
+      "step": "defect1",
+      "command": "docker run -d --name u1v-reverify-d1 -p 127.0.0.1:57774:8787 -v u1v-reverify-d1-data:/data u1v-feedback:0.3.0 → 管理员登录 → GET /api/admin/system/update",
+      "observed": {
+        "current.version": "0.3.0"
+      },
+      "expected": "0.3.0"
+    },
+    {
+      "step": "defect1-layout",
+      "observed": "-rw-r--r--    1 root     root         40067 Sep 14 07:12 /app/server/dist/routes/system-update.js\n-rw-r--r--    1 root     root           623 Sep 14 07:12 /app/server/package.json"
+    },
+    {
+      "step": "defect2",
+      "command": "docker run -d … -e FEEDBACK_UPDATER_URL=http://127.0.0.1:57743 u1v-feedback:0.3.0 → 管理员登录 → GET /api/admin/system/update",
+      "observed": {
+        "config.updaterBaseUrl": "http://127.0.0.1:57743",
+        "updateConfigured": true
+      },
+      "expected": "http://127.0.0.1:57743"
+    },
+    {
+      "step": "regression-default",
+      "observed": {
+        "config.updaterBaseUrl": "http://updater:8790"
+      },
+      "expected": "http://updater:8790"
+    },
+    {
+      "step": "regression-alias",
+      "observed": {
+        "config.updaterBaseUrl": "http://127.0.0.1:57743"
+      },
+      "expected": "http://127.0.0.1:57743"
+    },
+    {
+      "step": "regression-tsx",
+      "command": "tsx -e 'import { SERVER_VERSION } …'",
+      "observed": {
+        "SERVER_VERSION": "0.3.0"
+      }
+    }
+  ]
+}

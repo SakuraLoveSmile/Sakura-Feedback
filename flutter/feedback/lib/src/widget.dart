@@ -9,7 +9,8 @@ import 'package:flutter/rendering.dart'
 import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:http/http.dart' as http;
 
-import 'api_client.dart' show FeedbackCaptureInfo;
+import 'api_client.dart'
+    show FeedbackCaptureInfo, FeedbackFilePicker, FeedbackLogProvider;
 import 'capture_mask.dart';
 import 'config.dart';
 import 'controller.dart';
@@ -88,6 +89,8 @@ class FeedbackWidget extends StatefulWidget {
     required this.child,
     required this.config,
     this.controller,
+    this.logProvider,
+    this.filePicker,
     @visibleForTesting this.httpClient,
     @visibleForTesting this.tokenStore,
   });
@@ -100,6 +103,12 @@ class FeedbackWidget extends StatefulWidget {
 
   /// 主动呼出接口（`open()` / `close()` / `captureAndOpen()`）。
   final FeedbackController? controller;
+
+  /// 自动日志采集提供者（可选，优先于 config.logProvider）。
+  final FeedbackLogProvider? logProvider;
+
+  /// 手动日志文件选择器（可选，优先于 config.filePicker）。
+  final FeedbackFilePicker? filePicker;
 
   /// 测试注入的 HTTP 客户端。
   @visibleForTesting
@@ -516,7 +525,8 @@ class _FeedbackWidgetState extends State<FeedbackWidget> {
   /// 照常捕获。`hasDraft` 按去空白后的正文判定。
   bool _panelHasDraftContent() {
     final FeedbackPanelState? panel = _panelKey.currentState;
-    return panel != null && (panel.hasDraft || panel.hasScreenshot);
+    return panel != null &&
+        (panel.hasDraft || panel.hasScreenshot || panel.hasLogs);
   }
 
   /// 先截图后开面板：保持宿主当前布局等待 paint → 捕获宿主边界完成遮挡
@@ -818,6 +828,8 @@ class _FeedbackWidgetState extends State<FeedbackWidget> {
           visible: visible,
           onRequestClose: _close,
           onRetakeScreenshot: _retakeScreenshot,
+          logProvider: widget.logProvider,
+          filePicker: widget.filePicker,
           httpClient: widget.httpClient,
           tokenStore: widget.tokenStore,
         ),

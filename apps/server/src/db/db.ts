@@ -87,6 +87,20 @@ CREATE TABLE IF NOT EXISTS feedback_screenshots (
   capture_json  TEXT,
   created_at    TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS feedback_logs (
+  id           TEXT PRIMARY KEY,
+  feedback_id  TEXT NOT NULL REFERENCES feedbacks(id) ON DELETE CASCADE,
+  sort_order   INTEGER NOT NULL,
+  filename     TEXT NOT NULL,
+  source       TEXT NOT NULL CHECK (source IN ('auto','manual')),
+  bytes        BLOB NOT NULL,
+  byte_size    INTEGER NOT NULL,
+  sha256       TEXT NOT NULL,
+  created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_logs_feedback ON feedback_logs(feedback_id, sort_order);
+
 `;
 
 function columns(db: DatabaseSync, table: string): string[] {
@@ -154,6 +168,89 @@ export function migrate(db: DatabaseSync): void {
       db.exec("UPDATE feedbacks SET user_id = (SELECT id FROM users ORDER BY created_at LIMIT 1) WHERE user_id = ''");
       db.exec("PRAGMA user_version = 3;");
       db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
+  }
+
+  if (v < 4) {
+    // 附件日志：feedback_logs 表与索引。
+    // 迁移在事务内完成：任一步失败即回滚，版本号不前进。
+    db.exec("BEGIN");
+    try {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS feedback_logs (
+          id           TEXT PRIMARY KEY,
+          feedback_id  TEXT NOT NULL REFERENCES feedbacks(id) ON DELETE CASCADE,
+          sort_order   INTEGER NOT NULL,
+          filename     TEXT NOT NULL,
+          source       TEXT NOT NULL CHECK (source IN ('auto','manual')),
+          bytes        BLOB NOT NULL,
+          byte_size    INTEGER NOT NULL,
+          sha256       TEXT NOT NULL,
+          created_at   TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_feedback_logs_feedback ON feedback_logs(feedback_id, sort_order);
+      `);
+      db.exec("PRAGMA user_version = 4;");
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
+  }
+
+  if (v < 5) {
+    // 迁移 5（L3 / U1）：修正历史误标记录。
+    // 将“含日志但无完整日志归档证据”的 archived 记录转为 needs_review，
+    // 保留任务 ID、文件和旧恢复数据，不自动向 Kaneo 重发。
+    db.exec("BEGIN");
+    try {
+      const candidates = db
+        .prepare(
+          "SELECT id, archive_data_json FROM feedbacks WHERE status = 'archived' AND id IN (SELECT DISTINCT feedback_id FROM feedback_logs)",
+        )
+        .all() as { id: string; archive_data_json: string | null }[];
+
+      let affected = 0;
+      const stmt = db.prepare(
+        "UPDATE feedbacks SET status = 'needs_review', error_summary = ?, last_error = ? WHERE id = ?",
+      );
+      for (const row of candidates) {
+        let fullyArchived = false;
+        if (row.archive_data_json) {
+          try {
+            const parsed = JSON.parse(row.archive_data_json);
+            if (parsed && (parsed.version === 2 || parsed.attachments) && parsed.attachments) {
+              const logs = db.prepare("SELECT id FROM feedback_logs WHERE feedback_id = ?").all(row.id) as {
+                id: string;
+              }[];
+              fullyArchived =
+                logs.length > 0 &&
+                logs.every((l) => {
+                  const att = parsed.attachments[l.id];
+                  return att?.asset?.url && att.comment?.outcome === "confirmed";
+                });
+            }
+          } catch {
+            fullyArchived = false;
+          }
+        }
+        if (!fullyArchived) {
+          stmt.run(
+            "历史记录误标归档：含日志附件但缺少完整日志归档证据，待核对后补传",
+            "migration_v5: 日志附件未完成归档，已转待核对",
+            row.id,
+          );
+          affected++;
+        }
+      }
+      db.exec("PRAGMA user_version = 5;");
+      db.exec("COMMIT");
+      if (affected > 0) {
+        console.info(`[migration_v5] 已修正 ${affected} 条未归档日志的历史误标记录为 needs_review`);
+      }
     } catch (err) {
       db.exec("ROLLBACK");
       throw err;

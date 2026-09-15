@@ -37,13 +37,20 @@ export function makeProcessed(title = "整理后的标题"): ProcessedFeedback {
 export function makeMockAi(behavior: MockAiBehavior = {}): AiClient & {
   calls: number;
   lastImage: Parameters<AiClient["organize"]>[1];
+  lastLogs: Parameters<AiClient["organize"]>[2];
 } {
   const outcomes = behavior.outcomes ?? ["ok"];
   const ai = {
     calls: 0,
     lastImage: null as Parameters<AiClient["organize"]>[1],
-    async organize(_text: string, image?: Parameters<AiClient["organize"]>[1]): Promise<ProcessedFeedback> {
+    lastLogs: null as Parameters<AiClient["organize"]>[2],
+    async organize(
+      _text: string,
+      image?: Parameters<AiClient["organize"]>[1],
+      logs?: Parameters<AiClient["organize"]>[2],
+    ): Promise<ProcessedFeedback> {
       ai.lastImage = image ?? null;
+      ai.lastLogs = logs ?? null;
       const outcome = outcomes[Math.min(ai.calls, outcomes.length - 1)] ?? "ok";
       ai.calls++;
       switch (outcome) {
@@ -87,6 +94,7 @@ export interface MockKaneo extends KaneoClient {
   comments: Array<{ taskId: string; content: string }>;
   uploads: Array<{ taskId: string; bytes: Buffer | Uint8Array }>;
   finalizes: Array<{ taskId: string; key: string }>;
+  assetUrlToBytes: Map<string, Buffer | Uint8Array>;
   /** 每 task 的预签名申请序号（生成唯一 key/地址）。 */
   presignSeq: Map<string, number>;
   /** findByFeedbackId 搜索调用次数（断言“优先已有 task ID 时不搜索”）。 */
@@ -201,16 +209,18 @@ export function makeMockKaneo(opts: MockKaneoOptions = {}): MockKaneo {
           }
         : null;
     },
-    async createImageUpload(taskId, _input) {
+    assetUrlToBytes: new Map<string, Buffer | Uint8Array>(),
+    async createImageUpload(taskId, input) {
       countWrite();
       // 同一任务多次申请预签名时生成不同 key/地址（用于“过期换新 key”恢复断言）
       const seq = (mock.presignSeq.get(taskId) ?? 0) + 1;
       mock.presignSeq.set(taskId, seq);
       const suffix = seq === 1 ? "" : `-${seq}`;
+      const namePart = input?.filename && input.filename !== "screenshot.png" ? `-${input.filename}` : "";
       return {
-        key: `key-${taskId}${suffix}`,
-        uploadUrl: `http://kaneo.test/upload/${taskId}${suffix}`,
-        headers: { "content-type": "image/png" },
+        key: `key-${taskId}${namePart}${suffix}`,
+        uploadUrl: `http://kaneo.test/upload/${taskId}${namePart}${suffix}`,
+        headers: { "content-type": input?.contentType ?? "image/png" },
       };
     },
     async uploadImageToPresigned(uploadUrl, _headers, bytes) {
@@ -220,7 +230,17 @@ export function makeMockKaneo(opts: MockKaneoOptions = {}): MockKaneo {
     async finalizeImageUpload(taskId, input) {
       countWrite();
       finalizes.push({ taskId, key: input.key });
-      return { id: `asset-${taskId}`, url: `http://kaneo.test/assets/asset-${taskId}.png` };
+      const isScreenshot = input.filename === "screenshot.png";
+      const assetUrl = isScreenshot
+        ? `http://kaneo.test/assets/asset-${taskId}.png`
+        : `http://kaneo.test/assets/asset-${taskId}-${input.key}.png`;
+      const id = isScreenshot ? `asset-${taskId}` : `asset-${taskId}-${input.key}`;
+      const matchedUpload =
+        mock.uploads.find((u) => u.taskId.includes(input.key)) || mock.uploads[mock.uploads.length - 1];
+      if (matchedUpload) {
+        mock.assetUrlToBytes.set(assetUrl, matchedUpload.bytes);
+      }
+      return { id, url: assetUrl };
     },
     async createComment(taskId, input) {
       countWrite();
@@ -233,9 +253,9 @@ export function makeMockKaneo(opts: MockKaneoOptions = {}): MockKaneo {
     },
     async downloadAsset(assetUrl: string): Promise<Uint8Array> {
       count();
-      const hit = mock.uploads.find((u) => u.taskId === assetUrl);
-      if (!hit) throw new KaneoDefiniteError("资产下载返回 404（不能直接证明文件不存在）");
-      return new Uint8Array(hit.bytes);
+      const hitBytes = mock.assetUrlToBytes.get(assetUrl) ?? mock.uploads.find((u) => u.taskId === assetUrl)?.bytes;
+      if (!hitBytes) throw new KaneoDefiniteError("资产下载返回 404（不能直接证明文件不存在）");
+      return new Uint8Array(hitBytes);
     },
   };
   return mock;
@@ -453,8 +473,9 @@ export async function submitMultipartFeedback(
   bearer: string,
   metadata: Record<string, unknown>,
   screenshotBuffer?: Buffer,
+  logs?: Array<{ filename: string; buffer: Buffer; contentType?: string }>,
 ) {
-  const boundary = "----FeedbackTestBoundary" + Math.random().toString(36).slice(2);
+  const boundary = `----FeedbackTestBoundary${Math.random().toString(36).slice(2)}`;
   const parts: Buffer[] = [];
 
   parts.push(
@@ -473,6 +494,19 @@ export async function submitMultipartFeedback(
     );
     parts.push(screenshotBuffer);
     parts.push(Buffer.from("\r\n"));
+  }
+
+  if (logs) {
+    for (const log of logs) {
+      const ct = log.contentType ?? "text/plain";
+      parts.push(
+        Buffer.from(
+          `--${boundary}\r\nContent-Disposition: form-data; name="logs"; filename="${log.filename}"\r\nContent-Type: ${ct}\r\n\r\n`,
+        ),
+      );
+      parts.push(log.buffer);
+      parts.push(Buffer.from("\r\n"));
+    }
   }
 
   parts.push(Buffer.from(`--${boundary}--\r\n`));
@@ -494,5 +528,5 @@ export async function submitMultipartFeedback(
   } catch {
     data = null;
   }
-  return { status: res.status, data };
+  return { status: res.status, data, headers: res.headers };
 }

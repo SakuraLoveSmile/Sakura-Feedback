@@ -24,6 +24,14 @@ export interface FeedbackCaptureInfo {
   releasePoint?: { x: number; y: number };
 }
 
+export interface FeedbackLogAttachment {
+  filename: string;
+  source: 'auto' | 'manual';
+  blob: Blob;
+  byteSize?: number;
+  sha256?: string;
+}
+
 export interface FeedbackSubmitPayload {
   idempotencyKey: string;
   appId: string;
@@ -31,6 +39,7 @@ export interface FeedbackSubmitPayload {
   context?: FeedbackContext;
   capture?: FeedbackCaptureInfo;
   screenshot?: Blob;
+  logs?: FeedbackLogAttachment[];
 }
 
 export interface FeedbackSubmitResponse {
@@ -221,7 +230,8 @@ export async function submitFeedback(
   token: string,
   payload: FeedbackSubmitPayload,
 ): Promise<FeedbackSubmitResponse> {
-  if (payload.screenshot) {
+  const hasLogs = Array.isArray(payload.logs) && payload.logs.length > 0;
+  if (payload.screenshot || hasLogs) {
     const formData = new FormData();
     const metadata: Record<string, unknown> = {
       idempotencyKey: payload.idempotencyKey,
@@ -230,9 +240,23 @@ export async function submitFeedback(
     };
     if (payload.context) metadata.context = payload.context;
     if (payload.capture) metadata.capture = payload.capture;
+    if (hasLogs && payload.logs) {
+      metadata.logs = payload.logs.map((l) => ({
+        filename: l.filename,
+        source: l.source,
+        ...(l.sha256 ? { sha256: l.sha256 } : {}),
+      }));
+    }
 
     formData.append('metadata', JSON.stringify(metadata));
-    formData.append('screenshot', payload.screenshot, 'screenshot.png');
+    if (payload.screenshot) {
+      formData.append('screenshot', payload.screenshot, 'screenshot.png');
+    }
+    if (hasLogs && payload.logs) {
+      for (const log of payload.logs) {
+        formData.append('logs', log.blob, log.filename);
+      }
+    }
 
     const headers: Record<string, string> = {};
     if (token) headers['Authorization'] = `Bearer ${token}`;

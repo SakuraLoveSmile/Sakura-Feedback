@@ -117,6 +117,7 @@ export interface FetchCall {
   method: string;
   headers: Record<string, string>;
   body: Record<string, unknown> | undefined;
+  rawBody?: unknown;
 }
 
 /**
@@ -125,13 +126,13 @@ export interface FetchCall {
  * 打开面板会刷新额度、重新登录会发起会话请求，这些噪声不应干扰业务断言。
  */
 export function recordFetch(
-  impl: (url: string, init: { method?: string; body?: string }) => Promise<unknown>,
+  impl: (url: string, init: { method?: string; body?: unknown }) => Promise<unknown>,
   opts: { token?: string } = {},
 ): { calls: FetchCall[]; authCalls: string[]; fetchMock: ReturnType<typeof vi.fn> } {
   const calls: FetchCall[] = [];
   const authCalls: string[] = [];
   const fetchMock = vi.fn(
-    async (input: unknown, init?: { method?: string; headers?: Record<string, string>; body?: string }) => {
+    async (input: unknown, init?: { method?: string; headers?: Record<string, string>; body?: unknown }) => {
       const url = String(input);
       if (url.includes('/api/auth/login')) {
         authCalls.push(url);
@@ -141,8 +142,24 @@ export function recordFetch(
         authCalls.push(url);
         return sessionResponse();
       }
-      const body = typeof init?.body === 'string' ? (JSON.parse(init.body) as Record<string, unknown>) : undefined;
-      calls.push({ url, method: init?.method ?? 'GET', headers: init?.headers ?? {}, body });
+      let body: Record<string, unknown> | undefined;
+      if (typeof init?.body === 'string') {
+        try {
+          body = JSON.parse(init.body) as Record<string, unknown>;
+        } catch {
+          body = undefined;
+        }
+      } else if (init?.body && typeof (init.body as { get?: (k: string) => unknown }).get === 'function') {
+        const metaStr = (init.body as { get: (k: string) => unknown }).get('metadata');
+        if (typeof metaStr === 'string') {
+          try {
+            body = JSON.parse(metaStr) as Record<string, unknown>;
+          } catch {
+            body = undefined;
+          }
+        }
+      }
+      calls.push({ url, method: init?.method ?? 'GET', headers: init?.headers ?? {}, body, rawBody: init?.body });
       return impl(url, { method: init?.method, body: init?.body });
     },
   );

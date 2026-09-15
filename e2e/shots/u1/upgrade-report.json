@@ -1,0 +1,739 @@
+{
+  "generatedAt": "2026-09-15T13:24:36",
+  "oldImage": "feedback-service:e2e-verify",
+  "newImage": "u1v-feedback:0.3.0",
+  "brokenImage": "u1v-feedback-broken:0.3.0",
+  "oldDigest": "sha256:2ff9619975749eacd20ef32a9e12ecc48bf2c9d3c78f7ad3ebce15f482854ec6",
+  "newDigest": "sha256:767569d3fccdc6102fc0872066621f95be9cdbbe3664b9b4275b00a2f1232b7d",
+  "brokenDigest": "sha256:edd766f397a2fa33f275af1a5d94714eabe9c8ab3dbcbd0acfbb00d93014117f",
+  "total": 137,
+  "passed": 137,
+  "failed": [],
+  "assertions": [
+    {
+      "name": "[pre] 新版镜像版本标签为 0.3.0",
+      "ok": true,
+      "detail": "{\"org.opencontainers.image.revision\": \"cd79673768d93a23facb8ee370fe24ee2c2323b2\", \"org.opencontainers.image.version\": \"0.3.0\"}"
+    },
+    {
+      "name": "[pre] 新版镜像带提交标签",
+      "ok": true,
+      "detail": "{\"org.opencontainers.image.revision\": \"cd79673768d93a23facb8ee370fe24ee2c2323b2\", \"org.opencontainers.image.version\": \"0.3.0\"}"
+    },
+    {
+      "name": "[pre] 新版与旧版 digest 不同",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[pre] broken 镜像 digest 与新版本不同",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[happy] updater 容器无发布端口",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[happy] 未带令牌访问 /manifest 必须 401",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[happy] 错误令牌访问 /manifest 必须 401",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[happy] 旧版管理员登录",
+      "ok": true,
+      "detail": "200 {'ok': True, 'expiresAt': '2026-09-29T05:19:03.577Z', 'user': {'id': '166fd118-9528-4037-bc57-b3a0d7cafdad', 'username': 'admin', 'role': 'admin'}, 'quota': {'dailyLimit': 3, 'used': 0, 'remaining': 3, 'resetAt': '2026-09-15T16:00:00.000Z'}}"
+    },
+    {
+      "name": "[happy] 旧版登记软件配置",
+      "ok": true,
+      "detail": "201 {'id': '605641b2-068e-40b3-9609-6d5d893deb1d', 'appId': 'com.example.u1v', 'name': 'U1 验证', 'allowedOrigins': ['http://127.0.0.1:5199'], 'kaneoProjectId': 'p-u1v', 'kaneoColumnSlug': 'triage', 'createdAt': '2026-09-15T05:19:03.584Z', 'updatedAt': '2026-09-15T05:19:03.584Z'}"
+    },
+    {
+      "name": "[happy] 旧版登记 ai 连接（含加密密钥）",
+      "ok": true,
+      "detail": "200 {'ok': True, 'apiKeySet': True}"
+    },
+    {
+      "name": "[happy] 旧版登记 kaneo 连接（含加密密钥）",
+      "ok": true,
+      "detail": "200 {'ok': True, 'apiKeySet': True}"
+    },
+    {
+      "name": "[happy] 旧版提交反馈 1",
+      "ok": true,
+      "detail": "201 {'feedbackId': '535d6330-2a32-4165-bf2a-6d401c55b1ab', 'status': 'received', 'user': {'id': '166fd118-9528-4037-bc57-b3a0d7cafdad', 'username': 'admin', 'role': 'admin'}, 'quota': {'dailyLimit': 3, 'used': 1, 'remaining': 2, 'resetAt': '2026-09-15T16:00:00.000Z'}}"
+    },
+    {
+      "name": "[happy] 旧版提交反馈 2",
+      "ok": true,
+      "detail": "201 {'feedbackId': 'fb6b7716-7e50-49a5-a0a5-2579ea95a2f6', 'status': 'received', 'user': {'id': '166fd118-9528-4037-bc57-b3a0d7cafdad', 'username': 'admin', 'role': 'admin'}, 'quota': {'dailyLimit': 3, 'used': 2, 'remaining': 1, 'resetAt': '2026-09-15T16:00:00.000Z'}}"
+    },
+    {
+      "name": "[happy] 更新前数据基线可读",
+      "ok": true,
+      "detail": "{\"ok\": true, \"error\": null, \"integrity\": \"ok\", \"userVersion\": 3, \"tableNames\": [\"users\", \"sessions\", \"apps\", \"settings\", \"feedbacks\", \"daily_usage\", \"feedback_screenshots\"], \"counts\": {\"users\": 1, \"fe"
+    },
+    {
+      "name": "[happy] 旧版 schema 为旧版本（user_version < 目标）",
+      "ok": true,
+      "detail": "user_version=3"
+    },
+    {
+      "name": "[happy] POST /tasks 受理（202）",
+      "ok": true,
+      "detail": "{\"status\": 202, \"text\": \"{\\\"operationId\\\":\\\"op-20260915T051904Z-b3267621\\\",\\\"status\\\":\\\"running\\\",\\\"phase\\\":\\\"accepted\\\"}\\n\", \"json\": {\"operationId\": \"op-20260915T051904Z-b3267621\", \"status\": \"running\", \"phase\": \"accepted\"}}"
+    },
+    {
+      "name": "[happy] 返回 operationId",
+      "ok": true,
+      "detail": "op-20260915T051904Z-b3267621"
+    },
+    {
+      "name": "[happy] 同 requestId 重发返回原任务（幂等）",
+      "ok": true,
+      "detail": "{\"status\": 202, \"text\": \"{\\\"operationId\\\":\\\"op-20260915T051904Z-b3267621\\\",\\\"status\\\":\\\"running\\\",\\\"deduplicated\\\":true}\\n\", \"json\": {\"operationId\": \"op-20260915T051904Z-b3267621\", \"status\": \"running\", \"deduplicated\": true}}"
+    },
+    {
+      "name": "[happy] 运行中提交其它 requestId 必须 409 并发冲突",
+      "ok": true,
+      "detail": "{\"status\": 409, \"text\": \"{\\\"error\\\":\\\"conflict\\\",\\\"message\\\":\\\"\\u5df2\\u6709\\u66f4\\u65b0\\u4efb\\u52a1\\u5728\\u6267\\u884c\\uff0c\\u62d2\\u7edd\\u5e76\\u53d1\\u66f4\\u65b0\\\",\\\"operationId\\\":\\\"op-20260915T051904Z-b3267621\\\",\\\"phase\\\":\\\"preflight_pull\\\"}\\n\", \"json\": {\"error\": \"conflict\", \"message\": \"\\u5df2\\u6709\\"
+    },
+    {
+      "name": "[happy] 暂停标记内容含任务与阶段",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[happy] 后台能读到真实暂停标记（pause.paused=true）",
+      "ok": true,
+      "detail": "200 {\"current\": {\"version\": \"0.3.0\", \"protocol\": 1}, \"config\": {\"updateConfigured\": true, \"updaterBaseUrl\": \"http://updater:8790\", \"tokenFile\": \"/private/tmp/u1v-runs/happy-b50eae48/deploy/update-control/"
+    },
+    {
+      "name": "[happy] 暂停期写接口被拒（503 update_paused）",
+      "ok": true,
+      "detail": "503 {'error': {'code': 'update_paused', 'message': '新版已启动，等待核验，写入仍暂停（当前阶段：④启动验证）'}}"
+    },
+    {
+      "name": "[happy] 暂停期读接口仍然放行",
+      "ok": true,
+      "detail": "200"
+    },
+    {
+      "name": "[happy] 暂停期 mock 侧零归档/AI 调用",
+      "ok": true,
+      "detail": "{'ai': 2, 'project': 4, 'column': 2, 'task': 2, 'presign': 0, 'put': 0, 'finalize': 0, 'comment': 0} -> {'ai': 2, 'project': 4, 'column': 2, 'task': 2, 'presign': 0, 'put': 0, 'finalize': 0, 'comment': 0}"
+    },
+    {
+      "name": "[happy] 暂停期 mock 远端写入计数为 0",
+      "ok": true,
+      "detail": "task=2 comment=0 put=0"
+    },
+    {
+      "name": "[happy] 任务成功",
+      "ok": true,
+      "detail": "{\"operationId\": \"op-20260915T051904Z-b3267621\", \"requestId\": \"u1v-happy-b50eae48\", \"version\": \"0.3.0\", \"digest\": \"sha256:767569d3fccdc6102fc0872066621f95be9cdbbe3664b9b4275b00a2f1232b7d\", \"status\": \"succeeded\", \"outcome\": \"succeeded\", \"phase\": \"done\", \"phaseLabel\": \"\\u5b8c\\u6210\", \"message\": \"\\u66f4\\u65b0\\u5b8c\\u6210\\uff0c\\u5df2\\u653e\\u884c v0.3.0\", \"createdAt\": \"2026-09-15T05:19:04.082Z\", \"update"
+    },
+    {
+      "name": "[happy] 证据链包含阶段 preflight_pull",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[happy] 证据链包含阶段 pause_stop",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[happy] 证据链包含阶段 backup_copy",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[happy] 证据链包含阶段 start_paused",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[happy] 证据链包含阶段 verify_new",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[happy] 证据链包含阶段 release",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[happy] 证据链无失败步骤",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[happy] restore 为空（成功路径不做恢复）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[happy] 运行中镜像 digest = 清单目标 digest",
+      "ok": true,
+      "detail": "sha256:767569d3fccdc6102fc0872066621f95be9cdbbe3664b9b4275b00a2f1232b7d != sha256:767569d3fccdc6102fc0872066621f95be9cdbbe3664b9b4275b00a2f1232b7d"
+    },
+    {
+      "name": "[happy] 运行中镜像版本标签 = 0.3.0",
+      "ok": true,
+      "detail": "{\"org.opencontainers.image.revision\": \"cd79673768d93a23facb8ee370fe24ee2c2323b2\", \"org.opencontainers.image.version\": \"0.3.0\"}"
+    },
+    {
+      "name": "[happy] 运行中服务挂载新数据卷",
+      "ok": true,
+      "detail": "['feedback-data-0.3.0-20260915T051905Z'] vs feedback-data-0.3.0-20260915T051905Z"
+    },
+    {
+      "name": "[happy] 旧数据卷仍存在（未被删除）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[happy] 旧镜像仍存在（可回退）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[happy] 旧容器已被替换（无重名残留）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[happy] 环境文件已切到新镜像与新卷",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[happy] 环境文件其它字段逐字节保留（主密钥未变）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[happy] paused 标记已解除",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[happy] release 标记指向新版本与新卷",
+      "ok": true,
+      "detail": "{\"operationId\": \"op-20260915T051904Z-b3267621\", \"requestId\": \"u1v-happy-b50eae48\", \"version\": \"0.3.0\", \"digest\": \"sha256:767569d3fccdc6102fc0872066621f95be9cdbbe3664b9b4275b00a2f1232b7d\", \"imageRef\": \"127.0.0.1:57844/u1v-feedback-new@sha256:767569d3fccdc6102fc0872066621f95be9cdbbe3664b9b4275b00a2f1232b7d\", \"volume\": \"feedback-data-0.3.0-20260915T051905Z\", \"releasedAt\": \"2026-09-15T05:19:12.606Z\"}"
+    },
+    {
+      "name": "[happy] 备份目录含 600 受限副本",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[happy] 新版数据库可读",
+      "ok": true,
+      "detail": "{\"ok\": true, \"error\": null, \"integrity\": \"ok\", \"userVersion\": 5, \"tableNames\": [\"users\", \"sessions\", \"apps\", \"settings\", \"feedbacks\", \"daily_usage\", \"feedback_screenshots\", \"feedback_logs\"], \"counts\":"
+    },
+    {
+      "name": "[happy] users 行数不少于更新前（1 → 1）",
+      "ok": true,
+      "detail": "1 -> 1"
+    },
+    {
+      "name": "[happy] feedbacks 行数不少于更新前（2 → 2）",
+      "ok": true,
+      "detail": "2 -> 2"
+    },
+    {
+      "name": "[happy] feedback_screenshots 行数不少于更新前（0 → 0）",
+      "ok": true,
+      "detail": "0 -> 0"
+    },
+    {
+      "name": "[happy] daily_usage 行数不少于更新前（1 → 1）",
+      "ok": true,
+      "detail": "1 -> 1"
+    },
+    {
+      "name": "[happy] schema 已迁移到目标版本",
+      "ok": true,
+      "detail": "5"
+    },
+    {
+      "name": "[happy] 既有加密连接配置仍为 v1 形态",
+      "ok": true,
+      "detail": "{\"ai.baseUrl\": \"url\", \"ai.model\": \"text\", \"ai.apiKeyEnc\": \"v1\", \"kaneo.baseUrl\": \"url\", \"kaneo.apiKeyEnc\": \"v1\"}"
+    },
+    {
+      "name": "[happy] 原数据卷条目集合未被改动",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[happy] 放行后写接口恢复（201）",
+      "ok": true,
+      "detail": "201 {'feedbackId': '39521c33-d6a7-4833-a871-0d8284582f44', 'status': 'received', 'user': {'id': '166fd118-9528-4037-bc57-b3a0d7cafdad', 'username': 'admin', 'role': 'admin'}, 'quota': {'dailyLimit': 3, 'used': 3, 'remaining': 0, 'resetAt': '2026-09-15T16:00:00.000Z'}}"
+    },
+    {
+      "name": "[happy] 放行后提交的反馈在新版中可读",
+      "ok": true,
+      "detail": "200 {\"id\": \"39521c33-d6a7-4833-a871-0d8284582f44\", \"appId\": \"com.example.u1v\", \"username\": \"admin\", \"status\": \"processing\", \"createdAt\": \"2026-09-15T05:19:13.675Z\", \"updatedAt\": \"2026-09-15T05:19:13.679Z\""
+    },
+    {
+      "name": "[happy] 放行后归档链路真实调用 mock（AI）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[happy] 生产镜像里后台「当前版本」= 0.3.0（回归 t10 缺陷 1）",
+      "ok": true,
+      "detail": "current.version=0.3.0"
+    },
+    {
+      "name": "[happy] 后台可读到更新执行器地址",
+      "ok": true,
+      "detail": "http://updater:8790"
+    },
+    {
+      "name": "[happy] 无关容器与卷未被改动",
+      "ok": true,
+      "detail": "before={'containers': ['2f8f3981f5af|u1v-registry-66fdf061'], 'volumes': ['buildx_buildkit_multi0_state', 'fb-e2e-data', 'feedback-itest-8343_feedback-data']} after={'containers': ['2f8f3981f5af|u1v-registry-66fdf061'], 'volumes': ['buildx_buildkit_multi0_state', 'fb-e2e-data', 'feedback-itest-8343_feedback-data']}"
+    },
+    {
+      "name": "[happy] updater 日志不含共享令牌",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[verifyfail] 旧版管理员登录",
+      "ok": true,
+      "detail": "200 {'ok': True, 'expiresAt': '2026-09-29T05:19:20.410Z', 'user': {'id': 'e44f5954-4602-4ba7-a34f-a7e1a30e7249', 'username': 'admin', 'role': 'admin'}, 'quota': {'dailyLimit': 3, 'used': 0, 'remaining': 3, 'resetAt': '2026-09-15T16:00:00.000Z'}}"
+    },
+    {
+      "name": "[verifyfail] 旧版登记软件配置",
+      "ok": true,
+      "detail": "201 {'id': '11cbc3e9-718b-48cd-b23c-53e2fb88b5b6', 'appId': 'com.example.u1v', 'name': 'U1 验证', 'allowedOrigins': ['http://127.0.0.1:5199'], 'kaneoProjectId': 'p-u1v', 'kaneoColumnSlug': 'triage', 'createdAt': '2026-09-15T05:19:20.416Z', 'updatedAt': '2026-09-15T05:19:20.416Z'}"
+    },
+    {
+      "name": "[verifyfail] 旧版登记 ai 连接（含加密密钥）",
+      "ok": true,
+      "detail": "200 {'ok': True, 'apiKeySet': True}"
+    },
+    {
+      "name": "[verifyfail] 旧版登记 kaneo 连接（含加密密钥）",
+      "ok": true,
+      "detail": "200 {'ok': True, 'apiKeySet': True}"
+    },
+    {
+      "name": "[verifyfail] 旧版提交反馈 1",
+      "ok": true,
+      "detail": "201 {'feedbackId': '8ed180c5-09f7-4280-8caf-e8c7ad222a76', 'status': 'received', 'user': {'id': 'e44f5954-4602-4ba7-a34f-a7e1a30e7249', 'username': 'admin', 'role': 'admin'}, 'quota': {'dailyLimit': 3, 'used': 1, 'remaining': 2, 'resetAt': '2026-09-15T16:00:00.000Z'}}"
+    },
+    {
+      "name": "[verifyfail] 旧版提交反馈 2",
+      "ok": true,
+      "detail": "201 {'feedbackId': 'accc1ccc-98bc-4f68-bb39-98cd85651916', 'status': 'received', 'user': {'id': 'e44f5954-4602-4ba7-a34f-a7e1a30e7249', 'username': 'admin', 'role': 'admin'}, 'quota': {'dailyLimit': 3, 'used': 2, 'remaining': 1, 'resetAt': '2026-09-15T16:00:00.000Z'}}"
+    },
+    {
+      "name": "[verifyfail] 任务受理",
+      "ok": true,
+      "detail": "{\"status\": 202, \"text\": \"{\\\"operationId\\\":\\\"op-20260915T051920Z-19743a77\\\",\\\"status\\\":\\\"running\\\",\\\"phase\\\":\\\"accepted\\\"}\\n\", \"json\": {\"operationId\": \"op-20260915T051920Z-19743a77\", \"status\": \"running"
+    },
+    {
+      "name": "[verifyfail] outcome = failed_restored",
+      "ok": true,
+      "detail": "{\"operationId\": \"op-20260915T051920Z-19743a77\", \"requestId\": \"u1v-vf-903c8883\", \"version\": \"0.3.0\", \"digest\": \"sha256:edd766f397a2fa33f275af1a5d94714eabe9c8ab3dbcbd0acfbb00d93014117f\", \"status\": \"failed\", \"outcome\": \"failed_restored\", \"phase\": \"done\", \"phaseLabel\": \"\\u5b8c\\u6210\", \"message\": \"\\u66f4\\u65b0\\u5931\\u8d25\\uff0c\\u5df2\\u6062\\u590d\\u65e7\\u7248\\u672c\\uff1a\\u65b0\\u7248\\u6838\\u9a8c\\u672a\\u90"
+    },
+    {
+      "name": "[verifyfail] restore.confirmed = true",
+      "ok": true,
+      "detail": "{\"attempted\": true, \"confirmed\": true, \"note\": \"\\u65b0\\u7248\\u6838\\u9a8c\\u672a\\u901a\\u8fc7\\uff1a\\u5bb9\\u5668\\u5065\\u5eb7\\u68c0\\u67e5\\u4e3a unhealthy\"}"
+    },
+    {
+      "name": "[verifyfail] 失败阶段为 ⑤核验新版",
+      "ok": true,
+      "detail": "{\"phase\": \"verify_new\", \"code\": \"verify_timeout\", \"message\": \"\\u65b0\\u7248\\u6838\\u9a8c\\u672a\\u901a\\u8fc7\\uff1a\\u5bb9\\u5668\\u5065\\u5eb7\\u68c0\\u67e5\\u4e3a unhealthy\"}"
+    },
+    {
+      "name": "[verifyfail] 运行中的是旧镜像",
+      "ok": true,
+      "detail": "sha256:2ff9619975749eacd20ef32a9e12ecc48bf2c9d3c78f7ad3ebce15f482854ec6 != sha256:2ff9619975749eacd20ef32a9e12ecc48bf2c9d3c78f7ad3ebce15f482854ec6"
+    },
+    {
+      "name": "[verifyfail] 恢复后挂载的是未修改的原卷",
+      "ok": true,
+      "detail": "['u1v-verifyfail-903c8883-old']"
+    },
+    {
+      "name": "[verifyfail] 旧服务真实可用（/healthz 200）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[verifyfail] 环境文件已还原为旧镜像与旧卷",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[verifyfail] 新卷保留未删除",
+      "ok": true,
+      "detail": "feedback-data-0.3.0-20260915T051921Z"
+    },
+    {
+      "name": "[verifyfail] 旧卷仍在",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[verifyfail] paused 标记已解除",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[verifyfail] 原卷数据完好（integrity ok 且行数不变）",
+      "ok": true,
+      "detail": "{\"ok\": true, \"error\": null, \"integrity\": \"ok\", \"userVersion\": 3, \"tableNames\": [\"users\", \"sessions\", \"apps\", \"settings\", \"feedbacks\", \"daily_usage\", \"feedback_screenshots\"], \"counts\": {\"users\": 1, \"fe"
+    },
+    {
+      "name": "[releasefail] 旧版管理员登录",
+      "ok": true,
+      "detail": "200 {'ok': True, 'expiresAt': '2026-09-29T05:22:01.237Z', 'user': {'id': 'ed4ddaad-bc76-4c5c-91c9-d85c6f05f105', 'username': 'admin', 'role': 'admin'}, 'quota': {'dailyLimit': 3, 'used': 0, 'remaining': 3, 'resetAt': '2026-09-15T16:00:00.000Z'}}"
+    },
+    {
+      "name": "[releasefail] 旧版登记软件配置",
+      "ok": true,
+      "detail": "201 {'id': '857fa012-5b06-4add-ad0a-25f91371c7c2', 'appId': 'com.example.u1v', 'name': 'U1 验证', 'allowedOrigins': ['http://127.0.0.1:5199'], 'kaneoProjectId': 'p-u1v', 'kaneoColumnSlug': 'triage', 'createdAt': '2026-09-15T05:22:01.246Z', 'updatedAt': '2026-09-15T05:22:01.246Z'}"
+    },
+    {
+      "name": "[releasefail] 旧版登记 ai 连接（含加密密钥）",
+      "ok": true,
+      "detail": "200 {'ok': True, 'apiKeySet': True}"
+    },
+    {
+      "name": "[releasefail] 旧版登记 kaneo 连接（含加密密钥）",
+      "ok": true,
+      "detail": "200 {'ok': True, 'apiKeySet': True}"
+    },
+    {
+      "name": "[releasefail] 旧版提交反馈 1",
+      "ok": true,
+      "detail": "201 {'feedbackId': '7eff0f9a-68c0-4f5c-a93d-861d7a95fcf7', 'status': 'received', 'user': {'id': 'ed4ddaad-bc76-4c5c-91c9-d85c6f05f105', 'username': 'admin', 'role': 'admin'}, 'quota': {'dailyLimit': 3, 'used': 1, 'remaining': 2, 'resetAt': '2026-09-15T16:00:00.000Z'}}"
+    },
+    {
+      "name": "[releasefail] 旧版提交反馈 2",
+      "ok": true,
+      "detail": "201 {'feedbackId': '56ad4296-c0a5-4ef4-9471-e9d173a5d58d', 'status': 'received', 'user': {'id': 'ed4ddaad-bc76-4c5c-91c9-d85c6f05f105', 'username': 'admin', 'role': 'admin'}, 'quota': {'dailyLimit': 3, 'used': 2, 'remaining': 1, 'resetAt': '2026-09-15T16:00:00.000Z'}}"
+    },
+    {
+      "name": "[releasefail] 任务受理",
+      "ok": true,
+      "detail": "{\"status\": 202, \"text\": \"{\\\"operationId\\\":\\\"op-20260915T052201Z-55e2fd1a\\\",\\\"status\\\":\\\"running\\\",\\\"phase\\\":\\\"accepted\\\"}\\n\", \"json\": {\"operationId\": \"op-20260915T052201Z-55e2fd1a\", \"status\": \"running"
+    },
+    {
+      "name": "[releasefail] 放行阶段前制造新版不可用（docker kill）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[releasefail] 放行标记已落盘（⑥已开始，放行不可回退）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[releasefail] outcome = needs_attention",
+      "ok": true,
+      "detail": "{\"operationId\": \"op-20260915T052201Z-55e2fd1a\", \"requestId\": \"u1v-rf-ada814be\", \"version\": \"0.3.0\", \"digest\": \"sha256:767569d3fccdc6102fc0872066621f95be9cdbbe3664b9b4275b00a2f1232b7d\", \"status\": \"needs_attention\", \"outcome\": \"needs_attention\", \"phase\": \"done\", \"phaseLabel\": \"\\u5b8c\\u6210\", \"message\": \"\\u9700\\u8981\\u4eba\\u5de5\\u5904\\u7406\\uff1a\\u653e\\u884c\\u786e\\u8ba4\\u672a\\u901a\\u8fc7\\uff1a\\u5bb9\\"
+    },
+    {
+      "name": "[releasefail] 失败阶段为 ⑥放行",
+      "ok": true,
+      "detail": "{\"phase\": \"release\", \"code\": \"release_ack_failed\", \"message\": \"\\u653e\\u884c\\u786e\\u8ba4\\u672a\\u901a\\u8fc7\\uff1a\\u5bb9\\u5668\\u672a\\u8fd0\\u884c\\uff08exit 137\\uff09\"}"
+    },
+    {
+      "name": "[releasefail] 未执行自动恢复（restore 为 null）",
+      "ok": true,
+      "detail": "null"
+    },
+    {
+      "name": "[releasefail] 给出人工处理指引",
+      "ok": true,
+      "detail": "放行已开始，绝不自动恢复原卷。新版数据卷 feedback-data-0.3.0-20260915T052202Z，旧数据卷 u1v-releasefail-ada814be-old 与旧镜像 127.0.0.1:57844/u1v-fee"
+    },
+    {
+      "name": "[releasefail] 环境文件仍指向新镜像与新卷（绝不回退）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[releasefail] 旧卷未被重新挂载为主卷",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[releasefail] 数据仍在当前（新）卷且完整",
+      "ok": true,
+      "detail": "{\"ok\": true, \"error\": null, \"integrity\": \"ok\", \"userVersion\": 5, \"tableNames\": [\"users\", \"sessions\", \"apps\", \"settings\", \"feedbacks\", \"daily_usage\", \"feedback_screenshots\", \"feedback_logs\"], \"counts\":"
+    },
+    {
+      "name": "[releasefail] 新卷未被删除",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[releasefail] 旧卷未被删除",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[releasefail] 无关容器与卷未被改动",
+      "ok": true,
+      "detail": "before={'containers': ['2f8f3981f5af|u1v-registry-66fdf061'], 'volumes': ['buildx_buildkit_multi0_state', 'fb-e2e-data', 'feedback-itest-8343_feedback-data']} after={'containers': ['2f8f3981f5af|u1v-registry-66fdf061'], 'volumes': ['buildx_buildkit_multi0_state', 'fb-e2e-data', 'feedback-itest-8343_feedback-data']}"
+    },
+    {
+      "name": "[rejects] 清单缺失 → 409 manifest_missing",
+      "ok": true,
+      "detail": "{\"status\": 409, \"text\": \"{\\\"error\\\":\\\"manifest_missing\\\",\\\"message\\\":\\\"\\u672a\\u627e\\u5230\\u7248\\u672c\\u6e05\\u5355 release-manifest.json\\uff0c\\u62d2\\u7edd\\u66f4\\u65b0\\\"}\\n\", \"json\": {\"error\": \"manifest"
+    },
+    {
+      "name": "[rejects] 协议不兼容 → 409 updater_protocol_incompatible",
+      "ok": true,
+      "detail": "{\"status\": 409, \"text\": \"{\\\"error\\\":\\\"updater_protocol_incompatible\\\",\\\"message\\\":\\\"\\u6e05\\u5355\\u8981\\u6c42\\u66f4\\u65b0\\u6267\\u884c\\u5668\\u534f\\u8bae v99\\uff0c\\u672c\\u6267\\u884c\\u5668\\u4ec5\\u5b9e\\u73"
+    },
+    {
+      "name": "[rejects] 协议不兼容给出升级执行器指引",
+      "ok": true,
+      "detail": "清单要求更新执行器协议 v99，本执行器仅实现 v1（updater 0.1.0）。请先在服务器上按 docs/deployment.md 手工升级 updater 容器（执行器不会重建自己），再重试更新。"
+    },
+    {
+      "name": "[rejects] 提交 compose 路径字段 → 400 invalid_request",
+      "ok": true,
+      "detail": "{\"status\": 400, \"text\": \"{\\\"error\\\":\\\"invalid_request\\\",\\\"message\\\":\\\"\\u4e0d\\u63a5\\u53d7\\u5b57\\u6bb5\\uff1acomposeFile\\uff1b\\u53ea\\u5141\\u8bb8 requestId/version/digest\\uff0c\\u6267\\u884c\\u5668\\u53ea\\u63"
+    },
+    {
+      "name": "[rejects] 请求版本与清单不一致任务被受理（202）",
+      "ok": true,
+      "detail": "{\"status\": 202, \"text\": \"{\\\"operationId\\\":\\\"op-20260915T052417Z-62264c31\\\",\\\"status\\\":\\\"running\\\",\\\"phase\\\":\\\"accepted\\\"}\\n\", \"json\": {\"operationId\": \"op-20260915T052417Z-62264c31\", \"status\": \"running"
+    },
+    {
+      "name": "[rejects] 版本不一致 → failed_no_changes/version_mismatch",
+      "ok": true,
+      "detail": "{\"phase\": \"preflight_pull\", \"code\": \"version_mismatch\", \"message\": \"\\u8bf7\\u6c42\\u7248\\u672c 9.9.9 \\u4e0e\\u6e05\\u5355\\u7248\\u672c 0.3.0 \\u4e0d\\u4e00\\u81f4\"}"
+    },
+    {
+      "name": "[rejects] digest 不一致 → failed_no_changes/digest_mismatch",
+      "ok": true,
+      "detail": "{\"phase\": \"preflight_pull\", \"code\": \"digest_mismatch\", \"message\": \"\\u8bf7\\u6c42 digest sha256:0000000000000000000000000000000000000000000000000000000000000000 \\u4e0e\\u6e05\\u5355 digest sha256:767569d3fccdc6102fc0872066621f95be9cdbbe3664b9b4275b00a2f1232b7d \\u4e0d\\u4e00\\u81f4\"}"
+    },
+    {
+      "name": "[rejects] 拉取失败 → failed_no_changes/pull_failed",
+      "ok": true,
+      "detail": "{\"phase\": \"preflight_pull\", \"code\": \"pull_failed\", \"message\": \"docker \\u8c03\\u7528\\u5931\\u8d25\\uff08\\u62c9\\u53d6\\u955c\\u50cf 127.0.0.1:57844/u1v-feedback-new@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\uff09\\uff1adocker pull \\u5931\\u8d25\\uff08exit 1\\uff09: Error response from daemon: manifest for 127.0.0.1:57844/u1v-feedback-new@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb not found: manifest unknown: manifest unknown\"}"
+    },
+    {
+      "name": "[rejects] 旧服务全程未被停掉",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[rejects] 未留下 paused 标记",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[rejects] 未留下 release 标记",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[rejects] 未创建任何新数据卷",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[envmod] 旧版管理员登录",
+      "ok": true,
+      "detail": "200 {'ok': True, 'expiresAt': '2026-09-29T05:24:24.401Z', 'user': {'id': 'e882cf71-b0f5-49b5-b5b1-4b8c25457709', 'username': 'admin', 'role': 'admin'}, 'quota': {'dailyLimit': 3, 'used': 0, 'remaining': 3, 'resetAt': '2026-09-15T16:00:00.000Z'}}"
+    },
+    {
+      "name": "[envmod] 旧版登记软件配置",
+      "ok": true,
+      "detail": "201 {'id': '97246a50-f173-484a-9866-9ce273051fb0', 'appId': 'com.example.u1v', 'name': 'U1 验证', 'allowedOrigins': ['http://127.0.0.1:5199'], 'kaneoProjectId': 'p-u1v', 'kaneoColumnSlug': 'triage', 'createdAt': '2026-09-15T05:24:24.408Z', 'updatedAt': '2026-09-15T05:24:24.408Z'}"
+    },
+    {
+      "name": "[envmod] 旧版登记 ai 连接（含加密密钥）",
+      "ok": true,
+      "detail": "200 {'ok': True, 'apiKeySet': True}"
+    },
+    {
+      "name": "[envmod] 旧版登记 kaneo 连接（含加密密钥）",
+      "ok": true,
+      "detail": "200 {'ok': True, 'apiKeySet': True}"
+    },
+    {
+      "name": "[envmod] 旧版提交反馈 1",
+      "ok": true,
+      "detail": "201 {'feedbackId': '7a05eae1-e5d8-476c-bed0-b7cedee1c74e', 'status': 'received', 'user': {'id': 'e882cf71-b0f5-49b5-b5b1-4b8c25457709', 'username': 'admin', 'role': 'admin'}, 'quota': {'dailyLimit': 3, 'used': 1, 'remaining': 2, 'resetAt': '2026-09-15T16:00:00.000Z'}}"
+    },
+    {
+      "name": "[envmod] 旧版提交反馈 2",
+      "ok": true,
+      "detail": "201 {'feedbackId': '39508dd9-e649-4773-905d-a3e0b2964d35', 'status': 'received', 'user': {'id': 'e882cf71-b0f5-49b5-b5b1-4b8c25457709', 'username': 'admin', 'role': 'admin'}, 'quota': {'dailyLimit': 3, 'used': 2, 'remaining': 1, 'resetAt': '2026-09-15T16:00:00.000Z'}}"
+    },
+    {
+      "name": "[envmod] 任务受理",
+      "ok": true,
+      "detail": "{\"status\": 202, \"text\": \"{\\\"operationId\\\":\\\"op-20260915T052424Z-1c94c3a0\\\",\\\"status\\\":\\\"running\\\",\\\"phase\\\":\\\"accepted\\\"}\\n\", \"json\": {\"operationId\": \"op-20260915T052424Z-1c94c3a0\", \"status\": \"running"
+    },
+    {
+      "name": "[envmod] 已模拟其它工具修改部署环境文件",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[envmod] 拒绝覆盖 → env_file_changed",
+      "ok": true,
+      "detail": "{\"phase\": \"start_paused\", \"code\": \"env_file_changed\", \"message\": \"\\u90e8\\u7f72\\u73af\\u5883\\u6587\\u4ef6\\u5728\\u66f4\\u65b0\\u671f\\u95f4\\u88ab\\u5916\\u90e8\\u4fee\\u6539\\uff0c\\u62d2\\u7edd\\u8986\\u76d6\"}"
+    },
+    {
+      "name": "[envmod] 恢复旧版本（failed_restored）",
+      "ok": true,
+      "detail": "{\"attempted\": true, \"confirmed\": true, \"note\": \"\\u90e8\\u7f72\\u73af\\u5883\\u6587\\u4ef6\\u5728\\u66f4\\u65b0\\u671f\\u95f4\\u88ab\\u5916\\u90e8\\u4fee\\u6539\\uff0c\\u62d2\\u7edd\\u8986\\u76d6\"}"
+    },
+    {
+      "name": "[envmod] 环境文件未被执行器改写（仍是更新前内容 + 外部那一行）",
+      "ok": true,
+      "detail": "d-3c4777af/deploy\nUPDATER_IMAGE_NAME=127.0.0.1:57844/u1v-feedback-new\nU1V_PROJECT=u1v-envmod-3c4777af\nU1V_NETWORK=u1v-envmod-3c4777af-net\n# 其它工具（模拟）在更新过程中改了这一行\n"
+    },
+    {
+      "name": "[envmod] 环境文件里的镜像仍是旧镜像（没有被切到新版）",
+      "ok": true,
+      "detail": "# U1 验证夹具：注释与顺序必须被 updater 原样保留\nFEEDBACK_MASTER_KEY=dTF2LXVwZ3JhZGUtbWFzdGVyLWtleS0zMmJ5dGVzIQ==\nFEEDBACK_ADMIN_USER=admin\nFEEDBACK_ADMIN_PASSWORD=u1v-admin-pass-1\nFEEDBACK_IMAGE=127.0.0.1:57844/u1v-feedback-old@sha256:2ff9619975749eacd20ef32a9e12ecc48bf2c9d3c78f7ad3ebce15f482854ec6\nFEEDBACK_DATA_VOLUME=u1v-envmod-3c4777af-old\nFEEDBACK_COOKIE_SECURE=false\nUPDATER_IMAGE=u1v-updater:verify\nUPDATER_D"
+    },
+    {
+      "name": "[envmod] 旧服务真实可用",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[envmod] 运行中的仍是旧镜像",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[restart] 旧版管理员登录",
+      "ok": true,
+      "detail": "200 {'ok': True, 'expiresAt': '2026-09-29T05:24:33.081Z', 'user': {'id': 'c91c6bcf-7885-4e22-852c-97dc4eb3c8d2', 'username': 'admin', 'role': 'admin'}, 'quota': {'dailyLimit': 3, 'used': 0, 'remaining': 3, 'resetAt': '2026-09-15T16:00:00.000Z'}}"
+    },
+    {
+      "name": "[restart] 旧版登记软件配置",
+      "ok": true,
+      "detail": "201 {'id': '7b98acb3-e7c3-4a49-84bb-b7a7491f9198', 'appId': 'com.example.u1v', 'name': 'U1 验证', 'allowedOrigins': ['http://127.0.0.1:5199'], 'kaneoProjectId': 'p-u1v', 'kaneoColumnSlug': 'triage', 'createdAt': '2026-09-15T05:24:33.089Z', 'updatedAt': '2026-09-15T05:24:33.089Z'}"
+    },
+    {
+      "name": "[restart] 旧版登记 ai 连接（含加密密钥）",
+      "ok": true,
+      "detail": "200 {'ok': True, 'apiKeySet': True}"
+    },
+    {
+      "name": "[restart] 旧版登记 kaneo 连接（含加密密钥）",
+      "ok": true,
+      "detail": "200 {'ok': True, 'apiKeySet': True}"
+    },
+    {
+      "name": "[restart] 旧版提交反馈 1",
+      "ok": true,
+      "detail": "201 {'feedbackId': 'd851648b-a550-4261-a92a-39d950bd126c', 'status': 'received', 'user': {'id': 'c91c6bcf-7885-4e22-852c-97dc4eb3c8d2', 'username': 'admin', 'role': 'admin'}, 'quota': {'dailyLimit': 3, 'used': 1, 'remaining': 2, 'resetAt': '2026-09-15T16:00:00.000Z'}}"
+    },
+    {
+      "name": "[restart] 旧版提交反馈 2",
+      "ok": true,
+      "detail": "201 {'feedbackId': '66be6ed8-3ec8-43c6-96ea-21fbfbf03971', 'status': 'received', 'user': {'id': 'c91c6bcf-7885-4e22-852c-97dc4eb3c8d2', 'username': 'admin', 'role': 'admin'}, 'quota': {'dailyLimit': 3, 'used': 2, 'remaining': 1, 'resetAt': '2026-09-15T16:00:00.000Z'}}"
+    },
+    {
+      "name": "[restart] 任务受理",
+      "ok": true,
+      "detail": "{\"status\": 202, \"text\": \"{\\\"operationId\\\":\\\"op-20260915T052433Z-060be505\\\",\\\"status\\\":\\\"running\\\",\\\"phase\\\":\\\"accepted\\\"}\\n\", \"json\": {\"operationId\": \"op-20260915T052433Z-060be505\", \"status\": \"running"
+    },
+    {
+      "name": "[restart] 更新进行中重启 updater 容器",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[restart] 重启核对把任务收成终态 failed_restored",
+      "ok": true,
+      "detail": "{\"status\": \"failed\", \"outcome\": \"failed_restored\"}"
+    },
+    {
+      "name": "[restart] 核对证据落在任务文件里",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[restart] 旧服务已被确认并重新运行",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[restart] paused 标记已解除",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[restart] 未产生新卷切换（环境文件仍是旧镜像）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[restart] 旧卷数据完好",
+      "ok": true,
+      "detail": ""
+    }
+  ],
+  "scenarios": [
+    {
+      "scenario": "happy_path",
+      "ok": true,
+      "detail": "",
+      "seconds": 17.4
+    },
+    {
+      "scenario": "verify_failure",
+      "ok": true,
+      "detail": "",
+      "seconds": 160.6
+    },
+    {
+      "scenario": "release_failure",
+      "ok": true,
+      "detail": "",
+      "seconds": 136.0
+    },
+    {
+      "scenario": "fast_rejects",
+      "ok": true,
+      "detail": "",
+      "seconds": 7.4
+    },
+    {
+      "scenario": "env_modified",
+      "ok": true,
+      "detail": "",
+      "seconds": 8.7
+    },
+    {
+      "scenario": "updater_restart",
+      "ok": true,
+      "detail": "",
+      "seconds": 8.9
+    }
+  ],
+  "defects": [],
+  "artifactsRoot": "/private/tmp/u1v-runs"
+}

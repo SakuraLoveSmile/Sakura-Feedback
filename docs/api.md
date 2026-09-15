@@ -74,7 +74,7 @@ Cookie 或 Bearer。`200 { "authenticated": true, "kind": "cookie"|"client", "ex
 - `GET /api/auth/sessions` → `{ "sessions": [{ "id", "kind", "clientLabel"?, "createdAt", "lastUsedAt"?, "expiresAt", "current": bool }] }`
 - `DELETE /api/auth/sessions/:id` → `204`（撤销 `current` 亦返回 `204`，前端应随即跳登录）。
 - `POST /api/auth/sessions/revoke-all` → `{ "revoked": number }`
-- 账号被禁用或密码被重置时，其全部会话立即失效（鉴权每次检查账号启用状态）。
+- 账号被禁用、密码被重置或**管理员改了自己的凭据**时，其全部会话立即失效（鉴权每次检查账号启用状态）。
 
 ### 账号管理（仅管理员 Cookie 会话，前缀 /api/admin/users）
 
@@ -90,6 +90,110 @@ Cookie 或 Bearer。`200 { "authenticated": true, "kind": "cookie"|"client", "ex
   （额度从 3 调 5、当天已用 3 次 → 剩余 2；降到低于已用次数 → 剩余 0）；禁用账号同时撤销其全部会话。
   目标不是普通账号（含管理员）→ `404 "not_found"`。
 - `POST /api/admin/users/:id/password` `{ "password" }` → `{ "ok": true }`，并撤销该账号全部会话。
+
+### 管理员设置：修改自己的凭据（仅管理员 Cookie 会话）
+
+`PATCH /api/admin/me` —— **目标恒为当前会话管理员账号**：不接受任何可指定他人账号的字段（多余字段一律忽略），
+普通账号 Cookie（`403 "forbidden"`）、Bearer 令牌（`403 "unauthorized"`，本接口只接受 Cookie 会话）、
+跨源 `Origin`（`403 "origin_mismatch"`）都会被守卫拒绝。**不新增迁移，`users` 表结构不变**。
+
+```
+{ "currentPassword": string,        // 必填：当前密码
+  "username"?: string,              // 可选：新用户名，去首尾空格后 1..100 字符
+  "newPassword"?: string }          // 可选：新密码，8..200 字符（不 trim，首尾空格也是密码字符）
+```
+
+- 成功：`200 { "ok": true, "reauthenticate": true }`，并清除会话 Cookie。
+  **该账号全部会话（含发起本次请求的会话与它的 Bearer 令牌）在同一个事务内被撤销**，客户端必须重新登录。
+  账号 `id` / `role` / `daily_limit` 与历史反馈归属都不变；改密码不会扣减额度。
+- `username` 与 `newPassword` 都未提供（含只给空白字符串）→ `400 "invalid_request"`；
+  `currentPassword` 缺失或非字符串、`username` 超出 1..100、`newPassword` 超出 8..200 → `400 "invalid_request"`。
+- 当前密码不正确 → `403 "invalid_current_password"`（凭据与会话都不变）。
+- 新用户名已被其它账号占用 → `409 "user_exists"`；唯一性在事务内复查，冲突时整体回滚（用户名与密码都保持原值）。
+- 限流：**按管理员 id** 独立计时，10 次 / 15 分钟；超限 `429 "rate_limited"` 并携带 `Retry-After` 头（秒）。
+- 任一步失败整体 `ROLLBACK`：用户名与密码都不会出现「只改了一半」的状态。
+
+### 系统更新（仅管理员 Cookie 会话，前缀 /api/admin/system/update）
+
+后台「系统更新」标签用到的三个接口。反馈服务只做**代理与展示**，真正的部署动作全部由独立的 updater
+执行器完成（`http://updater:8790`，见 `apps/updater/README.md`）。三个接口都走管理员 Cookie + **严格的同源检查
+（读操作也校验 `Origin`）**：普通账号 → `403 "forbidden"`、Bearer 令牌 → `403 "unauthorized"`、
+跨源 `Origin` → `403 "origin_mismatch"`。
+
+环境变量（全部可选，缺失即「未接入更新」）：
+
+| 变量 | 规范名 | 说明 |
+| --- | --- | --- |
+| `FEEDBACK_UPDATER_URL` | ✅ **规范名** | updater 内网地址，默认 `http://updater:8790`。**该名字与 `deploy/compose.prod.yml` 注入的名字一致**；改这里才会真正生效。 |
+| `FEEDBACK_UPDATE_URL` | 别名（兼容） | v0.3.0 之前文档用过的旧名字。仅在 `FEEDBACK_UPDATER_URL` 未设置时才被读取；两者同时设置时**规范名优先**。新部署请用规范名。 |
+| `FEEDBACK_UPDATE_TOKEN_FILE` | ✅ 规范名 | 共享令牌文件（600 权限），请求头 `x-updater-token`；令牌**绝不**进入日志、响应或前端 |
+| `FEEDBACK_UPDATE_CONTROL_DIR` | ✅ 规范名 | 与执行器共享的控制目录（只读挂载）：`paused` 标记与 `state/tasks/*.json` 进度 |
+| `FEEDBACK_UPDATE_CHECK_INTERVAL_MS` | ✅ 规范名 | 自动**检查**间隔，默认 24 小时；`0` 关闭自动检查。compose 未注入（缺省即 24 小时），需要时可在 compose 覆盖层或 `.env.prod` 里加 |
+
+> 上表三处变量名与 `deploy/compose.prod.yml` 注入的名字逐一对齐：`FEEDBACK_UPDATER_URL`、
+> `FEEDBACK_UPDATE_CONTROL_DIR`、`FEEDBACK_UPDATE_TOKEN_FILE`。规范名之外只保留 `FEEDBACK_UPDATE_URL`
+> 一个兼容别名，且已在服务端 `apps/server/src/env.ts` 的 `UPDATE_URL_ENV` / `UPDATE_URL_ENV_ALIAS` 常量里落位。
+
+- `GET /api/admin/system/update` → 当前版本、更新配置、暂停状态、最近一次检查结果、最近任务：
+  ```jsonc
+  { "current": { "version": "0.3.0", "protocol": 1 },
+    "config": { "updateConfigured": true, "updaterBaseUrl": "http://updater:8790", "tokenFile": "…",
+                "controlDir": "…", "protocolSupported": 1, "checkIntervalMs": 86400000 },
+    "pause": { "paused": false, "since": null, "marker": null },
+    "check": { "state": "ok", "checkedAt": "<iso>", "latest": { "version": "0.3.0", "notes": "…",
+               "publishedAt": "<iso>", "digest": "sha256:…", "image": "…" },
+               "compatible": true, "requiredProtocol": 1, "supportedProtocol": 1, "guidance": null,
+               "failedCode": null, "failedMessage": null, "warnings": [] },
+    "recentOperations": [ /* 与下面 GET :id 的 operation 同构 */ ] }
+  ```
+  - `check.state`：`never`（尚未检查）/ `ok`（有新版本）/ `up_to_date` / `incompatible`（执行器协议不兼容）/
+    `failed`（检查失败，附 `failedCode` / `failedMessage`）。
+  - **检查失败只体现为状态**：updater 不可达、清单缺失或非法、令牌未配置都不会返回 5xx，
+    也绝不影响正在运行的服务（业务读写照常）。前端据此显示「检查失败，可稍后重试」。
+  - 协议不兼容（清单 `requiredUpdaterProtocol` 高于本服务支持的 `current.protocol`）时 `check.compatible = false`、
+    `state = "incompatible"`、`guidance` 给出「先在服务器上手工升级 updater 容器」的指引；版本信息仍正常展示。
+- `POST /api/admin/system/update/check` → `200 { "check": 同上的 check 对象 }`：手动触发一次检查（只读，**绝不安装**）。
+  自动检查每 `checkIntervalMs` 跑一次，同样只检查、绝不定时自动安装。
+- `POST /api/admin/system/update` `{ "requestId": string, "version": string, "digest": string }` →
+  `202 { "operationId", "status", "deduplicated" }`
+  - **只接受这三个字段**：`composePath` / `composeFile` / `command` / `image` / `volume` / `service` / `project`
+    等一律 `400 "invalid_request"`——部署路径、命令、镜像与卷名由执行器按预配置决定，反馈服务不接触也不转发。
+  - `version` 必须是 semver、`digest` 必须是 `sha256:<64 位小写十六进制>`，否则 `400 "invalid_request"`。
+  - `requestId`（1..128 位 `[A-Za-z0-9._:-]`）用于幂等：同一 `requestId` 重发返回原任务的 `operationId`
+    （`deduplicated: true`）；已有任务在执行 → `409 { "error": { "code": "update_in_progress" }, "operationId", "phase" }`。
+  - 执行器协议不兼容、清单缺失或版本/digest 与清单不一致 → `409` 并给出原因。
+  - 执行器不可达 / 未接入 → `503 "update_executor_unreachable"` / `"update_not_configured"` / `"update_token_unavailable"`，
+    其它上游错误 → `502 "update_executor_error"`；**绝不返回 500 堆栈**。
+  - 限流：按管理员 id 独立计时，30 次 / 15 分钟（`429 "rate_limited"` + `Retry-After`）。
+- `GET /api/admin/system/update/:id` → 任务进度（`operationId` 非法 → `400 "invalid_request"`）：
+  ```jsonc
+  { "status": "known", "fromControlDir": true,
+    "operation": { "operationId": "op-…", "version": "0.3.0", "status": "running",
+                   "outcome": null, "outcomeLabel": "更新进行中", "phase": "backup_copy",
+                   "phaseLabel": "③保留备份并复制", "message": "…", "failure": null,
+                   "recoveryHint": null, "warnings": [],
+                   "evidence": [ { "at", "phase", "step", "ok", "detail"? } ] } }
+  ```
+  - 进度优先读控制目录里执行器逐阶段落盘的任务文件，因此**服务重启期间也能显示进度**。
+  - 上游不可达且本地无记录 → `200 { "status": "unreachable", "error": { "code": "updater_unreachable", … } }`：
+    这是「正在恢复连接」而**不是**更新失败，前端应继续重试（只有执行器给出的终态才是权威结果）。
+  - 上游与控制目录都没有该任务 → `200 { "status": "unknown" }`。
+  - `outcomeLabel` 用于区分终态：`succeeded` /「更新失败，未改动部署」（`failed_no_changes`）/
+    「更新失败，已恢复旧版本」（`failed_restored`）/「需要处理」（`needs_attention`，附 `failure`、`recoveryHint`
+    与 `evidence`）。前端不提供任何自动删除旧镜像或备份卷的入口。
+
+### 更新期间的暂停写入
+
+updater 在执行「②暂停并停服」前会向控制目录写入 `paused` 标记（JSON，含 `phase`/`message`），
+反馈服务**只读**读取该标记（`FEEDBACK_UPDATE_CONTROL_DIR`），并据此：
+
+- 拒绝新的业务写入：`POST /api/feedback` 以及管理侧写操作（`PATCH /api/admin/me`、账号/软件配置/连接配置）
+  统一返回 `503 "update_paused"`，`message` 带上执行器给出的阶段说明。
+- worker **不取队、不处理**：更新期间零 Kaneo/AI 调用（队列保留在内存，解除暂停后自动继续）。
+- 读操作（后台读进度、反馈状态查询）始终可用；**系统更新自己的检查入口显式豁免**，
+  避免暂停标记残留时后台无法自愈。
+- `paused` 标记按短 TTL 缓存读取；文件缺失即视为未暂停，控制面异常**绝不**阻断业务写入。
+- 解除暂停 = 执行器删除 `paused` 文件（`unlink` 原子），反馈服务随后自动恢复写入与 worker。
 
 ## 反馈组
 
@@ -112,7 +216,12 @@ Cookie 或 Bearer。`200 { "authenticated": true, "kind": "cookie"|"client", "ex
 - `429 "daily_quota_exceeded"`（当日额度用尽，明确**未接收**；响应携带同结构 `quota`）
 - `401` / `400 "invalid_request"` / `404 "unknown_app"` / `413 "too_large"` / `429 "rate_limited"`
 
-**multipart 变体**（携带截图）：`Content-Type: multipart/form-data`，字段 `metadata`（同上 JSON，另加可选 `capture`）与 `screenshot`（PNG 文件）。`capture` 仅接受白名单字段，全部可选：
+**multipart 变体**（携带截图与/或日志附件）：`Content-Type: multipart/form-data`，总请求体上限 10 MiB。
+- 字段 `metadata`：同上 JSON，另加可选 `capture`（截图元数据）与可选 `logs`（日志附件描述符数组）。
+- 字段 `screenshot`（可选）：PNG 文件（上限 2048px / 400 万像素 / 5 MiB）。
+- 字段 `logs`（可选，可重复）：日志文件二进制流（多部分字段名均为 `logs`，按顺序与 `metadata.logs` 描述符一对一对应）。
+
+`capture` 仅接受白名单字段，全部可选：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
@@ -122,6 +231,21 @@ Cookie 或 Bearer。`200 { "authenticated": true, "kind": "cookie"|"client", "ex
 | `releasePoint` | `{x,y}` | 0..1 归一化落点 |
 
 未知字段忽略；输出像素出现但不完整或不是 1..65535 整数时整条请求 `400 "invalid_request"`。早期实现曾接受 `outputWidth`/`outputHeight` 作为同一字段的别名，命名定稿后已作废：现按未知字段忽略，规范名只有 `pixelWidth`/`pixelHeight`。AI 归档提示优先使用输出像素尺寸，逻辑视口仅作回退。服务端另行测量并持久化真实 PNG 尺寸（管理端 `screenshot.width/height` 为准），PNG 本身仍受 2048px / 400 万像素 / 5MiB 限制。
+
+`metadata.logs` 数组（可选）：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `filename` | string | 文件名（仅基名，禁止包含路径分隔符），扩展名仅限 `.log`, `.txt`, `.json`, `.jsonl` |
+| `source` | `"auto"` \| `"manual"` | 来源（组件/宿主自动采集 或 用户手动选择） |
+| `sha256` | string | 文件内容的 SHA-256 十六进制摘要（64 位小写） |
+
+日志附件校验规则（违规整条请求拒绝，零落盘且不扣减额度）：
+- 数量：每个反馈至多 3 份日志文件，超出返回 `400 "invalid_log"`。
+- 单文件体积：单份日志不得为空（0 字节）且不得超过 1 MiB（1,048,576 字节），超出返回 `413 "too_large"`。
+- 格式与编码：仅限 `.log`, `.txt`, `.json`, `.jsonl` 扩展名，且内容必须为有效 UTF-8 文本编码，非法格式/编码返回 `400 "invalid_log"`。
+- 完整性：二进制部分的 SHA-256 必须与 `metadata.logs` 中的 `sha256` 完全一致，且部分数量与描述符数量必须严格一致，否则返回 `400 "invalid_log"`。
+- 幂等判定：请求内容哈希综合计算 `text`、`context`、`screenshot` 与全部 `logs` 的摘要。日志内容发生任何改变即视为新内容；相同幂等键再次提交相同内容触发幂等重放（`200`，`replayed: true`）。
 
 ### GET /api/feedback/:id （Bearer 或 Cookie）
 `200 { "id", "status", "createdAt", "updatedAt", "errorSummary"?: string|null, "kaneoUrl"?: string|null }`
@@ -243,9 +367,12 @@ App 对象：
 ## 管理列表组（仅 Cookie 会话）
 
 - `GET /api/admin/feedback?status=&appId=&cursor=&limit=50` →
-  `{ "items": [{ "id", "appId", "username": string|null, "status", "createdAt", "updatedAt", "title"?: string|null, "kaneoUrl"?: string|null, "errorSummary"?: string|null, "archiveStage"?: string|null, "hasScreenshot": boolean }], "nextCursor": string|null }`
-  （`username` 为提交账号；旧记录归属迁移前的初始账号）
-- `GET /api/admin/feedback/:id` → 详情：以上字段 + `{ "username", "text", "processed"?: { "title", "sections": { "experience", "problems", "suggestions", "questions" } }, "kaneoTaskId"?, "attemptCount", "lastError"?, "context"?, "screenshot"?, "recovery"? }`，其中 `screenshot` 为截图元数据（`width`/`height`/`byteSize`/`sha256`/`capture`/`createdAt`，无截图则为 `null`；PNG 本体经 `GET /api/admin/feedback/:id/screenshot` 取回），`recovery` 见「管理页允许动作」。
+  `{ "items": [{ "id", "appId", "username": string|null, "status", "createdAt", "updatedAt", "title"?: string|null, "kaneoUrl"?: string|null, "errorSummary"?: string|null, "archiveStage"?: string|null, "hasScreenshot": boolean, "logCount": number }], "nextCursor": string|null }`
+  （`username` 为提交账号；旧记录归属迁移前的初始账号；`logCount` 为该记录附带的日志文件数量）
+- `GET /api/admin/feedback/:id` → 详情：以上字段 + `{ "username", "text", "processed"?: { "title", "sections": { "experience", "problems", "suggestions", "questions" } }, "kaneoTaskId"?, "attemptCount", "lastError"?, "context"?, "screenshot"?, "logs": Array<{ "id", "feedbackId", "sortOrder", "filename", "source", "byteSize", "sha256", "createdAt" }>, "recovery"? }`，其中 `screenshot` 为截图元数据（`width`/`height`/`byteSize`/`sha256`/`capture`/`createdAt`，无截图则为 `null`；PNG 本体经 `GET /api/admin/feedback/:id/screenshot` 取回），`logs` 为该记录有序排列的日志附件元数据列表，`recovery` 见「管理页允许动作」。
+- `GET /api/admin/feedback/:id/logs/:logId/download` → 下载日志原始文件，`Content-Type: application/octet-stream`，附带标准 RFC 5987 / RFC 6266 `Content-Disposition: attachment; filename="..."; filename*=UTF-8''...` 标头。
+- `GET /api/admin/feedback/:id/logs/:logId/preview` → 在浏览器内直接预览纯文本日志内容，`Content-Type: text/plain; charset=utf-8`，`Content-Disposition: inline`。
+- `GET /api/admin/feedback/:id/logs/:logId` → 便捷预览路由，行为等价于 `/preview`。
 
 ## 面板内登录（Web 组件 / Flutter，当前方式）
 
