@@ -45,6 +45,7 @@ jobs:
 
   node-checks:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -65,14 +66,16 @@ jobs:
         run: pnpm -r typecheck
       - name: lint
         run: pnpm -r lint
-      - name: test
-        # 只把 reporter 参数传给真正的 Vitest 包；管理页的占位 test 脚本不接受参数。
-        # 分包串行执行，避免 GitHub runner 上多个 Vitest/SQLite worker 互相影响。
-        run: |
-          pnpm --filter @feedback/admin test
-          pnpm --filter @feedback/server test -- --reporter=verbose
-          pnpm --filter @feedback/updater test -- --reporter=verbose
-          pnpm --filter @feedback/web test -- --reporter=verbose
+      # 分包串行执行，避免 GitHub runner 上多个 Vitest/SQLite worker 互相影响；
+      # 每个包单独成 step，阻塞时能明确定位到具体测试进程。
+      - name: test admin
+        run: pnpm --filter @feedback/admin test
+      - name: test server
+        run: pnpm --filter @feedback/server test -- --reporter=verbose
+      - name: test updater
+        run: pnpm --filter @feedback/updater test -- --reporter=verbose
+      - name: test web
+        run: pnpm --filter @feedback/web test -- --reporter=verbose
 
   flutter-checks:
     runs-on: ubuntu-latest
