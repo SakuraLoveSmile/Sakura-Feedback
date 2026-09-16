@@ -1,6 +1,6 @@
 {
   "name": "@feedback/updater",
-  "version": "0.3.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "description": "Feedback 独立更新执行器：只更新预配置 compose 项目中的 feedback 服务",
