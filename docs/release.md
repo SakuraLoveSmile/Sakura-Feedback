@@ -133,8 +133,9 @@
 
 ## 5. 人工发布步骤
 
-前置：`main` 上 CI 绿、版本号已收口（根 `package.json` 与 `apps/server`、`apps/admin`、`packages/web`
-统一为要发布的版本；`apps/updater` 保持自己的 `0.1.0` 不动）。
+前置：`main` 上 CI 绿、版本号已收口（根 `package.json` 与 `apps/server`、`apps/admin`、`packages/web`、
+`flutter/feedback/pubspec.yaml` 统一为要发布的版本；`apps/updater` 保持自己的 `0.1.0` 不动——
+与 `apps/updater/src/version.ts` 的 `UPDATER_VERSION` 常量一致，仅当 updater 自身变更时才升）。
 
 ```bash
 # 1) 确认版本号（必须等于要去掉的 v 之后的标签名）
