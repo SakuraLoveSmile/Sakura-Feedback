@@ -30,7 +30,20 @@ docker build -t feedback-service .
 docker compose up -d       # 读取 .env（主密钥与初始账号），卷 ./data:/data
 ```
 
-生产（`deploy/compose.prod.yml`：两个服务、固定 digest 镜像、external 数据卷）：
+生产有两种形态（取舍对比见 [`../deploy/README.md`](../deploy/README.md)「两种部署形态」）：
+
+**简易模式**（`deploy/compose.simple.yml`：单服务、可变镜像标签、普通数据卷）：
+
+```bash
+bash deploy/bootstrap.sh     # 首次：交互式收集域名、生成主密钥与管理员密码、写 .env.prod、启动
+bash deploy/update.sh        # 之后每次更新：卷备份 → compose pull → 重建 → 等健康
+```
+
+镜像默认跟 `latest`；要固定版本在 `.env.prod` 里写 `FEEDBACK_IMAGE=...:vX.Y.Z`。
+简易模式没有 updater：更新期间不暂停写入、不留逐版本卷副本——`update.sh` 的 tar 备份
+就是唯一的回退凭据（数据库迁移单向，跨 schema 版本回退必须先恢复备份）。
+
+**完整模式**（`deploy/compose.prod.yml`：两个服务、固定 digest 镜像、external 数据卷）：
 
 ```bash
 cp deploy/.env.prod.example deploy/.env.prod     # 填主密钥 / 域名 / 两个镜像 digest / 既有数据卷名
@@ -63,6 +76,8 @@ cd /opt/1panel/docker/compose/feedback && docker compose --env-file .env.prod up
 验证持久化：`docker compose restart` 后未处理反馈自动恢复队列（详见下）。
 
 ### 2.1 updater 与安全边界
+
+> 本节至 2.4 描述的是**完整模式**（`compose.prod.yml`）；简易模式没有 updater，更新见上文的 `update.sh`。
 
 U1 起，生产部署里多了一个独立服务 `updater`：后台「系统更新」标签里点更新时，真正干活的是它。
 
