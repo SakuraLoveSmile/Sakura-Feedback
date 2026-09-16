@@ -296,6 +296,11 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
   String? _ticketId;
   String? _idempotencyKey;
 
+  /// T4：当前记录的「等待项」提示（等待配置 / 等待确认来源 / 等待人工归档）。
+  /// 非空表示反馈已妥善保存、只是在等管理员操作——此时**不轮询**（等待不是
+  /// 处理中，无限轮询没有意义），改为提示 + 手动刷新。
+  String? _waitingNotice;
+
   /// 最近一次未决（结果未知 / 未送达）提交冻结的完整快照。快照在其后发生
   /// 变化（改文案 / 换图 / 移图）时，不得复用旧幂等键提交新内容（同 key
   /// 不同字节会触发 409 冲突、被误判为重放）；此时改用新 key 提交新快照
@@ -847,9 +852,12 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
         _quota = result.quota ?? _quota;
         _user = result.user ?? _user;
         _stage = _stageForStatus(result.status);
+        // T4：等待管理员配置/确认/归档同样是「已保存」——明确提示等待什么，
+        // 不启动轮询（只有真正在处理中才继续跟踪）。
+        _waitingNotice = collectionWaitingText(result.collectionState);
       });
       _consumeQuotaRefreshIntent(); // 提交忙碌结束：补发被挡下的刷新
-      _schedulePollingIfNeeded();
+      if (_waitingNotice == null) _schedulePollingIfNeeded();
     } on ApiException catch (e) {
       if (!mounted) return;
       if (e.statusCode == 401) {
@@ -944,9 +952,17 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
       _stage = stage;
       _kaneoUrl = rec.kaneoUrl;
       _errorSummary = rec.errorSummary;
+      // T4：等待态刷新后仍等待 → 保持等待提示并停止轮询。
+      _waitingNotice = collectionWaitingText(rec.collectionState);
     });
-    // 记录回到可轮询状态（received/processing/archiving）时恢复轮询。
-    if (_isPollable(stage)) _schedulePollingIfNeeded();
+    // 记录回到可轮询状态（received/processing/archiving）时恢复轮询；
+    // 处于等待管理员操作的状态时不轮询，保留手动刷新。
+    if (_waitingNotice != null) {
+      _pollTimer?.cancel();
+      _pollTimer = null;
+    } else if (_isPollable(stage)) {
+      _schedulePollingIfNeeded();
+    }
   }
 
   /// Class B 复制反馈 ID：失败也不抛出（剪贴板不可用时给出可读提示）。
@@ -987,6 +1003,7 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
       _errorSummary = null;
       _composeError = null;
       _failedNotice = null;
+      _waitingNotice = null;
     });
     if (restoreDraft) {
       _lastSubmittedText = null;
@@ -1050,8 +1067,10 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
         _stage = stage;
         _kaneoUrl = rec.kaneoUrl;
         _errorSummary = rec.errorSummary;
+        // T4：等待管理员操作的记录不再轮询（已保存 ≠ 处理中）。
+        _waitingNotice = collectionWaitingText(rec.collectionState);
       });
-      if (!_isPollable(stage)) {
+      if (_waitingNotice != null || !_isPollable(stage)) {
         _pollTimer = null;
         if (stage == FeedbackStage.archived) _lastSubmittedText = null;
         return;
@@ -1188,6 +1207,28 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
         // 编辑，提交按钮即"同 key 同字节"重试（快照变化则自动换新 key）。
         return _buildComposeView(context);
       case FeedbackStage.accepted:
+        // T4：等待管理员配置/确认/归档时明确说明等待什么，并提供手动刷新；
+        // 等待不是失败，也不是「正在处理」，因此不轮询。
+        if (_waitingNotice != null) {
+          return _buildStatusNotice(
+            title: '已保存',
+            subtitle: '$_waitingNotice\n无需重复提交；管理员处理后点「刷新状态」即可查看结果。',
+            icon: _statusIcon(Icons.mark_email_read_outlined, Icons.check_circle_outline),
+            extra: <Widget>[
+              OutlinedButton.icon(
+                key: const Key('feedback-refresh-status'),
+                onPressed: _busy ? null : _refreshTicketStatus,
+                icon: const Icon(Icons.refresh, size: 18),
+                label: Text(_busy ? '刷新中…' : '刷新状态'),
+              ),
+              FilledButton(
+                key: const Key('feedback-continue'),
+                onPressed: () => _backToCompose(),
+                child: const Text('继续反馈'),
+              ),
+            ],
+          );
+        }
         return _buildStatusNotice(
           title: '已接收',
           subtitle: '您的反馈已保存，等待后台处理…',

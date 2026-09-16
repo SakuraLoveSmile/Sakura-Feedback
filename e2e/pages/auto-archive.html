@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>E2E 宿主页 · 未登记软件（先接收后配置）</title>
+    <!--
+      e2e 专用宿主页（不是产品代码）：验证「未登记软件也能登录并提交」。
+
+      宿主页与反馈服务**跨源**：本页由静态服务在 127.0.0.1:5197 提供，
+      api-base 指向另一个端口的反馈服务，因此浏览器会真实发出跨域预检（OPTIONS）
+      与无凭据（credentials: omit）请求。
+
+      appId 由查询参数给出，默认故意使用一个**从未在服务端登记过**的 appId：
+      提交成功后服务端才会自动发现这个软件（待配置）。组件在 SDK 加载后由脚本
+      创建，属性在挂载前写入，避免「先连接后改属性」的时序差异。
+    -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: #ffffff;
+        font-family: system-ui, -apple-system, sans-serif;
+      }
+      body {
+        position: relative;
+        width: 1280px;
+        height: 800px;
+        overflow: hidden;
+      }
+      #host-labels {
+        padding: 24px;
+        color: #333333;
+      }
+      #host-labels h1 {
+        font-size: 16px;
+        margin: 0 0 8px 0;
+      }
+      #host-labels p {
+        font-size: 13px;
+        color: #666666;
+        margin: 4px 0;
+      }
+      #event-log {
+        margin-top: 12px;
+        font-size: 12px;
+        color: #444444;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="host-labels">
+      <h1>未登记软件 · 跨源提交宿主页</h1>
+      <p>本页与反馈服务不同源；组件使用 Bearer + credentials:omit，跨源不使用后台 Cookie。</p>
+      <div id="event-log"></div>
+    </div>
+
+    <script src="/sdk/feedback-web.umd.cjs"></script>
+    <script>
+      // 宿主页记录组件事件，供脚本断言（组件本身不写 DOM 记录器）。
+      window.__fbEvents = [];
+
+      const params = new URLSearchParams(window.location.search);
+      // 组件默认 launcher-mode=tab / capture-mode=off：本页不声明这两个属性
+      const el = document.createElement('feedback-widget');
+      el.id = 'fb';
+      el.setAttribute('api-base', params.get('apiBase') || '');
+      el.setAttribute('app-id', params.get('appId') || 'com.e2e.unregistered');
+      el.setAttribute('app-name', params.get('appName') || 'E2E 未登记软件');
+      el.addEventListener('feedback-submitted', function (ev) {
+        window.__fbEvents.push({ type: 'submitted', detail: ev.detail });
+        document.getElementById('event-log').textContent =
+          '已提交：' + JSON.stringify(ev.detail);
+      });
+      document.body.appendChild(el);
+    </script>
+  </body>
+</html>

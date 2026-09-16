@@ -2063,3 +2063,318 @@ cd examples/flutter && flutter build macos --release && flutter build ios --no-c
 | `python3 e2e/run_u1_upgrade.py` | exit 0，137/137 断言通过，6/6 场景通过；使用从 `HEAD` 归档构建的旧版镜像、本工作树新版镜像及隔离本地 registry/卷 |
 
 真实容器报告：[`e2e/shots/u1/upgrade-report.json`](e2e/shots/u1/upgrade-report.json)。本轮旧版 digest 为 `sha256:2ff9619975749eacd20ef32a9e12ecc48bf2c9d3c78f7ad3ebce15f482854ec6`，新版 digest 为 `sha256:767569d3fccdc6102fc0872066621f95be9cdbbe3664b9b4275b00a2f1232b7d`；成功、核验失败恢复、放行后失败、快速拒绝、环境文件并发修改、updater 重启六个场景全部通过。验证使用隔离 mock AI/Kaneo 与临时数据卷，未连接真实 Kaneo、生产数据或执行部署、提交、推送、打标签；因此当前结论为**具备进入测试部署的条件，状态待体验**。
+
+---
+
+## 2026-09-16 先接收、后配置、自动归档（T1–T4，状态：**待体验**）
+
+日期：2026-09-16 · 环境：macOS（darwin 27.0.0 / arm64），Node v26，pnpm 11.23.0，Flutter 3.41.3 (Dart 3.11.1)，Chromium（Playwright，`chromium_headless_shell-1243`）。
+本轮**不代表正式部署或用户验收**：未连接真实 Kaneo、未改动线上配置、未提交任何真实反馈数据，未推送 / 未部署。
+
+状态口径沿用 [`docs/closeout.md`](docs/closeout.md)：**未开始 / 实现中 / 待体验 / 已验收**。
+本轮不标记「已验收」——只有你按真实体验确认后才记已验收。
+
+### 0. 本轮范围
+
+- 软件**无需预先登记**：组件首次有效提交即自动发现一条待配置软件，来源按服务端观察结果逐条登记。
+- 后台**配置规则并显式启用**自动归档：积压与后续反馈各归档一次，不重复建任务。
+- 组件明确提示「已保存，等待配置/确认/归档」，不再把等待呈现为失败，也不再无限轮询。
+- 复用既有 AI 整理、分类、归档授权事务与固定快照；不改 RAG / Comic / Kaneo，不执行发布或线上配置变更。
+
+### 1. 任务状态
+
+| 任务 | 状态 | 说明 |
+|---|---|---|
+| T1 不登记也能登录和提交 | **待体验** | 登录只校验账号/启用状态/限流与 `appId` 格式；首次有效提交在事务内自动发现软件并登记来源；组件端点无凭据跨域。已过自动化 + **真实浏览器跨源**验证 |
+| T2 后台发现软件、配置规则、确认来源 | **待体验** | 软件列表显示待配置/待确认来源/等待反馈数量；来源确认与规则启用为独立操作（管理员权限 + 版本检查 + 操作幂等键）；普通保存不触发归档 |
+| T3 可靠补归档、不重复建任务 | **待体验** | 自动授权复用同一事务与快照；幂等键绑定规则版本；首次启用/确认来源/AI 完成/服务重启触发可恢复扫描；配置问题与可恢复故障分别处理 |
+| T4 组件提示、迁移与兼容 | **待体验** | `collectionState` 四态；Web/Flutter 提示等待并停止轮询、保留手动刷新；v7 迁移保留旧行为；文档与示例更新 |
+
+### 2. 交付清单（按文件）
+
+**数据层**
+
+- `apps/server/src/db/db.ts`：迁移 7（事务内、仅新增列与表）：`apps` 增加 `name_source / config_status / archive_mode / rule_version / kaneo_column_id / kaneo_label_ids / kaneo_assignee_id / kaneo_assignee_name / auto_enabled_at / auto_enabled_by / auto_operation_id / first_seen_at / last_seen_at`；新增 `app_sources`（逐条来源的待确认/已确认 + 确认留痕）；`feedbacks` 增加 `source_origin / archive_authorized_kind / archive_rule_version / auto_blocked_kind / auto_blocked_reason / auto_attempts / auto_next_attempt_at`。旧数据接管：旧软件保持**人工模式**与已配置状态，既有 `allowedOrigins` 迁为**已确认来源**，历史反馈 `source_origin` 留空 → **不参与任何自动补归档**。
+- `apps/server/src/db/repos.ts`：`ensureAppForSubmissionInTx`（首次提交自动发现 + 来源登记；名称仅在 `name_source='client'` 时可由客户端更新）；`submitFeedbackAtomic` 改为「重放/额度检查在前、软件创建在后」（重放与失败都不产生空软件）；来源读写与确认、规则启停事务（含版本检查与操作幂等）；`collectionState` 判定；`authorizeArchiveInTx` 增加自动授权护栏（事务内复核启用状态 + 规则版本 + 来源确认）；`findAutoArchiveCandidates` / `findAiPendingCandidates`（按库状态分批取候选）；自动归档阻塞与有上限退避。
+
+**归档与 worker**
+
+- `apps/server/src/services/archive-target.ts`（新）：实时核对项目/列/工作区标签/负责人，区分**配置问题**与**可恢复故障**；人工归档与该轮启用自动归档共用同一实现。
+- `apps/server/src/pipeline/archive-data.ts`：新增 `writeArchiveSnapshot`（人工与自动授权共用同一 V3 快照结构）。
+- `apps/server/src/pipeline/worker.ts`：新增 `autoAuthorizeIfEligible`（自动模式 + 来源已确认 + 规则完整有效才授权；否则写明阻塞原因）与 `scanAutoArchive`（按批扫描，不依赖内存队列）；AI 阶段结束后立即尝试自动授权；归档阶段门槛改读**最新**行状态（自动授权后才继续归档）。
+
+**接口**
+
+- `apps/server/src/routes/auth.ts`：令牌登录只校验 `appId` 格式与 Origin 合法性；**登录不再创建软件**；旧握手保持原有白名单限制。
+- `apps/server/src/routes/feedback.ts`：移除「appId 未登记 → 404」；接受可选 `appName`；记录观察到的来源；提交与查询响应带 `collectionState`。
+- `apps/server/src/app.ts`：组件端点（登录/会话/退出/提交/本人记录查询）对任意合法 http(s) Origin 无凭据跨域；**跨源请求不认后台 Cookie**；其余端点不参与跨源放行；`resumeWorker` 追加重启扫描。
+- `apps/server/src/routes/admin.ts`：软件列表带统计；`GET /apps/:id` 返回来源；来源确认、自动归档启用/停用（均要求管理员权限、版本检查与操作幂等键）；`PUT /apps/:id` 保存默认目标（不触发归档）；归档接口改用共享目标核对与快照写入。
+
+**组件**
+
+- `packages/web`：`app-name` 属性随提交上报；`collectionState` 解析与等待提示；等待态**停止轮询**并保留「刷新状态」；提交成功后不再把等待显示为整理中。
+- `flutter/feedback`：`FeedbackConfig.appName`；`FeedbackCollectionState` 解析；等待态提示 + 停止轮询 + 手动刷新；面板未改状态机语义。
+
+**管理页**
+
+- `apps/admin/src/views/AppsView.tsx`：软件列表显示状态/归档方式/来源计数/等待反馈；来源确认面板；默认目标编辑器（项目/列/工作区标签/负责人）；「启用自动归档并处理积压」与「关闭自动归档」；详情加载期间禁用编辑器，避免迟到回写覆盖用户刚做的选择；保存后保持选中，便于继续点启用。
+- `apps/admin/src/views/FeedbacksView.tsx`：列表新增「等待项」列与详情里的收集状态/来源/授权来源/阻塞原因。
+
+**验证与文档**
+
+- 新增 `apps/server/test/auto-archive.test.ts`（21 项）与迁移 7 断言（并入 `test/migration-v6.test.ts`）；更新受影响的既有断言。
+- 新增 `e2e/run_auto_archive_browser.py`（真实浏览器 + 真实跨源，46 项断言）与 `e2e/pages/auto-archive.html`（e2e 专用宿主页）。
+- 更新 `docs/api.md`（软件对象、新接口、自动归档语义、`collectionState`、登录放宽、CORS）、`docs/integration.md`（9.0 新流程、1.6 自动归档、快速接入步骤、故障排查）、`README.md`。
+
+### 3. 验证证据
+
+#### 3.1 工作区门禁（真实运行）
+
+| 命令 | 结果 |
+|---|---|
+| `pnpm -r typecheck` | ✅ exit 0（7 个项目：server / admin / web / updater / examples ssr·react·vue） |
+| `pnpm -r test` | ✅ exit 0；server **271** 通过（16 文件）、web **156** 通过（14 文件）、updater **75** 通过（8 文件）；`apps/admin` 的 `test` 为占位（管理页以浏览器验证代替单测） |
+| `pnpm -r lint` | ✅ exit 0；server 保留既有 **31** 条 warning，无 error |
+| `pnpm -r build` | ✅ exit 0（6 个项目完成构建） |
+| `flutter analyze`（`flutter/feedback`） | ✅ `No issues found!` |
+| `flutter test`（`flutter/feedback`） | ✅ **121/121** 通过 |
+| `flutter analyze`（`examples/flutter`） | ✅ `No issues found!` |
+| `flutter test`（`examples/flutter`） | ✅ **37/37** 通过 |
+
+本轮新增/修改的测试覆盖：未登记软件自动发现（含并发只建一条、重放与额度用尽不产生空软件）、客户端名称不覆盖管理员名称、native 来源单列、跨源与 Cookie 隔离、普通保存不触发归档、规则不完整拒绝启用、启用后积压与后续各归档一次、重复启用幂等、新来源待确认与确认后补归档、关闭自动归档只阻止新授权、改规则不重定向已授权记录、可恢复故障退避与配置问题等待修正、重启扫描幂等、人工授权不被自动覆盖、`collectionState` 口径（含迁移 7 的历史库断言）。
+
+#### 3.2 真实浏览器 + 真实跨源（重点）
+
+```
+FB_E2E_CHROMIUM=<chromium_headless_shell> python3 e2e/run_auto_archive_browser.py
+→ [SUMMARY] 46/46 通过，exit 0
+```
+
+报告与截图：`e2e/shots/auto-archive/report.json` 与同目录 `01`–`12` 号 PNG。真实链路为
+**真实构建产物**（`packages/web/dist/feedback-web.umd.cjs` + `apps/admin/dist`）+ **真实服务进程**（`tsx src/index.ts`）
++ **mock 外部服务**（`e2e/mock-external.mjs` 的 AI 与 Kaneo）+ **两个真实宿主源**（`127.0.0.1:5197` / `5196`）。
+
+已验证的行为：
+
+1. **未登记软件跨源提交成功**：宿主页与反馈服务不同源，组件内登录后提交**文字 + 截图 + 日志**返回 201；
+   服务端自动出现一条**待配置**软件（名称取自组件上报的 `appName`）与一条**待确认**来源，等待反馈计数为 1；
+   此时 Kaneo **零任务**。
+2. **跨源无凭据**：`/api/*` 响应回显宿主 Origin 且**不带** `access-control-allow-credentials`；
+   浏览器上下文里反馈服务**没有任何 Cookie**；同源带 Cookie 的请求仍可正常会话（后台不受影响）。
+3. **普通保存不触发归档**：管理页选好项目/列/工作区标签并保存后，积压仍是「等待人工归档」，Kaneo 仍零任务。
+4. **确认来源 + 启用自动归档**：确认来源本身不触发归档；点「启用自动归档并处理积压」后积压归档**一次**，
+   授权来源记为 `auto`，任务落在规则的列与项目上并带上选中的工作区标签。
+5. **幂等**：同一操作键重复调用启用返回 `replayed: true` 且不产生新任务；重复扫描同样不产生新任务。
+6. **后续反馈自动归档一次**；**第二个源**提交后提示「等待管理员确认来源」且不归档，管理页确认后**自动补归档一次**。
+7. **重启**：重启服务进程后任务数不变（重启扫描幂等）。
+8. 管理页与组件控制台**无 JS 运行时错误**。
+
+未能取得的一项证据（已在报告中列为 WARN，不影响上述结论）：Playwright 不暴露浏览器发出的 CORS 预检请求，
+因此脚本无法直接断言 OPTIONS 预检报文；替代证据是「跨源（不同 Origin）+ 非简单请求头（Authorization/JSON）
+的请求确实成功并返回回显 Origin 的 CORS 响应头」——在 Chromium 中这只有在预检成功后才可能发生。
+
+#### 3.3 迁移（隔离库副本）
+
+`apps/server/test/migration-v6.test.ts` 在隔离目录中的历史库副本（v3 / v4 / v5）上验证升级到 v7：
+旧软件保持**人工模式**与已配置状态、既有允许来源迁为**已确认来源**、历史反馈来源留空且**不会**成为自动归档候选、
+`feedback_screenshots` / `feedback_logs` / `feedback_audit` / `archive_data_json` 与授权字段完整保留、
+`PRAGMA foreign_key_check` 为空、重复打开幂等。迁移只做增量（新增列与表），不重建 `feedbacks`。
+
+### 4. 体验入口
+
+```bash
+pnpm -r build
+FEEDBACK_MASTER_KEY=<32 字节 base64> FEEDBACK_ADMIN_USER=admin FEEDBACK_ADMIN_PASSWORD=<自定> \
+  pnpm --filter @feedback/server dev
+# 服务 http://127.0.0.1:8787 ；管理页 /admin/
+```
+
+建议的体验顺序：
+
+1. 管理页「连接配置」填 Kaneo 与 AI（可先用 `node e2e/mock-external.mjs` 起 mock）。
+2. 打开 `e2e/pages/auto-archive.html`（用任意静态服务托管 `e2e/pages`，把 `/sdk/` 指向 `packages/web/dist/feedback-web.umd.cjs`），
+   或在任意宿主页放一个 `<feedback-widget api-base=… app-id=… app-name=…>`：登录 → 提交（可带截图/日志）。
+   - 预期：提示「反馈已保存，等待管理员配置该软件。」，**不轮询、不显示失败**。
+3. 管理页「软件配置」：确认出现待配置软件与待确认来源 → 点「配置」→ 确认来源 → 选项目/列/标签 → 保存。
+   - 预期：保存后仍不归档（积压显示「等待人工归档」）。
+4. 点「启用自动归档并处理积压」→ 预期积压变为已归档并出现 Kaneo 任务链接。
+5. 从一个**新域名**再提交一次 → 预期提示「等待管理员确认来源」且不归档；确认来源后自动补归档。
+
+### 5. 未验证项与限制（请据此安排验收）
+
+- **真实 Kaneo**：本轮的归档全部跑在 `e2e/mock-external.mjs` 上。真实 Kaneo 的项目/列/标签/成员读取、
+  任务创建、标签关联与读回**未在本轮验证**（沿用上一轮的结论：真实 Kaneo 兼容性仍需单独验证）。
+- **真实外部提交**：未从任何线上宿主提交真实反馈；未连接生产数据与生产 Kaneo。
+- **Flutter 原生真机/模拟器**：本轮只跑 `flutter analyze` 与 `flutter test`（121/121）；
+  未在真实设备上体验等待态提示与轮询收敛。上一轮遗留的 **macOS/iOS 默认安全存储**（`-34018`）验证仍**阻塞**，与本轮无关。
+- **多实例/多进程并发**：自动化覆盖了并发提交与重复扫描（单进程 + SQLite 写事务），
+  未验证多副本部署下的竞争（当前架构为单实例 SQLite）。
+- **自动归档的失败注入**：自动化覆盖了「读取目标可恢复故障 → 退避」与「目标列失效 → 配置阻塞」，
+  但**未**覆盖真实网络中断、Kaneo 5xx 长时段不可用下的长期退避行为。
+- **浏览器预检报文**：如 3.2 所述，Playwright 不暴露 OPTIONS 预检，只有间接证据。
+- **文档**：`docs/api.md` / `docs/integration.md` / `README.md` 已按新行为更新；
+  更早的独立简报类文档（如 `docs/closeout-manual-archive.md`）仍描述上一轮的人工归档流程，未改写。
+
+---
+
+## 2026-09-16 自动归档修复与验收（T1–T4 修复轮，状态：**待体验**）
+
+日期：2026-09-16 · 环境：macOS（darwin 27.0.0 / arm64），Node v22.23.2（本机 `node -v`），pnpm 11.23.0，
+Flutter 3.41.3 (Dart 3.11.1)，Chromium（Playwright，`chromium_headless_shell-1243`）。
+本轮**不代表正式部署或用户验收**：未连接真实 Kaneo、未改动线上配置、未提交任何真实反馈数据，未推送 / 未部署。
+上一节（T1–T4）的记录保留为**历史证据**，**不作为**本轮修复后的证据。
+
+### 0. 本轮范围（四项修复）
+
+1. **人工分类被覆盖**：已人工暂存的记录（缺项 / 完整 / 清空后保存）不再被自动归档覆盖。
+2. **积压只处理前 50 条**：一次启用后按批（50 条）连续处理，直到没有可执行候选。
+3. **退避到期不自动恢复**：服务按库内最早到期时间设置可取消定时器，到期自动查库并处理。
+4. **来源确认缺少版本检查**：来源确认、规则保存、规则启停都必须带页面读到的 `expectedRuleVersion`；
+   来源确认额外要求稳定 `operationId`；版本过期 → `409 version_conflict`，不写任何东西。
+
+沿用单实例 SQLite 架构，不扩展多副本调度；未新增数据库字段。
+
+### 1. 任务状态
+
+| 任务 | 状态 | 说明 |
+|---|---|---|
+| T1 保留登录与收集能力 | **待体验** | 未重做既有流程；新增用例与浏览器 E2E 再次覆盖未登记软件登录、首次提交自动发现、附件保存、配额与跨源 Cookie 隔离 |
+| T2 来源确认与规则操作的版本契约 | **待体验** | 4 个写接口要求 `expectedRuleVersion`；来源确认要求稳定 `operationId`；冲突返回 409 且零写入；管理页刷新详情并保留冲突说明；提示区分「等待启用」与「正在补处理」 |
+| T3 自动归档可靠性 | **待体验** | 人工保护（候选查询 / 授权入口 / 授权事务三处）+ 连续排空积压 + 到期自动重试与生命周期；时钟与定时器可注入 |
+| T4 状态提示、文档与验证收尾 | **待体验** | `collectionState` 修正为「人工已编辑 → waiting_manual_archive，自动排队/等待重试 → queued，配置阻塞 → waiting_configuration」；`docs/api.md`、`docs/integration.md`、`README.md` 更新；本记录分列本次实测与历史证据 |
+
+### 2. 本次实测（本轮重新真实运行）
+
+#### 2.1 仓库门禁
+
+| 命令 | 结果 | 证据 |
+|---|---|---|
+| `pnpm test` | ✅ exit 0 | server **17 文件 / 289 用例**、web **14 文件 / 156 用例**、updater **8 文件 / 75 用例**全过；admin 无单测（由浏览器 E2E 覆盖） |
+| `pnpm typecheck` | ✅ exit 0 | server / admin / web / updater / examples（react、vue、ssr）全部通过 |
+| `pnpm lint` | ✅ exit 0 | biome（server/admin/updater）+ eslint（web）；仅既有 warning（unused imports、`noExplicitAny` 等，非本轮引入），0 error |
+| `pnpm build` | ✅ exit 0 | server tsc、admin vite、web vite、examples react/vue |
+| `flutter analyze`（flutter/feedback） | ✅ No issues found | Flutter 3.41.3 |
+| `flutter test`（flutter/feedback） | ✅ **121** 用例全过 | 含等待态提示、停止轮询、手动刷新、幂等 key 用例 |
+
+#### 2.2 真实浏览器 E2E（`e2e/run_auto_archive_browser.py`，Chromium）
+
+真实构建产物（`packages/web/dist/feedback-web.umd.cjs` + `apps/admin/dist`）+ 真实服务进程（`tsx src/index.ts`）
++ mock 外部服务（`e2e/mock-external.mjs`），三个真实跨源宿主页（`:5197` / `:5196` / `:5198`）。
+
+| 结果 | 证据 |
+|---|---|
+| ✅ **54/54 断言通过** | 报告 [`e2e/shots/auto-archive/report.json`](e2e/shots/auto-archive/report.json)，截图 `e2e/shots/auto-archive/01..14-*.png` |
+
+覆盖：未登记软件跨源登录与提交（文字 + 截图 + 日志，multipart）、等待配置提示与不轮询、
+后台自动发现待配置软件与待确认来源、普通保存不触发归档、确认来源不触发归档、
+「启用自动归档并处理积压」后积压与后续反馈各归档一次、同操作键幂等、重启后扫描不重复建任务、
+新来源等待确认 + 确认后补归档、**旧页面确认来源被 `409 version_conflict` 拒绝并显示冲突说明且不确认不归档**、
+刷新后重新确认成功、跨源响应回显 Origin 且无 credentials、浏览器上下文无服务端 Cookie。
+
+#### 2.3 新增/更新的自动化测试（对照计划的 6 条通过标准）
+
+新增 `apps/server/test/auto-archive-reliability.test.ts`（18 用例）：
+
+| 通过标准 | 用例 | 关键断言 |
+|---|---|---|
+| 1 人工保护 | 不完整 / 完整 / 清空后暂存 → 启用自动归档 | `remoteWrites == 0`、`created == 0`、人工内容与状态原样保留、`collectionState = waiting_manual_archive` |
+| 1 人工保护（竞争） | 可控异步屏障：扫描取到候选后人工保存 | 授权事务返回 `manual_protected`，不授权、零远端写入、人工内容保留 |
+| 1 人工保护（同批） | 同批混入人工已编辑记录 | 同批其他 3 条照常归档，人工记录零写入、零授权 |
+| 2 批量积压 | 51 条（真实提交路径） | 一次启用后 51 条全部归档、每条一个任务、重扫不重复 |
+| 2 批量积压 | 121 条（直接落库积压） | 跨 50/50/21 三批处理完 121 条，各一个任务，重扫不重复 |
+| 2 批量积压（混入） | 人工 / 配置阻塞 / 未到期重试 + 新积压 | 新积压立即归档；人工 `waiting_manual_archive`、配置阻塞 `waiting_configuration`、未到期 `queued`，均不误写 |
+| 3 自动恢复 | 到期前不重试、到期后自动归档 | 推进 59s 仍 0 任务（手动扫描也不能绕过），再推进 1s 自动归档成功 |
+| 3 自动恢复 | 重启恢复并重排未来重试 | `resumeWorker` 后未到期不重试；推进 60s 由定时器自动归档 |
+| 3 自动恢复 | 重复触发扫描 | 连续 3 次 + 到期后再次触发，任务数恒为 1 |
+| 3 自动恢复 | 更新暂停 | 暂停期间扫描零远端写入；解除暂停后重新扫描并完成归档 |
+| 3 生命周期 | 退出后无数据库访问 | `worker.stop()` 后定时器数归 0；关闭数据库再推进 30 分钟无异常 |
+| 4 版本与幂等 | 两个页面共用同一版本 | 另一页面保存后旧页面确认来源 → 409 且来源仍 pending、零归档；刷新后确认成功并补归档 |
+| 4 版本与幂等 | 旧页面保存规则 | 409 `version_conflict`，配置保持另一页面的结果，`ruleVersion` 不变 |
+| 4 版本与幂等 | 缺字段 | 来源确认 / 规则保存 / 启用 / 停用缺 `expectedRuleVersion`（或来源确认缺 `operationId`）一律 400 |
+| 4 版本与幂等 | 同操作重放 | 版本已推进后重放同一 `operationId` 仍幂等（`replayed=true`），不重复授权 |
+| 4 提示语义 | 人工模式确认来源 | `autoArchiveEnabled=false`、`backlogDispatched=false`（只登记确认，不承诺补归档） |
+| 4 版本与幂等 | 停用后旧版本启用 | 409，模式保持 manual；用当前版本启用成功 |
+| 既有锁定语义 | 已归档记录人工保存 | 仍 409 `classification_locked`，人工保护不放松既有锁定 |
+
+更新的既有用例：`auto-archive.test.ts` 两处改为「不手动清退避字段、不手动调用扫描代替自动恢复」；
+`migration-v6.test.ts` 收集状态口径按 T4 新语义扩展（人工已编辑 / 配置阻塞 / 自动排队）；
+`admin.test.ts`、`classify-archive.test.ts`、`helpers.ts` 跟进必填 `expectedRuleVersion`。
+
+`test/helpers.ts` 新增 `makeFakeClock()`（可注入时钟与定时器、`advance()` 触发到期任务）、
+`setPaused()`（写真实 paused 标记）、`appRuleVersion()`，`makeHarness` 支持 `clock` / `scanBatch` / `pausable`。
+
+### 3. 历史证据（本轮之前，不作为修复后证据）
+
+- 上一节「2026-09-16 先接收、后配置、自动归档（T1–T4）」的自动化、迁移与浏览器记录仍然成立，
+  但其中 `collectionState` 口径、来源确认请求体（无 `expectedRuleVersion`）与「确认来源不触发归档」的表述**已被本轮取代**。
+- 更早各轮（迁移 6、T2-A 管理员设置、U1 更新、Flutter 存储兼容等）的记录未重新运行，仍作历史参考。
+
+### 4. 未验证项与限制（请据此安排验收）
+
+- **Flutter 原生设备/模拟器体验**：本轮只跑 `flutter analyze`（No issues）与 `flutter test`（121/121）。
+  **未**在真机或模拟器上体验「等待提示 / 停止轮询 / 手动刷新」；本机有 Android 真机（Mi 10）与无线 iPad，
+  但向真实设备安装应用属于计划外外部操作，未执行。该项**未验证**。
+- **真实 Kaneo**：归档全部跑在 `e2e/mock-external.mjs` 上。真实 Kaneo 的项目/列/标签/成员读取、
+  任务创建、标签关联与读回**未验证**（需要明确测试目标与外部写入授权）。
+- **多实例调度**：本轮为单实例 SQLite 串行调度；多副本下的重复扫描/定时器竞争**未验证**（不在本轮范围）。
+- **长期退避**：验证覆盖 1 分钟首档退避与到期自动恢复；30 分钟上限档位由单元层面的
+  `autoBackoffUntil`（有上限指数退避）覆盖，但未做长时间真实运行观测。
+- **已受影响的既有数据**：若修复前已有被自动覆盖或已远端归档的记录，本轮**不自动回滚**。
+  当前工作区未发现需要处理的实例（隔离库与浏览器 E2E 数据均为临时目录）；
+  如需核查生产数据，建议按 `archive_authorized_kind='auto'` 且 `classify_updated_at IS NOT NULL`
+  的组合排查并人工确认。
+- **浏览器预检报文**：Playwright 不暴露 OPTIONS 预检，只有间接证据（沿用上一节说明）。
+- **文档**：`docs/api.md` / `docs/integration.md` / `README.md` 已按新契约更新；
+  `docs/closeout-manual-archive.md` 等早期简报仍描述上一轮流程，未改写。
+
+### 5. 体验入口
+
+沿用上一节的启动方式与体验顺序；本轮需要额外确认的两点：
+
+1. 在管理页**人工暂存**一条反馈（缺项或清空后保存），再点「启用自动归档并处理积压」→
+   该记录应保持人工内容、显示「等待人工归档」，Kaneo 零任务。
+2. 同时打开两个管理页标签：在 A 保存配置后，用 B 的旧页面确认来源 →
+   应看到「规则已被修改（当前版本 N），请刷新后重试」并自动刷新详情，来源仍为待确认。
+
+### 6. 真实 Kaneo 验收（同日追加，此前一直列为未验证项）
+
+用户提供了真实 Kaneo 并明确授权在测试项目内写入，因此本节**产生了真实的远端写入**。
+
+- 环境：`https://kaneo.xn--fhqths51enha.cn`，工作区「卡塞尔学院」，
+  项目「Feedback 测试」(`gvfgclb9idzgi0jdfqg4wk72`)，目标列 `待筛选` (`rlac6c4plag9lnwyy1ihkgmk`)，
+  工作区标签 `bug` (`c25t9szy48n2ncv3zh38mdrw`)；AI 为用户的真实 OpenAI 兼容端点。
+- 方式：经管理接口与组件接口完成「提交 → 自动发现待配置软件 → 配置规则 → 确认来源 → 启用自动归档」，
+  再用 Kaneo API **独立回读**（不经过本服务）核对结果。
+
+| 验收点 | 结果 | 证据 |
+|---|---|---|
+| 认证与只读读取（工作区/项目/列/标签/成员） | ✅ | `GET /api/admin/connection/kaneo/projects` 返回 1 工作区 5 项目；项目选项接口返回 5 列 + 标签 `bug` + 成员 |
+| 未登记软件跨源提交（自动发现 + 待确认来源） | ✅ | `POST /api/feedback` 201，`collectionState=waiting_configuration`；后台出现 `com.example.kaneo-e2e`（pending，1 待确认来源） |
+| 普通保存不触发归档 / 确认来源不写远端 | ✅ | 保存与确认后记录仍 `needs_info`、`archiveAuthorized=false`、`backlogDispatched=false`，Kaneo 零新任务 |
+| 自动授权 + 任务创建 | ✅ | 启用后记录 `archiveAuthorizedKind=auto`；Kaneo 项目内出现任务 **#7** `vxtxpu5yly3vnjsgkq57zytr` |
+| 工作区标签关联 + 读回确认 | ✅ | 独立回读 `GET /label/task/<taskId>`：两个任务均带标签 `bug` |
+| 新来源确认后补归档（纯文字路径） | ✅ | 第二个来源提交 → `waiting_source_confirmation` → 确认（`backlogDispatched=true`）→ `archived`，任务 **#8** `gnlzffu28bxrkxc12xv2g6ho` |
+| AI 整理（真实模型） | ✅ | 任务标题为模型整理结果（非原文），说明真实 AI 调用成功 |
+| 幂等（不重复建任务） | ✅ | 两个来源各一个任务；归档后 `waitingFeedbacks=0`，重复扫描未新增 |
+| 截图上传 | ❌ 环境阻塞 | `PUT /api/task/image-upload/<taskId>` 恒定返回 **503 `S3 uploads are not configured...`**（Kaneo 侧未配置 S3） |
+| 评论写入 + 读回 | ⚠️ 未取得证据 | 两个任务均无需要写评论的附件（纯文字路径不产生评论），独立回读 `GET /comment/<taskId>` 均为 0 条 |
+
+**关于截图阻塞的定性**：这是 **Kaneo 实例侧配置缺失**（未设置 `S3_ENDPOINT`/`S3_BUCKET`），不是本服务的缺陷。
+服务对「写操作 5xx」按既定设计判为*结果不确定* → `needs_review`，**没有重复建任务、没有盲目重试**：
+
+- 记录 `fec3c6f0-3f9d-45ec-a869-277213b84b9c`：`status=needs_review`、`archive_stage=asset_uploading`、
+  `last_error="Kaneo 返回 503，预签名分配结果不确定"`，任务 #7 已创建且标签已关联（未丢失）。
+- 恢复数据完整保留（`target` 快照 + 标签确认结果），管理页可用恢复动作 `recheck` / `replace_upload`。
+
+**处置建议（未执行，等 S3 就绪后再做）**：在 Kaneo 配置 S3 后，对该记录执行恢复动作「图片」（`replace_upload`）
+或「重新核对」（`recheck`）；现有任务 #7 不会重建。
+
+**本次遗留物（需要时可由管理员在管理页处理，本记录如实列出）**：
+
+- 测试软件 `com.example.kaneo-e2e`（规则完整、**仍为自动归档模式**）。
+- 两个临时账号 `kaneo-e2e-0518f0` / `kaneo-e2e-829f22`（仍启用，额度 20/日）。
+- Kaneo 侧测试任务 #7（`needs_review` 那条）与 #8（已归档那条），可自行删除。
+- 5 个既有软件的默认目标已由管理员补齐为真实项目/列/标签（`ruleComplete=true`，仍为人工模式）。
+
+因此「真实 Kaneo 兼容性」的状态更新为：**除图片上传（被环境阻塞）与评论写入（未取得证据）外，均已验证**；
+整轮状态仍为**待体验**，`已验收` 需要你确认。

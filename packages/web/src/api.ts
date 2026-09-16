@@ -35,6 +35,8 @@ export interface FeedbackLogAttachment {
 export interface FeedbackSubmitPayload {
   idempotencyKey: string;
   appId: string;
+  /** 可选：组件上报的软件名称（服务端仅在管理员未设置名称时采用）。 */
+  appName?: string;
   text: string;
   context?: FeedbackContext;
   capture?: FeedbackCaptureInfo;
@@ -48,6 +50,32 @@ export interface FeedbackSubmitResponse {
   replayed?: boolean;
   user?: AuthUser;
   quota?: Quota;
+  /** T4：反馈已保存，等待管理员配置 / 确认来源 / 人工归档，或已进入归档流程。 */
+  collectionState?: CollectionState;
+}
+
+/**
+ * 组件侧「已保存、等待什么」状态（旧服务端不返回该字段，缺省即可忽略）。
+ * 等待态不是失败：组件应提示已保存，并停止无意义的轮询。
+ */
+export type CollectionState =
+  | 'waiting_configuration'
+  | 'waiting_source_confirmation'
+  | 'waiting_manual_archive'
+  | 'queued';
+
+/** 等待态的中文提示（queued 与未知状态返回 null，按原有“整理中”展示）。 */
+export function collectionWaitingText(state?: CollectionState): string | null {
+  switch (state) {
+    case 'waiting_configuration':
+      return '反馈已保存，等待管理员配置该软件。';
+    case 'waiting_source_confirmation':
+      return '反馈已保存，等待管理员确认来源。';
+    case 'waiting_manual_archive':
+      return '反馈已保存，等待管理员归档。';
+    default:
+      return null;
+  }
 }
 
 /** 已登录账号的最小信息（服务端不返回密码或哈希）。 */
@@ -89,6 +117,8 @@ export interface FeedbackRecord {
   updatedAt: string;
   errorSummary?: string | null;
   kaneoUrl?: string | null;
+  /** T4：等待配置 / 等待来源确认 / 等待人工归档 / 已排队；旧服务端可能不返回。 */
+  collectionState?: CollectionState;
 }
 
 /** 契约统一错误：`{ error: { code, message } }`；message 可安全展示。 */
@@ -238,6 +268,7 @@ export async function submitFeedback(
       appId: payload.appId,
       text: payload.text,
     };
+    if (payload.appName) metadata.appName = payload.appName;
     if (payload.context) metadata.context = payload.context;
     if (payload.capture) metadata.capture = payload.capture;
     if (hasLogs && payload.logs) {

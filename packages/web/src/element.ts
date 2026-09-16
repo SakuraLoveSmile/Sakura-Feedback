@@ -2,6 +2,7 @@ import {
   ApiError,
   MAX_TEXT,
   codePointLength,
+  collectionWaitingText,
   getFeedback,
   getSession,
   login,
@@ -254,6 +255,7 @@ export class FeedbackWidget extends HTMLElement {
     return [
       'api-base',
       'app-id',
+      'app-name',
       'app-version',
       'page-label',
       'side',
@@ -333,6 +335,13 @@ export class FeedbackWidget extends HTMLElement {
   private visibilityHandler: (() => void) | null = null;
   /** 手动刷新服务端记录状态进行中（按钮禁用 + 防重入）。 */
   private refreshing = false;
+
+  /**
+   * T4：当前记录的「等待项」提示（等待配置 / 等待来源确认 / 等待人工归档）。
+   * 非空表示记录已妥善保存、只是在等管理员操作——此时**不轮询**（等待不是处理中，
+   * 无限轮询没有意义），改为提示 + 手动刷新；管理员处理后刷新即可看到结果。
+   */
+  private waitingNotice: string | null = null;
 
   /**
    * 登录操作序号（T1-A）：每次发起登录递增；面板关闭 / 取消登录 /
@@ -484,6 +493,17 @@ export class FeedbackWidget extends HTMLElement {
     this.reflect('app-id', v);
   }
 
+  /**
+   * 可选的软件名称（随提交上报）。
+   * 服务端只在**管理员尚未设置名称**时采用；管理员设置过就绝不会被覆盖。
+   */
+  get appName(): string | null {
+    return this.getAttribute('app-name');
+  }
+  set appName(v: string | null) {
+    this.reflect('app-name', v);
+  }
+
   get appVersion(): string | null {
     return this.getAttribute('app-version');
   }
@@ -582,7 +602,9 @@ export class FeedbackWidget extends HTMLElement {
     document.addEventListener('keydown', this.keydownHandler, true);
 
     if (this.phase === 'tracking') {
-      void this.resumePolling();
+      // T4：等待管理员处理的记录不做轮询循环，重新打开时只做一次只读刷新。
+      if (this.waitingNotice !== null) void this.refreshLastRecord();
+      else void this.resumePolling();
     }
   }
 
@@ -1892,6 +1914,7 @@ export class FeedbackWidget extends HTMLElement {
 
     this.phase = 'submitting';
     this.lastErrorSummary = null;
+    this.waitingNotice = null; // 新一轮提交：清除上一条记录的等待提示
     this.renderStatus('提交中…');
     this.syncUi();
 
@@ -1903,6 +1926,7 @@ export class FeedbackWidget extends HTMLElement {
       const res = await submitFeedback(frozen.apiBase, this.accessToken as string, {
         idempotencyKey: frozen.key,
         appId: frozen.appId,
+        ...(this.appName ? { appName: this.appName } : {}),
         text: frozen.text,
         ...(Object.keys(frozen.context).length ? { context: frozen.context } : {}),
         ...(frozen.captureInfo ? { capture: frozen.captureInfo } : {}),
@@ -1933,7 +1957,10 @@ export class FeedbackWidget extends HTMLElement {
         kaneoUrl: null,
       };
       this.phase = 'tracking';
-      this.renderStatus('已保存，正在整理');
+      // T4：等待管理员配置/确认/归档同样属于「已保存」，但**不再轮询**——
+      // 明确提示等待什么，保留手动刷新；只有真正在处理中才继续跟踪。
+      this.waitingNotice = collectionWaitingText(res.collectionState);
+      this.renderStatus(this.waitingNotice ?? '已保存，正在整理');
       this.dispatchEvent(
         new CustomEvent<FeedbackSubmittedDetail>('feedback-submitted', {
           detail: { feedbackId: res.feedbackId, status: res.status, replayed: res.replayed === true },
@@ -1942,7 +1969,9 @@ export class FeedbackWidget extends HTMLElement {
         }),
       );
       this.syncUi();
-      this.startPolling(res.feedbackId);
+      if (this.waitingNotice === null) {
+        this.startPolling(res.feedbackId);
+      }
       this.consumeQuotaRefreshIntent(); // 提交忙碌结束：补发被挡下的刷新
     } catch (err) {
       // 身份已切换 → 旧服务的失败同样不得改写新身份的状态（含 401 清令牌）
@@ -2080,6 +2109,13 @@ export class FeedbackWidget extends HTMLElement {
 
     this.lastRecord = record;
 
+    // T4：等待管理员操作同样不再继续轮询（见 applyRecordState），只在处理中才跟踪。
+    if (collectionWaitingText(record.collectionState) !== null) {
+      this.stopPolling();
+      this.applyRecordState(record);
+      return;
+    }
+
     if (Date.now() - this.pollStartedAt + this.pollDelay > POLL_BUDGET_MS) {
       this.polling = false;
       // 轮询超时绝不能呈现为归档失败！
@@ -2098,6 +2134,19 @@ export class FeedbackWidget extends HTMLElement {
    */
   private applyRecordState(record: FeedbackRecord): boolean {
     this.lastRecord = record;
+
+    // T4：等待配置 / 等待来源确认 / 等待人工归档 —— 已保存，等待管理员操作。
+    // 明确提示而不是显示失败，并立即停止轮询（手动刷新按钮仍然可用）。
+    const waiting = collectionWaitingText(record.collectionState);
+    if (waiting !== null) {
+      this.waitingNotice = waiting;
+      this.phase = 'tracking';
+      this.lastErrorSummary = null;
+      this.renderStatus(waiting);
+      this.syncUi();
+      return true; // 视为终态：调用方停止轮询
+    }
+    this.waitingNotice = null;
 
     if (record.status === 'archived') {
       this.phase = 'archived';
@@ -2176,6 +2225,14 @@ export class FeedbackWidget extends HTMLElement {
         return;
       }
 
+      // T4：等待管理员操作的记录：刷新后仍处于等待 → 停止轮询并给出等待提示。
+      if (collectionWaitingText(record.collectionState) !== null) {
+        this.stopPolling();
+        this.applyRecordState(record);
+        return;
+      }
+
+      this.waitingNotice = null;
       // 仍在整理中：回到跟踪态并继续轮询（只读，不会重复提交）
       this.lastRecord = record;
       this.phase = 'tracking';
@@ -2485,6 +2542,7 @@ export class FeedbackWidget extends HTMLElement {
     this.lastFeedbackId = null;
     this.lastRecord = null;
     this.lastErrorSummary = null;
+    this.waitingNotice = null;
     this.idempotencyKey = null;
     this.submitSnapshot = null;
     this.unconfirmedRequest = null;
@@ -2708,11 +2766,28 @@ export class FeedbackWidget extends HTMLElement {
       this.errorRegion.append(card);
     }
 
-    // 5. 状态：处理中说明
+    // 5. 状态：处理中说明 / 等待管理员处理
     else if (this.phase === 'tracking') {
       this.errorRegion.hidden = false;
       const card = el('div', 'fb-status-card is-warn');
-      card.append(el('p', undefined, '已保存，正在整理。您可以关闭面板，我们将继续在后台处理。'));
+      if (this.waitingNotice !== null) {
+        // T4：等待不是失败，也不是「正在处理」——明确说明等待什么，并提供手动刷新。
+        card.append(el('p', undefined, this.waitingNotice));
+        card.append(el('p', 'fb-header-meta', '无需重复提交；管理员处理后点「刷新状态」即可查看结果。'));
+        const actions = el('div', 'fb-card-actions');
+        const refreshBtn = el('button', 'fb-btn-secondary fb-refresh-btn', this.refreshing ? '刷新中…' : '刷新状态');
+        refreshBtn.type = 'button';
+        refreshBtn.setAttribute('aria-label', '刷新反馈处理状态');
+        refreshBtn.disabled = this.refreshing;
+        refreshBtn.addEventListener('click', () => void this.refreshLastRecord());
+        const newBtn = el('button', 'fb-btn-secondary', '再记一条');
+        newBtn.type = 'button';
+        newBtn.addEventListener('click', () => this.resetToCompose());
+        actions.append(refreshBtn, newBtn);
+        card.append(actions);
+      } else {
+        card.append(el('p', undefined, '已保存，正在整理。您可以关闭面板，我们将继续在后台处理。'));
+      }
       this.errorRegion.append(card);
     }
   }

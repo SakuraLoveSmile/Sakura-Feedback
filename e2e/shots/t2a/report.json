@@ -1,0 +1,2432 @@
+{
+  "generatedAt": "2026-09-14T13:07:10",
+  "durationSec": 27.8,
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "port": 56586
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "port": 56588
+    }
+  },
+  "total": 465,
+  "passed": 465,
+  "failed": [],
+  "assertions": [
+    {
+      "name": "[静态] package.json 版本为 0.2.1",
+      "ok": true,
+      "detail": "version='0.2.1'"
+    },
+    {
+      "name": "[静态] apps/server/package.json 版本为 0.2.1",
+      "ok": true,
+      "detail": "version='0.2.1'"
+    },
+    {
+      "name": "[静态] apps/admin/package.json 版本为 0.2.1",
+      "ok": true,
+      "detail": "version='0.2.1'"
+    },
+    {
+      "name": "[静态] packages/web/package.json 版本为 0.2.1",
+      "ok": true,
+      "detail": "version='0.2.1'"
+    },
+    {
+      "name": "[静态] docs/api.md 含 PATCH /api/admin/me 契约",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[静态] docs/api.md 记录 当前密码错误码（invalid_current_password）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[静态] docs/api.md 记录 重名错误码（user_exists）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[静态] docs/api.md 记录 限流错误码（rate_limited）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[静态] docs/api.md 记录 Retry-After 头（Retry-After）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[静态] docs/api.md 记录 成功响应字段（reauthenticate）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[静态] docs/deployment.md 不再要求「重建数据库」改密",
+      "ok": true,
+      "detail": "stale=[]"
+    },
+    {
+      "name": "[静态] docs/deployment.md 指向后台「管理员设置」",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "管理页构建 exit 0",
+      "ok": true,
+      "detail": "exit=0"
+    },
+    {
+      "name": "[desktop/仅改用户名] 用户名预填当前账号",
+      "ok": true,
+      "detail": "prefilled='admin'"
+    },
+    {
+      "name": "[desktop/仅改用户名] 设置页 无横向溢出（scrollWidth=1280 <= innerWidth=1280）",
+      "ok": true,
+      "detail": "scrollWidth=1280 innerWidth=1280"
+    },
+    {
+      "name": "[desktop/仅改用户名] 设置页 输入框 #me-username 在视口内",
+      "ok": true,
+      "detail": "box={'x': 145, 'y': 194, 'width': 382, 'height': 32} viewport=1280"
+    },
+    {
+      "name": "[desktop/仅改用户名] 设置页 输入框 #me-current 在视口内",
+      "ok": true,
+      "detail": "box={'x': 145, 'y': 259, 'width': 382, 'height': 32} viewport=1280"
+    },
+    {
+      "name": "[desktop/仅改用户名] 设置页 输入框 #me-new 在视口内",
+      "ok": true,
+      "detail": "box={'x': 145, 'y': 324, 'width': 382, 'height': 32} viewport=1280"
+    },
+    {
+      "name": "[desktop/仅改用户名] 设置页 输入框 #me-confirm 在视口内",
+      "ok": true,
+      "detail": "box={'x': 145, 'y': 389, 'width': 382, 'height': 32} viewport=1280"
+    },
+    {
+      "name": "[desktop/仅改用户名] 设置页 保存按钮可见/可用/在视口内",
+      "ok": true,
+      "detail": "visible=True enabled=True box={'x': 145, 'y': 487, 'width': 52, 'height': 32}"
+    },
+    {
+      "name": "[desktop/仅改用户名] 回登录页并出现重新登录提示",
+      "ok": true,
+      "detail": "notice='凭据已更新，请重新登录'"
+    },
+    {
+      "name": "[desktop/仅改用户名] 登录页用户名已预填新用户名",
+      "ok": true,
+      "detail": "value='t2a-admin-renamed'"
+    },
+    {
+      "name": "[desktop/仅改用户名] storage 不含口令 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改用户名] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改用户名] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改用户名] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改用户名] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改用户名] storage 的键名不含 password/token/secret",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改用户名] URL 不含口令 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改用户名] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改用户名] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改用户名] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改用户名] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改用户名] 旧用户名不可登录",
+      "ok": true,
+      "detail": "err='用户名或密码错误'"
+    },
+    {
+      "name": "[desktop/仅改用户名] 新用户名 + 旧密码可登录（只改了用户名）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改用户名] 服务端日志不含口令明文 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改用户名] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改用户名] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改用户名] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改用户名] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/username-only] 服务端日志不含口令明文 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/username-only] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/username-only] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/username-only] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/username-only] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改密码] 用户名预填当前账号",
+      "ok": true,
+      "detail": "prefilled='admin'"
+    },
+    {
+      "name": "[desktop/仅改密码] 设置页 无横向溢出（scrollWidth=1280 <= innerWidth=1280）",
+      "ok": true,
+      "detail": "scrollWidth=1280 innerWidth=1280"
+    },
+    {
+      "name": "[desktop/仅改密码] 设置页 输入框 #me-username 在视口内",
+      "ok": true,
+      "detail": "box={'x': 145, 'y': 194, 'width': 382, 'height': 32} viewport=1280"
+    },
+    {
+      "name": "[desktop/仅改密码] 设置页 输入框 #me-current 在视口内",
+      "ok": true,
+      "detail": "box={'x': 145, 'y': 259, 'width': 382, 'height': 32} viewport=1280"
+    },
+    {
+      "name": "[desktop/仅改密码] 设置页 输入框 #me-new 在视口内",
+      "ok": true,
+      "detail": "box={'x': 145, 'y': 324, 'width': 382, 'height': 32} viewport=1280"
+    },
+    {
+      "name": "[desktop/仅改密码] 设置页 输入框 #me-confirm 在视口内",
+      "ok": true,
+      "detail": "box={'x': 145, 'y': 389, 'width': 382, 'height': 32} viewport=1280"
+    },
+    {
+      "name": "[desktop/仅改密码] 设置页 保存按钮可见/可用/在视口内",
+      "ok": true,
+      "detail": "visible=True enabled=True box={'x': 145, 'y': 487, 'width': 52, 'height': 32}"
+    },
+    {
+      "name": "[desktop/仅改密码] 预先签发普通账号 client 令牌",
+      "ok": true,
+      "detail": "None"
+    },
+    {
+      "name": "[desktop/仅改密码] 改动前 普通账号 client 令牌仍可用（t2a-client-user）",
+      "ok": true,
+      "detail": "status=200 body={'authenticated': True, 'kind': 'client', 'clientLabel': 't2a-client', 'expiresAt': '2026-12-13T05:06:47.971Z', 'user': {'id': '1678a056-42fd-49c3-aafa-61c5fe390630', 'username': 't2a-client-user', 'role': 'user'}, 'quota': {'dailyLimit': 50, 'used': 0, 'remaining': 50, 'resetAt': '2026-09-14T16:00:00.000Z'}}"
+    },
+    {
+      "name": "[desktop/仅改密码] 第二个管理员 cookie 会话建立",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "name": "[desktop/仅改密码] 回登录页并出现重新登录提示",
+      "ok": true,
+      "detail": "notice='凭据已更新，请重新登录'"
+    },
+    {
+      "name": "[desktop/仅改密码] 登录页用户名仍预填当前用户名",
+      "ok": true,
+      "detail": "value='admin'"
+    },
+    {
+      "name": "[desktop/仅改密码] storage 不含口令 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改密码] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改密码] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改密码] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改密码] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改密码] storage 的键名不含 password/token/secret",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改密码] URL 不含口令 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改密码] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改密码] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改密码] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改密码] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改密码] 浏览器旧 cookie 会话已失效",
+      "ok": true,
+      "detail": "status=401"
+    },
+    {
+      "name": "[desktop/仅改密码] 另一个管理员 cookie 会话也已失效",
+      "ok": true,
+      "detail": "status=401"
+    },
+    {
+      "name": "[desktop/仅改密码] 改动后 普通账号 client 令牌仍可用（t2a-client-user）",
+      "ok": true,
+      "detail": "status=200 body={'authenticated': True, 'kind': 'client', 'clientLabel': 't2a-client', 'expiresAt': '2026-12-13T05:06:47.971Z', 'user': {'id': '1678a056-42fd-49c3-aafa-61c5fe390630', 'username': 't2a-client-user', 'role': 'user'}, 'quota': {'dailyLimit': 50, 'used': 0, 'remaining': 50, 'resetAt': '2026-09-14T16:00:00.000Z'}}"
+    },
+    {
+      "name": "[desktop/仅改密码] 旧密码不可登录",
+      "ok": true,
+      "detail": "err='用户名或密码错误'"
+    },
+    {
+      "name": "[desktop/仅改密码] 新密码可登录",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改密码] 服务端日志不含口令明文 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改密码] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改密码] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改密码] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/仅改密码] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/password-only] 服务端日志不含口令明文 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/password-only] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/password-only] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/password-only] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/password-only] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/同时修改] 设置页 无横向溢出（scrollWidth=1280 <= innerWidth=1280）",
+      "ok": true,
+      "detail": "scrollWidth=1280 innerWidth=1280"
+    },
+    {
+      "name": "[desktop/同时修改] 设置页 输入框 #me-username 在视口内",
+      "ok": true,
+      "detail": "box={'x': 145, 'y': 194, 'width': 382, 'height': 32} viewport=1280"
+    },
+    {
+      "name": "[desktop/同时修改] 设置页 输入框 #me-current 在视口内",
+      "ok": true,
+      "detail": "box={'x': 145, 'y': 259, 'width': 382, 'height': 32} viewport=1280"
+    },
+    {
+      "name": "[desktop/同时修改] 设置页 输入框 #me-new 在视口内",
+      "ok": true,
+      "detail": "box={'x': 145, 'y': 324, 'width': 382, 'height': 32} viewport=1280"
+    },
+    {
+      "name": "[desktop/同时修改] 设置页 输入框 #me-confirm 在视口内",
+      "ok": true,
+      "detail": "box={'x': 145, 'y': 389, 'width': 382, 'height': 32} viewport=1280"
+    },
+    {
+      "name": "[desktop/同时修改] 设置页 保存按钮可见/可用/在视口内",
+      "ok": true,
+      "detail": "visible=True enabled=True box={'x': 145, 'y': 487, 'width': 52, 'height': 32}"
+    },
+    {
+      "name": "[desktop/同时修改] 预先签发普通账号 client 令牌",
+      "ok": true,
+      "detail": "None"
+    },
+    {
+      "name": "[desktop/同时修改] 回登录页并出现重新登录提示",
+      "ok": true,
+      "detail": "notice='凭据已更新，请重新登录'"
+    },
+    {
+      "name": "[desktop/同时修改] 登录页用户名已预填新用户名",
+      "ok": true,
+      "detail": "value='t2a-admin-renamed'"
+    },
+    {
+      "name": "[desktop/同时修改] storage 不含口令 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/同时修改] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/同时修改] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/同时修改] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/同时修改] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/同时修改] storage 的键名不含 password/token/secret",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/同时修改] URL 不含口令 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/同时修改] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/同时修改] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/同时修改] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/同时修改] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/同时修改] 改动后 普通账号 client 令牌仍可用（t2a-client-user）",
+      "ok": true,
+      "detail": "status=200 body={'authenticated': True, 'kind': 'client', 'clientLabel': 't2a-client', 'expiresAt': '2026-12-13T05:06:50.080Z', 'user': {'id': 'c59f7fbd-f5ed-4aca-9cad-f65036cbfde7', 'username': 't2a-client-user', 'role': 'user'}, 'quota': {'dailyLimit': 50, 'used': 0, 'remaining': 50, 'resetAt': '2026-09-14T16:00:00.000Z'}}"
+    },
+    {
+      "name": "[desktop/同时修改] 重启后服务可用（/healthz）",
+      "ok": true,
+      "detail": "health=200"
+    },
+    {
+      "name": "[desktop/同时修改] 重启后仍是未登录态（旧会话未复活）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/同时修改] 重启后旧凭据不可登录",
+      "ok": true,
+      "detail": "err='用户名或密码错误'"
+    },
+    {
+      "name": "[desktop/同时修改] 重启后新凭据可登录（已持久化）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/同时修改] 重启后 普通账号 client 令牌仍可用（t2a-client-user）",
+      "ok": true,
+      "detail": "status=200 body={'authenticated': True, 'kind': 'client', 'clientLabel': 't2a-client', 'expiresAt': '2026-12-13T05:06:50.080Z', 'user': {'id': 'c59f7fbd-f5ed-4aca-9cad-f65036cbfde7', 'username': 't2a-client-user', 'role': 'user'}, 'quota': {'dailyLimit': 50, 'used': 0, 'remaining': 50, 'resetAt': '2026-09-14T16:00:00.000Z'}}"
+    },
+    {
+      "name": "[desktop/同时修改] 服务端日志不含口令明文 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/同时修改] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/同时修改] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/同时修改] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/同时修改] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/both] 服务端日志不含口令明文 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/both] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/both] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/both] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/both] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/当前密码错误] 设置页 无横向溢出（scrollWidth=1280 <= innerWidth=1280）",
+      "ok": true,
+      "detail": "scrollWidth=1280 innerWidth=1280"
+    },
+    {
+      "name": "[desktop/当前密码错误] 设置页 输入框 #me-username 在视口内",
+      "ok": true,
+      "detail": "box={'x': 145, 'y': 194, 'width': 382, 'height': 32} viewport=1280"
+    },
+    {
+      "name": "[desktop/当前密码错误] 设置页 输入框 #me-current 在视口内",
+      "ok": true,
+      "detail": "box={'x': 145, 'y': 259, 'width': 382, 'height': 32} viewport=1280"
+    },
+    {
+      "name": "[desktop/当前密码错误] 设置页 输入框 #me-new 在视口内",
+      "ok": true,
+      "detail": "box={'x': 145, 'y': 324, 'width': 382, 'height': 32} viewport=1280"
+    },
+    {
+      "name": "[desktop/当前密码错误] 设置页 输入框 #me-confirm 在视口内",
+      "ok": true,
+      "detail": "box={'x': 145, 'y': 389, 'width': 382, 'height': 32} viewport=1280"
+    },
+    {
+      "name": "[desktop/当前密码错误] 设置页 保存按钮可见/可用/在视口内",
+      "ok": true,
+      "detail": "visible=True enabled=True box={'x': 145, 'y': 487, 'width': 52, 'height': 32}"
+    },
+    {
+      "name": "[desktop/当前密码错误] 用户名草稿保留",
+      "ok": true,
+      "detail": "values={'username': 't2a-draft-name', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[desktop/当前密码错误] 当前密码字段已清空",
+      "ok": true,
+      "detail": "values={'username': 't2a-draft-name', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[desktop/当前密码错误] 新密码字段已清空",
+      "ok": true,
+      "detail": "values={'username': 't2a-draft-name', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[desktop/当前密码错误] 确认新密码字段已清空",
+      "ok": true,
+      "detail": "values={'username': 't2a-draft-name', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[desktop/当前密码错误] storage 不含口令 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/当前密码错误] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/当前密码错误] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/当前密码错误] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/当前密码错误] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/当前密码错误] storage 的键名不含 password/token/secret",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/当前密码错误] URL 不含口令 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/当前密码错误] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/当前密码错误] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/当前密码错误] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/当前密码错误] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/当前密码错误] 当前会话在失败后仍有效",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/当前密码错误] 服务端日志不含口令明文 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/当前密码错误] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/当前密码错误] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/当前密码错误] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/当前密码错误] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/wrong-current] 服务端日志不含口令明文 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/wrong-current] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/wrong-current] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/wrong-current] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/wrong-current] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/重名] 管理员 API 登录",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "name": "[desktop/重名] 预置同名普通账号",
+      "ok": true,
+      "detail": "status=201 body={'id': 'effab83d-66c4-41bb-b3f4-6ac84e9d3e01', 'username': 't2a-dup-user', 'enabled': True, 'dailyLimit': 3, 'used': 0, 'remaining': 3, 'resetAt': '2026-09-14T16:00:00.000Z', 'createdAt': '2026-09-14T05:06:53.640Z'}"
+    },
+    {
+      "name": "[desktop/重名] 设置页 无横向溢出（scrollWidth=1280 <= innerWidth=1280）",
+      "ok": true,
+      "detail": "scrollWidth=1280 innerWidth=1280"
+    },
+    {
+      "name": "[desktop/重名] 设置页 输入框 #me-username 在视口内",
+      "ok": true,
+      "detail": "box={'x': 145, 'y': 194, 'width': 382, 'height': 32} viewport=1280"
+    },
+    {
+      "name": "[desktop/重名] 设置页 输入框 #me-current 在视口内",
+      "ok": true,
+      "detail": "box={'x': 145, 'y': 259, 'width': 382, 'height': 32} viewport=1280"
+    },
+    {
+      "name": "[desktop/重名] 设置页 输入框 #me-new 在视口内",
+      "ok": true,
+      "detail": "box={'x': 145, 'y': 324, 'width': 382, 'height': 32} viewport=1280"
+    },
+    {
+      "name": "[desktop/重名] 设置页 输入框 #me-confirm 在视口内",
+      "ok": true,
+      "detail": "box={'x': 145, 'y': 389, 'width': 382, 'height': 32} viewport=1280"
+    },
+    {
+      "name": "[desktop/重名] 设置页 保存按钮可见/可用/在视口内",
+      "ok": true,
+      "detail": "visible=True enabled=True box={'x': 145, 'y': 487, 'width': 52, 'height': 32}"
+    },
+    {
+      "name": "[desktop/重名] 用户名草稿保留（便于改名重试）",
+      "ok": true,
+      "detail": "values={'username': 't2a-dup-user', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[desktop/重名] 密码字段已清空",
+      "ok": true,
+      "detail": "values={'username': 't2a-dup-user', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[desktop/重名] storage 不含口令 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/重名] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/重名] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/重名] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/重名] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/重名] storage 的键名不含 password/token/secret",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/重名] URL 不含口令 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/重名] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/重名] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/重名] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/重名] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/重名] 冲突后原用户名/密码仍可登录（整体回滚）",
+      "ok": true,
+      "detail": "status=200 body={'ok': True, 'expiresAt': '2026-09-28T05:06:54.159Z', 'user': {'id': 'b30ac707-67b1-4939-9340-58c53d57951f', 'username': 'admin', 'role': 'admin'}, 'quota': {'dailyLimit': 3, 'used': 0, 'remaining': 3, 'resetAt': '2026-09-14T16:00:00.000Z'}}"
+    },
+    {
+      "name": "[desktop/重名] 服务端日志不含口令明文 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/重名] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/重名] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/重名] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/重名] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/duplicate-username] 服务端日志不含口令明文 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/duplicate-username] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/duplicate-username] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/duplicate-username] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/duplicate-username] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/连续失败限流] 设置页 无横向溢出（scrollWidth=1280 <= innerWidth=1280）",
+      "ok": true,
+      "detail": "scrollWidth=1280 innerWidth=1280"
+    },
+    {
+      "name": "[desktop/连续失败限流] 设置页 输入框 #me-username 在视口内",
+      "ok": true,
+      "detail": "box={'x': 145, 'y': 194, 'width': 382, 'height': 32} viewport=1280"
+    },
+    {
+      "name": "[desktop/连续失败限流] 设置页 输入框 #me-current 在视口内",
+      "ok": true,
+      "detail": "box={'x': 145, 'y': 259, 'width': 382, 'height': 32} viewport=1280"
+    },
+    {
+      "name": "[desktop/连续失败限流] 设置页 输入框 #me-new 在视口内",
+      "ok": true,
+      "detail": "box={'x': 145, 'y': 324, 'width': 382, 'height': 32} viewport=1280"
+    },
+    {
+      "name": "[desktop/连续失败限流] 设置页 输入框 #me-confirm 在视口内",
+      "ok": true,
+      "detail": "box={'x': 145, 'y': 389, 'width': 382, 'height': 32} viewport=1280"
+    },
+    {
+      "name": "[desktop/连续失败限流] 设置页 保存按钮可见/可用/在视口内",
+      "ok": true,
+      "detail": "visible=True enabled=True box={'x': 145, 'y': 487, 'width': 52, 'height': 32}"
+    },
+    {
+      "name": "[desktop/连续失败限流] 第 1 次失败：当前密码字段清空",
+      "ok": true,
+      "detail": "values={'username': 't2a-draft-name', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[desktop/连续失败限流] 第 2 次失败：当前密码字段清空",
+      "ok": true,
+      "detail": "values={'username': 't2a-draft-name', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[desktop/连续失败限流] 第 3 次失败：当前密码字段清空",
+      "ok": true,
+      "detail": "values={'username': 't2a-draft-name', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[desktop/连续失败限流] 第 4 次失败：当前密码字段清空",
+      "ok": true,
+      "detail": "values={'username': 't2a-draft-name', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[desktop/连续失败限流] 第 5 次失败：当前密码字段清空",
+      "ok": true,
+      "detail": "values={'username': 't2a-draft-name', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[desktop/连续失败限流] 第 6 次失败：当前密码字段清空",
+      "ok": true,
+      "detail": "values={'username': 't2a-draft-name', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[desktop/连续失败限流] 第 7 次失败：当前密码字段清空",
+      "ok": true,
+      "detail": "values={'username': 't2a-draft-name', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[desktop/连续失败限流] 第 8 次失败：当前密码字段清空",
+      "ok": true,
+      "detail": "values={'username': 't2a-draft-name', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[desktop/连续失败限流] 第 9 次失败：当前密码字段清空",
+      "ok": true,
+      "detail": "values={'username': 't2a-draft-name', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[desktop/连续失败限流] 第 10 次失败：当前密码字段清空",
+      "ok": true,
+      "detail": "values={'username': 't2a-draft-name', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[desktop/连续失败限流] 第 10 次失败后用户名草稿仍保留",
+      "ok": true,
+      "detail": "values={'username': 't2a-draft-name', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[desktop/连续失败限流] 第 11 次请求被限流（界面提示）",
+      "ok": true,
+      "detail": "err='尝试过于频繁，请稍后再试'"
+    },
+    {
+      "name": "[desktop/连续失败限流] 限流响应 429 且带 Retry-After 头",
+      "ok": true,
+      "detail": "status=429 Retry-After='899' body={'error': {'code': 'rate_limited', 'message': '尝试过于频繁，请稍后再试'}}"
+    },
+    {
+      "name": "[desktop/连续失败限流] 限流后会话仍有效（未被登出）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/连续失败限流] 服务端日志不含口令明文 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/连续失败限流] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/连续失败限流] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/连续失败限流] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/连续失败限流] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/rate-limit] 服务端日志不含口令明文 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/rate-limit] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/rate-limit] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/rate-limit] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/rate-limit] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/守卫与响应卫生] 管理员 API 登录",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "name": "[desktop/守卫与响应卫生] 建普通账号",
+      "ok": true,
+      "detail": "status=201"
+    },
+    {
+      "name": "[desktop/守卫与响应卫生] 普通账号 cookie 登录",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "name": "[desktop/守卫与响应卫生] 普通账号 Cookie 被拒（403 forbidden）",
+      "ok": true,
+      "detail": "status=403 body={'error': {'code': 'forbidden', 'message': '需要管理员权限'}}"
+    },
+    {
+      "name": "[desktop/守卫与响应卫生] 建应用（供给 client 令牌登录）",
+      "ok": true,
+      "detail": "status=201 body={'id': '7d6c52c9-d5d2-4eb5-9aa8-47632a983c64', 'appId': 'com.example.t2a-admin-settings', 'name': 'T2A 守卫检查', 'allowedOrigins': ['http://127.0.0.1:5199'], 'kaneoProjectId': 'p-t2a', 'kaneoColumnSlug': 'triage', 'createdAt': '2026-09-14T05:06:57.342Z', 'updatedAt': '2026-09-14T05:06:57.342Z'}"
+    },
+    {
+      "name": "[desktop/守卫与响应卫生] 管理员 client 令牌可签发",
+      "ok": true,
+      "detail": "status=200 body={'ok': True, 'token': '<redacted>', 'expiresAt': '2026-12-13T05:06:57.376Z', 'user': {'id': 'c363de9b-5af2-46a2-b5f1-11a244e57227', 'username': 'admin', 'role': 'admin'}, 'quota': {'dailyLimit': 3, 'used': 0, 'remaining': 3, 'resetAt': '2026-09-14T16:00:00.000Z'}}"
+    },
+    {
+      "name": "[desktop/守卫与响应卫生] 管理员 Bearer 令牌被拒（403 unauthorized）",
+      "ok": true,
+      "detail": "status=403 body={'error': {'code': 'unauthorized', 'message': '凭据类型不允许此操作'}}"
+    },
+    {
+      "name": "[desktop/守卫与响应卫生] 跨源 Origin 被拒（403 origin_mismatch）",
+      "ok": true,
+      "detail": "status=403 body={'error': {'code': 'origin_mismatch', 'message': '请求来源与服务地址不一致'}}"
+    },
+    {
+      "name": "[desktop/守卫与响应卫生] 无凭据被拒（401）",
+      "ok": true,
+      "detail": "status=401 body={'error': {'code': 'unauthorized', 'message': '需要登录'}}"
+    },
+    {
+      "name": "[desktop/守卫与响应卫生] 会话响应不含 pass_hash",
+      "ok": true,
+      "detail": "{\"authenticated\": true, \"kind\": \"cookie\", \"clientLabel\": null, \"expiresAt\": \"2026-09-28T05:06:57.266Z\", \"user\": {\"id\": \"c363de9b-5af2-46a2-b5f1-11a244e57227\", \"username\": \"admin\", \"role\": \"admin\"}, \"q"
+    },
+    {
+      "name": "[desktop/守卫与响应卫生] 会话响应不含口令明文 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/守卫与响应卫生] 会话响应不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/守卫与响应卫生] 会话响应不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/守卫与响应卫生] 会话响应不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/守卫与响应卫生] 会话响应不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/守卫与响应卫生] 被拒请求后原凭据仍可用（无副作用）",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "name": "[desktop/守卫与响应卫生] 服务端日志不含口令明文 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/守卫与响应卫生] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/守卫与响应卫生] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/守卫与响应卫生] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/守卫与响应卫生] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/guards-http] 服务端日志不含口令明文 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/guards-http] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/guards-http] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/guards-http] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[desktop/guards-http] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改用户名] 用户名预填当前账号",
+      "ok": true,
+      "detail": "prefilled='admin'"
+    },
+    {
+      "name": "[mobile/仅改用户名] 设置页 无横向溢出（scrollWidth=390 <= innerWidth=390）",
+      "ok": true,
+      "detail": "scrollWidth=390 innerWidth=390"
+    },
+    {
+      "name": "[mobile/仅改用户名] 设置页 输入框 #me-username 在视口内",
+      "ok": true,
+      "detail": "box={'x': 35, 'y': 272, 'width': 320, 'height': 32} viewport=390"
+    },
+    {
+      "name": "[mobile/仅改用户名] 设置页 输入框 #me-current 在视口内",
+      "ok": true,
+      "detail": "box={'x': 35, 'y': 337, 'width': 320, 'height': 32} viewport=390"
+    },
+    {
+      "name": "[mobile/仅改用户名] 设置页 输入框 #me-new 在视口内",
+      "ok": true,
+      "detail": "box={'x': 35, 'y': 402, 'width': 320, 'height': 32} viewport=390"
+    },
+    {
+      "name": "[mobile/仅改用户名] 设置页 输入框 #me-confirm 在视口内",
+      "ok": true,
+      "detail": "box={'x': 35, 'y': 467, 'width': 320, 'height': 32} viewport=390"
+    },
+    {
+      "name": "[mobile/仅改用户名] 设置页 保存按钮可见/可用/在视口内",
+      "ok": true,
+      "detail": "visible=True enabled=True box={'x': 35, 'y': 565, 'width': 52, 'height': 32}"
+    },
+    {
+      "name": "[mobile/仅改用户名] 回登录页并出现重新登录提示",
+      "ok": true,
+      "detail": "notice='凭据已更新，请重新登录'"
+    },
+    {
+      "name": "[mobile/仅改用户名] 登录页用户名已预填新用户名",
+      "ok": true,
+      "detail": "value='t2a-admin-renamed'"
+    },
+    {
+      "name": "[mobile/仅改用户名] storage 不含口令 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改用户名] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改用户名] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改用户名] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改用户名] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改用户名] storage 的键名不含 password/token/secret",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改用户名] URL 不含口令 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改用户名] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改用户名] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改用户名] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改用户名] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改用户名] 旧用户名不可登录",
+      "ok": true,
+      "detail": "err='用户名或密码错误'"
+    },
+    {
+      "name": "[mobile/仅改用户名] 新用户名 + 旧密码可登录（只改了用户名）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改用户名] 服务端日志不含口令明文 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改用户名] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改用户名] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改用户名] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改用户名] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/username-only] 服务端日志不含口令明文 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/username-only] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/username-only] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/username-only] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/username-only] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改密码] 用户名预填当前账号",
+      "ok": true,
+      "detail": "prefilled='admin'"
+    },
+    {
+      "name": "[mobile/仅改密码] 设置页 无横向溢出（scrollWidth=390 <= innerWidth=390）",
+      "ok": true,
+      "detail": "scrollWidth=390 innerWidth=390"
+    },
+    {
+      "name": "[mobile/仅改密码] 设置页 输入框 #me-username 在视口内",
+      "ok": true,
+      "detail": "box={'x': 35, 'y': 272, 'width': 320, 'height': 32} viewport=390"
+    },
+    {
+      "name": "[mobile/仅改密码] 设置页 输入框 #me-current 在视口内",
+      "ok": true,
+      "detail": "box={'x': 35, 'y': 337, 'width': 320, 'height': 32} viewport=390"
+    },
+    {
+      "name": "[mobile/仅改密码] 设置页 输入框 #me-new 在视口内",
+      "ok": true,
+      "detail": "box={'x': 35, 'y': 402, 'width': 320, 'height': 32} viewport=390"
+    },
+    {
+      "name": "[mobile/仅改密码] 设置页 输入框 #me-confirm 在视口内",
+      "ok": true,
+      "detail": "box={'x': 35, 'y': 467, 'width': 320, 'height': 32} viewport=390"
+    },
+    {
+      "name": "[mobile/仅改密码] 设置页 保存按钮可见/可用/在视口内",
+      "ok": true,
+      "detail": "visible=True enabled=True box={'x': 35, 'y': 565, 'width': 52, 'height': 32}"
+    },
+    {
+      "name": "[mobile/仅改密码] 预先签发普通账号 client 令牌",
+      "ok": true,
+      "detail": "None"
+    },
+    {
+      "name": "[mobile/仅改密码] 改动前 普通账号 client 令牌仍可用（t2a-client-user）",
+      "ok": true,
+      "detail": "status=200 body={'authenticated': True, 'kind': 'client', 'clientLabel': 't2a-client', 'expiresAt': '2026-12-13T05:07:01.436Z', 'user': {'id': '6db4f186-e92c-4d33-af0a-d4545f5b5b8e', 'username': 't2a-client-user', 'role': 'user'}, 'quota': {'dailyLimit': 50, 'used': 0, 'remaining': 50, 'resetAt': '2026-09-14T16:00:00.000Z'}}"
+    },
+    {
+      "name": "[mobile/仅改密码] 第二个管理员 cookie 会话建立",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "name": "[mobile/仅改密码] 回登录页并出现重新登录提示",
+      "ok": true,
+      "detail": "notice='凭据已更新，请重新登录'"
+    },
+    {
+      "name": "[mobile/仅改密码] 登录页用户名仍预填当前用户名",
+      "ok": true,
+      "detail": "value='admin'"
+    },
+    {
+      "name": "[mobile/仅改密码] storage 不含口令 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改密码] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改密码] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改密码] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改密码] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改密码] storage 的键名不含 password/token/secret",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改密码] URL 不含口令 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改密码] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改密码] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改密码] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改密码] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改密码] 浏览器旧 cookie 会话已失效",
+      "ok": true,
+      "detail": "status=401"
+    },
+    {
+      "name": "[mobile/仅改密码] 另一个管理员 cookie 会话也已失效",
+      "ok": true,
+      "detail": "status=401"
+    },
+    {
+      "name": "[mobile/仅改密码] 改动后 普通账号 client 令牌仍可用（t2a-client-user）",
+      "ok": true,
+      "detail": "status=200 body={'authenticated': True, 'kind': 'client', 'clientLabel': 't2a-client', 'expiresAt': '2026-12-13T05:07:01.436Z', 'user': {'id': '6db4f186-e92c-4d33-af0a-d4545f5b5b8e', 'username': 't2a-client-user', 'role': 'user'}, 'quota': {'dailyLimit': 50, 'used': 0, 'remaining': 50, 'resetAt': '2026-09-14T16:00:00.000Z'}}"
+    },
+    {
+      "name": "[mobile/仅改密码] 旧密码不可登录",
+      "ok": true,
+      "detail": "err='用户名或密码错误'"
+    },
+    {
+      "name": "[mobile/仅改密码] 新密码可登录",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改密码] 服务端日志不含口令明文 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改密码] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改密码] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改密码] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/仅改密码] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/password-only] 服务端日志不含口令明文 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/password-only] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/password-only] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/password-only] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/password-only] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/同时修改] 设置页 无横向溢出（scrollWidth=390 <= innerWidth=390）",
+      "ok": true,
+      "detail": "scrollWidth=390 innerWidth=390"
+    },
+    {
+      "name": "[mobile/同时修改] 设置页 输入框 #me-username 在视口内",
+      "ok": true,
+      "detail": "box={'x': 35, 'y': 272, 'width': 320, 'height': 32} viewport=390"
+    },
+    {
+      "name": "[mobile/同时修改] 设置页 输入框 #me-current 在视口内",
+      "ok": true,
+      "detail": "box={'x': 35, 'y': 337, 'width': 320, 'height': 32} viewport=390"
+    },
+    {
+      "name": "[mobile/同时修改] 设置页 输入框 #me-new 在视口内",
+      "ok": true,
+      "detail": "box={'x': 35, 'y': 402, 'width': 320, 'height': 32} viewport=390"
+    },
+    {
+      "name": "[mobile/同时修改] 设置页 输入框 #me-confirm 在视口内",
+      "ok": true,
+      "detail": "box={'x': 35, 'y': 467, 'width': 320, 'height': 32} viewport=390"
+    },
+    {
+      "name": "[mobile/同时修改] 设置页 保存按钮可见/可用/在视口内",
+      "ok": true,
+      "detail": "visible=True enabled=True box={'x': 35, 'y': 565, 'width': 52, 'height': 32}"
+    },
+    {
+      "name": "[mobile/同时修改] 预先签发普通账号 client 令牌",
+      "ok": true,
+      "detail": "None"
+    },
+    {
+      "name": "[mobile/同时修改] 回登录页并出现重新登录提示",
+      "ok": true,
+      "detail": "notice='凭据已更新，请重新登录'"
+    },
+    {
+      "name": "[mobile/同时修改] 登录页用户名已预填新用户名",
+      "ok": true,
+      "detail": "value='t2a-admin-renamed'"
+    },
+    {
+      "name": "[mobile/同时修改] storage 不含口令 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/同时修改] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/同时修改] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/同时修改] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/同时修改] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/同时修改] storage 的键名不含 password/token/secret",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/同时修改] URL 不含口令 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/同时修改] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/同时修改] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/同时修改] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/同时修改] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/同时修改] 改动后 普通账号 client 令牌仍可用（t2a-client-user）",
+      "ok": true,
+      "detail": "status=200 body={'authenticated': True, 'kind': 'client', 'clientLabel': 't2a-client', 'expiresAt': '2026-12-13T05:07:03.212Z', 'user': {'id': 'a2a6a7e5-555a-45cc-930c-d57a95fcfa64', 'username': 't2a-client-user', 'role': 'user'}, 'quota': {'dailyLimit': 50, 'used': 0, 'remaining': 50, 'resetAt': '2026-09-14T16:00:00.000Z'}}"
+    },
+    {
+      "name": "[mobile/同时修改] 重启后服务可用（/healthz）",
+      "ok": true,
+      "detail": "health=200"
+    },
+    {
+      "name": "[mobile/同时修改] 重启后仍是未登录态（旧会话未复活）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/同时修改] 重启后旧凭据不可登录",
+      "ok": true,
+      "detail": "err='用户名或密码错误'"
+    },
+    {
+      "name": "[mobile/同时修改] 重启后新凭据可登录（已持久化）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/同时修改] 重启后 普通账号 client 令牌仍可用（t2a-client-user）",
+      "ok": true,
+      "detail": "status=200 body={'authenticated': True, 'kind': 'client', 'clientLabel': 't2a-client', 'expiresAt': '2026-12-13T05:07:03.212Z', 'user': {'id': 'a2a6a7e5-555a-45cc-930c-d57a95fcfa64', 'username': 't2a-client-user', 'role': 'user'}, 'quota': {'dailyLimit': 50, 'used': 0, 'remaining': 50, 'resetAt': '2026-09-14T16:00:00.000Z'}}"
+    },
+    {
+      "name": "[mobile/同时修改] 服务端日志不含口令明文 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/同时修改] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/同时修改] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/同时修改] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/同时修改] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/both] 服务端日志不含口令明文 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/both] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/both] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/both] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/both] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/当前密码错误] 设置页 无横向溢出（scrollWidth=390 <= innerWidth=390）",
+      "ok": true,
+      "detail": "scrollWidth=390 innerWidth=390"
+    },
+    {
+      "name": "[mobile/当前密码错误] 设置页 输入框 #me-username 在视口内",
+      "ok": true,
+      "detail": "box={'x': 35, 'y': 272, 'width': 320, 'height': 32} viewport=390"
+    },
+    {
+      "name": "[mobile/当前密码错误] 设置页 输入框 #me-current 在视口内",
+      "ok": true,
+      "detail": "box={'x': 35, 'y': 337, 'width': 320, 'height': 32} viewport=390"
+    },
+    {
+      "name": "[mobile/当前密码错误] 设置页 输入框 #me-new 在视口内",
+      "ok": true,
+      "detail": "box={'x': 35, 'y': 402, 'width': 320, 'height': 32} viewport=390"
+    },
+    {
+      "name": "[mobile/当前密码错误] 设置页 输入框 #me-confirm 在视口内",
+      "ok": true,
+      "detail": "box={'x': 35, 'y': 467, 'width': 320, 'height': 32} viewport=390"
+    },
+    {
+      "name": "[mobile/当前密码错误] 设置页 保存按钮可见/可用/在视口内",
+      "ok": true,
+      "detail": "visible=True enabled=True box={'x': 35, 'y': 565, 'width': 52, 'height': 32}"
+    },
+    {
+      "name": "[mobile/当前密码错误] 用户名草稿保留",
+      "ok": true,
+      "detail": "values={'username': 't2a-draft-name', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[mobile/当前密码错误] 当前密码字段已清空",
+      "ok": true,
+      "detail": "values={'username': 't2a-draft-name', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[mobile/当前密码错误] 新密码字段已清空",
+      "ok": true,
+      "detail": "values={'username': 't2a-draft-name', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[mobile/当前密码错误] 确认新密码字段已清空",
+      "ok": true,
+      "detail": "values={'username': 't2a-draft-name', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[mobile/当前密码错误] storage 不含口令 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/当前密码错误] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/当前密码错误] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/当前密码错误] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/当前密码错误] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/当前密码错误] storage 的键名不含 password/token/secret",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/当前密码错误] URL 不含口令 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/当前密码错误] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/当前密码错误] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/当前密码错误] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/当前密码错误] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/当前密码错误] 当前会话在失败后仍有效",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/当前密码错误] 服务端日志不含口令明文 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/当前密码错误] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/当前密码错误] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/当前密码错误] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/当前密码错误] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/wrong-current] 服务端日志不含口令明文 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/wrong-current] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/wrong-current] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/wrong-current] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/wrong-current] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/重名] 管理员 API 登录",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "name": "[mobile/重名] 预置同名普通账号",
+      "ok": true,
+      "detail": "status=201 body={'id': 'af16d553-6f91-4c45-baed-23e6dfbf97aa', 'username': 't2a-dup-user', 'enabled': True, 'dailyLimit': 3, 'used': 0, 'remaining': 3, 'resetAt': '2026-09-14T16:00:00.000Z', 'createdAt': '2026-09-14T05:07:06.654Z'}"
+    },
+    {
+      "name": "[mobile/重名] 设置页 无横向溢出（scrollWidth=390 <= innerWidth=390）",
+      "ok": true,
+      "detail": "scrollWidth=390 innerWidth=390"
+    },
+    {
+      "name": "[mobile/重名] 设置页 输入框 #me-username 在视口内",
+      "ok": true,
+      "detail": "box={'x': 35, 'y': 272, 'width': 320, 'height': 32} viewport=390"
+    },
+    {
+      "name": "[mobile/重名] 设置页 输入框 #me-current 在视口内",
+      "ok": true,
+      "detail": "box={'x': 35, 'y': 337, 'width': 320, 'height': 32} viewport=390"
+    },
+    {
+      "name": "[mobile/重名] 设置页 输入框 #me-new 在视口内",
+      "ok": true,
+      "detail": "box={'x': 35, 'y': 402, 'width': 320, 'height': 32} viewport=390"
+    },
+    {
+      "name": "[mobile/重名] 设置页 输入框 #me-confirm 在视口内",
+      "ok": true,
+      "detail": "box={'x': 35, 'y': 467, 'width': 320, 'height': 32} viewport=390"
+    },
+    {
+      "name": "[mobile/重名] 设置页 保存按钮可见/可用/在视口内",
+      "ok": true,
+      "detail": "visible=True enabled=True box={'x': 35, 'y': 565, 'width': 52, 'height': 32}"
+    },
+    {
+      "name": "[mobile/重名] 用户名草稿保留（便于改名重试）",
+      "ok": true,
+      "detail": "values={'username': 't2a-dup-user', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[mobile/重名] 密码字段已清空",
+      "ok": true,
+      "detail": "values={'username': 't2a-dup-user', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[mobile/重名] storage 不含口令 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/重名] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/重名] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/重名] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/重名] storage 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/重名] storage 的键名不含 password/token/secret",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/重名] URL 不含口令 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/重名] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/重名] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/重名] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/重名] URL 不含口令 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/重名] 冲突后原用户名/密码仍可登录（整体回滚）",
+      "ok": true,
+      "detail": "status=200 body={'ok': True, 'expiresAt': '2026-09-28T05:07:07.143Z', 'user': {'id': '05fc1549-7dc7-4bac-a95f-3e5367fa5852', 'username': 'admin', 'role': 'admin'}, 'quota': {'dailyLimit': 3, 'used': 0, 'remaining': 3, 'resetAt': '2026-09-14T16:00:00.000Z'}}"
+    },
+    {
+      "name": "[mobile/重名] 服务端日志不含口令明文 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/重名] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/重名] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/重名] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/重名] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/duplicate-username] 服务端日志不含口令明文 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/duplicate-username] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/duplicate-username] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/duplicate-username] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/duplicate-username] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/连续失败限流] 设置页 无横向溢出（scrollWidth=390 <= innerWidth=390）",
+      "ok": true,
+      "detail": "scrollWidth=390 innerWidth=390"
+    },
+    {
+      "name": "[mobile/连续失败限流] 设置页 输入框 #me-username 在视口内",
+      "ok": true,
+      "detail": "box={'x': 35, 'y': 272, 'width': 320, 'height': 32} viewport=390"
+    },
+    {
+      "name": "[mobile/连续失败限流] 设置页 输入框 #me-current 在视口内",
+      "ok": true,
+      "detail": "box={'x': 35, 'y': 337, 'width': 320, 'height': 32} viewport=390"
+    },
+    {
+      "name": "[mobile/连续失败限流] 设置页 输入框 #me-new 在视口内",
+      "ok": true,
+      "detail": "box={'x': 35, 'y': 402, 'width': 320, 'height': 32} viewport=390"
+    },
+    {
+      "name": "[mobile/连续失败限流] 设置页 输入框 #me-confirm 在视口内",
+      "ok": true,
+      "detail": "box={'x': 35, 'y': 467, 'width': 320, 'height': 32} viewport=390"
+    },
+    {
+      "name": "[mobile/连续失败限流] 设置页 保存按钮可见/可用/在视口内",
+      "ok": true,
+      "detail": "visible=True enabled=True box={'x': 35, 'y': 565, 'width': 52, 'height': 32}"
+    },
+    {
+      "name": "[mobile/连续失败限流] 第 1 次失败：当前密码字段清空",
+      "ok": true,
+      "detail": "values={'username': 't2a-draft-name', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[mobile/连续失败限流] 第 2 次失败：当前密码字段清空",
+      "ok": true,
+      "detail": "values={'username': 't2a-draft-name', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[mobile/连续失败限流] 第 3 次失败：当前密码字段清空",
+      "ok": true,
+      "detail": "values={'username': 't2a-draft-name', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[mobile/连续失败限流] 第 4 次失败：当前密码字段清空",
+      "ok": true,
+      "detail": "values={'username': 't2a-draft-name', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[mobile/连续失败限流] 第 5 次失败：当前密码字段清空",
+      "ok": true,
+      "detail": "values={'username': 't2a-draft-name', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[mobile/连续失败限流] 第 6 次失败：当前密码字段清空",
+      "ok": true,
+      "detail": "values={'username': 't2a-draft-name', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[mobile/连续失败限流] 第 7 次失败：当前密码字段清空",
+      "ok": true,
+      "detail": "values={'username': 't2a-draft-name', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[mobile/连续失败限流] 第 8 次失败：当前密码字段清空",
+      "ok": true,
+      "detail": "values={'username': 't2a-draft-name', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[mobile/连续失败限流] 第 9 次失败：当前密码字段清空",
+      "ok": true,
+      "detail": "values={'username': 't2a-draft-name', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[mobile/连续失败限流] 第 10 次失败：当前密码字段清空",
+      "ok": true,
+      "detail": "values={'username': 't2a-draft-name', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[mobile/连续失败限流] 第 10 次失败后用户名草稿仍保留",
+      "ok": true,
+      "detail": "values={'username': 't2a-draft-name', 'current': '', 'new': '', 'confirm': ''}"
+    },
+    {
+      "name": "[mobile/连续失败限流] 第 11 次请求被限流（界面提示）",
+      "ok": true,
+      "detail": "err='尝试过于频繁，请稍后再试'"
+    },
+    {
+      "name": "[mobile/连续失败限流] 限流响应 429 且带 Retry-After 头",
+      "ok": true,
+      "detail": "status=429 Retry-After='900' body={'error': {'code': 'rate_limited', 'message': '尝试过于频繁，请稍后再试'}}"
+    },
+    {
+      "name": "[mobile/连续失败限流] 限流后会话仍有效（未被登出）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/连续失败限流] 服务端日志不含口令明文 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/连续失败限流] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/连续失败限流] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/连续失败限流] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/连续失败限流] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/rate-limit] 服务端日志不含口令明文 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/rate-limit] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/rate-limit] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/rate-limit] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/rate-limit] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/守卫与响应卫生] 管理员 API 登录",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "name": "[mobile/守卫与响应卫生] 建普通账号",
+      "ok": true,
+      "detail": "status=201"
+    },
+    {
+      "name": "[mobile/守卫与响应卫生] 普通账号 cookie 登录",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "name": "[mobile/守卫与响应卫生] 普通账号 Cookie 被拒（403 forbidden）",
+      "ok": true,
+      "detail": "status=403 body={'error': {'code': 'forbidden', 'message': '需要管理员权限'}}"
+    },
+    {
+      "name": "[mobile/守卫与响应卫生] 建应用（供给 client 令牌登录）",
+      "ok": true,
+      "detail": "status=201 body={'id': 'ef09ba21-00e3-4e2f-88f9-61410b84e079', 'appId': 'com.example.t2a-admin-settings', 'name': 'T2A 守卫检查', 'allowedOrigins': ['http://127.0.0.1:5199'], 'kaneoProjectId': 'p-t2a', 'kaneoColumnSlug': 'triage', 'createdAt': '2026-09-14T05:07:10.316Z', 'updatedAt': '2026-09-14T05:07:10.316Z'}"
+    },
+    {
+      "name": "[mobile/守卫与响应卫生] 管理员 client 令牌可签发",
+      "ok": true,
+      "detail": "status=200 body={'ok': True, 'token': '<redacted>', 'expiresAt': '2026-12-13T05:07:10.355Z', 'user': {'id': '49fee906-1459-412a-9de4-2368db7b2415', 'username': 'admin', 'role': 'admin'}, 'quota': {'dailyLimit': 3, 'used': 0, 'remaining': 3, 'resetAt': '2026-09-14T16:00:00.000Z'}}"
+    },
+    {
+      "name": "[mobile/守卫与响应卫生] 管理员 Bearer 令牌被拒（403 unauthorized）",
+      "ok": true,
+      "detail": "status=403 body={'error': {'code': 'unauthorized', 'message': '凭据类型不允许此操作'}}"
+    },
+    {
+      "name": "[mobile/守卫与响应卫生] 跨源 Origin 被拒（403 origin_mismatch）",
+      "ok": true,
+      "detail": "status=403 body={'error': {'code': 'origin_mismatch', 'message': '请求来源与服务地址不一致'}}"
+    },
+    {
+      "name": "[mobile/守卫与响应卫生] 无凭据被拒（401）",
+      "ok": true,
+      "detail": "status=401 body={'error': {'code': 'unauthorized', 'message': '需要登录'}}"
+    },
+    {
+      "name": "[mobile/守卫与响应卫生] 会话响应不含 pass_hash",
+      "ok": true,
+      "detail": "{\"authenticated\": true, \"kind\": \"cookie\", \"clientLabel\": null, \"expiresAt\": \"2026-09-28T05:07:10.233Z\", \"user\": {\"id\": \"49fee906-1459-412a-9de4-2368db7b2415\", \"username\": \"admin\", \"role\": \"admin\"}, \"q"
+    },
+    {
+      "name": "[mobile/守卫与响应卫生] 会话响应不含口令明文 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/守卫与响应卫生] 会话响应不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/守卫与响应卫生] 会话响应不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/守卫与响应卫生] 会话响应不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/守卫与响应卫生] 会话响应不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/守卫与响应卫生] 被拒请求后原凭据仍可用（无副作用）",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "name": "[mobile/守卫与响应卫生] 服务端日志不含口令明文 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/守卫与响应卫生] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/守卫与响应卫生] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/守卫与响应卫生] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/守卫与响应卫生] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/guards-http] 服务端日志不含口令明文 t2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/guards-http] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/guards-http] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/guards-http] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "[mobile/guards-http] 服务端日志不含口令明文 T2a-***",
+      "ok": true,
+      "detail": ""
+    }
+  ],
+  "scenarios": [
+    {
+      "viewport": "desktop",
+      "scenario": "username-only",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "viewport": "desktop",
+      "scenario": "password-only",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "viewport": "desktop",
+      "scenario": "both",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "viewport": "desktop",
+      "scenario": "wrong-current",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "viewport": "desktop",
+      "scenario": "duplicate-username",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "viewport": "desktop",
+      "scenario": "rate-limit",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "viewport": "desktop",
+      "scenario": "guards-http",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "viewport": "mobile",
+      "scenario": "username-only",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "viewport": "mobile",
+      "scenario": "password-only",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "viewport": "mobile",
+      "scenario": "both",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "viewport": "mobile",
+      "scenario": "wrong-current",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "viewport": "mobile",
+      "scenario": "duplicate-username",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "viewport": "mobile",
+      "scenario": "rate-limit",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "viewport": "mobile",
+      "scenario": "guards-http",
+      "ok": true,
+      "detail": ""
+    }
+  ]
+}

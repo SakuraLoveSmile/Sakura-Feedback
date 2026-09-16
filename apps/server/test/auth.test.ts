@@ -46,30 +46,55 @@ describe("认证", () => {
     expect(s.data.quota.remaining).toBe(3);
   });
 
-  it("令牌登录：未携带 appId 400；浏览器来源未登记 403；原生无 Origin 放行", async () => {
+  it("令牌登录（T1）：只查 appId 格式；任意合法来源与任意未登记软件都能登录", async () => {
     const t = makeTestApp();
     const cookie = await loginAsAdmin(t);
     await seedApp(t, cookie);
 
+    // appId 仍是令牌登录的必填项（格式检查保留）
     const noApp = await jsonReq(t.app, "POST", "/api/auth/login", {
       origin: "http://host.test",
       body: { username: "admin", password: TEST_PASSWORD, clientLabel: "web-x" },
     });
     expect(noApp.status).toBe(400);
+    expect(noApp.data.error.code).toBe("invalid_request");
 
-    const badOrigin = await jsonReq(t.app, "POST", "/api/auth/login", {
+    // appId 格式非法 → 400
+    const badFormat = await jsonReq(t.app, "POST", "/api/auth/login", {
+      origin: "http://host.test",
+      body: {
+        username: "admin",
+        password: TEST_PASSWORD,
+        clientLabel: "web-x",
+        appId: "带空格的 app/../id",
+      },
+    });
+    expect(badFormat.status).toBe(400);
+
+    // 未登记的浏览器来源不再被拒绝：合法 http(s) Origin 一律放行
+    const otherOrigin = await jsonReq(t.app, "POST", "/api/auth/login", {
       origin: "http://evil.test",
       body: { username: "admin", password: TEST_PASSWORD, clientLabel: "web-x", appId: "com.test.app" },
     });
-    expect(badOrigin.status).toBe(403);
-    expect(badOrigin.data.error.code).toBe("origin_not_allowed");
+    expect(otherOrigin.status).toBe(200);
+    expect(otherOrigin.data.token).toBeTruthy();
 
+    // 未登记软件同样可以登录（登录本身不创建软件）
     const unknownApp = await jsonReq(t.app, "POST", "/api/auth/login", {
       origin: "http://host.test",
-      body: { username: "admin", password: TEST_PASSWORD, clientLabel: "web-x", appId: "nope" },
+      body: { username: "admin", password: TEST_PASSWORD, clientLabel: "web-x", appId: "com.never.seen" },
     });
-    expect(unknownApp.status).toBe(404);
-    expect(unknownApp.data.error.code).toBe("unknown_app");
+    expect(unknownApp.status).toBe(200);
+    const apps = await jsonReq(t.app, "GET", "/api/admin/apps", { cookie });
+    expect((apps.data.apps as Array<{ appId: string }>).some((a) => a.appId === "com.never.seen")).toBe(false);
+
+    // 非法 Origin（非 http/https）仍拒绝——来源登记必须是可信值
+    const invalidOrigin = await jsonReq(t.app, "POST", "/api/auth/login", {
+      origin: "file:///tmp/x",
+      body: { username: "admin", password: TEST_PASSWORD, clientLabel: "web-x", appId: "com.test.app" },
+    });
+    expect(invalidOrigin.status).toBe(400);
+    expect(invalidOrigin.data.error.code).toBe("origin_not_allowed");
 
     // 原生 Flutter 不发送 Origin：不按浏览器来源校验（仍须声明 appId）。
     const native = await t.app.request("http://localhost/api/auth/login", {

@@ -1,0 +1,283 @@
+{
+  "summary": {
+    "total": 54,
+    "passed": 54,
+    "failed": [],
+    "dataDir": "/var/folders/3f/d270m3fx56b4ff4x8l0xcn8m0000gn/T/fb-auto-archive-e2e-_6z8egpd",
+    "base": "http://127.0.0.1:50415",
+    "originA": "http://127.0.0.1:5197",
+    "originB": "http://127.0.0.1:5196"
+  },
+  "results": [
+    [
+      "管理员登录 200",
+      true,
+      "status=200"
+    ],
+    [
+      "Kaneo 连接写入 200",
+      true,
+      "status=200"
+    ],
+    [
+      "AI 连接写入 200",
+      true,
+      "status=200"
+    ],
+    [
+      "创建普通账号 201",
+      true,
+      "status=201 body={'id': 'a4caa45b-1ed4-425a-93b6-909cb035b5dd', 'username': 'e2e-user', 'enabled': True, 'dailyLimit': 20, 'used': 0, 'remaining': 20, 'resetAt': '2026-09-16T16:00:00.000Z', 'createdAt': '2026-09-16T05:53:15.666Z'}"
+    ],
+    [
+      "初始没有任何软件配置",
+      true,
+      "apps=[]"
+    ],
+    [
+      "宿主页与反馈服务不同源",
+      true,
+      "origin=http://127.0.0.1:5197 api=http://127.0.0.1:50415"
+    ],
+    [
+      "组件提示「已保存 + 等待管理员配置」而不是失败",
+      true,
+      "\n:host {\n  --fb-z-index-default: 2147483000;\n  --fb-accent: #0071e3;\n  --fb-accent-hover: #0077ed;\n  --fb-accent-active: #006edb;\n  --fb-accent-disabled: #a0c7f5;\n  --fb-focus-ring: rgba(0, 113, 227, "
+    ],
+    [
+      "组件未显示提交失败",
+      true,
+      "\n:host {\n  --fb-z-index-default: 2147483000;\n  --fb-accent: #0071e3;\n  --fb-accent-hover: #0077ed;\n  --fb-accent-active: #006edb;\n  --fb-accent-disabled: #a0c7f5;\n  --fb-focus-ring: rgba(0, 113, 227, "
+    ],
+    [
+      "登录后进入已登录态（令牌仅存内存）",
+      true,
+      "no .fb-quota"
+    ],
+    [
+      "实际响应回显宿主 Origin",
+      true,
+      "cors=[{'url': 'http://127.0.0.1:50415/api/auth/login', 'origin': 'http://127.0.0.1:5197', 'credentials': None}, {'url': 'http://127.0.0.1:50415/api/feedback', 'origin': 'http://127.0.0.1:5197', 'credentials': None}]"
+    ],
+    [
+      "跨源响应绝不带 allow-credentials",
+      true,
+      "cors=[{'url': 'http://127.0.0.1:50415/api/auth/login', 'origin': 'http://127.0.0.1:5197', 'credentials': None}, {'url': 'http://127.0.0.1:50415/api/feedback', 'origin': 'http://127.0.0.1:5197', 'credentials': None}]"
+    ],
+    [
+      "浏览器上下文里反馈服务没有任何 Cookie",
+      true,
+      "cookies=[]"
+    ],
+    [
+      "后台出现自动发现的软件",
+      true,
+      "apps=[{'id': '80c8a7c8-5f18-4116-bedb-ddee57ff43b9', 'appId': 'com.e2e.unregistered', 'name': 'E2E 未登记软件', 'allowedOrigins': [], 'kaneoProjectId': '', 'kaneoColumnSlug': '', 'createdAt': '2026-09-16T05:53:20.826Z', 'updatedAt': '2026-09-16T05:53:20.826Z', 'nameSource': 'client', 'configStatus': 'pending', 'archiveMode': 'manual', 'ruleVersion': 0, 'defaults': {'projectId': '', 'columnId': '', 'columnSlug': '', 'labelIds': [], 'assigneeId': None, 'assigneeName': None}, 'ruleComplete': False, 'autoEnabledAt': None, 'autoEnabledBy': None, 'firstSeenAt': '2026-09-16T05:53:20.826Z', 'lastSeenAt': '2026-09-16T05:53:20.826Z', 'pendingSources': 1, 'confirmedSources': 0, 'waitingFeedbacks': 1}]"
+    ],
+    [
+      "软件为待配置且人工模式",
+      true,
+      "{'id': '80c8a7c8-5f18-4116-bedb-ddee57ff43b9', 'appId': 'com.e2e.unregistered', 'name': 'E2E 未登记软件', 'allowedOrigins': [], 'kaneoProjectId': '', 'kaneoColumnSlug': '', 'createdAt': '2026-09-16T05:53:20.826Z', 'updatedAt': '2026-09-16T05:53:20.826Z', 'nameSource': 'client', 'configStatus': 'pending', 'archiveMode': 'manual', 'ruleVersion': 0, 'defaults': {'projectId': '', 'columnId': '', 'columnSlug': '', 'labelIds': [], 'assigneeId': None, 'assigneeName': None}, 'ruleComplete': False, 'autoEnabledAt': None, 'autoEnabledBy': None, 'firstSeenAt': '2026-09-16T05:53:20.826Z', 'lastSeenAt': '2026-09-16T05:53:20.826Z', 'pendingSources': 1, 'confirmedSources': 0, 'waitingFeedbacks': 1}"
+    ],
+    [
+      "软件名称取自组件上报",
+      true,
+      "name=E2E 未登记软件"
+    ],
+    [
+      "存在待确认来源",
+      true,
+      "pendingSources=1"
+    ],
+    [
+      "存在等待归档的反馈",
+      true,
+      "waitingFeedbacks=1"
+    ],
+    [
+      "来源记录为宿主页 Origin 且待确认",
+      true,
+      "sources=[{'origin': 'http://127.0.0.1:5197', 'kind': 'browser', 'status': 'pending', 'firstSeenAt': '2026-09-16T05:53:20.826Z', 'lastSeenAt': '2026-09-16T05:53:20.826Z', 'confirmedAt': None, 'confirmedBy': None}]"
+    ],
+    [
+      "未配置软件时 Kaneo 零任务",
+      true,
+      "tasks=[]"
+    ],
+    [
+      "软件列表显示待配置软件",
+      true,
+      "Feedback 管理\n退出登录\n反馈\n软件配置\n连接配置\n账号\n会话\n管理员设置\n系统更新\n\n已加载 2 个项目\n\n待配置软件 1 个 · 待确认来源 1 条 · 等待归档反馈 1 条\n\n名称\tappId\t状态\t归档方式\t来源（待确认/已确认）\t等待反馈\t\nE2E 未登记软件\tcom.e2e.unregistered\t待配置 · 自动发现\t人工归档 · 规则 v0\t1 / 0\t1\t\n配置\n启用自动归档\n删除\n新增软件\n名称\nappId（创建后不可改）\n允许的 Web 来源（每行一个 origin；此处登记的来源直接视为已确认）\n默认归档目标（自动归档规则）\nKaneo 项目 （从实例加载）\n"
+    ],
+    [
+      "软件列表显示待确认来源数量",
+      true,
+      "Feedback 管理\n退出登录\n反馈\n软件配置\n连接配置\n账号\n会话\n管理员设置\n系统更新\n\n已加载 2 个项目\n\n待配置软件 1 个 · 待确认来源 1 条 · 等待归档反馈 1 条\n\n名称\tappId\t状态\t归档方式\t来源（待确认/已确认）\t等待反馈\t\nE2E 未登记软件\tcom.e2e.unregistered\t待配置 · 自动发现\t人工归档 · 规则 v0\t1 / 0\t1\t\n配置\n启用自动归档\n删除\n新增软件\n名称\nappId（创建后不可改）\n允许的 Web 来源（每行一个 origin；此处登记的来源直接视为已确认）\n默认归档目标（自动归档规则）\nKaneo 项目 （从实例加载）\n"
+    ],
+    [
+      "普通保存后仍未归档",
+      true,
+      "tasks=[]"
+    ],
+    [
+      "反馈仍为等待人工归档",
+      true,
+      "states=['waiting_manual_archive']"
+    ],
+    [
+      "来源已确认",
+      true,
+      "sources=[{'origin': 'http://127.0.0.1:5197', 'kind': 'browser', 'status': 'confirmed', 'firstSeenAt': '2026-09-16T05:53:20.826Z', 'lastSeenAt': '2026-09-16T05:53:20.826Z', 'confirmedAt': '2026-09-16T05:53:25.794Z', 'confirmedBy': 'a154d586-66da-4503-8e52-e637dc7bad51'}]"
+    ],
+    [
+      "确认来源本身不触发归档（仍是人工模式）",
+      true,
+      ""
+    ],
+    [
+      "积压被自动归档一次",
+      true,
+      "tasks=[{'id': 'e2e-task-1', 'projectId': 'p-e2e', 'number': 1, 'title': 'E2E整理：未登记软件的反馈：导出 CSV 卡住', 'description': '## 使用体验\\n\\n（mock）使用体验整理\\n\\n## 问题\\n\\n（mock）问题摘录：未登记软件的反馈：导出 CSV 卡住\\n\\n---\\n\\n**来源**：E2E 未登记软件（com.e2e.unregistered）\\n\\n**提交时间**：2026-09-16T05:53:20.826Z\\n\\n**用户原话**：\\n\\n> 未登记软件的反馈：导出 CSV 卡住了，希望支持后台导出\\n\\n**日志附件 (1)**：\\n\\n- `app.log` (手动 · 29 字节 · `691b37f4`)\\n\\n**反馈ID**：a6842d7c-0e60-485d-80da-09c22435c1ec', 'priority': 'no-priority', 'status': 'triage'}]"
+    ],
+    [
+      "积压记录状态为已归档",
+      true,
+      "status=archived"
+    ],
+    [
+      "授权来源为自动规则",
+      true,
+      "{'id': 'a6842d7c-0e60-485d-80da-09c22435c1ec', 'appId': 'com.e2e.unregistered', 'username': 'e2e-user', 'status': 'archived', 'createdAt': '2026-09-16T05:53:20.826Z', 'updatedAt': '2026-09-16T05:53:28.434Z', 'title': 'E2E整理：未登记软件的反馈：导出 CSV 卡住', 'kaneoUrl': 'http://127.0.0.1:8898/dashboard/workspace/ws-e2e/project/p-e2e/task/e2e-task-1', 'errorSummary': None, 'archiveStage': 'complete', 'hasScreenshot': True, 'logCount': 1, 'classification': {'projectId': 'p-e2e', 'columnId': 'col-1', 'columnSlug': 'triage', 'labelIds': ['label-bug'], 'assigneeId': None, 'assigneeName': None, 'version': 1, 'updatedAt': '2026-09-16T05:53:28.379Z', 'updatedBy': 'a154d586-66da-4503-8e52-e637dc7bad51'}, 'archiveAuthorized': True, 'classificationLocked': True, 'sourceOrigin': 'http://127.0.0.1:5197', 'collectionState': 'queued', 'archiveAuthorizedKind': 'auto', 'archiveRuleVersion': 2, 'autoBlockedKind': None, 'autoBlockedReason': None, 'autoAttempts': 0, 'autoNextAttemptAt': None}"
+    ],
+    [
+      "集状态为已排队",
+      true,
+      "{'id': 'a6842d7c-0e60-485d-80da-09c22435c1ec', 'appId': 'com.e2e.unregistered', 'username': 'e2e-user', 'status': 'archived', 'createdAt': '2026-09-16T05:53:20.826Z', 'updatedAt': '2026-09-16T05:53:28.434Z', 'title': 'E2E整理：未登记软件的反馈：导出 CSV 卡住', 'kaneoUrl': 'http://127.0.0.1:8898/dashboard/workspace/ws-e2e/project/p-e2e/task/e2e-task-1', 'errorSummary': None, 'archiveStage': 'complete', 'hasScreenshot': True, 'logCount': 1, 'classification': {'projectId': 'p-e2e', 'columnId': 'col-1', 'columnSlug': 'triage', 'labelIds': ['label-bug'], 'assigneeId': None, 'assigneeName': None, 'version': 1, 'updatedAt': '2026-09-16T05:53:28.379Z', 'updatedBy': 'a154d586-66da-4503-8e52-e637dc7bad51'}, 'archiveAuthorized': True, 'classificationLocked': True, 'sourceOrigin': 'http://127.0.0.1:5197', 'collectionState': 'queued', 'archiveAuthorizedKind': 'auto', 'archiveRuleVersion': 2, 'autoBlockedKind': None, 'autoBlockedReason': None, 'autoAttempts': 0, 'autoNextAttemptAt': None}"
+    ],
+    [
+      "软件已切换为自动归档",
+      true,
+      "{'id': '80c8a7c8-5f18-4116-bedb-ddee57ff43b9', 'appId': 'com.e2e.unregistered', 'name': 'E2E 未登记软件', 'allowedOrigins': [], 'kaneoProjectId': 'p-e2e', 'kaneoColumnSlug': 'triage', 'createdAt': '2026-09-16T05:53:20.826Z', 'updatedAt': '2026-09-16T05:53:28.370Z', 'nameSource': 'admin', 'configStatus': 'configured', 'archiveMode': 'automatic', 'ruleVersion': 2, 'defaults': {'projectId': 'p-e2e', 'columnId': 'col-1', 'columnSlug': 'triage', 'labelIds': ['label-bug'], 'assigneeId': None, 'assigneeName': None}, 'ruleComplete': True, 'autoEnabledAt': '2026-09-16T05:53:28.370Z', 'autoEnabledBy': 'a154d586-66da-4503-8e52-e637dc7bad51', 'firstSeenAt': '2026-09-16T05:53:20.826Z', 'lastSeenAt': '2026-09-16T05:53:20.826Z', 'pendingSources': 0, 'confirmedSources': 1, 'waitingFeedbacks': 0}"
+    ],
+    [
+      "重复启用返回 200",
+      true,
+      "status=200 body={'ok': True, 'replayed': False, 'app': {'id': '80c8a7c8-5f18-4116-bedb-ddee57ff43b9', 'appId': 'com.e2e.unregistered', 'name': 'E2E 未登记软件', 'allowedOrigins': [], 'kaneoProjectId': 'p-e2e', 'kaneoColumnSlug': 'triage', 'createdAt': '2026-09-16T05:53:20.826Z', 'updatedAt': '2026-09-16T05:53:33.436Z', 'nameSource': 'admin', 'configStatus': 'configured', 'archiveMode': 'automatic', 'ruleVersion': 3, 'defaults': {'projectId': 'p-e2e', 'columnId': 'col-1', 'columnSlug': 'triage', 'labelIds': ['label-bug'], 'assigneeId': None, 'assigneeName': None}, 'ruleComplete': True, 'autoEnabledAt': '2026-09-16T05:53:33.436Z', 'autoEnabledBy': 'a154d586-66da-4503-8e52-e637dc7bad51', 'firstSeenAt': '2026-09-16T05:53:20.826Z', 'lastSeenAt': '2026-09-16T05:53:20.826Z', 'pendingSources': 0, 'confirmedSources': 0, 'waitingFeedbacks': 0}}"
+    ],
+    [
+      "同操作键重放被识别",
+      true,
+      "body={'ok': True, 'replayed': True, 'app': {'id': '80c8a7c8-5f18-4116-bedb-ddee57ff43b9', 'appId': 'com.e2e.unregistered', 'name': 'E2E 未登记软件', 'allowedOrigins': [], 'kaneoProjectId': 'p-e2e', 'kaneoColumnSlug': 'triage', 'createdAt': '2026-09-16T05:53:20.826Z', 'updatedAt': '2026-09-16T05:53:33.436Z', 'nameSource': 'admin', 'configStatus': 'configured', 'archiveMode': 'automatic', 'ruleVersion': 3, 'defaults': {'projectId': 'p-e2e', 'columnId': 'col-1', 'columnSlug': 'triage', 'labelIds': ['label-bug'], 'assigneeId': None, 'assigneeName': None}, 'ruleComplete': True, 'autoEnabledAt': '2026-09-16T05:53:33.436Z', 'autoEnabledBy': 'a154d586-66da-4503-8e52-e637dc7bad51', 'firstSeenAt': '2026-09-16T05:53:20.826Z', 'lastSeenAt': '2026-09-16T05:53:20.826Z', 'pendingSources': 0, 'confirmedSources': 0, 'waitingFeedbacks': 0}}"
+    ],
+    [
+      "重复启用未产生新任务",
+      true,
+      "tasks=[{'id': 'e2e-task-1', 'projectId': 'p-e2e', 'number': 1, 'title': 'E2E整理：未登记软件的反馈：导出 CSV 卡住', 'description': '## 使用体验\\n\\n（mock）使用体验整理\\n\\n## 问题\\n\\n（mock）问题摘录：未登记软件的反馈：导出 CSV 卡住\\n\\n---\\n\\n**来源**：E2E 未登记软件（com.e2e.unregistered）\\n\\n**提交时间**：2026-09-16T05:53:20.826Z\\n\\n**用户原话**：\\n\\n> 未登记软件的反馈：导出 CSV 卡住了，希望支持后台导出\\n\\n**日志附件 (1)**：\\n\\n- `app.log` (手动 · 29 字节 · `691b37f4`)\\n\\n**反馈ID**：a6842d7c-0e60-485d-80da-09c22435c1ec', 'priority': 'no-priority', 'status': 'triage'}]"
+    ],
+    [
+      "后续提交被接收",
+      true,
+      "\n:host {\n  --fb-z-index-default: 2147483000;\n  --fb-accent: #0071e3;\n  --fb-accent-hover: #0077ed;\n  --fb-accent-active: #006edb;\n  --fb-accent-disabled: #a0c7f5;\n  --fb-focus-ring: rgba(0, 113, 227, "
+    ],
+    [
+      "后续反馈自动归档一次",
+      true,
+      "tasks=[{'id': 'e2e-task-1', 'projectId': 'p-e2e', 'number': 1, 'title': 'E2E整理：未登记软件的反馈：导出 CSV 卡住', 'description': '## 使用体验\\n\\n（mock）使用体验整理\\n\\n## 问题\\n\\n（mock）问题摘录：未登记软件的反馈：导出 CSV 卡住\\n\\n---\\n\\n**来源**：E2E 未登记软件（com.e2e.unregistered）\\n\\n**提交时间**：2026-09-16T05:53:20.826Z\\n\\n**用户原话**：\\n\\n> 未登记软件的反馈：导出 CSV 卡住了，希望支持后台导出\\n\\n**日志附件 (1)**：\\n\\n- `app.log` (手动 · 29 字节 · `691b37f4`)\\n\\n**反馈ID**：a6842d7c-0e60-485d-80da-09c22435c1ec', 'priority': 'no-priority', 'status': 'triage'}, {'id': 'e2e-task-2', 'projectId': 'p-e2e', 'number': 2, 'title': 'E2E整理：后续反馈：再次导出仍然卡住', 'description': '## 使用体验\\n\\n（mock）使用体验整理\\n\\n## 问题\\n\\n（mock）问题摘录：后续反馈：再次导出仍然卡住\\n\\n---\\n\\n**来源**：E2E 未登记软件（com.e2e.unregistered）\\n\\n**提交时间**：2026-09-16T05:53:35.115Z\\n\\n**用户原话**：\\n\\n> 后续反馈：再次导出仍然卡住\\n\\n**反馈ID**：e37c443f-36a6-4504-8871-f6c0b99a87a2', 'priority': 'no-priority', 'status': 'triage'}]"
+    ],
+    [
+      "组件提示等待确认来源",
+      true,
+      "\n:host {\n  --fb-z-index-default: 2147483000;\n  --fb-accent: #0071e3;\n  --fb-accent-hover: #0077ed;\n  --fb-accent-active: #006edb;\n  --fb-accent-disabled: #a0c7f5;\n  --fb-focus-ring: rgba(0, 113, 227, "
+    ],
+    [
+      "新来源不自动归档",
+      true,
+      "tasks=[{'id': 'e2e-task-1', 'projectId': 'p-e2e', 'number': 1, 'title': 'E2E整理：未登记软件的反馈：导出 CSV 卡住', 'description': '## 使用体验\\n\\n（mock）使用体验整理\\n\\n## 问题\\n\\n（mock）问题摘录：未登记软件的反馈：导出 CSV 卡住\\n\\n---\\n\\n**来源**：E2E 未登记软件（com.e2e.unregistered）\\n\\n**提交时间**：2026-09-16T05:53:20.826Z\\n\\n**用户原话**：\\n\\n> 未登记软件的反馈：导出 CSV 卡住了，希望支持后台导出\\n\\n**日志附件 (1)**：\\n\\n- `app.log` (手动 · 29 字节 · `691b37f4`)\\n\\n**反馈ID**：a6842d7c-0e60-485d-80da-09c22435c1ec', 'priority': 'no-priority', 'status': 'triage'}, {'id': 'e2e-task-2', 'projectId': 'p-e2e', 'number': 2, 'title': 'E2E整理：后续反馈：再次导出仍然卡住', 'description': '## 使用体验\\n\\n（mock）使用体验整理\\n\\n## 问题\\n\\n（mock）问题摘录：后续反馈：再次导出仍然卡住\\n\\n---\\n\\n**来源**：E2E 未登记软件（com.e2e.unregistered）\\n\\n**提交时间**：2026-09-16T05:53:35.115Z\\n\\n**用户原话**：\\n\\n> 后续反馈：再次导出仍然卡住\\n\\n**反馈ID**：e37c443f-36a6-4504-8871-f6c0b99a87a2', 'priority': 'no-priority', 'status': 'triage'}]"
+    ],
+    [
+      "服务端标记为等待来源确认",
+      true,
+      "items=[{'id': '6c017d54-7e9f-470c-9bbd-39b8b971e451', 'appId': 'com.e2e.unregistered', 'username': 'e2e-user', 'status': 'needs_info', 'createdAt': '2026-09-16T05:53:39.319Z', 'updatedAt': '2026-09-16T05:53:39.322Z', 'title': 'E2E整理：来自新站点的反馈：希望支持深色模式', 'kaneoUrl': None, 'errorSummary': None, 'archiveStage': 'task_pending', 'hasScreenshot': False, 'logCount': 0, 'classification': {'projectId': None, 'columnId': None, 'columnSlug': None, 'labelIds': [], 'assigneeId': None, 'assigneeName': None, 'version': 0, 'updatedAt': None, 'updatedBy': None}, 'archiveAuthorized': False, 'classificationLocked': False, 'sourceOrigin': 'http://127.0.0.1:5196', 'collectionState': 'waiting_source_confirmation', 'archiveAuthorizedKind': None, 'archiveRuleVersion': None, 'autoBlockedKind': 'config', 'autoBlockedReason': '来源尚未确认，确认后会自动补处理', 'autoAttempts': 0, 'autoNextAttemptAt': None}, {'id': 'e37c443f-36a6-4504-8871-f6c0b99a87a2', 'appId': 'com.e2e.unregistered', 'username': 'e2e-user', 'status': 'archived', 'createdAt': '2026-09-16T05:53:35.115Z', 'updatedAt': '2026-09-16T05:53:35.146Z', 'title': 'E2E整理：后续反馈：再次导出仍然卡住', 'kaneoUrl': 'http://127.0.0.1:8898/dashboard/workspace/ws-e2e/project/p-e2e/task/e2e-task-2', 'errorSummary': None, 'archiveStage': 'complete', 'hasScreenshot': False, 'logCount': 0, 'classification': {'projectId': 'p-e2e', 'columnId': 'col-1', 'columnSlug': 'triage', 'labelIds': ['label-bug'], 'assigneeId': None, 'assigneeName': None, 'version': 1, 'updatedAt': '2026-09-16T05:53:35.122Z', 'updatedBy': 'a154d586-66da-4503-8e52-e637dc7bad51'}, 'archiveAuthorized': True, 'classificationLocked': True, 'sourceOrigin': 'http://127.0.0.1:5197', 'collectionState': 'queued', 'archiveAuthorizedKind': 'auto', 'archiveRuleVersion': 3, 'autoBlockedKind': None, 'autoBlockedReason': None, 'autoAttempts': 0, 'autoNextAttemptAt': None}, {'id': 'a6842d7c-0e60-485d-80da-09c22435c1ec', 'appId': 'com.e2e.unregistered', 'username': 'e2e-user', 'status': 'archived', 'createdAt': '2026-09-16T05:53:20.826Z', 'updatedAt': '2026-09-16T05:53:28.434Z', 'title': 'E2E整理：未登记软件的反馈：导出 CSV 卡住', 'kaneoUrl': 'http://127.0.0.1:8898/dashboard/workspace/ws-e2e/project/p-e2e/task/e2e-task-1', 'errorSummary': None, 'archiveStage': 'complete', 'hasScreenshot': True, 'logCount': 1, 'classification': {'projectId': 'p-e2e', 'columnId': 'col-1', 'columnSlug': 'triage', 'labelIds': ['label-bug'], 'assigneeId': None, 'assigneeName': None, 'version': 1, 'updatedAt': '2026-09-16T05:53:28.379Z', 'updatedBy': 'a154d586-66da-4503-8e52-e637dc7bad51'}, 'archiveAuthorized': True, 'classificationLocked': True, 'sourceOrigin': 'http://127.0.0.1:5197', 'collectionState': 'queued', 'archiveAuthorizedKind': 'auto', 'archiveRuleVersion': 2, 'autoBlockedKind': None, 'autoBlockedReason': None, 'autoAttempts': 0, 'autoNextAttemptAt': None}]"
+    ],
+    [
+      "确认来源后补归档一次",
+      true,
+      "tasks=[{'id': 'e2e-task-1', 'projectId': 'p-e2e', 'number': 1, 'title': 'E2E整理：未登记软件的反馈：导出 CSV 卡住', 'description': '## 使用体验\\n\\n（mock）使用体验整理\\n\\n## 问题\\n\\n（mock）问题摘录：未登记软件的反馈：导出 CSV 卡住\\n\\n---\\n\\n**来源**：E2E 未登记软件（com.e2e.unregistered）\\n\\n**提交时间**：2026-09-16T05:53:20.826Z\\n\\n**用户原话**：\\n\\n> 未登记软件的反馈：导出 CSV 卡住了，希望支持后台导出\\n\\n**日志附件 (1)**：\\n\\n- `app.log` (手动 · 29 字节 · `691b37f4`)\\n\\n**反馈ID**：a6842d7c-0e60-485d-80da-09c22435c1ec', 'priority': 'no-priority', 'status': 'triage'}, {'id': 'e2e-task-2', 'projectId': 'p-e2e', 'number': 2, 'title': 'E2E整理：后续反馈：再次导出仍然卡住', 'description': '## 使用体验\\n\\n（mock）使用体验整理\\n\\n## 问题\\n\\n（mock）问题摘录：后续反馈：再次导出仍然卡住\\n\\n---\\n\\n**来源**：E2E 未登记软件（com.e2e.unregistered）\\n\\n**提交时间**：2026-09-16T05:53:35.115Z\\n\\n**用户原话**：\\n\\n> 后续反馈：再次导出仍然卡住\\n\\n**反馈ID**：e37c443f-36a6-4504-8871-f6c0b99a87a2', 'priority': 'no-priority', 'status': 'triage'}, {'id': 'e2e-task-3', 'projectId': 'p-e2e', 'number': 3, 'title': 'E2E整理：来自新站点的反馈：希望支持深色模式', 'description': '## 使用体验\\n\\n（mock）使用体验整理\\n\\n## 问题\\n\\n（mock）问题摘录：来自新站点的反馈：希望支持深色模式\\n\\n---\\n\\n**来源**：E2E 未登记软件（com.e2e.unregistered）\\n\\n**提交时间**：2026-09-16T05:53:39.319Z\\n\\n**用户原话**：\\n\\n> 来自新站点的反馈：希望支持深色模式\\n\\n**反馈ID**：6c017d54-7e9f-470c-9bbd-39b8b971e451', 'priority': 'no-priority', 'status': 'triage'}]"
+    ],
+    [
+      "三条反馈全部归档",
+      true,
+      "items=[('archived', 'queued'), ('archived', 'queued'), ('archived', 'queued')]"
+    ],
+    [
+      "任务列使用规则中的目标列",
+      true,
+      "tasks=[{'id': 'e2e-task-1', 'projectId': 'p-e2e', 'number': 1, 'title': 'E2E整理：未登记软件的反馈：导出 CSV 卡住', 'description': '## 使用体验\\n\\n（mock）使用体验整理\\n\\n## 问题\\n\\n（mock）问题摘录：未登记软件的反馈：导出 CSV 卡住\\n\\n---\\n\\n**来源**：E2E 未登记软件（com.e2e.unregistered）\\n\\n**提交时间**：2026-09-16T05:53:20.826Z\\n\\n**用户原话**：\\n\\n> 未登记软件的反馈：导出 CSV 卡住了，希望支持后台导出\\n\\n**日志附件 (1)**：\\n\\n- `app.log` (手动 · 29 字节 · `691b37f4`)\\n\\n**反馈ID**：a6842d7c-0e60-485d-80da-09c22435c1ec', 'priority': 'no-priority', 'status': 'triage'}, {'id': 'e2e-task-2', 'projectId': 'p-e2e', 'number': 2, 'title': 'E2E整理：后续反馈：再次导出仍然卡住', 'description': '## 使用体验\\n\\n（mock）使用体验整理\\n\\n## 问题\\n\\n（mock）问题摘录：后续反馈：再次导出仍然卡住\\n\\n---\\n\\n**来源**：E2E 未登记软件（com.e2e.unregistered）\\n\\n**提交时间**：2026-09-16T05:53:35.115Z\\n\\n**用户原话**：\\n\\n> 后续反馈：再次导出仍然卡住\\n\\n**反馈ID**：e37c443f-36a6-4504-8871-f6c0b99a87a2', 'priority': 'no-priority', 'status': 'triage'}, {'id': 'e2e-task-3', 'projectId': 'p-e2e', 'number': 3, 'title': 'E2E整理：来自新站点的反馈：希望支持深色模式', 'description': '## 使用体验\\n\\n（mock）使用体验整理\\n\\n## 问题\\n\\n（mock）问题摘录：来自新站点的反馈：希望支持深色模式\\n\\n---\\n\\n**来源**：E2E 未登记软件（com.e2e.unregistered）\\n\\n**提交时间**：2026-09-16T05:53:39.319Z\\n\\n**用户原话**：\\n\\n> 来自新站点的反馈：希望支持深色模式\\n\\n**反馈ID**：6c017d54-7e9f-470c-9bbd-39b8b971e451', 'priority': 'no-priority', 'status': 'triage'}]"
+    ],
+    [
+      "任务使用规则中的项目",
+      true,
+      "tasks=[{'id': 'e2e-task-1', 'projectId': 'p-e2e', 'number': 1, 'title': 'E2E整理：未登记软件的反馈：导出 CSV 卡住', 'description': '## 使用体验\\n\\n（mock）使用体验整理\\n\\n## 问题\\n\\n（mock）问题摘录：未登记软件的反馈：导出 CSV 卡住\\n\\n---\\n\\n**来源**：E2E 未登记软件（com.e2e.unregistered）\\n\\n**提交时间**：2026-09-16T05:53:20.826Z\\n\\n**用户原话**：\\n\\n> 未登记软件的反馈：导出 CSV 卡住了，希望支持后台导出\\n\\n**日志附件 (1)**：\\n\\n- `app.log` (手动 · 29 字节 · `691b37f4`)\\n\\n**反馈ID**：a6842d7c-0e60-485d-80da-09c22435c1ec', 'priority': 'no-priority', 'status': 'triage'}, {'id': 'e2e-task-2', 'projectId': 'p-e2e', 'number': 2, 'title': 'E2E整理：后续反馈：再次导出仍然卡住', 'description': '## 使用体验\\n\\n（mock）使用体验整理\\n\\n## 问题\\n\\n（mock）问题摘录：后续反馈：再次导出仍然卡住\\n\\n---\\n\\n**来源**：E2E 未登记软件（com.e2e.unregistered）\\n\\n**提交时间**：2026-09-16T05:53:35.115Z\\n\\n**用户原话**：\\n\\n> 后续反馈：再次导出仍然卡住\\n\\n**反馈ID**：e37c443f-36a6-4504-8871-f6c0b99a87a2', 'priority': 'no-priority', 'status': 'triage'}, {'id': 'e2e-task-3', 'projectId': 'p-e2e', 'number': 3, 'title': 'E2E整理：来自新站点的反馈：希望支持深色模式', 'description': '## 使用体验\\n\\n（mock）使用体验整理\\n\\n## 问题\\n\\n（mock）问题摘录：来自新站点的反馈：希望支持深色模式\\n\\n---\\n\\n**来源**：E2E 未登记软件（com.e2e.unregistered）\\n\\n**提交时间**：2026-09-16T05:53:39.319Z\\n\\n**用户原话**：\\n\\n> 来自新站点的反馈：希望支持深色模式\\n\\n**反馈ID**：6c017d54-7e9f-470c-9bbd-39b8b971e451', 'priority': 'no-priority', 'status': 'triage'}]"
+    ],
+    [
+      "工作区标签已关联到任务",
+      true,
+      "attaches=[{'labelId': 'label-bug', 'taskId': 'e2e-task-1', 'created': True, 'at': '2026-09-16T05:53:28.397Z'}, {'labelId': 'label-bug', 'taskId': 'e2e-task-2', 'created': True, 'at': '2026-09-16T05:53:35.142Z'}, {'labelId': 'label-bug', 'taskId': 'e2e-task-3', 'created': True, 'at': '2026-09-16T05:53:42.097Z'}]"
+    ],
+    [
+      "关联的是规则里选中的工作区标签",
+      true,
+      "attaches=[{'labelId': 'label-bug', 'taskId': 'e2e-task-1', 'created': True, 'at': '2026-09-16T05:53:28.397Z'}, {'labelId': 'label-bug', 'taskId': 'e2e-task-2', 'created': True, 'at': '2026-09-16T05:53:35.142Z'}, {'labelId': 'label-bug', 'taskId': 'e2e-task-3', 'created': True, 'at': '2026-09-16T05:53:42.097Z'}]"
+    ],
+    [
+      "第三个源提示等待确认来源",
+      true,
+      "\n:host {\n  --fb-z-index-default: 2147483000;\n  --fb-accent: #0071e3;\n  --fb-accent-hover: #0077ed;\n  --fb-accent-active: #006edb;\n  --fb-accent-disabled: #a0c7f5;\n  --fb-focus-ring: rgba(0, 113, 227, "
+    ],
+    [
+      "第三个源不自动归档",
+      true,
+      "tasks=[{'id': 'e2e-task-1', 'projectId': 'p-e2e', 'number': 1, 'title': 'E2E整理：未登记软件的反馈：导出 CSV 卡住', 'description': '## 使用体验\\n\\n（mock）使用体验整理\\n\\n## 问题\\n\\n（mock）问题摘录：未登记软件的反馈：导出 CSV 卡住\\n\\n---\\n\\n**来源**：E2E 未登记软件（com.e2e.unregistered）\\n\\n**提交时间**：2026-09-16T05:53:20.826Z\\n\\n**用户原话**：\\n\\n> 未登记软件的反馈：导出 CSV 卡住了，希望支持后台导出\\n\\n**日志附件 (1)**：\\n\\n- `app.log` (手动 · 29 字节 · `691b37f4`)\\n\\n**反馈ID**：a6842d7c-0e60-485d-80da-09c22435c1ec', 'priority': 'no-priority', 'status': 'triage'}, {'id': 'e2e-task-2', 'projectId': 'p-e2e', 'number': 2, 'title': 'E2E整理：后续反馈：再次导出仍然卡住', 'description': '## 使用体验\\n\\n（mock）使用体验整理\\n\\n## 问题\\n\\n（mock）问题摘录：后续反馈：再次导出仍然卡住\\n\\n---\\n\\n**来源**：E2E 未登记软件（com.e2e.unregistered）\\n\\n**提交时间**：2026-09-16T05:53:35.115Z\\n\\n**用户原话**：\\n\\n> 后续反馈：再次导出仍然卡住\\n\\n**反馈ID**：e37c443f-36a6-4504-8871-f6c0b99a87a2', 'priority': 'no-priority', 'status': 'triage'}, {'id': 'e2e-task-3', 'projectId': 'p-e2e', 'number': 3, 'title': 'E2E整理：来自新站点的反馈：希望支持深色模式', 'description': '## 使用体验\\n\\n（mock）使用体验整理\\n\\n## 问题\\n\\n（mock）问题摘录：来自新站点的反馈：希望支持深色模式\\n\\n---\\n\\n**来源**：E2E 未登记软件（com.e2e.unregistered）\\n\\n**提交时间**：2026-09-16T05:53:39.319Z\\n\\n**用户原话**：\\n\\n> 来自新站点的反馈：希望支持深色模式\\n\\n**反馈ID**：6c017d54-7e9f-470c-9bbd-39b8b971e451', 'priority': 'no-priority', 'status': 'triage'}]"
+    ],
+    [
+      "另一个页面保存成功并推进版本",
+      true,
+      "status=200 body={'id': '80c8a7c8-5f18-4116-bedb-ddee57ff43b9', 'appId': 'com.e2e.unregistered', 'name': '另一个页面改名', 'allowedOrigins': [], 'kaneoProjectId': 'p-e2e', 'kaneoColumnSlug': 'triage', 'createdAt': '2026-09-16T05:53:20.826Z', 'updatedAt': '2026-09-16T05:53:48.993Z', 'nameSource': 'admin', 'configStatus': 'configured', 'archiveMode': 'automatic', 'ruleVersion': 4, 'defaults': {'projectId': 'p-e2e', 'columnId': 'col-1', 'columnSlug': 'triage', 'labelIds': ['label-bug'], 'assigneeId': None, 'assigneeName': None}, 'ruleComplete': True, 'autoEnabledAt': '2026-09-16T05:53:33.436Z', 'autoEnabledBy': 'a154d586-66da-4503-8e52-e637dc7bad51', 'firstSeenAt': '2026-09-16T05:53:20.826Z', 'lastSeenAt': '2026-09-16T05:53:46.318Z', 'pendingSources': 1, 'confirmedSources': 2, 'waitingFeedbacks': 1}"
+    ],
+    [
+      "管理页显示版本冲突提示（不静默重试）",
+      true,
+      "端记为 native。待确认来源不会自动归档， 确认后由扫描自动补处理。\n\n来源\t类型\t状态\t最近出现\t\nhttp://127.0.0.1:5197\t浏览器\t已确认\t2026-09-16T05:53:35.115Z\t—\nhttp://127.0.0.1:5196\t浏览器\t已确认\t2026-09-16T05:53:39.319Z\t—\nhttp://127.0.0.1:5198\t浏览器\t待确认\t2026-09-16T05:53:46.318Z\t确认来源\n配置：另一个页面改名\n名称\nappId（创建后不可改）\n允许的 Web 来源（每行一个 origin；此处登记的来源直接视为已确认）\n默认归档目标（自动归档规则）\nKaneo 项目 （从实例加载）\n— 选择项目 —\nE2E 测试项目（E2E）\n另一个项目（OTHER）\n↻ 刷新项目列表\n目标列\n— 选择列 —\n待筛选（triage）\n进行中（doing）\n加载列 / 标签 / 成员\n工作区标签（至少选一个）\nbug\nui\n负责人（可选）\n— 不指定 —\nE2E 成员甲\nE2E 成员乙\n保存配置（不触发归档）\n启用自动归档并处理积压\n取消编辑"
+    ],
+    [
+      "冲突时来源未被确认",
+      true,
+      "sources=[{'origin': 'http://127.0.0.1:5197', 'kind': 'browser', 'status': 'confirmed', 'firstSeenAt': '2026-09-16T05:53:20.826Z', 'lastSeenAt': '2026-09-16T05:53:35.115Z', 'confirmedAt': '2026-09-16T05:53:25.794Z', 'confirmedBy': 'a154d586-66da-4503-8e52-e637dc7bad51'}, {'origin': 'http://127.0.0.1:5196', 'kind': 'browser', 'status': 'confirmed', 'firstSeenAt': '2026-09-16T05:53:39.319Z', 'lastSeenAt': '2026-09-16T05:53:39.319Z', 'confirmedAt': '2026-09-16T05:53:42.077Z', 'confirmedBy': 'a154d586-66da-4503-8e52-e637dc7bad51'}, {'origin': 'http://127.0.0.1:5198', 'kind': 'browser', 'status': 'pending', 'firstSeenAt': '2026-09-16T05:53:46.318Z', 'lastSeenAt': '2026-09-16T05:53:46.318Z', 'confirmedAt': None, 'confirmedBy': None}]"
+    ],
+    [
+      "冲突不触发归档",
+      true,
+      ""
+    ],
+    [
+      "刷新后确认成功",
+      true,
+      "sources=[{'origin': 'http://127.0.0.1:5197', 'kind': 'browser', 'status': 'confirmed', 'firstSeenAt': '2026-09-16T05:53:20.826Z', 'lastSeenAt': '2026-09-16T05:53:35.115Z', 'confirmedAt': '2026-09-16T05:53:25.794Z', 'confirmedBy': 'a154d586-66da-4503-8e52-e637dc7bad51'}, {'origin': 'http://127.0.0.1:5196', 'kind': 'browser', 'status': 'confirmed', 'firstSeenAt': '2026-09-16T05:53:39.319Z', 'lastSeenAt': '2026-09-16T05:53:39.319Z', 'confirmedAt': '2026-09-16T05:53:42.077Z', 'confirmedBy': 'a154d586-66da-4503-8e52-e637dc7bad51'}, {'origin': 'http://127.0.0.1:5198', 'kind': 'browser', 'status': 'confirmed', 'firstSeenAt': '2026-09-16T05:53:46.318Z', 'lastSeenAt': '2026-09-16T05:53:46.318Z', 'confirmedAt': '2026-09-16T05:53:52.094Z', 'confirmedBy': 'a154d586-66da-4503-8e52-e637dc7bad51'}]"
+    ],
+    [
+      "确认后补归档一次",
+      true,
+      "tasks=[{'id': 'e2e-task-1', 'projectId': 'p-e2e', 'number': 1, 'title': 'E2E整理：未登记软件的反馈：导出 CSV 卡住', 'description': '## 使用体验\\n\\n（mock）使用体验整理\\n\\n## 问题\\n\\n（mock）问题摘录：未登记软件的反馈：导出 CSV 卡住\\n\\n---\\n\\n**来源**：E2E 未登记软件（com.e2e.unregistered）\\n\\n**提交时间**：2026-09-16T05:53:20.826Z\\n\\n**用户原话**：\\n\\n> 未登记软件的反馈：导出 CSV 卡住了，希望支持后台导出\\n\\n**日志附件 (1)**：\\n\\n- `app.log` (手动 · 29 字节 · `691b37f4`)\\n\\n**反馈ID**：a6842d7c-0e60-485d-80da-09c22435c1ec', 'priority': 'no-priority', 'status': 'triage'}, {'id': 'e2e-task-2', 'projectId': 'p-e2e', 'number': 2, 'title': 'E2E整理：后续反馈：再次导出仍然卡住', 'description': '## 使用体验\\n\\n（mock）使用体验整理\\n\\n## 问题\\n\\n（mock）问题摘录：后续反馈：再次导出仍然卡住\\n\\n---\\n\\n**来源**：E2E 未登记软件（com.e2e.unregistered）\\n\\n**提交时间**：2026-09-16T05:53:35.115Z\\n\\n**用户原话**：\\n\\n> 后续反馈：再次导出仍然卡住\\n\\n**反馈ID**：e37c443f-36a6-4504-8871-f6c0b99a87a2', 'priority': 'no-priority', 'status': 'triage'}, {'id': 'e2e-task-3', 'projectId': 'p-e2e', 'number': 3, 'title': 'E2E整理：来自新站点的反馈：希望支持深色模式', 'description': '## 使用体验\\n\\n（mock）使用体验整理\\n\\n## 问题\\n\\n（mock）问题摘录：来自新站点的反馈：希望支持深色模式\\n\\n---\\n\\n**来源**：E2E 未登记软件（com.e2e.unregistered）\\n\\n**提交时间**：2026-09-16T05:53:39.319Z\\n\\n**用户原话**：\\n\\n> 来自新站点的反馈：希望支持深色模式\\n\\n**反馈ID**：6c017d54-7e9f-470c-9bbd-39b8b971e451', 'priority': 'no-priority', 'status': 'triage'}, {'id': 'e2e-task-4', 'projectId': 'p-e2e', 'number': 4, 'title': 'E2E整理：第三个站点：希望支持多语言', 'description': '## 使用体验\\n\\n（mock）使用体验整理\\n\\n## 问题\\n\\n（mock）问题摘录：第三个站点：希望支持多语言\\n\\n---\\n\\n**来源**：另一个页面改名（com.e2e.unregistered）\\n\\n**提交时间**：2026-09-16T05:53:46.318Z\\n\\n**用户原话**：\\n\\n> 第三个站点：希望支持多语言\\n\\n**反馈ID**：4d753d72-f9b6-4e10-b897-346001476385', 'priority': 'no-priority', 'status': 'triage'}]"
+    ],
+    [
+      "重启后任务数不变（可恢复扫描幂等）",
+      true,
+      "before=4 after=4"
+    ],
+    [
+      "浏览器控制台无 JS 运行时错误",
+      true,
+      "errors=[]"
+    ]
+  ]
+}

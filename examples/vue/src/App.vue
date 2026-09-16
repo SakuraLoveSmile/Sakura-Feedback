@@ -4,13 +4,16 @@ import { onBeforeUnmount, onMounted, ref, useTemplateRef } from 'vue';
 import { openFeedback, type FeedbackSubmittedDetail, type FeedbackWidget } from '@feedback/web';
 
 const last = ref<string | null>(null);
+/** 主题：与站点一致的深色模式（system | light | dark）。 */
+const theme = ref<'system' | 'light' | 'dark'>('light');
 
 /** 模板 ref：直接持有真实的 DOM 元素实例（不再用 document.querySelector 全局查找）。 */
 const widget = useTemplateRef<FeedbackWidget>('widget');
 
 function onSubmitted(ev: Event) {
   const detail = (ev as CustomEvent<FeedbackSubmittedDetail>).detail;
-  last.value = `feedbackId=${detail.feedbackId} status=${detail.status}`;
+  // 提交成功只代表“原话已保存 + AI 已整理”；归档由管理员在 Feedback 管理页人工完成。
+  last.value = `feedbackId=${detail.feedbackId} status=${detail.status}（已保存，等待人工归档）`;
 }
 
 /** 只打开面板，不触发截图（需要截图用 captureAndOpen()）。 */
@@ -49,6 +52,31 @@ onBeforeUnmount(() => {
 <template>
   <main style="font-family: sans-serif; padding: 40px">
     <h1>Vue × @feedback/web 示例</h1>
+
+    <!-- 宿主菜单调用：任何菜单项 / 工具栏按钮都可以直接调用 open() / captureAndOpen()。 -->
+    <nav
+      style="
+        display: flex;
+        gap: 16px;
+        align-items: center;
+        border-bottom: 1px solid #e2e8f0;
+        padding-bottom: 10px;
+        margin-bottom: 16px;
+      "
+    >
+      <strong>站点菜单</strong>
+      <button @click="openPanel">反馈</button>
+      <button @click="captureAndOpen">反馈并截图</button>
+      <label style="margin-left: auto; font-size: 13px">
+        主题
+        <select v-model="theme">
+          <option value="system">跟随系统</option>
+          <option value="light">浅色</option>
+          <option value="dark">深色</option>
+        </select>
+      </label>
+    </nav>
+
     <p>右下角为灵感球（可拖动到界面任意位置指出问题并截图）：</p>
 
     <div style="display: flex; gap: 12px; margin-bottom: 8px; flex-wrap: wrap">
@@ -82,9 +110,14 @@ onBeforeUnmount(() => {
     </div>
 
     <p style="color: #059669">{{ last ? `最近提交：${last}` : '' }}</p>
+    <p style="font-size: 13px; color: #64748b">
+      提交成功后服务端只做保存与 AI 整理；<strong>归档到 Kaneo 由管理员在 Feedback 管理页人工完成</strong>
+      （选择项目 / 列 / 工作区标签 / 可选负责人，再点「保存并归档」）。因此宿主文案请写"反馈已保存"。
+    </p>
 
     <!-- 直接在模板里使用自定义元素；vite.config.ts 已声明 isCustomElement。
-         launcher-mode / capture-mode 的组件默认值是 tab / off，这里显式覆盖。 -->
+         launcher-mode / capture-mode 的组件默认值是 tab / off，这里显式覆盖。
+         theme 与站点主题联动（system 跟随系统）。 -->
     <feedback-widget
       ref="widget"
       api-base="http://localhost:8787"
@@ -94,6 +127,7 @@ onBeforeUnmount(() => {
       side="right"
       launcher-mode="orb"
       capture-mode="viewport"
+      :theme="theme"
     />
   </main>
 </template>

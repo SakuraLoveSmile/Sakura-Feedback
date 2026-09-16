@@ -8,6 +8,17 @@ import { type ControlPlane, PAUSE_DEFAULT_MESSAGE, PAUSE_ERROR_CODE } from "./ro
 export const COOKIE_NAME = "fb_session";
 export const MAX_BODY_BYTES = 64 * 1024;
 
+declare module "hono" {
+  interface ContextVariableMap {
+    /**
+     * 跨源组件请求标记（由 app.ts 的组件端点中间件设置）。
+     * 置位后 Cookie **一律不参与鉴权**：浏览器组件只使用 Bearer + `credentials: omit`，
+     * 跨源页面绝不允许借后台 Cookie 提升权限。
+     */
+    crossOriginNoCookie?: boolean;
+  }
+}
+
 export interface Err {
   code: string;
   message: string;
@@ -32,9 +43,11 @@ export function readBearer(c: Context): string | null {
   return null;
 }
 
-/** 解析请求方会话（Cookie 或 Bearer 均可），无效返回 null。 */
+/** 解析请求方会话（Bearer 优先；跨源请求不允许回退到后台 Cookie），无效返回 null。 */
 export function resolveSession(db: Db, c: Context): SessionRow | null {
-  const token = readBearer(c) ?? getCookie(c, COOKIE_NAME);
+  const bearer = readBearer(c);
+  const cookie = c.get("crossOriginNoCookie") ? null : getCookie(c, COOKIE_NAME);
+  const token = bearer ?? cookie;
   if (!token) return null;
   return findActiveSessionByToken(db, token);
 }
@@ -92,6 +105,35 @@ export function checkSameOrigin(c: Context, session: SessionRow, config: ServerC
   const method = c.req.method;
   if (method === "GET" || method === "HEAD") return null;
   return checkOriginHeader(c, config);
+}
+
+/**
+ * 请求是否来自**跨源**页面：携带 Origin 且与服务自身 origin 不一致。
+ * 组件端点据此启用「只认 Bearer、不认 Cookie」的鉴权口径。
+ * Origin 头本身非法（无法解析）也按跨源处理——宁可要求 Bearer，也不放宽 Cookie。
+ */
+export function isCrossOriginRequest(c: Context, config: ServerConfig): boolean {
+  const origin = c.req.header("origin");
+  if (!origin) return false;
+  let actual: string;
+  try {
+    actual = new URL(origin).origin;
+  } catch {
+    return true;
+  }
+  const expected = expectedOrigin(c, config);
+  return expected === null || actual !== expected;
+}
+
+/** 规范化 Origin 头（仅接受 http/https）；非法返回 null。 */
+export function normalizeRequestOrigin(raw: string): string | null {
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    return u.origin;
+  } catch {
+    return null;
+  }
 }
 
 /**

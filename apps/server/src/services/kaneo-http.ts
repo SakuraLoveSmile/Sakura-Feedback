@@ -217,6 +217,107 @@ export function createKaneoHttpClient(
       return { id: project.id, workspaceId: project.workspaceId, name: project.name, slug: project.slug };
     },
 
+    async listColumns(projectId) {
+      return listColumns(projectId);
+    },
+
+    async listWorkspaceLabels(workspaceId) {
+      const res = await req(`/label/workspace/${encodeURIComponent(workspaceId)}`, {
+        timeoutMs: 15_000,
+        uncertainOnNetwork: false,
+      });
+      if (res.status === 401 || res.status === 403) {
+        throw new KaneoDefiniteError(`Kaneo 认证失败或无权限 (${res.status})`);
+      }
+      if (!res.ok) throw new KaneoDefiniteError(`Kaneo 标签列表获取失败 (${res.status})：${await bodyText(res)}`);
+      const data: unknown = await res.json().catch(() => null);
+      if (!Array.isArray(data)) throw new KaneoDefiniteError("Kaneo 标签响应不是数组");
+      return data
+        .filter((r): r is Record<string, unknown> => typeof r === "object" && r !== null)
+        .filter((r) => typeof r.id === "string" && typeof r.name === "string")
+        .map((r) => ({
+          id: String(r.id),
+          name: String(r.name),
+          color: typeof r.color === "string" ? r.color : "",
+          taskId: typeof r.taskId === "string" ? r.taskId : null,
+          workspaceId: typeof r.workspaceId === "string" ? r.workspaceId : null,
+        }));
+    },
+
+    async listTaskLabels(taskId) {
+      const res = await req(`/label/task/${encodeURIComponent(taskId)}`, {
+        timeoutMs: 15_000,
+        uncertainOnNetwork: false,
+      });
+      if (res.status === 401 || res.status === 403) {
+        throw new KaneoDefiniteError(`Kaneo 认证失败或无权限 (${res.status})`);
+      }
+      if (!res.ok) throw new KaneoDefiniteError(`Kaneo 任务标签获取失败 (${res.status})：${await bodyText(res)}`);
+      const data: unknown = await res.json().catch(() => null);
+      if (!Array.isArray(data)) throw new KaneoDefiniteError("Kaneo 任务标签响应不是数组");
+      return data
+        .filter((r): r is Record<string, unknown> => typeof r === "object" && r !== null)
+        .filter((r) => typeof r.id === "string" && typeof r.name === "string")
+        .map((r) => ({
+          id: String(r.id),
+          name: String(r.name),
+          color: typeof r.color === "string" ? r.color : "",
+          taskId: typeof r.taskId === "string" ? r.taskId : null,
+          workspaceId: typeof r.workspaceId === "string" ? r.workspaceId : null,
+        }));
+    },
+
+    async attachLabelToTask(labelId, taskId) {
+      const res = await req(`/label/${encodeURIComponent(labelId)}/task`, {
+        method: "PUT",
+        body: JSON.stringify({ taskId }),
+        timeoutMs: 15_000,
+        uncertainOnNetwork: true,
+      });
+      if (res.status >= 500) {
+        throw new KaneoUncertainError(`Kaneo 返回 ${res.status}，标签关联结果不确定`);
+      }
+      if (!res.ok) throw new KaneoDefiniteError(`Kaneo 标签关联被拒绝 (${res.status})：${await bodyText(res)}`);
+      let data: Record<string, unknown> | null = null;
+      try {
+        data = (await res.json()) as Record<string, unknown>;
+      } catch {
+        data = null;
+      }
+      if (!data || typeof data.id !== "string" || typeof data.name !== "string") {
+        throw new KaneoUncertainError("Kaneo 标签关联响应不可解析，结果不确定");
+      }
+      return {
+        id: String(data.id),
+        name: String(data.name),
+        color: typeof data.color === "string" ? data.color : "",
+        taskId: typeof data.taskId === "string" ? data.taskId : taskId,
+        workspaceId: typeof data.workspaceId === "string" ? data.workspaceId : null,
+      };
+    },
+
+    async listWorkspaceMembers(workspaceId) {
+      const res = await req(`/workspace/${encodeURIComponent(workspaceId)}/members`, {
+        timeoutMs: 15_000,
+        uncertainOnNetwork: false,
+      });
+      if (res.status === 401 || res.status === 403) {
+        throw new KaneoDefiniteError(`Kaneo 认证失败或无权限 (${res.status})`);
+      }
+      if (!res.ok) throw new KaneoDefiniteError(`Kaneo 成员列表获取失败 (${res.status})：${await bodyText(res)}`);
+      const data: unknown = await res.json().catch(() => null);
+      if (!Array.isArray(data)) throw new KaneoDefiniteError("Kaneo 成员响应不是数组");
+      return data
+        .filter((r): r is Record<string, unknown> => typeof r === "object" && r !== null)
+        .filter((r) => typeof r.id === "string")
+        .map((r) => ({
+          id: String(r.id),
+          name: typeof r.name === "string" ? r.name : String(r.email ?? r.id),
+          email: typeof r.email === "string" ? r.email : "",
+          role: typeof r.role === "string" ? r.role : "",
+        }));
+    },
+
     async listProjects() {
       const wsRes = await req("/auth/organization/list", { timeoutMs: 15_000, uncertainOnNetwork: false });
       if (wsRes.status === 401 || wsRes.status === 403) {
@@ -260,7 +361,7 @@ export function createKaneoHttpClient(
       return { workspaces, projects };
     },
 
-    async createTask({ projectId, columnSlug, title, description }) {
+    async createTask({ projectId, columnSlug, title, description, userId }) {
       // —— 写入前置检查（只读；任何失败都不会产生任务） ——
       const project = await getProject(projectId);
       const columns = await listColumns(projectId);
@@ -270,6 +371,7 @@ export function createKaneoHttpClient(
       }
 
       // —— 创建请求：此后一切异常按“结果不确定”处理 ——
+      // 未选负责人时**省略 userId**字段（不是传 null），保持 Kaneo 的“无负责人”默认。
       const res = await req(`/task/${encodeURIComponent(projectId)}`, {
         method: "POST",
         body: JSON.stringify({
@@ -277,6 +379,7 @@ export function createKaneoHttpClient(
           description,
           priority: "no-priority", // 固定，无负责人/日期/里程碑字段即保持空
           status: column.slug,
+          ...(userId ? { userId } : {}),
         }),
         timeoutMs: 30_000,
         uncertainOnNetwork: true,

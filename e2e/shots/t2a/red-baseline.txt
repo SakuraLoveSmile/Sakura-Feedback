@@ -1,0 +1,25 @@
+  PASS  [mobile/password-only] 服务端日志不含口令明文 T2a-***
+  PASS  [mobile/password-only] 服务端日志不含口令明文 T2a-***
+  PASS  [mobile/password-only] 服务端日志不含口令明文 T2a-***
+  PASS  [mobile/password-only] 服务端日志不含口令明文 T2a-***
+
+=== T2-A 断言结果：42/42 通过，用时 35.7s ===
+场景结果：
+  FAIL desktop/password-only — TimeoutError: Page.wait_for_selector: Timeout 15000ms exceeded.
+Call log:
+  - waiting for locator("form:has(#u)") to be visible
+
+  FAIL mobile/password-only — TimeoutError: Page.wait_for_selector: Timeout 15000ms exceeded.
+Call log:
+  - waiting for locator("form:has(#u)") to be visible
+
+[INFO] 报告：../../../../../../../tmp/t2a-red-shots/report.json
+
+[红基线] 退出码=1，失败断言 0 条，场景失败 2 个
+[红基线] 场景 desktop/password-only ok=False — TimeoutError: Page.wait_for_selector: Timeout 15000ms exceeded.
+Call log:
+  - waiting for locator("form:has(#u)") to be 
+[红基线] 场景 mobile/password-only ok=False — TimeoutError: Page.wait_for_selector: Timeout 15000ms exceeded.
+Call log:
+  - waiting for locator("form:has(#u)") to be 
+[红基线] 判定：脚本能捕获不符契约的实现（符合预期）
