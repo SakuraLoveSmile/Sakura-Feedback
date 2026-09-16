@@ -32,6 +32,8 @@ async function shutdown(signal: string): Promise<void> {
     // 关闭空闲 keep-alive 连接，否则 close() 会一直等它们自然结束
     (server as unknown as { closeIdleConnections?: () => void }).closeIdleConnections?.();
   });
+  // T3：先停调度与定时器（不再安排新工作、不再有定时器回调碰数据库），再排空已有队列。
+  feedbackApp.worker.stop();
   await feedbackApp.worker.idle();
   try {
     feedbackApp.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");

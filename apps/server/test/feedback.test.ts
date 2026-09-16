@@ -1,16 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { defaultSubmitBody, jsonReq, makeHarness, submitFeedback } from "./helpers.ts";
+import { authorizeArchive, defaultSubmitBody, jsonReq, makeHarness, submitFeedback } from "./helpers.ts";
 
 describe("反馈提交", () => {
-  it("未认证 401；未知 appId 404", async () => {
+  it("未认证 401；未登记 appId 也能成功提交（自动发现软件）", async () => {
     const h = await makeHarness();
     const noAuth = await jsonReq(h.feedbackApp.app, "POST", "/api/feedback", {
       body: defaultSubmitBody(),
     });
     expect(noAuth.status).toBe(401);
+    // T1：移除“应用必须存在、来源必须登记”的登录/提交前置条件。
     const unknown = await submitFeedback(h.feedbackApp, h.bearer, defaultSubmitBody({ appId: "com.nope" }));
-    expect(unknown.status).toBe(404);
-    expect(unknown.data.error.code).toBe("unknown_app");
+    expect(unknown.status).toBe(201);
+    expect(unknown.data.status).toBe("received");
+    expect(unknown.data.collectionState).toBe("waiting_configuration");
   });
 
   it("输入校验：空文本/超长文本/非法 idempotencyKey", async () => {
@@ -36,10 +38,19 @@ describe("反馈提交", () => {
     const body = defaultSubmitBody({ idempotencyKey: "stable-key" });
     const first = await submitFeedback(h.feedbackApp, h.bearer, body);
     expect(first.status).toBe(201);
+    // 新契约：提交只做 AI 整理，归档需显式授权；这里先完成一次授权以得到唯一的远端任务。
+    await h.feedbackApp.worker.idle();
+    const auth = await authorizeArchive(h, first.data.feedbackId);
+    expect(auth.status).toBe(202);
+    await h.feedbackApp.worker.idle();
+    expect(h.kaneo.created.length).toBe(1);
+    // 同 key 重放：返回 replayed，不产生第二条流水线处理
     const replay = await submitFeedback(h.feedbackApp, h.bearer, body);
     expect(replay.status).toBe(200);
     expect(replay.data.replayed).toBe(true);
     expect(replay.data.feedbackId).toBe(first.data.feedbackId);
+    await h.feedbackApp.worker.idle();
+    expect(h.kaneo.created.length).toBe(1);
     const conflict = await submitFeedback(
       h.feedbackApp,
       h.bearer,
@@ -47,14 +58,14 @@ describe("反馈提交", () => {
     );
     expect(conflict.status).toBe(409);
     expect(conflict.data.error.code).toBe("idempotency_conflict");
-    // 重放不产生第二条流水线处理
-    await h.feedbackApp.worker.idle();
-    expect(h.kaneo.created.length).toBe(1);
   });
 
   it("状态查询：仅认证后可见；未知 id 404", async () => {
     const h = await makeHarness();
     const r = await submitFeedback(h.feedbackApp, h.bearer, defaultSubmitBody());
+    await h.feedbackApp.worker.idle();
+    const auth = await authorizeArchive(h, r.data.feedbackId);
+    expect(auth.status).toBe(202);
     await h.feedbackApp.worker.idle();
     const q = await jsonReq(h.feedbackApp.app, "GET", `/api/feedback/${r.data.feedbackId}`, {
       bearer: h.bearer,
@@ -70,7 +81,7 @@ describe("反馈提交", () => {
 
   it("上下文白名单：仅显式 appVersion/pageLabel 进入归档描述，其余字段忽略", async () => {
     const h = await makeHarness();
-    await submitFeedback(
+    const submitted = await submitFeedback(
       h.feedbackApp,
       h.bearer,
       defaultSubmitBody({
@@ -78,6 +89,10 @@ describe("反馈提交", () => {
         context: { appVersion: "2.0.0", pageLabel: "dashboard", url: "https://secret", logs: "leak" },
       }),
     );
+    expect(submitted.status).toBe(201);
+    await h.feedbackApp.worker.idle();
+    const auth = await authorizeArchive(h, submitted.data.feedbackId);
+    expect(auth.status).toBe(202);
     await h.feedbackApp.worker.idle();
     expect(h.kaneo.created.length).toBe(1);
     const desc = h.kaneo.created[0]?.description;

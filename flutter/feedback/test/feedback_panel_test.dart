@@ -482,6 +482,91 @@ void main() {
     await teardown(tester);
   });
 
+  testWidgets('提交返回 waiting_configuration：提示等待配置、不轮询、保留手动刷新', (tester) async {
+    server.respond(
+        'POST /api/feedback',
+        {
+          'feedbackId': 'fw',
+          'status': 'received',
+          'collectionState': 'waiting_configuration',
+        },
+        201);
+    server.respond('GET /api/feedback/fw', {
+      'id': 'fw',
+      'status': 'needs_info',
+      'collectionState': 'waiting_configuration',
+    });
+    await _pumpPanel(tester, server: server, tokenStore: store);
+
+    await tester.enterText(find.byKey(input), '未登记软件的反馈');
+    await tester.pump();
+    await tester.tap(find.byKey(submit));
+    await tester.pump();
+    await tester.pump();
+
+    // 等待不是失败：明确提示已保存 + 等待什么
+    expect(find.text('已保存'), findsOneWidget);
+    expect(find.textContaining('等待管理员配置该软件'), findsOneWidget);
+    expect(find.textContaining('失败'), findsNothing);
+
+    // 不轮询：等待期间不会发出 GET
+    final int getsAfterSubmit = server.requests
+        .where((r) => r.method == 'GET' && r.url.path == '/api/feedback/fw')
+        .length;
+    await tester.pump(const Duration(seconds: 30));
+    await tester.pump();
+    expect(
+        server.requests
+            .where((r) => r.method == 'GET' && r.url.path == '/api/feedback/fw')
+            .length,
+        getsAfterSubmit);
+
+    // 手动刷新仍然可用
+    await tester.tap(find.byKey(const Key('feedback-refresh-status')));
+    await tester.pump();
+    await tester.pump();
+    expect(
+        server.requests
+            .where((r) => r.method == 'GET' && r.url.path == '/api/feedback/fw')
+            .length,
+        greaterThan(getsAfterSubmit));
+
+    await teardown(tester);
+  });
+
+  testWidgets('轮询到 waiting_source_confirmation：停止轮询并提示等待确认来源', (tester) async {
+    server.respond(
+        'POST /api/feedback', {'feedbackId': 'fs', 'status': 'received'}, 201);
+    server.respond('GET /api/feedback/fs', {
+      'id': 'fs',
+      'status': 'needs_info',
+      'collectionState': 'waiting_source_confirmation',
+    });
+    await _pumpPanel(tester, server: server, tokenStore: store);
+
+    await tester.enterText(find.byKey(input), '新来源的反馈');
+    await tester.pump();
+    await tester.tap(find.byKey(submit));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump();
+
+    expect(find.textContaining('等待管理员确认来源'), findsOneWidget);
+    final int gets = server.requests
+        .where((r) => r.method == 'GET' && r.url.path == '/api/feedback/fs')
+        .length;
+    await tester.pump(const Duration(seconds: 30));
+    await tester.pump();
+    expect(
+        server.requests
+            .where((r) => r.method == 'GET' && r.url.path == '/api/feedback/fs')
+            .length,
+        gets);
+
+    await teardown(tester);
+  });
+
   testWidgets('结果未知失败后：草稿未变重试同 key，草稿已编辑换新 key', (tester) async {
     // 与 Web 端"未知结果 + 修改 → 新快照新 key（不静默覆盖原请求）"对齐：
     // 草稿未变 → 同 key 同字节重试；草稿被编辑 → 新 key，避免同 key 不同

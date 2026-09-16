@@ -25,6 +25,7 @@ import {
   err,
   fail,
   isErr,
+  normalizeRequestOrigin,
   readJson,
   requireAdminCookie,
   requireSession,
@@ -52,15 +53,31 @@ export function ensureInitialUser(db: Db, config: ServerConfig): boolean {
 }
 
 function normalizeOrigin(raw: string): string | null {
-  try {
-    const u = new URL(raw);
-    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
-    return u.origin; // 精确到 scheme://host:port
-  } catch {
-    return null;
-  }
+  return normalizeRequestOrigin(raw);
 }
 
+/**
+ * 组件令牌登录（T1）：只校验账号、启用状态与限流，并保留 `appId` **格式**检查。
+ * “应用必须已登记”“来源必须在允许列表中”不再是登录前置条件——软件由首次有效提交
+ * 自动发现，来源按服务端观察结果登记。登录本身**不创建软件**。
+ *
+ * 浏览器仍必须携带合法的 http(s) Origin（用于服务端记录来源）；
+ * 非法 Origin 直接拒绝，避免把来源登记成不可信的值。
+ */
+function validateClientLogin(appId: string, originHeader: string | undefined): Err | null {
+  if (!appId || appId.length > 100 || !/^[A-Za-z0-9._:-]+$/.test(appId)) {
+    return err("invalid_request", "appId 必填、不超过 100 字符且仅含字母数字与 . _ : -", 400);
+  }
+  if (originHeader === undefined || originHeader === "") {
+    return null; // 原生客户端不携带 Origin
+  }
+  if (!normalizeOrigin(originHeader)) {
+    return err("origin_not_allowed", "来源不合法", 400);
+  }
+  return null;
+}
+
+/** 旧登录握手沿用原有安全限制：必须是已登记软件 + 已允许来源（本函数保持原语义）。 */
 function validateHandshakeTarget(db: Db, appId: string, origin: string): Err | null {
   const app = getAppByAppId(db, appId);
   if (!app) return err("unknown_app", "appId 未配置", 404);
@@ -74,24 +91,6 @@ function validateHandshakeTarget(db: Db, appId: string, origin: string): Err | n
   }
   const allowed = Array.isArray(list) ? (list as string[]) : [];
   if (!allowed.includes(normalized)) return err("origin_not_allowed", "该来源未被允许接收登录令牌", 403);
-  return null;
-}
-
-/** 客户端令牌登录的来源校验：按目标应用的允许来源校验浏览器 Origin。 */
-function validateClientOrigin(db: Db, appId: string, originHeader: string | undefined): Err | null {
-  const app = getAppByAppId(db, appId);
-  if (!app) return err("unknown_app", "appId 未配置", 404);
-  if (!originHeader) return null; // 原生客户端不携带 Origin
-  const normalized = normalizeOrigin(originHeader);
-  if (!normalized) return err("origin_not_allowed", "来源不合法", 400);
-  let list: unknown;
-  try {
-    list = JSON.parse(app.allowed_origins);
-  } catch {
-    list = [];
-  }
-  const allowed = Array.isArray(list) ? (list as string[]) : [];
-  if (!allowed.includes(normalized)) return err("origin_not_allowed", "该来源未被允许登录", 403);
   return null;
 }
 
@@ -133,11 +132,11 @@ export function authRoutes(deps: AuthDeps): Hono {
       return fail(c, err("invalid_credentials", "用户名或密码错误", 401));
     }
 
-    // 令牌登录（Web / Flutter）：必须声明 appId，浏览器来源按该应用允许来源校验。
+    // 令牌登录（Web / Flutter）：必须声明格式合法的 appId；**不要求软件已登记**。
+    // 软件在首次有效提交时自动发现，登录本身不创建任何软件记录。
     if (clientLabel) {
-      if (!appId) return fail(c, err("invalid_request", "令牌登录必须携带 appId", 400));
-      const originErr = validateClientOrigin(db, appId, c.req.header("origin"));
-      if (originErr) return fail(c, originErr);
+      const appIdErr = validateClientLogin(appId, c.req.header("origin"));
+      if (appIdErr) return fail(c, appIdErr);
     }
 
     const kind: SessionRow["kind"] = clientLabel ? "client" : "cookie";

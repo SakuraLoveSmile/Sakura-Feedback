@@ -8,8 +8,10 @@ import {
   saveArchiveData,
 } from "../src/pipeline/archive-data.ts";
 import {
+  authorizeArchive,
   createTestPng,
   defaultSubmitBody,
+  type Harness,
   instantSleep,
   jsonReq,
   loginAsAdmin,
@@ -24,6 +26,14 @@ import {
   submitMultipartFeedback,
 } from "./helpers.ts";
 
+/**
+ * 用自行 createApp 的实例构造 authorizeArchive 需要的 Harness 形状。
+ * 契约变更后归档必须先经管理接口授权；测试里这些实例与 makeHarness 等价，只是需要显式传入。
+ */
+function asHarness(feedbackApp: Harness["feedbackApp"], cookie: string): Harness {
+  return { feedbackApp, cookie } as unknown as Harness;
+}
+
 function expectValidArchive(db: Db, id: string): ArchiveData {
   const parsed = loadArchiveData(db, id);
   if (parsed.kind !== "valid") throw new Error(`期望合法归档数据，实际 ${parsed.kind}`);
@@ -31,19 +41,24 @@ function expectValidArchive(db: Db, id: string): ArchiveData {
 }
 
 describe("AI 处理阶段", () => {
-  it("瞬时故障有限重试：超时 3 次后 failed，attempt_count=3", async () => {
+  it("瞬时故障有限重试：超时 3 次后 needs_info 保留原文，attempt_count=3", async () => {
     const h = await makeHarness({ aiOutcomes: ["timeout", "timeout", "timeout"] });
-    const r = await submitFeedback(h.feedbackApp, h.bearer, defaultSubmitBody());
+    const body = defaultSubmitBody();
+    const r = await submitFeedback(h.feedbackApp, h.bearer, body);
     await h.feedbackApp.worker.idle();
     expect(h.ai.calls).toBe(3);
     const q = await jsonReq(h.feedbackApp.app, "GET", `/api/feedback/${r.data.feedbackId}`, { bearer: h.bearer });
-    expect(q.data.status).toBe("failed");
+    // AI 失败不再判 failed：保留原文，等待人工分类
+    expect(q.data.status).toBe("needs_info");
     expect(q.data.errorSummary).toContain("超时");
     const detail = await jsonReq(h.feedbackApp.app, "GET", `/api/admin/feedback/${r.data.feedbackId}`, {
       cookie: h.cookie,
     });
     expect(detail.data.attemptCount).toBe(3);
+    expect(detail.data.processed).toBeNull();
+    expect(detail.data.title).toBe(String(body.text)); // 回退标题 = 原文首个非空行
     expect(h.kaneo.created.length).toBe(0);
+    expect(h.kaneo.remoteWrites).toBe(0); // 未经人工授权绝不归档
   });
 
   it("重试后成功：前 3 次格式失败，管理页 retry 后成功归档", async () => {
@@ -51,12 +66,26 @@ describe("AI 处理阶段", () => {
     const r = await submitFeedback(h.feedbackApp, h.bearer, defaultSubmitBody());
     await h.feedbackApp.worker.idle();
     let q = await jsonReq(h.feedbackApp.app, "GET", `/api/feedback/${r.data.feedbackId}`, { bearer: h.bearer });
-    expect(q.data.status).toBe("failed");
+    expect(q.data.status).toBe("needs_info");
 
     const retry = await jsonReq(h.feedbackApp.app, "POST", `/api/feedback/${r.data.feedbackId}/retry`, {
       cookie: h.cookie,
     });
     expect(retry.status).toBe(202);
+    await h.feedbackApp.worker.idle();
+    // retry 只重跑 AI：成功后仍是 needs_info（等待人工分类/授权），不直接归档
+    q = await jsonReq(h.feedbackApp.app, "GET", `/api/feedback/${r.data.feedbackId}`, { bearer: h.bearer });
+    expect(q.data.status).toBe("needs_info");
+    const detail = await jsonReq(h.feedbackApp.app, "GET", `/api/admin/feedback/${r.data.feedbackId}`, {
+      cookie: h.cookie,
+    });
+    expect(detail.data.processed).not.toBeNull();
+    expect(detail.data.title).toBe("整理后的标题");
+    expect(h.ai.calls).toBe(4);
+
+    // 人工授权后才真正归档
+    const auth = await authorizeArchive(h, r.data.feedbackId);
+    expect(auth.status).toBe(202);
     await h.feedbackApp.worker.idle();
     q = await jsonReq(h.feedbackApp.app, "GET", `/api/feedback/${r.data.feedbackId}`, { bearer: h.bearer });
     expect(q.data.status).toBe("archived");
@@ -74,6 +103,9 @@ describe("AI 处理阶段", () => {
     const h = await makeHarness();
     const r = await submitFeedback(h.feedbackApp, h.bearer, defaultSubmitBody({ text: "导出 CSV 卡住了" }));
     await h.feedbackApp.worker.idle();
+    const auth = await authorizeArchive(h, r.data.feedbackId);
+    expect(auth.status).toBe(202);
+    await h.feedbackApp.worker.idle();
     const desc = h.kaneo.created[0]?.description;
     expect(desc).toContain("> 导出 CSV 卡住了");
     expect(desc).toContain(`**反馈ID**：${r.data.feedbackId}`);
@@ -86,26 +118,20 @@ describe("AI 处理阶段", () => {
 });
 
 describe("Kaneo 归档失败与恢复", () => {
-  it("失效目标列：failed 且提示修复，不自动创建列；修配置后 retry 成功", async () => {
-    const h = await makeHarness({ seedAppOver: { columnSlug: "ghost" } });
+  it("失效目标列：failed 且提示修复，不自动创建列；列恢复后 retry 成功", async () => {
+    const h = await makeHarness();
+    // 归档目标由人工授权快照固定（软件配置不再决定归档列）；模拟 Kaneo 对所选列返回“列不存在”。
     h.kaneo.createErrorQueue.push("column-not-found");
     const r = await submitFeedback(h.feedbackApp, h.bearer, defaultSubmitBody());
+    await h.feedbackApp.worker.idle();
+    const auth = await authorizeArchive(h, r.data.feedbackId);
+    expect(auth.status).toBe(202);
     await h.feedbackApp.worker.idle();
     let q = await jsonReq(h.feedbackApp.app, "GET", `/api/feedback/${r.data.feedbackId}`, { bearer: h.bearer });
     expect(q.data.status).toBe("failed");
     expect(q.data.errorSummary).toContain("列已失效");
 
-    // 修复列配置
-    const upd = await jsonReq(h.feedbackApp.app, "PUT", `/api/admin/apps/${h.app.id}`, {
-      cookie: h.cookie,
-      body: {
-        name: "测试软件",
-        allowedOrigins: ["http://host.test"],
-        kaneoProjectId: "proj-1",
-        kaneoColumnSlug: "triage",
-      },
-    });
-    expect(upd.status).toBe(200);
+    // 列在 Kaneo 侧恢复可用（授权快照仍指向 triage）→ retry 从断点继续
     const retry = await jsonReq(h.feedbackApp.app, "POST", `/api/feedback/${r.data.feedbackId}/retry`, {
       cookie: h.cookie,
     });
@@ -123,6 +149,9 @@ describe("Kaneo 归档失败与恢复", () => {
     h.kaneo.createErrorQueue.push("definite");
     const r = await submitFeedback(h.feedbackApp, h.bearer, defaultSubmitBody());
     await h.feedbackApp.worker.idle();
+    const auth = await authorizeArchive(h, r.data.feedbackId);
+    expect(auth.status).toBe(202);
+    await h.feedbackApp.worker.idle();
     const q = await jsonReq(h.feedbackApp.app, "GET", `/api/feedback/${r.data.feedbackId}`, { bearer: h.bearer });
     expect(q.data.status).toBe("failed");
     expect(q.data.errorSummary).toContain("拒绝");
@@ -132,6 +161,9 @@ describe("Kaneo 归档失败与恢复", () => {
     const h = await makeHarness();
     h.kaneo.createErrorQueue.push("uncertain");
     const r = await submitFeedback(h.feedbackApp, h.bearer, defaultSubmitBody());
+    await h.feedbackApp.worker.idle();
+    const auth = await authorizeArchive(h, r.data.feedbackId);
+    expect(auth.status).toBe(202);
     await h.feedbackApp.worker.idle();
     let q = await jsonReq(h.feedbackApp.app, "GET", `/api/feedback/${r.data.feedbackId}`, { bearer: h.bearer });
     expect(q.data.status).toBe("needs_review");
@@ -166,6 +198,9 @@ describe("Kaneo 归档失败与恢复", () => {
     const r = await submitFeedback(h.feedbackApp, h.bearer, defaultSubmitBody());
     await h.feedbackApp.worker.idle();
     const id = r.data.feedbackId;
+    const auth = await authorizeArchive(h, id);
+    expect(auth.status).toBe(202);
+    await h.feedbackApp.worker.idle();
     // 模拟“任务创建结果未知”：无已知 task ID、无任何已知附件状态（恢复数据仅剩目标）
     const base = expectValidArchive(h.feedbackApp.db, id);
     saveArchiveData(h.feedbackApp.db, id, loadArchiveData(h.feedbackApp.db, id), { target: base.target });
@@ -213,6 +248,9 @@ describe("Kaneo 归档失败与恢复", () => {
     );
     await h.feedbackApp.worker.idle();
     const id = res.data.feedbackId;
+    const auth = await authorizeArchive(h, id);
+    expect(auth.status).toBe(202);
+    await h.feedbackApp.worker.idle();
     expect(h.kaneo.finalizes.length).toBe(1);
     // 转待核对（保留 task ID 与阶段 asset_finalized），清评论并清掉本地评论记录，
     // 模拟“评论尚未发出”的合法断点
@@ -251,6 +289,9 @@ describe("Kaneo 归档失败与恢复", () => {
     );
     await h.feedbackApp.worker.idle();
     const id = res.data.feedbackId;
+    const auth = await authorizeArchive(h, id);
+    expect(auth.status).toBe(202);
+    await h.feedbackApp.worker.idle();
     expect(expectValidArchive(h.feedbackApp.db, id).comment?.outcome).toBe("confirmed");
     // 远端评论已不存在（本地记录仍为 confirmed）→ 记录与远端矛盾，必须人工决定
     h.kaneo.comments.length = 0;
@@ -300,6 +341,10 @@ describe("持久化与崩溃恢复", () => {
     const kaneo2 = makeMockKaneo();
     const second = createApp(config, { ai: makeMockAi(), kaneo: kaneo2, workerSleep: instantSleep });
     resumeWorker(second);
+    await second.worker.idle();
+    // 重启恢复只重跑 AI 整理；首次远端归档仍需人工授权
+    const auth = await authorizeArchive(asHarness(second, cookie), r.data.feedbackId);
+    expect(auth.status).toBe(202);
     await second.worker.idle();
     const after = getFeedback(second.db, r.data.feedbackId);
     expect(after?.status).toBe("archived");
@@ -376,6 +421,9 @@ describe("分阶段恢复（4.2–4.3：同 key 恢复与意图记录）", () =>
       await createTestPng(80, 60),
     );
     await h.feedbackApp.worker.idle();
+    const auth = await authorizeArchive(h, res.data.feedbackId);
+    expect(auth.status).toBe(202);
+    await h.feedbackApp.worker.idle();
     expect(h.kaneo.uploads.length).toBe(1);
     expect(h.kaneo.finalizes.length).toBe(1);
     const firstKey = h.kaneo.finalizes[0]!.key;
@@ -405,6 +453,9 @@ describe("分阶段恢复（4.2–4.3：同 key 恢复与意图记录）", () =>
       await createTestPng(80, 60),
     );
     await h.feedbackApp.worker.idle();
+    const auth = await authorizeArchive(h, res.data.feedbackId);
+    expect(auth.status).toBe(202);
+    await h.feedbackApp.worker.idle();
     const base = expectValidArchive(h.feedbackApp.db, res.data.feedbackId);
     await seedResume(h, res.data.feedbackId, { ...base.upload!, outcome: "not_sent", recoveries: 0 });
     const row = getFeedback(h.feedbackApp.db, res.data.feedbackId);
@@ -430,6 +481,9 @@ describe("分阶段恢复（4.2–4.3：同 key 恢复与意图记录）", () =>
       await createTestPng(80, 60),
     );
     await h.feedbackApp.worker.idle();
+    const auth = await authorizeArchive(h, res.data.feedbackId);
+    expect(auth.status).toBe(202);
+    await h.feedbackApp.worker.idle();
     const base = expectValidArchive(h.feedbackApp.db, res.data.feedbackId);
     await seedResume(h, res.data.feedbackId, { ...base.upload!, outcome: "not_sent", recoveries: 3 });
     const row = getFeedback(h.feedbackApp.db, res.data.feedbackId);
@@ -449,6 +503,9 @@ describe("分阶段恢复（4.2–4.3：同 key 恢复与意图记录）", () =>
     );
     await h.feedbackApp.worker.idle();
     const id = res.data.feedbackId;
+    const auth = await authorizeArchive(h, id);
+    expect(auth.status).toBe(202);
+    await h.feedbackApp.worker.idle();
     const base = expectValidArchive(h.feedbackApp.db, id);
     const expired = {
       ...base.upload!,
@@ -509,6 +566,9 @@ describe("分阶段恢复（4.2–4.3：同 key 恢复与意图记录）", () =>
     const bearer = await loginAsClient(app);
     const res = await submitMultipartFeedback(app, bearer, defaultSubmitBody(), await createTestPng(64, 48));
     await app.worker.idle();
+    const auth = await authorizeArchive(asHarness(app, cookie), res.data.feedbackId);
+    expect(auth.status).toBe(202);
+    await app.worker.idle();
     let row = getFeedback(app.db, res.data.feedbackId);
     expect(row?.status).toBe("needs_review");
     expect(row?.error_summary).toContain("截图评论已提交但核对未发现");
@@ -553,6 +613,9 @@ describe("操作锁、revision 与恢复接口（4.4）", () => {
     const bearer = await loginAsClient(app);
     const r = await submitFeedback(app, bearer, defaultSubmitBody());
     await app.worker.idle();
+    const auth = await authorizeArchive(asHarness(app, cookie), r.data.feedbackId);
+    expect(auth.status).toBe(202);
+    await app.worker.idle();
     // 构造“任务创建结果未知”的待核对记录（无 task ID、无附件状态）
     const base = expectValidArchive(app.db, r.data.feedbackId);
     saveArchiveData(app.db, r.data.feedbackId, loadArchiveData(app.db, r.data.feedbackId), { target: base.target });
@@ -585,6 +648,9 @@ describe("操作锁、revision 与恢复接口（4.4）", () => {
     const r = await submitFeedback(h.feedbackApp, h.bearer, defaultSubmitBody());
     await h.feedbackApp.worker.idle();
     const id = r.data.feedbackId;
+    const auth = await authorizeArchive(h, id);
+    expect(auth.status).toBe(202);
+    await h.feedbackApp.worker.idle();
     const base = expectValidArchive(h.feedbackApp.db, id);
     saveArchiveData(h.feedbackApp.db, id, loadArchiveData(h.feedbackApp.db, id), { target: base.target });
     updateFeedback(h.feedbackApp.db, id, {
@@ -627,6 +693,9 @@ describe("操作锁、revision 与恢复接口（4.4）", () => {
     );
     await h.feedbackApp.worker.idle();
     const id = res.data.feedbackId;
+    const auth = await authorizeArchive(h, id);
+    expect(auth.status).toBe(202);
+    await h.feedbackApp.worker.idle();
     // 模拟评论待核对：upload/asset 已确认，评论 maybe_sent，状态 needs_review
     const base = expectValidArchive(h.feedbackApp.db, id);
     saveArchiveData(h.feedbackApp.db, id, loadArchiveData(h.feedbackApp.db, id), {
@@ -697,6 +766,9 @@ describe("操作锁、revision 与恢复接口（4.4）", () => {
     );
     await h.feedbackApp.worker.idle();
     const id = res.data.feedbackId;
+    const auth = await authorizeArchive(h, id);
+    expect(auth.status).toBe(202);
+    await h.feedbackApp.worker.idle();
     const base = expectValidArchive(h.feedbackApp.db, id);
     saveArchiveData(h.feedbackApp.db, id, loadArchiveData(h.feedbackApp.db, id), {
       target: base.target,
@@ -738,6 +810,9 @@ describe("操作锁、revision 与恢复接口（4.4）", () => {
     );
     await h.feedbackApp.worker.idle();
     const id = res.data.feedbackId;
+    const auth = await authorizeArchive(h, id);
+    expect(auth.status).toBe(202);
+    await h.feedbackApp.worker.idle();
     const base = expectValidArchive(h.feedbackApp.db, id);
     const oldKey = base.upload!.key;
     // 场景 A：远端字节与本地一致 → replaced:false，不申请新地址
@@ -810,6 +885,9 @@ describe("操作锁、revision 与恢复接口（4.4）", () => {
     );
     await h.feedbackApp.worker.idle();
     const id = res.data.feedbackId;
+    const auth = await authorizeArchive(h, id);
+    expect(auth.status).toBe(202);
+    await h.feedbackApp.worker.idle();
     const base = expectValidArchive(h.feedbackApp.db, id);
     saveArchiveData(h.feedbackApp.db, id, loadArchiveData(h.feedbackApp.db, id), {
       target: base.target,

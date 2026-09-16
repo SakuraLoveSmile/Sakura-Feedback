@@ -25,8 +25,10 @@ import {
 } from "../src/pipeline/archive-data.ts";
 import { normalizeKaneoApiBase } from "../src/services/kaneo-http.ts";
 import {
+  authorizeArchive,
   createTestPng,
   defaultSubmitBody,
+  type Harness,
   instantSleep,
   jsonReq,
   loginAsAdmin,
@@ -44,6 +46,14 @@ import {
 /** 每个用例独立临时数据库（openDb 接收目录并在其中创建 feedback.db）。 */
 function newDb(): Db {
   return openDb(mkdtempSync(path.join(tmpdir(), "fb-archive-")));
+}
+
+/**
+ * 用自行 createApp 的实例构造 authorizeArchive 需要的 Harness 形状。
+ * 契约变更后归档必须先经管理接口授权；这些用例需要自定义 kaneo mock，无法走 makeHarness。
+ */
+function asHarness(feedbackApp: Harness["feedbackApp"], cookie: string): Harness {
+  return { feedbackApp, cookie } as unknown as Harness;
 }
 
 const MASTER_KEY = Buffer.alloc(32, 9);
@@ -142,11 +152,12 @@ describe("ArchiveDataV1 严格解析", () => {
   });
 
   it("未知版本 → unsupported；损坏 JSON → corrupt", () => {
+    // v3 已是受支持版本（含人工授权快照）；未知版本用 v4 表示。
     expect(
-      parseArchiveData('{"version":3,"revision":1,"target":{"apiBase":"http://a","projectId":"p","workspaceId":"w"}}'),
+      parseArchiveData('{"version":4,"revision":1,"target":{"apiBase":"http://a","projectId":"p","workspaceId":"w"}}'),
     ).toEqual({
       kind: "unsupported",
-      version: 3,
+      version: 4,
     });
     expect(parseArchiveData("{not json").kind).toBe("corrupt");
     expect(parseArchiveData('{"version":"1"}').kind).toBe("corrupt");
@@ -166,10 +177,11 @@ describe("ArchiveDataV1 序列化与 revision 持久化", () => {
     const parsed = parseArchiveData(json);
     expect(parsed.kind).toBe("valid");
     if (parsed.kind !== "valid") return;
+    expect(parsed.data.version).toBe(3);
     expect(parsed.data.revision).toBe(4);
     expect(parsed.data.upload?.expiresAt).toBeNull();
     // 键序固定，version/revision 在前
-    expect(json.startsWith('{"version":2,"revision":4,"target":{"apiBase"')).toBe(true);
+    expect(json.startsWith('{"version":3,"revision":4,"target":{"apiBase"')).toBe(true);
   });
 
   it("revision 单调递增；并发基准过期时拒绝覆盖", () => {
@@ -191,14 +203,14 @@ describe("ArchiveDataV1 序列化与 revision 持久化", () => {
     updateFeedback(db, id, { archive_data_json: "{broken" });
     expect(() => saveArchiveData(db, id, loadArchiveData(db, id), validNext())).toThrow(ArchiveVersionConflictError);
     updateFeedback(db, id, {
-      archive_data_json: '{"version":3,"revision":1,"target":{"apiBase":"http://a","projectId":"p","workspaceId":"w"}}',
+      archive_data_json: '{"version":4,"revision":1,"target":{"apiBase":"http://a","projectId":"p","workspaceId":"w"}}',
     });
     expect(() => saveArchiveData(db, id, loadArchiveData(db, id), validNext())).toThrow(ArchiveVersionConflictError);
     // legacy 之上允许首写（单记录迁移，非批量改写）
     updateFeedback(db, id, { archive_data_json: '{"assetUrl":"http://a/b.png"}' });
     const saved = saveArchiveData(db, id, loadArchiveData(db, id), validNext());
     expect(saved.revision).toBe(1);
-    expect(getFeedback(db, id)?.archive_data_json).toContain('"version":2');
+    expect(getFeedback(db, id)?.archive_data_json).toContain('"version":3');
   });
 
   it("SQLite 写入失败 → ArchivePersistenceError", () => {
@@ -300,11 +312,15 @@ describe("预签名凭证加密与到期解析", () => {
 });
 
 describe("worker 集成：目标固定、凭证落盘门禁与损坏数据停止", () => {
-  it("图文反馈归档后 archive_data_json 为合法 v1：目标固定、凭证加密、上传/资产/评论结果完整", async () => {
+  it("图文反馈归档后 archive_data_json 为合法 v3：目标固定、凭证加密、上传/资产/评论结果完整", async () => {
     const h = await makeHarness();
     const png = await createTestPng(80, 60);
     const res = await submitMultipartFeedback(h.feedbackApp, h.bearer, defaultSubmitBody(), png);
     expect(res.status).toBe(201);
+    await h.feedbackApp.worker.idle();
+    // 契约变更：提交只做 AI 整理，远端归档必须由管理员在管理接口显式授权
+    const auth = await authorizeArchive(h, res.data.feedbackId);
+    expect(auth.status).toBe(202);
     await h.feedbackApp.worker.idle();
     const row = getFeedback(h.feedbackApp.db, res.data.feedbackId);
     expect(row?.status).toBe("archived");
@@ -314,9 +330,18 @@ describe("worker 集成：目标固定、凭证落盘门禁与损坏数据停止
     const parsed = parseArchiveData(row?.archive_data_json ?? null);
     expect(parsed.kind).toBe("valid");
     if (parsed.kind !== "valid") return;
-    expect(parsed.data.version).toBe(2);
+    expect(parsed.data.version).toBe(3);
     expect(parsed.data.revision).toBeGreaterThanOrEqual(1);
-    expect(parsed.data.target).toEqual({ apiBase: "http://kaneo.test/api", projectId: "proj-1", workspaceId: "ws-1" });
+    // 目标以人工授权快照为准（含列 / 标签 / 负责人），不再只固定 apiBase/项目/工作区
+    expect(parsed.data.target).toEqual({
+      apiBase: "http://kaneo.test/api",
+      projectId: "proj-1",
+      workspaceId: "ws-1",
+      columnId: "col-db-id",
+      columnSlug: "triage",
+      labelIds: ["label-bug"],
+      assigneeId: null,
+    });
     expect(parsed.data.upload?.outcome).toBe("confirmed");
     expect(parsed.data.upload?.key).toContain("task-");
     expect(parsed.data.upload?.expiresAt).toBeNull(); // mock 预签名无签名参数 → 未知
@@ -343,7 +368,11 @@ describe("worker 集成：目标固定、凭证落盘门禁与损坏数据停止
   it("archive_data_json 损坏或版本未知 → needs_review，零远端写入", async () => {
     const h = await makeHarness();
     const r = await submitFeedback(h.feedbackApp, h.bearer, defaultSubmitBody());
-    await h.feedbackApp.worker.idle(); // 首轮正常归档
+    await h.feedbackApp.worker.idle(); // AI 整理
+    // 契约变更：先经管理员显式授权完成首轮归档，供后续损坏数据对照“零新增远端写入”
+    const auth = await authorizeArchive(h, r.data.feedbackId);
+    expect(auth.status).toBe(202);
+    await h.feedbackApp.worker.idle();
     expect(getFeedback(h.feedbackApp.db, r.data.feedbackId)?.status).toBe("archived");
 
     // 损坏数据 → 重开流程转入待核对，不再创建任务/上传
@@ -360,12 +389,12 @@ describe("worker 集成：目标固定、凭证落盘门禁与损坏数据停止
     expect(h.kaneo.created.length).toBe(1);
     expect(h.kaneo.uploads.length).toBe(0);
 
-    // 未知版本 → 同样待核对
+    // 未知版本（v3 已受支持，用未来版本 v4 表示）→ 同样待核对
     updateFeedback(h.feedbackApp.db, r.data.feedbackId, {
       status: "received",
       archive_stage: "task_pending",
       archive_data_json: JSON.stringify({
-        version: 3,
+        version: 4,
         revision: 1,
         target: { apiBase: "http://kaneo.test/api", projectId: "proj-1", workspaceId: "ws-1" },
       }),
@@ -374,7 +403,7 @@ describe("worker 集成：目标固定、凭证落盘门禁与损坏数据停止
     await h.feedbackApp.worker.idle();
     row = getFeedback(h.feedbackApp.db, r.data.feedbackId);
     expect(row?.status).toBe("needs_review");
-    expect(row?.error_summary).toContain("v3 不受支持");
+    expect(row?.error_summary).toContain("v4 不受支持");
     expect(h.kaneo.created.length).toBe(1);
     expect(h.kaneo.uploads.length).toBe(0);
   });
@@ -382,6 +411,10 @@ describe("worker 集成：目标固定、凭证落盘门禁与损坏数据停止
   it("归档目标改变（apiBase）→ 停止待核对，不发出远端写入", async () => {
     const h = await makeHarness();
     const r = await submitFeedback(h.feedbackApp, h.bearer, defaultSubmitBody());
+    await h.feedbackApp.worker.idle();
+    // 契约变更：先按当前连接授权并完成首轮归档，随后再注入“已固定到另一个实例”的恢复数据
+    const auth = await authorizeArchive(h, r.data.feedbackId);
+    expect(auth.status).toBe(202);
     await h.feedbackApp.worker.idle();
     expect(getFeedback(h.feedbackApp.db, r.data.feedbackId)?.status).toBe("archived");
     // 重开流程并预置已固定到另一个 Kaneo 实例的恢复数据
@@ -415,6 +448,10 @@ describe("worker 集成：目标固定、凭证落盘门禁与损坏数据停止
     expect(rot.status).toBe(200);
     const r = await submitFeedback(h.feedbackApp, h.bearer, defaultSubmitBody());
     await h.feedbackApp.worker.idle();
+    // 契约变更：密钥轮换后仍需管理员显式授权；授权快照在轮换后的当前设置下创建
+    const auth = await authorizeArchive(h, r.data.feedbackId);
+    expect(auth.status).toBe(202);
+    await h.feedbackApp.worker.idle();
     expect(getFeedback(h.feedbackApp.db, r.data.feedbackId)?.status).toBe("archived");
     expect(h.kaneo.created.length).toBe(1);
   });
@@ -439,6 +476,10 @@ describe("worker 集成：目标固定、凭证落盘门禁与损坏数据停止
     const res = await submitMultipartFeedback(app, bearer, defaultSubmitBody(), await createTestPng(40, 40));
     expect(res.status).toBe(201);
     await app.worker.idle();
+    // 契约变更：归档需管理员显式授权（该用例的 kaneo mock 自定义，无法用 makeHarness）
+    const auth = await authorizeArchive(asHarness(app, cookie), res.data.feedbackId);
+    expect(auth.status).toBe(202);
+    await app.worker.idle();
     // 目标已固定、任务已创建（此前的写入都成功）；凭证落盘失败后绝不传字节、不 finalize
     expect(inner.created.length).toBe(1);
     expect(inner.uploads.length).toBe(0);
@@ -449,6 +490,10 @@ describe("worker 集成：目标固定、凭证落盘门禁与损坏数据停止
     const h = await makeHarness();
     const png = await createTestPng(64, 48);
     const res = await submitMultipartFeedback(h.feedbackApp, h.bearer, defaultSubmitBody(), png);
+    await h.feedbackApp.worker.idle();
+    // 契约变更：先经管理员显式授权完成首轮归档，后续恢复沿用已固定目标
+    const auth = await authorizeArchive(h, res.data.feedbackId);
+    expect(auth.status).toBe(202);
     await h.feedbackApp.worker.idle();
     const rowBefore = getFeedback(h.feedbackApp.db, res.data.feedbackId);
     expect(rowBefore?.status).toBe("archived");

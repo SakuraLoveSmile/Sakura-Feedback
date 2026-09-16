@@ -144,3 +144,80 @@ describe('轮询 GET /api/feedback/:id', () => {
   });
 });
 
+describe('T4：等待管理员操作的收集状态', () => {
+  it('提交返回 waiting_configuration：提示等待配置、不轮询、保留手动刷新', async () => {
+    vi.useFakeTimers();
+    const m = mount();
+    const { calls } = recordFetch(async (url, init) => {
+      if (init.method === 'POST') {
+        return httpResponse(201, {
+          feedbackId: 'fb-1',
+          status: 'received',
+          collectionState: 'waiting_configuration',
+        });
+      }
+      return httpResponse(200, feedbackRecord('needs_info', { collectionState: 'waiting_configuration' }));
+    });
+    await completeLogin(m);
+    setTextarea(m, '未登记软件的反馈');
+    m.submitBtn.click();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // 明确「已保存 + 等待什么」，绝不显示为失败
+    expect(m.statusRegion.textContent).toContain('等待管理员配置');
+    expect(m.errorRegion.textContent).toContain('等待管理员配置');
+    expect(m.errorRegion.textContent).not.toContain('失败');
+
+    // 不启动轮询（等待期间无限轮询没有意义）
+    await vi.advanceTimersByTimeAsync(300000);
+    expect(calls.filter((c) => c.method === 'GET' && c.url.includes('/api/feedback/'))).toHaveLength(0);
+
+    // 手动刷新仍然可用，且会重新读取服务端状态
+    const refresh = Array.from(m.errorRegion.querySelectorAll<HTMLButtonElement>('button')).find((b) =>
+      (b.textContent ?? '').includes('刷新状态'),
+    );
+    expect(refresh).not.toBeNull();
+    refresh?.click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls.filter((c) => c.method === 'GET' && c.url.includes('/api/feedback/fb-1')).length).toBeGreaterThan(0);
+  });
+
+  it('轮询到 waiting_source_confirmation：停止轮询并提示等待确认来源', async () => {
+    vi.useFakeTimers();
+    const m = mount();
+    const { calls } = recordFetch(async (url, init) => {
+      if (init.method === 'POST') return httpResponse(201, { feedbackId: 'fb-1', status: 'received' });
+      return httpResponse(200, feedbackRecord('needs_info', { collectionState: 'waiting_source_confirmation' }));
+    });
+    await completeLogin(m);
+    setTextarea(m, '新来源的反馈');
+    m.submitBtn.click();
+    await vi.advanceTimersByTimeAsync(2100);
+    expect(m.errorRegion.textContent).toContain('等待管理员确认来源');
+
+    // 已经识别为等待态：不再继续轮询
+    const getsAfterDetection = calls.filter((c) => c.method === 'GET' && c.url.includes('/api/feedback/fb-1')).length;
+    await vi.advanceTimersByTimeAsync(120000);
+    expect(calls.filter((c) => c.method === 'GET' && c.url.includes('/api/feedback/fb-1'))).toHaveLength(
+      getsAfterDetection,
+    );
+  });
+
+  it('queued（已进入归档流程）仍按处理中轮询', async () => {
+    vi.useFakeTimers();
+    const m = mount();
+    const { calls } = recordFetch(async (url, init) => {
+      if (init.method === 'POST') return httpResponse(201, { feedbackId: 'fb-1', status: 'received' });
+      return httpResponse(200, feedbackRecord('processing', { collectionState: 'queued' }));
+    });
+    await completeLogin(m);
+    setTextarea(m, '已排队的反馈');
+    m.submitBtn.click();
+    await vi.advanceTimersByTimeAsync(2100);
+    expect(m.statusRegion.textContent).toContain('已保存，正在整理');
+
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(calls.filter((c) => c.method === 'GET' && c.url.includes('/api/feedback/fb-1')).length).toBeGreaterThan(1);
+  });
+});
+

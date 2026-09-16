@@ -11,16 +11,40 @@ import { getFeedback, updateFeedback } from "../db/repos.ts";
  * 兼容读取 V1，保留既有目标、加密信息和 revision 检查。
  */
 
-export const ARCHIVE_DATA_VERSION = 2;
+export const ARCHIVE_DATA_VERSION = 3;
 
 /** 远端写入结果分类：尚未发送 / 已发出但结果未知 / 已确认成功响应。 */
 export type WriteOutcome = "not_sent" | "maybe_sent" | "confirmed";
 
-/** 首次远端写入前固定的恢复目标：Kaneo 实例 API 基址 + 项目 + 工作区。 */
+/**
+ * 首次远端写入前固定的恢复目标：Kaneo 实例 API 基址 + 项目 + 工作区。
+ * V3（人工分类归档改造）在此之上固定本次授权选择的列 ID/slug、工作区标签与负责人：
+ * 排队后即使软件配置或 Kaneo 选项变化，本次任务也不会被重定向。
+ */
 export interface ArchiveTarget {
   apiBase: string;
   projectId: string;
   workspaceId: string;
+  /** V3：授权时选中的项目列（ID 与真实 slug）；旧记录缺省。 */
+  columnId?: string;
+  columnSlug?: string;
+  /** V3：授权时选中的工作区级标签 ID（Kaneo label.id）。 */
+  labelIds?: string[];
+  /** V3：授权时选中的负责人用户 ID；未选负责人为 null（创建任务时省略 userId）。 */
+  assigneeId?: string | null;
+}
+
+/** V3 单个标签的写入记录：保存写入前后状态与 Kaneo 返回标识。 */
+export interface ArchiveLabelRecord {
+  /** 工作区级标签 ID（快照选择值）。 */
+  id: string;
+  /** 标签名（读回核对依据；关联到任务后 Kaneo 会生成新的任务级标签 ID）。 */
+  name: string;
+  outcome: WriteOutcome;
+  /** 关联成功后由 Kaneo 返回 / 读回确认到的任务级标签 ID。 */
+  taskLabelId?: string;
+  /** 最近一次失败原因（确定失败时保存，便于管理页展示）。 */
+  error?: string;
 }
 
 /** 预签名上传信息。credentialsEnc 为 AES-GCM 密文（含 uploadUrl 与必要请求头），绝不回传管理页、不写日志。 */
@@ -86,11 +110,25 @@ export interface ArchiveDataV2 {
   replacedKeys?: string[];
 }
 
-export type ArchiveData = ArchiveDataV1 | ArchiveDataV2;
+/** V3：在 V2 之上加入人工授权快照（列/标签/负责人）与标签写入记录。 */
+export interface ArchiveDataV3 {
+  version: 3;
+  revision: number;
+  target: ArchiveTarget;
+  labels: Record<string, ArchiveLabelRecord>;
+  attachments: Record<string, ArchiveAttachmentRecord>;
+  upload?: ArchiveUpload;
+  asset?: ArchiveAsset;
+  comment?: ArchiveComment;
+  replacedKeys?: string[];
+}
+
+export type ArchiveData = ArchiveDataV1 | ArchiveDataV2 | ArchiveDataV3;
 
 /** 保存时输入的新数据（version/revision 由 saveArchiveData 统一设置）。 */
 export interface ArchiveDataNext {
   target: ArchiveTarget;
+  labels?: Record<string, ArchiveLabelRecord>;
   attachments?: Record<string, ArchiveAttachmentRecord>;
   upload?: ArchiveUpload;
   asset?: ArchiveAsset;
@@ -187,13 +225,77 @@ function validateReplacedKeys(r: unknown): string[] | null {
   return r as string[];
 }
 
+/**
+ * 校验恢复目标：apiBase/projectId/workspaceId 恒必填（V1/V2/V3 相同），
+ * columnId/columnSlug/labelIds/assigneeId 为 V3 扩展字段，可出现也可缺省（向后兼容旧记录）。
+ */
 function validateTarget(t: unknown): ArchiveTarget | null {
   if (!isRecord(t)) return null;
-  if (Object.keys(t).length !== 3) return null;
+  const allowed = new Set(["apiBase", "projectId", "workspaceId", "columnId", "columnSlug", "labelIds", "assigneeId"]);
+  for (const key of Object.keys(t)) {
+    if (!allowed.has(key)) return null;
+  }
   if (typeof t.apiBase !== "string" || !t.apiBase || !isHttpUrl(t.apiBase)) return null;
   if (typeof t.projectId !== "string" || !t.projectId || t.projectId.length > 200) return null;
   if (typeof t.workspaceId !== "string" || !t.workspaceId || t.workspaceId.length > 200) return null;
-  return { apiBase: t.apiBase, projectId: t.projectId, workspaceId: t.workspaceId };
+
+  const target: ArchiveTarget = { apiBase: t.apiBase, projectId: t.projectId, workspaceId: t.workspaceId };
+  if (t.columnId !== undefined) {
+    if (typeof t.columnId !== "string" || t.columnId.length > 200) return null;
+    target.columnId = t.columnId;
+  }
+  if (t.columnSlug !== undefined) {
+    if (typeof t.columnSlug !== "string" || !t.columnSlug || t.columnSlug.length > 200) return null;
+    target.columnSlug = t.columnSlug;
+  }
+  if (t.labelIds !== undefined) {
+    if (!Array.isArray(t.labelIds)) return null;
+    const ids: string[] = [];
+    for (const v of t.labelIds) {
+      if (typeof v !== "string" || !v || v.length > 200) return null;
+      if (!ids.includes(v)) ids.push(v);
+    }
+    target.labelIds = ids;
+  }
+  if (t.assigneeId !== undefined) {
+    if (t.assigneeId !== null && (typeof t.assigneeId !== "string" || t.assigneeId.length > 200)) return null;
+    target.assigneeId = t.assigneeId as string | null;
+  }
+  return target;
+}
+
+/** 严格校验单个标签写入记录。 */
+function validateLabelRecord(v: unknown): ArchiveLabelRecord | null {
+  if (!isRecord(v)) return null;
+  const allowed = new Set(["id", "name", "outcome", "taskLabelId", "error"]);
+  for (const key of Object.keys(v)) {
+    if (!allowed.has(key)) return null;
+  }
+  if (typeof v.id !== "string" || !v.id || v.id.length > 200) return null;
+  if (typeof v.name !== "string" || !v.name || v.name.length > 300) return null;
+  if (!isWriteOutcome(v.outcome)) return null;
+  if (v.taskLabelId !== undefined && (typeof v.taskLabelId !== "string" || v.taskLabelId.length > 200)) return null;
+  if (v.error !== undefined && (typeof v.error !== "string" || v.error.length > 500)) return null;
+  return {
+    id: v.id,
+    name: v.name,
+    outcome: v.outcome,
+    ...(v.taskLabelId !== undefined ? { taskLabelId: v.taskLabelId as string } : {}),
+    ...(v.error !== undefined ? { error: v.error as string } : {}),
+  };
+}
+
+function validateLabels(v: unknown): Record<string, ArchiveLabelRecord> | null {
+  if (!isRecord(v)) return null;
+  const out: Record<string, ArchiveLabelRecord> = {};
+  for (const [key, value] of Object.entries(v)) {
+    if (!key || key.length > 200) return null;
+    const rec = validateLabelRecord(value);
+    if (!rec) return null;
+    if (rec.id !== key) return null;
+    out[key] = rec;
+  }
+  return out;
 }
 
 /** 严格校验一段 V1 结构；任何不符都返回 null。 */
@@ -402,9 +504,84 @@ function validateV2(v: Record<string, unknown>): ArchiveDataV2 | null {
   };
 }
 
-/** 将 V1 归档数据无损转为 V2 内存表示。 */
+/** 严格校验一段 V3 结构（V2 + labels）；任何不符都返回 null。 */
+function validateV3(v: Record<string, unknown>): ArchiveDataV3 | null {
+  const allowed = new Set([
+    "version",
+    "revision",
+    "target",
+    "labels",
+    "attachments",
+    "upload",
+    "asset",
+    "comment",
+    "replacedKeys",
+  ]);
+  for (const key of Object.keys(v)) {
+    if (!allowed.has(key)) return null;
+  }
+  if (v.version !== 3) return null;
+  if (typeof v.revision !== "number" || !Number.isInteger(v.revision) || v.revision < 1) return null;
+  const target = validateTarget(v.target);
+  if (!target) return null;
+  const labels = v.labels === undefined ? {} : validateLabels(v.labels);
+  if (!labels) return null;
+  const base = validateV2({
+    version: 2,
+    revision: v.revision,
+    target,
+    attachments: v.attachments,
+    ...(v.upload !== undefined ? { upload: v.upload } : {}),
+    ...(v.asset !== undefined ? { asset: v.asset } : {}),
+    ...(v.comment !== undefined ? { comment: v.comment } : {}),
+    ...(v.replacedKeys !== undefined ? { replacedKeys: v.replacedKeys } : {}),
+  });
+  if (!base) return null;
+  return {
+    version: 3,
+    revision: base.revision,
+    target,
+    labels,
+    attachments: base.attachments,
+    ...(base.upload ? { upload: base.upload } : {}),
+    ...(base.asset ? { asset: base.asset } : {}),
+    ...(base.comment ? { comment: base.comment } : {}),
+    ...(base.replacedKeys ? { replacedKeys: base.replacedKeys } : {}),
+  };
+}
+
+/** 将任意受支持的归档数据无损转为 V3 内存表示（仅新增 labels 容器，不改变既有字段）。 */
+export function normalizeToV3(data: ArchiveData): ArchiveDataV3 {
+  if (data.version === 3) return data;
+  const v2 = normalizeToV2(data);
+  return {
+    version: 3,
+    revision: v2.revision,
+    target: v2.target,
+    labels: {},
+    attachments: v2.attachments,
+    ...(v2.upload ? { upload: v2.upload } : {}),
+    ...(v2.asset ? { asset: v2.asset } : {}),
+    ...(v2.comment ? { comment: v2.comment } : {}),
+    ...(v2.replacedKeys ? { replacedKeys: v2.replacedKeys } : {}),
+  };
+}
+
+/** 将 V1 归档数据无损转为 V2 内存表示（V2 原样返回；V3 丢弃标签记录降级为 V2）。 */
 export function normalizeToV2(data: ArchiveData): ArchiveDataV2 {
   if (data.version === 2) return data;
+  if (data.version === 3) {
+    return {
+      version: 2,
+      revision: data.revision,
+      target: data.target,
+      attachments: data.attachments,
+      ...(data.upload ? { upload: data.upload } : {}),
+      ...(data.asset ? { asset: data.asset } : {}),
+      ...(data.comment ? { comment: data.comment } : {}),
+      ...(data.replacedKeys ? { replacedKeys: data.replacedKeys } : {}),
+    };
+  }
   const attachments: Record<string, ArchiveAttachmentRecord> = {};
   if (data.upload || data.asset || data.comment || data.replacedKeys) {
     attachments.screenshot = {
@@ -437,7 +614,8 @@ export function normalizeToV2(data: ArchiveData): ArchiveDataV2 {
  * - 旧格式（无 version，仅 { assetUrl? }）→ legacy（assetUrl 供迁移，不猜其他信息）；
  * - version:1 且合法 → valid (ArchiveDataV1)；
  * - version:2 且合法 → valid (ArchiveDataV2)；
- * - version 存在但不是 1 或 2 → unsupported（可能由未来版本的服务端写入，绝不覆盖）；
+ * - version:3 且合法 → valid (ArchiveDataV3)；
+ * - version 存在但不是 1/2/3 → unsupported（可能由未来版本的服务端写入，绝不覆盖）；
  * - 其余（JSON 损坏、类型不符、缺字段、未知字段）→ corrupt。
  */
 export function parseArchiveData(raw: string | null | undefined): ParsedArchiveData {
@@ -469,6 +647,11 @@ export function parseArchiveData(raw: string | null | undefined): ParsedArchiveD
   if (version === 2) {
     const data = validateV2(parsed);
     if (!data) return fail("v2 结构校验失败（字段缺失/类型不符/未知字段）");
+    return { kind: "valid", data };
+  }
+  if (version === 3) {
+    const data = validateV3(parsed);
+    if (!data) return fail("v3 结构校验失败（字段缺失/类型不符/未知字段）");
     return { kind: "valid", data };
   }
   return { kind: "unsupported", version };
@@ -509,10 +692,11 @@ export function serializeArchiveData(next: ArchiveDataNext, revision: number): s
     };
   }
 
-  const probe = validateV2({
+  const probe = validateV3({
     version: ARCHIVE_DATA_VERSION,
     revision,
     target: next.target,
+    labels: next.labels ?? {},
     attachments,
     ...(upload !== undefined ? { upload } : {}),
     ...(asset !== undefined ? { asset } : {}),
@@ -541,7 +725,7 @@ export function saveArchiveData(
   feedbackId: string,
   base: ParsedArchiveData,
   next: ArchiveDataNext,
-): ArchiveDataV2 {
+): ArchiveDataV3 {
   if (base.kind === "corrupt") {
     throw new ArchiveVersionConflictError(`归档数据损坏，拒绝覆盖: ${base.reason}`);
   }
@@ -579,10 +763,59 @@ export function saveArchiveData(
   } catch (err) {
     throw new ArchivePersistenceError(`归档恢复信息写入 SQLite 失败: ${(err as Error).message?.slice(0, 150)}`);
   }
-  return JSON.parse(json) as ArchiveDataV2;
+  return JSON.parse(json) as ArchiveDataV3;
 }
 
 // ---------- 恢复目标固定与变更检测 ----------
+
+/**
+ * 依据**已实时核对**的目标写出（或更新）归档快照 V3，返回落盘 JSON。
+ *
+ * 人工归档（管理页选择后点击归档）与自动归档授权共用同一实现，
+ * 保证两条路径产生完全一致的快照结构：目标固定后改规则/改配置都不会重定向已授权记录。
+ * 只做数据库写入，不做任何网络调用，供事务内调用。
+ */
+export function writeArchiveSnapshot(
+  db: Db,
+  feedbackId: string,
+  base: ParsedArchiveData,
+  input: {
+    apiBase: string;
+    project: { id: string; workspaceId: string };
+    column: { id: string; slug: string };
+    labels: Array<{ id: string; name: string }>;
+    assigneeId: string | null;
+  },
+): string {
+  const prev = base.kind === "valid" ? normalizeToV3(base.data) : null;
+  const labelRecords: Record<string, ArchiveLabelRecord> = { ...(prev?.labels ?? {}) };
+  for (const l of input.labels) {
+    const existing = labelRecords[l.id];
+    labelRecords[l.id] = {
+      id: l.id,
+      name: l.name,
+      outcome: existing?.outcome === "confirmed" ? "confirmed" : "not_sent",
+      ...(existing?.taskLabelId ? { taskLabelId: existing.taskLabelId } : {}),
+    };
+  }
+  const next: ArchiveDataNext = {
+    target: {
+      apiBase: input.apiBase,
+      projectId: input.project.id,
+      workspaceId: input.project.workspaceId,
+      columnId: input.column.id,
+      columnSlug: input.column.slug,
+      labelIds: input.labels.map((l) => l.id),
+      assigneeId: input.assigneeId,
+    },
+    labels: labelRecords,
+    attachments: prev?.attachments ?? {},
+    ...(prev?.upload ? { upload: prev.upload } : {}),
+    ...(prev?.asset ? { asset: prev.asset } : {}),
+    ...(prev?.comment ? { comment: prev.comment } : {}),
+  };
+  return JSON.stringify(saveArchiveData(db, feedbackId, base, next));
+}
 
 export type TargetCheck =
   | { status: "fresh" }

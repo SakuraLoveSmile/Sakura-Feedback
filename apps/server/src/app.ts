@@ -2,13 +2,13 @@ import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { serveStatic } from "@hono/node-server/serve-static";
-import { Hono } from "hono";
+import { type Context, Hono } from "hono";
 import { createRateLimiter } from "./auth/ratelimit.ts";
 import { decryptSecret } from "./crypto/secret.ts";
 import { type Db, openDb } from "./db/db.ts";
 import { findResumable, getSetting } from "./db/repos.ts";
 import type { ServerConfig } from "./env.ts";
-import { requireWritesAllowed } from "./http.ts";
+import { isCrossOriginRequest, normalizeRequestOrigin, requireWritesAllowed } from "./http.ts";
 import { loginPageHtml } from "./pages/login.ts";
 import { createWorker, type Worker } from "./pipeline/worker.ts";
 import { adminRoutes } from "./routes/admin.ts";
@@ -34,6 +34,11 @@ export interface AppDeps {
   workerSleep?: (ms: number) => Promise<void>;
   /** 测试注入：可控服务端时钟（额度按北京时间日切分）。 */
   now?: () => number;
+  /** 测试注入：worker 的定时器（默认 setTimeout，自动 unref）。 */
+  setTimer?: (fn: () => void, ms: number) => unknown;
+  clearTimer?: (handle: unknown) => void;
+  /** 测试注入：单次自动归档扫描批量（默认 50）。 */
+  scanBatch?: number;
   /** 测试注入：updater 客户端（默认按 FEEDBACK_UPDATE_* 配置创建）。 */
   updaterClient?: UpdaterClient;
   /** 测试注入：控制目录读取缓存时长（毫秒）；0 表示每次读盘。 */
@@ -50,7 +55,6 @@ export interface FeedbackApp {
   /** 释放后台定时器（不影响数据库连接的生命周期）。 */
   close: () => void;
 }
-
 export function createApp(config: ServerConfig, deps: AppDeps = {}): FeedbackApp {
   const db = openDb(config.dataDir);
   ensureInitialUser(db, config);
@@ -98,9 +102,41 @@ export function createApp(config: ServerConfig, deps: AppDeps = {}): FeedbackApp
     snapshotKaneoSettings,
     writesPaused: () => control.isWritePaused(),
     ...(deps.workerSleep ? { sleep: deps.workerSleep } : {}),
+    ...(deps.now ? { now: deps.now } : {}),
+    ...(deps.setTimer ? { setTimer: deps.setTimer } : {}),
+    ...(deps.clearTimer ? { clearTimer: deps.clearTimer } : {}),
+    ...(deps.scanBatch !== undefined ? { scanBatch: deps.scanBatch } : {}),
   });
 
   const app = new Hono();
+
+  /**
+   * 组件端点的跨域处理（T1）。
+   * 合法 http(s) Origin 一律回显，不带 credentials；跨源请求标记为“不认 Cookie”。
+   */
+  const componentCors = async (c: Context, next: () => Promise<void>): Promise<Response | undefined> => {
+    const pathname = new URL(c.req.url).pathname.replace(/\/+$/, "") || "/";
+    if (!isComponentEndpoint(pathname)) {
+      await next();
+      return undefined;
+    }
+    const origin = c.req.header("origin");
+    if (origin) {
+      const normalized = normalizeRequestOrigin(origin);
+      if (normalized) {
+        c.header("access-control-allow-origin", normalized);
+        c.header("access-control-allow-methods", "GET, POST, OPTIONS");
+        c.header("access-control-allow-headers", "authorization, content-type");
+        c.header("access-control-max-age", "300");
+        c.header("vary", "origin");
+        if (c.req.method === "OPTIONS") return c.body(null, 204);
+      }
+    }
+    // 跨源组件请求只认 Bearer：即使浏览器带上了后台 Cookie，也不会被当作用户身份。
+    if (isCrossOriginRequest(c, config)) c.set("crossOriginNoCookie", true);
+    await next();
+    return undefined;
+  };
 
   app.get("/healthz", (c) => c.json({ ok: true }));
 
@@ -122,48 +158,13 @@ export function createApp(config: ServerConfig, deps: AppDeps = {}): FeedbackApp
     return pauseGate(c, next);
   });
 
-  // 宿主应用与反馈服务通常跨源：/api/feedback* 使用 Bearer（非 Cookie）鉴权，
-  // 仅对已在任一软件配置中登记的 allowedOrigins 回显 CORS。
-  app.use("/api/feedback*", async (c, next) => {
-    const origin = c.req.header("origin");
-    if (origin) {
-      let normalized: string | null = null;
-      try {
-        normalized = new URL(origin).origin;
-      } catch {
-        normalized = null;
-      }
-      if (normalized && isRegisteredOrigin(db, normalized)) {
-        c.header("access-control-allow-origin", normalized);
-        c.header("access-control-allow-methods", "GET, POST, OPTIONS");
-        c.header("access-control-allow-headers", "authorization, content-type");
-        c.header("access-control-max-age", "300");
-        if (c.req.method === "OPTIONS") return c.body(null, 204);
-      }
-    }
-    await next();
-  });
-
-  // 组件在宿主页面内登录：登录 / 会话查询 / 退出支持跨源 Bearer（不依赖跨站 Cookie）。
-  app.use("/api/auth/*", async (c, next) => {
-    const origin = c.req.header("origin");
-    if (origin) {
-      let normalized: string | null = null;
-      try {
-        normalized = new URL(origin).origin;
-      } catch {
-        normalized = null;
-      }
-      if (normalized && isRegisteredOrigin(db, normalized)) {
-        c.header("access-control-allow-origin", normalized);
-        c.header("access-control-allow-methods", "GET, POST, DELETE, OPTIONS");
-        c.header("access-control-allow-headers", "authorization, content-type");
-        c.header("access-control-max-age", "300");
-        if (c.req.method === "OPTIONS") return c.body(null, 204);
-      }
-    }
-    await next();
-  });
+  // 宿主应用与反馈服务通常跨源（T1：未登记软件也必须能用）：
+  // - 组件端点允许**任意合法 http(s) Origin** 的无凭据跨域请求，按请求回显 Origin；
+  // - 绝不回显 access-control-allow-credentials：浏览器端使用 Bearer + `credentials: omit`；
+  // - 跨源请求一律**不认后台 Cookie**（crossOriginNoCookie），后台凭据无法被跨站借用；
+  // - 只覆盖组件真正需要的端点；后台管理、会话管理与旧登录握手保持原有限制。
+  app.use("/api/feedback*", componentCors);
+  app.use("/api/auth/*", componentCors);
 
   // 登录窗口页面（Web 组件握手入口），CSP 只放行带 nonce 的内联脚本
   app.get("/login", (c) => {
@@ -188,7 +189,7 @@ export function createApp(config: ServerConfig, deps: AppDeps = {}): FeedbackApp
       ...(deps.now ? { now: deps.now } : {}),
     }),
   );
-  app.route("/api/admin", adminRoutes({ db, masterKey: config.masterKey, config, kaneo, ai }));
+  app.route("/api/admin", adminRoutes({ db, masterKey: config.masterKey, config, kaneo, ai, worker }));
   // U1-4：系统更新接口（同样是 /api/admin 下的管理员守卫路由）。
   app.route("/api/admin/system", systemUpdateRoutes({ db, config, system }));
 
@@ -217,28 +218,45 @@ export function createApp(config: ServerConfig, deps: AppDeps = {}): FeedbackApp
   }
   app.get("/admin", (c) => c.redirect("/admin/"));
 
-  return { app, db, config, worker, system, close: () => system.close() };
+  return {
+    app,
+    db,
+    config,
+    worker,
+    system,
+    // T3：先停调度与定时器（此后不再有任何回调访问数据库），再释放系统更新定时器。
+    close: () => {
+      worker.stop();
+      system.close();
+    },
+  };
 }
 
-/** origin 是否已在任一软件配置中登记（用于跨源反馈接口的 CORS 回显）。 */
-function isRegisteredOrigin(db: Db, origin: string): boolean {
-  const rows = db.prepare("SELECT allowed_origins FROM apps").all() as Array<{ allowed_origins: string }>;
-  for (const r of rows) {
-    try {
-      const list: unknown = JSON.parse(r.allowed_origins);
-      if (Array.isArray(list) && list.includes(origin)) return true;
-    } catch {
-      /* 损坏条目跳过 */
-    }
-  }
-  return false;
+/** 组件端点（允许无凭据跨域 + 只认 Bearer）的精确路径。 */
+const COMPONENT_ENDPOINTS = new Set(["/api/auth/login", "/api/auth/logout", "/api/auth/session", "/api/feedback"]);
+/** 本人记录查询与截图：/api/feedback/{id} 与 /api/feedback/{id}/screenshot。 */
+const COMPONENT_FEEDBACK_PATTERN = /^\/api\/feedback\/[^/]+(?:\/screenshot)?$/;
+
+/**
+ * 是否属于「组件需要用到的端点」：
+ * 反馈提交、本人记录查询与截图、组件登录 / 会话 / 退出。
+ * 后台管理、会话管理、旧握手与人工恢复端点**不在其列**，保持原有安全限制。
+ */
+export function isComponentEndpoint(pathname: string): boolean {
+  return COMPONENT_ENDPOINTS.has(pathname) || COMPONENT_FEEDBACK_PATTERN.test(pathname);
 }
 
-/** 服务重启恢复：received/processing 重新入队，archiving 转待核对。 */
+/** 服务重启恢复：received/processing 重新入队（仅 AI 整理）；archiving 转待核对；
+ *  ready_to_archive 只有在**已持久化人工归档授权**时才重新入队；
+ *  随后触发一次可恢复的自动归档扫描（重启同样要补处理积压）。 */
 export function resumeWorker(feedbackApp: FeedbackApp): void {
-  const { requeue, uncertain } = findResumable(feedbackApp.db);
-  feedbackApp.worker.resume(requeue, uncertain);
-  if (requeue.length || uncertain.length) {
-    console.log(`[server] 恢复处理：重新入队 ${requeue.length} 条，待核对 ${uncertain.length} 条`);
+  const { requeue, uncertain, authorized } = findResumable(feedbackApp.db);
+  feedbackApp.worker.resume(requeue, uncertain, authorized);
+  if (requeue.length || uncertain.length || authorized.length) {
+    console.log(
+      `[server] 恢复处理：重新入队 ${requeue.length} 条，待核对 ${uncertain.length} 条，已授权归档 ${authorized.length} 条`,
+    );
   }
+  // 重启恢复：按库内状态重新扫描自动归档积压（不依赖一次性内存队列）。
+  feedbackApp.worker.scanAutoArchive();
 }

@@ -9,6 +9,7 @@ import {
 } from "../src/pipeline/archive-data.ts";
 import { KaneoUncertainError } from "../src/services/kaneo.ts";
 import {
+  authorizeArchive,
   createTestPng,
   defaultSubmitBody,
   instantSleep,
@@ -71,6 +72,23 @@ function bearerOf(rig: Rig): string {
   return rig.bearer;
 }
 
+/**
+ * 契约变更后归档必须先经管理接口授权：本文件自行 createApp，这里按 authorizeArchive 需要的
+ * Harness 形状（feedbackApp / cookie / bearer）适配。仅传入的字段会被 helper 使用。
+ */
+function harnessOf(rig: Rig): Parameters<typeof authorizeArchive>[0] {
+  return { feedbackApp: rig.app, cookie: rig.cookie, bearer: rig.bearer } as unknown as Parameters<
+    typeof authorizeArchive
+  >[0];
+}
+
+/** 人工归档授权（必须 202）并等待授权触发的归档 worker 跑完。 */
+async function authorizeAndIdle(rig: Rig, id: string): Promise<void> {
+  const auth = await authorizeArchive(harnessOf(rig), id);
+  expect(auth.status).toBe(202);
+  await rig.app.worker.idle();
+}
+
 describe("故障注入：预签名/上传阶段中断", () => {
   it("presign 返回后、本地落盘前中断 → 零字节传输；恢复后复用任务 ID、重新申请地址并完成", async () => {
     const rig = await buildRig((inner) => ({
@@ -81,7 +99,12 @@ describe("故障注入：预签名/上传阶段中断", () => {
       },
     }));
     const { id } = await submitScreenshot(rig);
-    expect(rig.inner.created.length).toBe(1);
+    // 契约变更：提交只做 AI 整理，人工授权前零远端写入
+    expect(getFeedback(rig.app.db, id)?.status).toBe("needs_info");
+    expect(rig.inner.remoteWrites).toBe(0);
+    // 归档需人工授权：授权后归档 worker 才会创建任务并申请预签名
+    await authorizeAndIdle(rig, id);
+    expect(rig.inner.created.length).toBe(1); // 任务创建成功后才申请上传地址
     expect(rig.inner.uploads.length).toBe(0);
     expect(rig.inner.finalizes.length).toBe(0);
     expect(rig.inner.comments.length).toBe(0);
@@ -119,6 +142,7 @@ describe("故障注入：预签名/上传阶段中断", () => {
       },
     }));
     const { id, png } = await submitScreenshot(rig);
+    await authorizeAndIdle(rig, id);
     expect(getFeedback(rig.app.db, id)?.status).toBe("needs_review");
     let state = validArchive(rig, id);
     expect(state.upload?.outcome).toBe("maybe_sent");
@@ -153,6 +177,7 @@ describe("故障注入：预签名/上传阶段中断", () => {
       },
     }));
     const { id } = await submitScreenshot(rig);
+    await authorizeAndIdle(rig, id);
     expect(getFeedback(rig.app.db, id)?.status).toBe("needs_review");
     const state = validArchive(rig, id);
     expect(state.upload?.outcome).toBe("confirmed"); // PUT 已确认并持久化
@@ -180,6 +205,7 @@ describe("故障注入：预签名/上传阶段中断", () => {
       },
     }));
     const { id } = await submitScreenshot(rig);
+    await authorizeAndIdle(rig, id);
     expect(getFeedback(rig.app.db, id)?.status).toBe("failed");
     const state = validArchive(rig, id);
     expect(state.upload?.outcome).toBe("confirmed"); // 恢复状态未被清除
@@ -207,6 +233,7 @@ describe("故障注入：评论阶段中断与列表不可读", () => {
       },
     }));
     const { id } = await submitScreenshot(rig);
+    await authorizeAndIdle(rig, id);
     expect(getFeedback(rig.app.db, id)?.status).toBe("needs_review");
     const state = validArchive(rig, id);
     // P1：意图在请求发出**之前**落盘 → 结果未知记为 maybe_sent，绝不降级为 not_sent
@@ -247,6 +274,7 @@ describe("故障注入：评论阶段中断与列表不可读", () => {
       },
     }));
     const { id } = await submitScreenshot(rig);
+    await authorizeAndIdle(rig, id);
     expect(getFeedback(rig.app.db, id)?.status).toBe("needs_review");
     expect(validArchive(rig, id).comment?.outcome).toBe("maybe_sent");
     const commentsAfterPost = rig.inner.comments.length;
@@ -268,6 +296,7 @@ describe("故障注入：评论阶段中断与列表不可读", () => {
   it("多条匹配评论（多候选）→ 仍视为已挂载，绝不重复提交", async () => {
     const rig = await buildRig();
     const { id, png } = await submitScreenshot(rig);
+    await authorizeAndIdle(rig, id);
     // 制造重复评论（同资产引用，均命中反馈 ID + 摘要）
     const sha = getFeedbackScreenshot(rig.app.db, id)!.sha256;
     const assetUrl = validArchive(rig, id).asset!.url;
@@ -297,6 +326,7 @@ describe("故障注入：签名到期与凭证", () => {
   it("未知到期（expiresAt 未知）→ 允许同 key 重传；主密钥无法解密 → 待核对不猜新地址", async () => {
     const rig = await buildRig();
     const { id } = await submitScreenshot(rig);
+    await authorizeAndIdle(rig, id);
     const base = validArchive(rig, id);
     // mock 预签名 URL 无签名参数 → expiresAt 应为 null（未知）
     expect(base.upload?.expiresAt).toBeNull();
@@ -326,6 +356,7 @@ describe("故障注入：签名到期与凭证", () => {
   it("签名过期 → 绝不自动申请新 key：转待核对、保留原 key，仅 replace_upload 可替换", async () => {
     const rig = await buildRig();
     const { id } = await submitScreenshot(rig);
+    await authorizeAndIdle(rig, id);
     const base = validArchive(rig, id);
     resetToUploadResume(rig, id, {
       ...base.upload!,
@@ -361,43 +392,29 @@ describe("故障注入：签名到期与凭证", () => {
 });
 
 describe("故障注入：归档中目标改变与数据异常", () => {
-  it("恢复前修改项目映射 → 目标改变待核对且零远端写入；改回后成功", async () => {
+  it("恢复前 Kaneo 项目映射改变 → 目标改变待核对且零远端写入；改回后成功", async () => {
     const rig = await buildRig();
     const { id } = await submitScreenshot(rig);
+    await authorizeAndIdle(rig, id);
+    expect(getFeedback(rig.app.db, id)?.status).toBe("archived");
     // 模拟恢复：清评论、保留任务，重开流程
     hReset(rig, id);
-    // 归档中（恢复时）修改项目映射
-    const apps = (await jsonReq(rig.app.app, "GET", "/api/admin/apps", { cookie: rig.cookie })).data.apps as Array<{
-      id: string;
-    }>;
-    const change = await jsonReq(rig.app.app, "PUT", `/api/admin/apps/${apps[0]!.id}`, {
-      cookie: rig.cookie,
-      body: {
-        name: "测试软件",
-        allowedOrigins: ["http://host.test"],
-        kaneoProjectId: "proj-2",
-        kaneoColumnSlug: "triage",
-      },
-    });
-    expect(change.status).toBe(200);
+    const writesBeforeTargetChange = rig.inner.remoteWrites;
+    // 契约变更后授权快照固定了目标项目，改“软件默认映射”不再重定向（该点由 classify-archive 覆盖）；
+    // 这里模拟恢复时 Kaneo 侧把授权快照指向的 proj-1 解析成另一个项目 → 目标改变。
+    const originalGetProjectInfo = rig.inner.getProjectInfo.bind(rig.inner);
+    rig.inner.getProjectInfo = (projectId: string) =>
+      originalGetProjectInfo(projectId === "proj-1" ? "proj-2" : projectId);
     rig.app.worker.enqueue(id);
     await rig.app.worker.idle();
     expect(getFeedback(rig.app.db, id)?.status).toBe("needs_review");
     expect(getFeedback(rig.app.db, id)?.error_summary).toContain("归档恢复目标已改变（projectId）");
-    expect(rig.inner.created.length).toBe(1); // 零远端写入
+    expect(rig.inner.remoteWrites).toBe(writesBeforeTargetChange); // 目标改变时零远端写入
+    expect(rig.inner.created.length).toBe(1);
     expect(rig.inner.uploads.length).toBe(1);
 
-    // 改回原项目 → 恢复成功
-    const revert = await jsonReq(rig.app.app, "PUT", `/api/admin/apps/${apps[0]!.id}`, {
-      cookie: rig.cookie,
-      body: {
-        name: "测试软件",
-        allowedOrigins: ["http://host.test"],
-        kaneoProjectId: "proj-1",
-        kaneoColumnSlug: "triage",
-      },
-    });
-    expect(revert.status).toBe(200);
+    // 改回原映射 → 恢复成功
+    rig.inner.getProjectInfo = originalGetProjectInfo;
     updateFeedback(rig.app.db, id, { status: "processing", error_summary: null });
     rig.app.worker.enqueue(id);
     await rig.app.worker.idle();
@@ -408,6 +425,7 @@ describe("故障注入：归档中目标改变与数据异常", () => {
   it("旧格式资产字节不匹配 → 待核对且不改写；下载 404 同样待核对", async () => {
     const rig = await buildRig();
     const { id } = await submitScreenshot(rig);
+    await authorizeAndIdle(rig, id);
     const stored = getFeedbackScreenshot(rig.app.db, id)!.png_blob;
     // 字节不匹配：旧资产链接指向不同字节
     rig.inner.uploads.push({ taskId: "http://kaneo.test/assets/wrong.png", bytes: Buffer.from([1, 2, 3]) });
@@ -483,6 +501,7 @@ describe("故障注入：错误评论响应与并发人工操作", () => {
       },
     }));
     const { id } = await submitScreenshot(rig);
+    await authorizeAndIdle(rig, id);
     expect(getFeedback(rig.app.db, id)?.status).toBe("needs_review");
     // 意图先落盘且未被误标成功
     expect(validArchive(rig, id).comment?.outcome).toBe("maybe_sent");
@@ -525,6 +544,17 @@ describe("故障注入：错误评论响应与并发人工操作", () => {
     const r = await submitFeedback(app, bearer, defaultSubmitBody());
     await app.worker.idle();
     const id = r.data.feedbackId;
+    // 提交后仅等待 AI 整理：未授权前不写远端、不带授权标记
+    const beforeAuth = getFeedback(app.db, id);
+    expect(beforeAuth?.status).toBe("needs_info");
+    expect(beforeAuth?.archive_authorized_at).toBeNull();
+    // 归档需人工授权：先授权并跑完首次归档，再构造“任务创建结果未知”的恢复起点
+    const auth = await authorizeArchive(
+      { feedbackApp: app, cookie } as unknown as Parameters<typeof authorizeArchive>[0],
+      id,
+    );
+    expect(auth.status).toBe(202);
+    await app.worker.idle();
     // 构造“任务创建结果未知”的待核对记录（无 task ID、无附件状态）
     const parsed = loadArchiveData(app.db, id);
     if (parsed.kind !== "valid") throw new Error("期望合法归档数据");

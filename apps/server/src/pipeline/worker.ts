@@ -2,16 +2,29 @@ import { createHash } from "node:crypto";
 import type { Db } from "../db/db.ts";
 import {
   type AppRow,
+  authorizeArchiveInTx,
+  clearAutoBlocked,
   type FeedbackRow,
+  findAiPendingCandidates,
+  findAutoArchiveCandidates,
+  findNextAutoRetryAt,
+  finishAiOrganization,
   getApp,
+  getAppSource,
   getFeedback,
   getFeedbackLogs,
   getFeedbackScreenshot,
   getFeedbackScreenshotMeta,
+  getUserById,
+  isAppRuleComplete,
+  isManuallyHandled,
+  markAutoBlocked,
+  parseAppLabelIds,
   resolveOutputPixels,
   updateFeedback,
 } from "../db/repos.ts";
 import { type AiClient, AiError, prepareLogEvidence } from "../services/ai.ts";
+import { resolveArchiveTarget } from "../services/archive-target.ts";
 import {
   buildLogComment,
   buildScreenshotComment,
@@ -19,6 +32,7 @@ import {
   type KaneoClient,
   KaneoColumnNotFound,
   KaneoDefiniteError,
+  type KaneoLabel,
   type KaneoSettings,
   KaneoUncertainError,
 } from "../services/kaneo.ts";
@@ -27,7 +41,8 @@ import {
   type ArchiveAttachmentRecord,
   type ArchiveData,
   type ArchiveDataNext,
-  type ArchiveDataV2,
+  type ArchiveDataV3,
+  type ArchiveLabelRecord,
   ArchivePersistenceError,
   type ArchiveTarget,
   type ArchiveUpload,
@@ -39,13 +54,17 @@ import {
   loadArchiveData,
   logCommentMarker,
   MAX_SAME_KEY_RECOVERIES,
-  normalizeToV2,
+  normalizeToV3,
   type ParsedArchiveData,
+  parseArchiveData,
   saveArchiveData,
   type UploadCredentials,
+  writeArchiveSnapshot,
 } from "./archive-data.ts";
 
 const MAX_ATTEMPTS = 3; // AI 调用（含格式失败/超时/限流）单轮最多 3 次
+/** 自动归档扫描的批大小：每次触发按批取候选，不依赖一次性内存队列。 */
+const AUTO_SCAN_BATCH = 50;
 
 /**
  * 4.5 阶段矛盾检查：归档阶段 / 任务 ID / 恢复数据互相矛盾时返回描述（→待核对，不猜测重建）。
@@ -56,7 +75,7 @@ function stageContradiction(row: FeedbackRow, parsed: ParsedArchiveData): string
   if (row.archive_stage === "complete" && row.status !== "archived") {
     return `archive_stage=complete 但 status=${row.status}`;
   }
-  const attachments = data && "attachments" in data ? (data as ArchiveDataV2).attachments : {};
+  const attachments = data && "attachments" in data ? (data as ArchiveDataV3).attachments : {};
   const hasAnyAttachmentData = Boolean(
     data && (data.upload || data.asset || data.comment || (attachments && Object.keys(attachments).length > 0)),
   );
@@ -82,7 +101,13 @@ function getLogContentType(filename: string): string {
   return "text/plain";
 }
 
-function isFullyArchived(data: ArchiveDataV2 | null, hasScreenshot: boolean, logs: { id: string }[]): boolean {
+/** 归档完成判定：截图 + 全部日志 + 全部目标标签都已确认，缺一不可。 */
+function isFullyArchived(
+  data: ArchiveDataV3 | null,
+  hasScreenshot: boolean,
+  logs: { id: string }[],
+  labelIds: string[] = [],
+): boolean {
   if (!data) return false;
   if (hasScreenshot) {
     const s = data.attachments?.screenshot;
@@ -93,7 +118,46 @@ function isFullyArchived(data: ArchiveDataV2 | null, hasScreenshot: boolean, log
     const l = data.attachments?.[log.id];
     if (l?.comment?.outcome !== "confirmed") return false;
   }
+  for (const id of labelIds) {
+    if (data.labels?.[id]?.outcome !== "confirmed") return false;
+  }
   return true;
+}
+
+/**
+ * 该记录是否已经开始远端写入（T3 门槛判定）：
+ * 已知任务 ID，或恢复数据里存在任何“可能/已经发出”的上传、资产、评论痕迹。
+ * 仅固定了目标（只读操作）不算远端写入。
+ */
+function hasRemoteWriteEvidence(row: FeedbackRow): boolean {
+  if (row.kaneo_task_id) return true;
+  const parsed = parseArchiveData(row.archive_data_json);
+  if (parsed.kind !== "valid") return false;
+  const d = parsed.data;
+  if (d.upload && d.upload.outcome !== "not_sent") return true;
+  if (d.asset || d.comment) return true;
+  const attachments = "attachments" in d ? d.attachments : {};
+  for (const att of Object.values(attachments)) {
+    if (att.asset || att.comment) return true;
+    if (att.upload && att.upload.outcome !== "not_sent") return true;
+  }
+  return false;
+}
+
+/**
+ * AI 整理失败时使用原文回退（T2：AI 仅整理内容，失败保留原文）：
+ * 标题取原文首个非空行，描述由 buildTaskDescription 用空分节 + 用户原话生成。
+ */
+function fallbackProcessed(text: string): Parameters<typeof buildTaskDescription>[1] {
+  const firstLine = text
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l.length > 0);
+  const title =
+    Array.from(firstLine ?? "用户反馈")
+      .slice(0, 80)
+      .join("") || "用户反馈";
+  return { title, sections: { experience: "", problems: "", suggestions: "", questions: "" } };
 }
 
 /** 人工/自动操作的统一结果：ok=false 时 reason 由路由映射为明确的 HTTP 语义（busy/revision_conflict 等）。 */
@@ -124,6 +188,15 @@ export interface WorkerDeps {
   writesPaused?: () => boolean;
   /** 暂停期间的轮询间隔（毫秒），默认 500。 */
   pausePollMs?: number;
+  /**
+   * T3 可注入时钟与定时器：默认用 `Date.now` / `setTimeout`（自动 unref，不阻止进程退出）。
+   * 测试注入可控时钟并推进时间，观察真实调度（绝不靠手动清空退避字段或调用扫描代替）。
+   */
+  now?: () => number;
+  setTimer?: (fn: () => void, ms: number) => unknown;
+  clearTimer?: (handle: unknown) => void;
+  /** 单次扫描批量（默认 50）；仅用于测试收紧批量以覆盖多轮补处理。 */
+  scanBatch?: number;
 }
 
 /**
@@ -132,8 +205,26 @@ export interface WorkerDeps {
  */
 export function createWorker(deps: WorkerDeps) {
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms).unref?.()));
+  const now = deps.now ?? (() => Date.now());
+  const setTimer =
+    deps.setTimer ??
+    ((fn: () => void, ms: number): unknown => {
+      const t = setTimeout(fn, ms);
+      t.unref?.();
+      return t;
+    });
+  const clearTimer = deps.clearTimer ?? ((handle: unknown) => clearTimeout(handle as NodeJS.Timeout));
+  const scanBatch = deps.scanBatch ?? AUTO_SCAN_BATCH;
   const queue: string[] = [];
-  let running = false;
+  /** 正在排空队列的 promise（并发调用共享同一次排空，绝不并行处理）。 */
+  let drainPromise: Promise<void> | null = null;
+  /** 当前正在处理的反馈（扫描时避免重复入队）。 */
+  let activeId: string | null = null;
+  /** T3 调度器：扫描请求合并 + 串行批次循环 + 可取消的到点重试定时器。 */
+  let scanRequested = false;
+  let scanRunning = false;
+  let retryTimer: unknown = null;
+  let stopped = false;
   // 反馈级操作锁：同一反馈并发操作只有一个获得处理权，其余返回可识别 busy。
   const busyFeedbacks = new Set<string>();
   const pausePollMs = deps.pausePollMs ?? 500;
@@ -153,27 +244,40 @@ export function createWorker(deps: WorkerDeps) {
     void drain();
   }
 
-  async function drain(): Promise<void> {
-    if (running) return;
-    running = true;
-    try {
+  /**
+   * 排空内存队列（并发调用共享同一次排空）。
+   * 更新暂停：不取队、不处理，等暂停解除后继续（绝不丢弃已入队的工作）。
+   */
+  function drain(): Promise<void> {
+    if (drainPromise) return drainPromise;
+    const p = (async () => {
       while (queue.length > 0) {
-        // 更新暂停：不取队、不处理，等暂停解除后继续（绝不丢弃已入队的工作）。
         if (paused()) {
           await sleep(pausePollMs);
           continue;
         }
         const id = queue.shift()!;
+        activeId = id;
         try {
           await processOne(id);
         } catch (err) {
           // processOne 内部已兜底；到这里说明是程序性 bug，标 failed 留痕
           safeFail(id, `worker 内部错误: ${(err as Error).message?.slice(0, 200) ?? String(err)}`);
+        } finally {
+          activeId = null;
         }
       }
-    } finally {
-      running = false;
-    }
+      // 非扫描路径（提交 / 人工操作直接入队）也可能产生“可恢复退避”记录：
+      // 队列排空后按库内最早到期时间重新安排定时器（扫描循环进行中时由它统一安排）。
+      if (!scanRunning) scheduleRetryTimer();
+    })();
+    // 排空异常已在内部逐条兜底；这里保证 drainPromise 永不 reject（调用方多为 fire-and-forget）。
+    drainPromise = p
+      .catch(() => undefined)
+      .finally(() => {
+        drainPromise = null;
+      });
+    return drainPromise;
   }
 
   /**
@@ -182,9 +286,10 @@ export function createWorker(deps: WorkerDeps) {
    * 若在这里死等排空会让停机超时被 SIGKILL，WAL 留在盘上、升级中止。
    * 队列仍保留在内存（服务随后会被重建），解除暂停后由 drain 继续处理。
    * 注意：暂停期间调用方不应再写数据库（调用顺序见 index.ts 的优雅退出）。
+   * T3：同时等待调度器当前这一轮扫描跑完，否则 `idle()` 可能在两批之间提前返回。
    */
   async function idle(): Promise<void> {
-    while (running || queue.length > 0) {
+    while (drainPromise || queue.length > 0 || scanRunning) {
       if (paused()) return;
       await sleep(5);
     }
@@ -314,14 +419,16 @@ export function createWorker(deps: WorkerDeps) {
       return { ok: false, result: { ok: false, reason: "invalid_state", note: "Kaneo 连接未配置" } };
     }
     const app = appOf(row);
-    if (!app?.kaneo_project_id) {
+    // T3：已固定快照优先（人工授权选择的目标），仅在完全没有快照时才回退到软件默认项目。
+    const pinnedProjectId = saved?.target.projectId ?? app?.kaneo_project_id ?? "";
+    if (!pinnedProjectId) {
       return { ok: false, result: { ok: false, reason: "invalid_state", note: "应用未配置 Kaneo 目标项目" } };
     }
     if (!saved) return { ok: true, client: bound.client, apiBase: bound.apiBase };
 
     let resolved: ArchiveTarget;
     try {
-      const proj = await bound.client.getProjectInfo(app.kaneo_project_id);
+      const proj = await bound.client.getProjectInfo(pinnedProjectId);
       resolved = { apiBase: bound.apiBase, projectId: proj.id, workspaceId: proj.workspaceId };
     } catch (err) {
       return {
@@ -347,6 +454,256 @@ export function createWorker(deps: WorkerDeps) {
     return { ok: true, client: bound.client, apiBase: bound.apiBase };
   }
 
+  /**
+   * 自动归档授权（T3）：仅在“自动模式已启用 + 来源已确认 + 规则完整有效 + Kaneo 目标有效”
+   * 时调用同一套人工授权事务与快照逻辑；其余情况保持已接收状态并写明阻塞原因。
+   *
+   * 返回 true 表示该记录已（或有）归档授权，调用方可以继续归档阶段。
+   * 返回 false 表示本记录暂不授权，调用方必须立即返回（不发起任何远端写入）。
+   */
+  async function autoAuthorizeIfEligible(feedbackId: string): Promise<boolean> {
+    const db = deps.db;
+    const row = getFeedback(db, feedbackId);
+    if (!row) return false;
+    if (row.archive_authorized_at) return true; // 已授权（人工或自动）
+    if (row.status !== "needs_info") return false;
+    // T3 人工保护（入口）：管理员已经保存过分类（含缺项暂存、清空后保存）的记录
+    // 一律不自动授权、不写阻塞原因，交由管理员继续“保存并归档”或重新保存。
+    if (isManuallyHandled(row)) return false;
+
+    const app = appOf(row);
+    if (!app) {
+      markAutoBlocked(db, feedbackId, "config", "软件配置不存在或已删除", 0, now());
+      return false;
+    }
+    if (app.archive_mode !== "automatic" || app.config_status !== "configured") return false;
+
+    // 规则不完整 / 来源不明 / 来源待确认：属于**配置问题**，等待管理员处理，不做退避。
+    if (!isAppRuleComplete(app)) {
+      markAutoBlocked(
+        db,
+        feedbackId,
+        "config",
+        "自动归档规则不完整：需要选择项目、目标列与至少一个工作区标签",
+        0,
+        now(),
+      );
+      return false;
+    }
+    if (!row.source_origin) {
+      markAutoBlocked(db, feedbackId, "config", "该记录来源无法确定（历史数据），不参与自动归档", 0, now());
+      return false;
+    }
+    const source = getAppSource(db, app.id, row.source_origin);
+    if (!source || source.status !== "confirmed") {
+      markAutoBlocked(db, feedbackId, "config", "来源尚未确认，确认后会自动补处理", 0, now());
+      return false;
+    }
+
+    const bound = bindKaneo();
+    if (!bound) {
+      markAutoBlocked(db, feedbackId, "config", "Kaneo 连接未配置，配置后会自动补处理", 0, now());
+      return false;
+    }
+    const baseUrl = bound.settings.baseUrl;
+    const labelIds = parseAppLabelIds(app.kaneo_label_ids);
+
+    // 只读核对目标（列 / 工作区标签 / 负责人是否仍然有效）。
+    const resolved = await resolveArchiveTarget(bound.client, {
+      projectId: app.kaneo_project_id,
+      columnId: app.kaneo_column_id,
+      labelIds,
+      assigneeId: app.kaneo_assignee_id,
+    });
+    if (!resolved.ok) {
+      const attempts = row.auto_attempts + 1;
+      markAutoBlocked(db, feedbackId, resolved.kind, resolved.reason, attempts, now());
+      if (resolved.kind === "retryable") {
+        // 可恢复故障：退避后由扫描重试；此处不等待、不阻塞队列。
+        console.warn(`[worker] 自动归档暂缓（可恢复）：反馈 ${feedbackId} — ${resolved.reason}`);
+      }
+      return false;
+    }
+    const target = resolved.target;
+    const apiBase = normalizeKaneoApiBase(baseUrl);
+
+    // 授权者记为**启用该规则的管理员**（自动授权同样留痕到审计）。
+    const enabler = app.auto_enabled_by ? getUserById(db, app.auto_enabled_by) : null;
+    const actor = enabler
+      ? { id: enabler.id, username: enabler.username }
+      : { id: app.auto_enabled_by ?? "", username: "自动归档规则" };
+
+    // 操作幂等键固定绑定“记录 + 规则版本”：重复扫描/并发 worker 只会授权一次。
+    const operationId = `auto:${feedbackId}:${app.rule_version}`;
+    let outcome: ReturnType<typeof authorizeArchiveInTx>;
+    try {
+      outcome = authorizeArchiveInTx(db, feedbackId, {
+        expectedVersion: row.classify_version,
+        operationId,
+        patch: {
+          projectId: target.project.id,
+          columnId: target.column.id,
+          columnSlug: target.column.slug,
+          labelIds: target.labels.map((l) => l.id),
+          assigneeId: target.assigneeId,
+          assigneeName: target.assigneeName,
+        },
+        actor,
+        kind: "auto",
+        autoGuard: { appRowId: app.id, ruleVersion: app.rule_version, sourceOrigin: row.source_origin },
+        buildSnapshot: (existingRaw) => {
+          const base = parseArchiveData(existingRaw);
+          return writeArchiveSnapshot(db, feedbackId, base, {
+            apiBase,
+            project: { id: target.project.id, workspaceId: target.project.workspaceId },
+            column: { id: target.column.id, slug: target.column.slug },
+            labels: target.labels,
+            assigneeId: target.assigneeId,
+          });
+        },
+      });
+    } catch (err) {
+      // 快照写入被拒（恢复数据损坏/并发修改）→ 保持等待，交给人工核对路径。
+      markAutoBlocked(
+        db,
+        feedbackId,
+        "config",
+        `归档快照写入被拒绝：${(err as Error).message.slice(0, 200)}`,
+        0,
+        now(),
+      );
+      return false;
+    }
+
+    if (outcome.kind === "authorized") {
+      clearAutoBlocked(db, feedbackId);
+      return true;
+    }
+    if (outcome.kind === "manual_protected") {
+      // 事务内发现管理员刚保存过分类：保持人工内容，不授权、不留阻塞原因。
+      return false;
+    }
+    if (outcome.kind === "rule_changed") {
+      // 停用 / 改规则 / 来源回退的竞争：不授权，交给扫描下一轮重新评估。
+      return false;
+    }
+    if (outcome.kind === "version_conflict") {
+      return false;
+    }
+    if (outcome.kind === "operation_conflict") {
+      return true; // 已被其他操作授权：按已授权继续
+    }
+    markAutoBlocked(
+      db,
+      feedbackId,
+      "config",
+      outcome.kind === "locked" ? "该记录已进入归档流程，不再自动授权" : "自动归档规则不完整，无法授权",
+      0,
+      now(),
+    );
+    return false;
+  }
+
+  /** 当前可执行的候选（AI 待整理 + 自动归档待补处理），排除已在队列或正在处理的记录。 */
+  function collectCandidates(): string[] {
+    const ids: string[] = [];
+    const push = (id: string): void => {
+      if (queue.includes(id) || activeId === id) return;
+      if (!ids.includes(id)) ids.push(id);
+    };
+    for (const row of findAiPendingCandidates(deps.db, scanBatch)) push(row.id);
+    for (const row of findAutoArchiveCandidates(deps.db, now(), scanBatch)) push(row.id);
+    return ids;
+  }
+
+  function clearRetryTimer(): void {
+    if (retryTimer !== null) {
+      clearTimer(retryTimer);
+      retryTimer = null;
+    }
+  }
+
+  /** 按库内最早到期的可恢复退避安排一个**可取消**定时器：到点重新查库并处理。 */
+  function scheduleRetryTimer(): void {
+    try {
+      clearRetryTimer();
+      if (stopped) return;
+      const next = findNextAutoRetryAt(deps.db);
+      if (next === null) return;
+      retryTimer = setTimer(
+        () => {
+          retryTimer = null;
+          requestScan();
+        },
+        Math.max(0, next - now()),
+      );
+    } catch {
+      // 读取 / 定时器失败都不影响既有队列：下一次触发会重新安排。
+    }
+  }
+
+  /**
+   * 请求一次可恢复扫描（T3 统一调度入口）。
+   * - 请求合并：扫描进行中只置位标记，由当前这一轮接续处理；
+   * - 串行调度：一次只有一个扫描循环，循环内一批 50 条处理完再取下一批，直到没有新候选；
+   * - 每批处理过即记入 `attempted`，同一轮不重复尝试同一条，避免空转与饥饿；
+   * - 扫描结束按库内最早到期的退避重新安排定时器（启用规则、确认来源、配置修正、
+   *   AI 完成、服务恢复都走这里，不依赖管理员重复点击）。
+   */
+  function requestScan(): void {
+    if (stopped) return;
+    scanRequested = true;
+    clearRetryTimer();
+    if (!scanRunning) void runScanLoop();
+  }
+
+  async function runScanLoop(): Promise<void> {
+    if (scanRunning) return;
+    scanRunning = true;
+    const attempted = new Set<string>();
+    try {
+      // 一批处理结束后继续查询，直到没有“尚未在本轮尝试过”的可执行候选：
+      // 51 条 = 50 + 1，121 条 = 50 + 50 + 21，批次上限不限制总吞吐。
+      while (!stopped) {
+        scanRequested = false;
+        let candidates: string[];
+        try {
+          candidates = collectCandidates();
+        } catch (err) {
+          // 扫描失败不影响既有队列：下一次触发会重新扫描。
+          console.warn(`[worker] 自动归档扫描失败: ${(err as Error).message?.slice(0, 200)}`);
+          return;
+        }
+        const fresh = candidates.filter((id) => !attempted.has(id));
+        if (fresh.length === 0) break;
+        for (const id of fresh) {
+          attempted.add(id);
+          enqueue(id);
+        }
+        console.log(`[worker] 自动归档扫描：入队 ${fresh.length} 条`);
+        await drain();
+      }
+    } finally {
+      scanRunning = false;
+      if (scanRequested && !stopped) {
+        void runScanLoop();
+      } else {
+        scheduleRetryTimer();
+      }
+    }
+  }
+
+  /**
+   * 停止调度与定时器（优雅退出第一步）。
+   * 只停止“安排新工作”：已入队的记录仍由 `idle()` 排空后再关闭数据库，
+   * 停止后不再有任何定时器回调访问数据库。
+   */
+  function stop(): void {
+    stopped = true;
+    scanRequested = false;
+    clearRetryTimer();
+  }
+
   async function processOne(feedbackId: string): Promise<void> {
     // 更新暂停期间连单条处理入口也不放行（人工动作与 drain 都经过这里）。
     if (paused()) return;
@@ -362,7 +719,23 @@ export function createWorker(deps: WorkerDeps) {
     const db = deps.db;
     let row = getFeedback(db, feedbackId);
     if (!row) return;
-    if (row.status !== "received" && row.status !== "processing") return;
+    const authorized = Boolean(row.archive_authorized_at && row.archive_operation_id);
+    // “已开始远端写入”的既有记录（旧版本遗留）允许沿既有恢复入口继续；
+    // 从未产生远端写入、也没有人工授权的记录绝不允许归档（必须先人工补齐并确认）。
+    const resumable = authorized || hasRemoteWriteEvidence(row);
+    const isAiPhase = (row.status === "received" || row.status === "processing") && !resumable;
+    const isArchivePhase =
+      row.status === "ready_to_archive" || ((row.status === "received" || row.status === "processing") && resumable);
+    /**
+     * T3 自动授权阶段：AI 已整理完成、尚未授权、也从未发生远端写入。
+     * 只有满足“自动模式 + 来源已确认 + 规则完整有效”时才会真正授权（见 autoAuthorizeIfEligible）；
+     * 已被管理员人工编辑的记录不进这个阶段（绝不覆盖人工内容）。
+     */
+    const isAutoAuthorizePhase =
+      row.status === "needs_info" &&
+      !row.archive_authorized_at &&
+      !hasRemoteWriteEvidence(row) &&
+      !isManuallyHandled(row);
 
     const app = appOf(row);
     if (!app) {
@@ -370,76 +743,109 @@ export function createWorker(deps: WorkerDeps) {
       return;
     }
 
-    if (row.status === "received") {
-      updateFeedback(db, feedbackId, { status: "processing", archive_stage: "task_pending", kaneo_task_id: null });
-      row = getFeedback(db, feedbackId)!;
+    if (isAutoAuthorizePhase) {
+      if (!(await autoAuthorizeIfEligible(feedbackId))) return;
+      row = getFeedback(db, feedbackId) ?? row;
     }
 
-    // ---- AI 整理（已有整理结果则跳过，支持从归档失败处重试） ----
-    let processed = row.processed_json
-      ? (JSON.parse(row.processed_json) as Parameters<typeof buildTaskDescription>[1])
-      : null;
-    if (!processed) {
-      updateFeedback(db, feedbackId, { status: "processing" });
-      const screenshot = getFeedbackScreenshot(db, feedbackId);
-      const screenshotMeta = screenshot ? getFeedbackScreenshotMeta(db, feedbackId) : null;
-      const logs = getFeedbackLogs(db, feedbackId);
-      const logEvidence = logs.length > 0 ? prepareLogEvidence(logs) : null;
-      let lastErr: AiError | null = null;
-      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-        updateFeedback(db, feedbackId, { attempt_count: row.attempt_count + attempt });
-        try {
-          processed = await deps.ai.organize(
-            row.text,
-            screenshot
-              ? {
-                  pngBuffer: Buffer.from(screenshot.png_blob),
-                  releasePoint: screenshotMeta?.capture?.releasePoint,
-                  viewport: screenshotMeta?.capture
-                    ? {
-                        width: screenshotMeta.capture.viewportWidth,
-                        height: screenshotMeta.capture.viewportHeight,
-                      }
-                    : undefined,
-                  // 输出像素优先（pixelWidth/pixelHeight，兼容 outputWidth/outputHeight 别名）
-                  outputPixels: resolveOutputPixels(screenshotMeta?.capture),
-                }
-              : null,
-            logEvidence,
-          );
-          break;
-        } catch (err) {
-          const aiErr =
-            err instanceof AiError
-              ? err
-              : new AiError("network", `AI 未知错误: ${(err as Error).message?.slice(0, 150)}`, false);
-          lastErr = aiErr;
-          if (!aiErr.retryable || attempt === MAX_ATTEMPTS) {
-            updateFeedback(db, feedbackId, {
-              status: "failed",
-              error_summary: aiErr.message.slice(0, 300),
-              last_error: `AI 阶段（第 ${attempt} 次，kind=${aiErr.kind}）: ${aiErr.message}`.slice(0, 1000),
-            });
-            return;
-          }
-          await sleep(attempt * 1000);
-        }
+    if (!isAiPhase && !isArchivePhase && !isAutoAuthorizePhase) return;
+
+    if (isAiPhase) {
+      if (row.status === "received") {
+        updateFeedback(db, feedbackId, { status: "processing", archive_stage: "task_pending", kaneo_task_id: null });
+        row = getFeedback(db, feedbackId)!;
       }
+
+      // ---- AI 整理（仅整理内容，绝不触发任何远端归档） ----
+      let processed = row.processed_json
+        ? (JSON.parse(row.processed_json) as Parameters<typeof buildTaskDescription>[1])
+        : null;
       if (!processed) {
-        updateFeedback(db, feedbackId, {
-          status: "failed",
-          error_summary: lastErr?.message.slice(0, 300) ?? "AI 处理失败",
+        updateFeedback(db, feedbackId, { status: "processing" });
+        const screenshot = getFeedbackScreenshot(db, feedbackId);
+        const screenshotMeta = screenshot ? getFeedbackScreenshotMeta(db, feedbackId) : null;
+        const logs = getFeedbackLogs(db, feedbackId);
+        const logEvidence = logs.length > 0 ? prepareLogEvidence(logs) : null;
+        let lastErr: AiError | null = null;
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+          updateFeedback(db, feedbackId, { attempt_count: row.attempt_count + attempt });
+          try {
+            processed = await deps.ai.organize(
+              row.text,
+              screenshot
+                ? {
+                    pngBuffer: Buffer.from(screenshot.png_blob),
+                    releasePoint: screenshotMeta?.capture?.releasePoint,
+                    viewport: screenshotMeta?.capture
+                      ? {
+                          width: screenshotMeta.capture.viewportWidth,
+                          height: screenshotMeta.capture.viewportHeight,
+                        }
+                      : undefined,
+                    // 输出像素优先（pixelWidth/pixelHeight，兼容 outputWidth/outputHeight 别名）
+                    outputPixels: resolveOutputPixels(screenshotMeta?.capture),
+                  }
+                : null,
+              logEvidence,
+            );
+            break;
+          } catch (err) {
+            const aiErr =
+              err instanceof AiError
+                ? err
+                : new AiError("network", `AI 未知错误: ${(err as Error).message?.slice(0, 150)}`, false);
+            lastErr = aiErr;
+            if (!aiErr.retryable || attempt === MAX_ATTEMPTS) break;
+            await sleep(attempt * 1000);
+          }
+        }
+        // AI 失败**不再把记录判为 failed**：保留原文，用原文标题/描述回退，等待人工分类。
+        const fallback = fallbackProcessed(row.text);
+        finishAiOrganization(db, feedbackId, {
+          title: processed?.title ?? fallback.title,
+          processedJson: processed ? JSON.stringify(processed) : null,
+          errorSummary: processed
+            ? null
+            : `AI 整理失败，已使用原文标题/描述：${lastErr?.message.slice(0, 200) ?? "未知错误"}`,
+          lastError: processed
+            ? null
+            : lastErr
+              ? `AI 阶段失败（kind=${lastErr.kind}）: ${lastErr.message}`.slice(0, 1000)
+              : "AI 阶段失败",
         });
-        return;
+      } else {
+        finishAiOrganization(db, feedbackId, {
+          title: processed.title,
+          processedJson: JSON.stringify(processed),
+          errorSummary: null,
+          lastError: null,
+        });
       }
-      updateFeedback(db, feedbackId, {
-        title: processed.title,
-        processed_json: JSON.stringify(processed),
-      });
-      row = getFeedback(db, feedbackId)!;
+
+      // 提交本身仍不授权归档（T2 门槛不变）；这里只把**已满足自动归档规则**的记录
+      // 交给同一个授权事务与快照逻辑（T3）。不满足条件的记录保持 needs_info 等待配置。
+      if (!(await autoAuthorizeIfEligible(feedbackId))) return;
+      row = getFeedback(db, feedbackId) ?? row;
     }
 
-    // ---- 归档到 Kaneo ----
+    // ---- 归档阶段：必须有持久化的归档授权（人工或自动），或该记录在旧版本中已经开始远端写入 ----
+    // 注意：AI 阶段结束后可能刚完成一次自动授权，因此这里必须读**最新**的行，
+    // 不能用进入函数时的旧快照判断。
+    if (!row.archive_authorized_at && !hasRemoteWriteEvidence(row)) {
+      // 防御性返回：没有归档授权、也没有已开始的远端写入时绝不发起任何远端写入
+      // （普通保存与重启扫描都走不到这里）。
+      // T3 人工保护：管理员已保存过分类的记录保持原状（可能是 ready_to_archive 或
+      // 缺项/清空后的 needs_info），绝不改写成“尚未授权”的失败态。
+      if (isManuallyHandled(row)) return;
+      updateFeedback(db, feedbackId, {
+        status: "needs_info",
+        error_summary: "尚未完成归档授权，已停止远端归档",
+      });
+      return;
+    }
+    const processed = row.processed_json
+      ? (JSON.parse(row.processed_json) as Parameters<typeof buildTaskDescription>[1])
+      : fallbackProcessed(row.text);
     await archive(row, app, processed);
   }
 
@@ -449,10 +855,21 @@ export function createWorker(deps: WorkerDeps) {
     processed: Parameters<typeof buildTaskDescription>[1],
   ): Promise<void> {
     const db = deps.db;
-    if (!app.kaneo_project_id || !app.kaneo_column_slug) {
+    // ---- T3 门槛：只有持久化的人工归档授权可以执行**首次**远端写入；旧版本中已开始远端写入的
+    // 记录沿用既有恢复入口继续，但两者都不允许“普通保存 / 重启扫描”触发归档。 ----
+    if (!row.archive_authorized_at && !hasRemoteWriteEvidence(row)) {
+      updateFeedback(db, row.id, {
+        status: "needs_info",
+        error_summary: "尚未完成人工归档授权，已停止远端归档",
+      });
+      return;
+    }
+    const pinnedProject = row.classify_project_id ?? app.kaneo_project_id;
+    const pinnedColumnSlug = row.classify_column_slug ?? app.kaneo_column_slug;
+    if (!pinnedProject || !pinnedColumnSlug) {
       updateFeedback(db, row.id, {
         status: "failed",
-        error_summary: "未配置 Kaneo 目标项目或列",
+        error_summary: "分类缺少目标项目或列，已停止归档",
       });
       return;
     }
@@ -486,7 +903,7 @@ export function createWorker(deps: WorkerDeps) {
       }
       return;
     }
-    let cur: ArchiveDataV2 | null = parsedArchive.kind === "valid" ? normalizeToV2(parsedArchive.data) : null;
+    let cur: ArchiveDataV3 | null = parsedArchive.kind === "valid" ? normalizeToV3(parsedArchive.data) : null;
 
     // ---- 4.5 阶段矛盾检查：阶段/任务/附件状态互相矛盾 → 待核对，不猜测重建 ----
     const contradiction = stageContradiction(row, parsedArchive);
@@ -548,14 +965,27 @@ export function createWorker(deps: WorkerDeps) {
       }
     }
 
-    // ---- 4.1 首次远端写入前固定恢复目标（Kaneo 实例 / 项目 / 工作区） ----
+    // ---- 4.1 首次远端写入前固定恢复目标（Kaneo 实例 / 项目 / 工作区 / 列 / 标签 / 负责人） ----
+    // T3：以**人工授权快照**为准。授权后即使软件配置或 Kaneo 选项变化，本次任务也不会被重定向；
+    // 仅在没有任何恢复数据（理论上不可达）时才回退到软件默认目标。
+    const pinned = cur?.target;
+    const authorizedProjectId = pinned?.projectId ?? pinnedProject;
+    const authorizedColumnSlug = pinned?.columnSlug ?? pinnedColumnSlug;
+    const authorizedColumnId = pinned?.columnId ?? "";
+    const authorizedLabelIds = pinned?.labelIds ?? [];
+    const authorizedAssigneeId = pinned?.assigneeId ?? null;
+
     const target: ArchiveTarget = {
       apiBase: normalizeKaneoApiBase(baseUrl),
-      projectId: app.kaneo_project_id,
+      projectId: authorizedProjectId,
       workspaceId: "",
+      columnId: authorizedColumnId,
+      columnSlug: authorizedColumnSlug,
+      labelIds: authorizedLabelIds,
+      assigneeId: authorizedAssigneeId,
     };
     try {
-      const proj = await kaneo.getProjectInfo(app.kaneo_project_id);
+      const proj = await kaneo.getProjectInfo(authorizedProjectId);
       target.projectId = proj.id;
       target.workspaceId = proj.workspaceId;
     } catch (err) {
@@ -586,13 +1016,14 @@ export function createWorker(deps: WorkerDeps) {
         const legacyAssetUrl = parsedArchive.kind === "legacy" ? parsedArchive.assetUrl : undefined;
         const next: ArchiveDataNext = {
           target,
+          labels: cur?.labels ?? {},
           attachments: cur?.attachments ?? {},
           ...(cur?.upload ? { upload: cur.upload } : {}),
           ...(legacyAssetUrl ? { asset: { id: "", url: legacyAssetUrl } } : cur?.asset ? { asset: cur.asset } : {}),
           ...(cur?.comment ? { comment: cur.comment } : {}),
         };
         const saved = saveArchiveData(db, row.id, loadArchiveData(db, row.id), next);
-        cur = normalizeToV2(saved);
+        cur = normalizeToV3(saved);
       } catch (err) {
         stopForPersistenceFailure(row.id, "固定恢复目标", err);
         return;
@@ -612,7 +1043,7 @@ export function createWorker(deps: WorkerDeps) {
     function persistArchive(next: ArchiveDataNext, what: string): boolean {
       try {
         const saved = saveArchiveData(db, row.id, loadArchiveData(db, row.id), next);
-        cur = normalizeToV2(saved);
+        cur = normalizeToV3(saved);
         return true;
       } catch (err) {
         stopForPersistenceFailure(row.id, what, err);
@@ -645,10 +1076,12 @@ export function createWorker(deps: WorkerDeps) {
       if (!gateUpdate(row.id, "标记 archiving", { status: "archiving", archive_stage: "task_pending" })) return;
       try {
         const ref = await kaneo.createTask({
-          projectId: app.kaneo_project_id,
-          columnSlug: app.kaneo_column_slug,
+          projectId: authorizedProjectId,
+          columnSlug: authorizedColumnSlug,
           title: processed.title,
           description,
+          // 未选负责人时**省略 userId**（不是传 null），保持 Kaneo 的“无负责人”默认。
+          ...(authorizedAssigneeId ? { userId: authorizedAssigneeId } : {}),
         });
         taskId = ref.taskId;
         taskUrl = ref.taskUrl;
@@ -672,7 +1105,7 @@ export function createWorker(deps: WorkerDeps) {
         if (err instanceof KaneoUncertainError) {
           // 写入结果不确定：先按反馈 ID 核对是否其实已创建
           try {
-            const found = await kaneo.findByFeedbackId(app.kaneo_project_id, row.id);
+            const found = await kaneo.findByFeedbackId(authorizedProjectId, row.id);
             if (found) {
               taskId = found.taskId;
               taskUrl = found.taskUrl;
@@ -713,10 +1146,102 @@ export function createWorker(deps: WorkerDeps) {
       }
     }
 
+    // ---- 阶段 1.5：标签关联（T3，仅工作区级标签；按 (taskId,name) 幂等） ----
+    // 只有工作区级标签（taskId === null）允许选择，避免把其他任务上的标签“搬走”。
+    if ((target.labelIds ?? []).length > 0) {
+      if (!target.workspaceId) {
+        updateFeedback(db, row.id, {
+          status: "needs_review",
+          error_summary: "缺少工作区标识，无法核对标签归属，已停止处理，待核对",
+        });
+        return;
+      }
+      let workspaceLabels: KaneoLabel[];
+      try {
+        workspaceLabels = await kaneo.listWorkspaceLabels(target.workspaceId);
+      } catch (err) {
+        updateFeedback(db, row.id, {
+          status: "needs_review",
+          error_summary: "读取工作区标签失败（结果不确定），已停止处理，待核对",
+          last_error: `listWorkspaceLabels: ${(err as Error).message}`.slice(0, 1000),
+        });
+        return;
+      }
+      const workspaceLevel = new Map(workspaceLabels.filter((l) => l.taskId === null).map((l) => [l.id, l] as const));
+      for (const labelId of target.labelIds ?? []) {
+        if (cur!.labels?.[labelId]?.outcome === "confirmed") continue;
+        const label = workspaceLevel.get(labelId);
+        if (!label) {
+          // 标签已不再是本工作区的工作区级标签（被删除 / 变成任务标签）：确定失败，绝不关联他任务标签。
+          updateFeedback(db, row.id, {
+            status: "failed",
+            error_summary: `工作区标签已不存在或不再可用（${labelId}），请重新选择标签后重试`,
+            last_error: `label ${labelId} 不在工作区级标签列表中`,
+          });
+          return;
+        }
+        // 写入前先落盘 maybe_sent：确保“已发出”有据可查，任何中断都不会被当成“从未发送”。
+        const pending: ArchiveLabelRecord = { id: labelId, name: label.name, outcome: "maybe_sent" };
+        if (!persistArchive({ ...cur!, labels: { ...(cur!.labels ?? {}), [labelId]: pending } }, "标记标签关联"))
+          return;
+        try {
+          await kaneo.attachLabelToTask(labelId, taskId!);
+        } catch (err) {
+          if (err instanceof KaneoDefiniteError) {
+            updateFeedback(db, row.id, {
+              status: "failed",
+              error_summary: `关联标签失败：${err.message.slice(0, 250)}`,
+              last_error: `attachLabel(${labelId}): ${err.message}`.slice(0, 1000),
+            });
+            return;
+          }
+          // 结果不确定：标签关联对 (taskId, name) 幂等，重试安全；绝不猜测，转入待核对。
+          updateFeedback(db, row.id, {
+            status: "needs_review",
+            error_summary: "标签关联结果不确定，已进入待核对队列（重试安全，不会产生重复标签）",
+            last_error: String((err as Error).message).slice(0, 1000),
+          });
+          return;
+        }
+        // 写入后读回核对（Kaneo 会为任务级标签生成新的 ID，以名称匹配）
+        let confirmed: KaneoLabel | undefined;
+        try {
+          const taskLabels = await kaneo.listTaskLabels(taskId!);
+          confirmed = taskLabels.find((l) => l.name === label.name) ?? taskLabels.find((l) => l.id === labelId);
+        } catch {
+          /* 读回失败保持 maybe_sent，由待核对入口处理 */
+        }
+        if (!confirmed) {
+          updateFeedback(db, row.id, {
+            status: "needs_review",
+            error_summary: "标签已关联但读回核对未命中，已进入待核对队列",
+            last_error: `label ${label.name} 未在任务标签列表中读回`,
+          });
+          return;
+        }
+        const record: ArchiveLabelRecord = {
+          id: labelId,
+          name: label.name,
+          outcome: "confirmed",
+          taskLabelId: confirmed.id,
+        };
+        if (!persistArchive({ ...cur!, labels: { ...(cur!.labels ?? {}), [labelId]: record } }, "确认标签关联")) return;
+      }
+    }
+
     // 检查是否有附件（截图或日志）需要归档（已在阶段前置检查中读取）
     const logs = getFeedbackLogs(db, row.id);
     if (!screenshot && logs.length === 0) {
-      // 纯文字反馈：任务创建完成即代表归档完成
+      // 纯文字反馈：任务 + 标签全部确认后才代表归档完成
+      if (!isFullyArchived(cur, false, [], target.labelIds ?? [])) {
+        updateFeedback(db, row.id, {
+          status: "needs_review",
+          error_summary: "任务已创建但标签尚未全部确认，待核对",
+          kaneo_task_id: taskId,
+          kaneo_task_url: taskUrl,
+        });
+        return;
+      }
       updateFeedback(db, row.id, {
         status: "archived",
         archive_stage: "complete",
@@ -1400,8 +1925,8 @@ export function createWorker(deps: WorkerDeps) {
         } catch {}
       }
 
-      // 3. 所有附件（截图若存在 + 全部日志）全部确认后，才标记归档完成
-      if (isFullyArchived(cur, Boolean(screenshot), logs)) {
+      // 3. 所有附件（截图若存在 + 全部日志）与全部标签都确认后，才标记归档完成
+      if (isFullyArchived(cur, Boolean(screenshot), logs, target.labelIds ?? [])) {
         updateFeedback(db, row.id, {
           status: "archived",
           archive_stage: "complete",
@@ -1429,7 +1954,12 @@ export function createWorker(deps: WorkerDeps) {
     }
   }
 
-  /** 管理页人工重试：failed → 从持久化断点继续（不清 task/key/asset）。 */
+  /**
+   * 管理页人工重试：
+   * - `failed` → 从持久化断点继续（不清 task/key/asset）；
+   * - `needs_info` 且尚无 AI 整理结果（AI 失败已回退原文）→ 重新尝试 AI 整理。
+   *   重试绝不发起未经人工授权的远端归档。
+   */
   function retry(feedbackId: string, expectedRevision?: number): WorkerOpResult {
     if (!tryAcquire(feedbackId)) return { ok: false, reason: "busy" };
     let result: WorkerOpResult;
@@ -1438,7 +1968,10 @@ export function createWorker(deps: WorkerDeps) {
       if (!row) return { ok: false, reason: "not_found" };
       const revFail = checkRevision(feedbackId, expectedRevision);
       if (revFail) return revFail;
-      if (row.status !== "failed") return { ok: false, reason: "invalid_state", status: row.status };
+      const aiFallbackRetry = row.status === "needs_info" && !row.processed_json;
+      if (row.status !== "failed" && !aiFallbackRetry) {
+        return { ok: false, reason: "invalid_state", status: row.status };
+      }
       const next = row.processed_json ? "archiving" : "processing";
       if (!gateUpdate(feedbackId, "人工重试", { status: "processing", error_summary: null })) {
         return { ok: false, reason: "persist_failed" };
@@ -1483,7 +2016,8 @@ export function createWorker(deps: WorkerDeps) {
       let taskId = row.kaneo_task_id;
       let taskUrl = row.kaneo_task_url;
       if (!taskId) {
-        const ref = await client.findByFeedbackId(app.kaneo_project_id!, row.id);
+        const searchProjectId = saved?.target.projectId ?? app.kaneo_project_id!;
+        const ref = await client.findByFeedbackId(searchProjectId, row.id);
         if (!ref) {
           return { ok: true, status: "needs_review", revision: currentRevision(feedbackId) };
         }
@@ -1518,8 +2052,8 @@ export function createWorker(deps: WorkerDeps) {
       // 3. 附件反馈：核对评论是否存在（含资产引用；读取失败会抛错，绝不当“没有评论”）
       const comments = await client.listComments(taskId);
       const base = loadArchiveData(deps.db, feedbackId);
-      let curV2 = base.kind === "valid" ? normalizeToV2(base.data) : null;
-      if (!curV2) {
+      let curV3 = base.kind === "valid" ? normalizeToV3(base.data) : null;
+      if (!curV3) {
         return { ok: false, reason: "invalid_state" };
       }
 
@@ -1527,7 +2061,7 @@ export function createWorker(deps: WorkerDeps) {
       let hasUnconfirmedMaybeOrConfirmed = false;
 
       if (screenshot) {
-        const assetRef = curV2.attachments?.screenshot?.asset?.url ?? curV2.asset?.url ?? null;
+        const assetRef = curV3.attachments?.screenshot?.asset?.url ?? curV3.asset?.url ?? null;
         const matched = comments.find(
           (c) =>
             c.content.includes(row.id) &&
@@ -1542,7 +2076,7 @@ export function createWorker(deps: WorkerDeps) {
             outcome: "confirmed" as const,
           };
           const screenshotAtt = {
-            ...(curV2.attachments?.screenshot ?? {}),
+            ...(curV3.attachments?.screenshot ?? {}),
             id: "screenshot",
             kind: "screenshot" as const,
             filename: "screenshot.png",
@@ -1550,13 +2084,13 @@ export function createWorker(deps: WorkerDeps) {
             sha256: screenshot.sha256,
             comment: commentRecord,
           };
-          curV2 = {
-            ...curV2,
-            attachments: { ...curV2.attachments, screenshot: screenshotAtt },
+          curV3 = {
+            ...curV3,
+            attachments: { ...curV3.attachments, screenshot: screenshotAtt },
             comment: commentRecord,
           };
         } else {
-          const sOutcome = curV2.attachments?.screenshot?.comment?.outcome ?? curV2.comment?.outcome;
+          const sOutcome = curV3.attachments?.screenshot?.comment?.outcome ?? curV3.comment?.outcome;
           if (sOutcome === "maybe_sent" || sOutcome === "confirmed") {
             hasUnconfirmedMaybeOrConfirmed = true;
           }
@@ -1565,7 +2099,7 @@ export function createWorker(deps: WorkerDeps) {
 
       let allLogsConfirmed = true;
       for (const log of logs) {
-        const logAssetRef = curV2.attachments?.[log.id]?.asset?.url ?? null;
+        const logAssetRef = curV3.attachments?.[log.id]?.asset?.url ?? null;
         const matchedLog = comments.find(
           (c) =>
             c.content.includes(row.id) &&
@@ -1580,7 +2114,7 @@ export function createWorker(deps: WorkerDeps) {
             outcome: "confirmed" as const,
           };
           const logAtt: ArchiveAttachmentRecord = {
-            ...(curV2.attachments?.[log.id] ?? {}),
+            ...(curV3.attachments?.[log.id] ?? {}),
             id: log.id,
             kind: "log" as const,
             filename: log.filename,
@@ -1588,13 +2122,13 @@ export function createWorker(deps: WorkerDeps) {
             sha256: log.sha256,
             comment: logCommentRecord,
           };
-          curV2 = {
-            ...curV2,
-            attachments: { ...curV2.attachments, [log.id]: logAtt },
+          curV3 = {
+            ...curV3,
+            attachments: { ...curV3.attachments, [log.id]: logAtt },
           };
         } else {
           allLogsConfirmed = false;
-          const lOutcome = curV2.attachments?.[log.id]?.comment?.outcome;
+          const lOutcome = curV3.attachments?.[log.id]?.comment?.outcome;
           if (lOutcome === "maybe_sent" || lOutcome === "confirmed") {
             hasUnconfirmedMaybeOrConfirmed = true;
           }
@@ -1602,13 +2136,54 @@ export function createWorker(deps: WorkerDeps) {
       }
 
       try {
-        saveRecoveryState(feedbackId, curV2, "核对附件评论确认状态");
+        saveRecoveryState(feedbackId, curV3, "核对附件评论确认状态");
       } catch {
         /* 尽力而为 */
       }
 
+      // ---- T3 标签核对（只读）：按名称读回任务标签；读回失败绝不能当作“没有标签” ----
+      const labelIds = curV3.target.labelIds ?? [];
+      let allLabelsConfirmed = true;
+      if (labelIds.length > 0) {
+        let taskLabels: KaneoLabel[] | null = null;
+        try {
+          taskLabels = await client.listTaskLabels(taskId);
+        } catch {
+          taskLabels = null;
+        }
+        for (const labelId of labelIds) {
+          const rec: ArchiveLabelRecord | undefined = curV3.labels?.[labelId];
+          if (rec?.outcome === "confirmed") continue;
+          const recName: string | undefined = rec?.name;
+          const hit: KaneoLabel | undefined =
+            taskLabels && recName ? taskLabels.find((l) => l.name === recName) : undefined;
+          if (hit) {
+            curV3 = {
+              ...curV3,
+              labels: {
+                ...(curV3.labels ?? {}),
+                [labelId]: {
+                  id: labelId,
+                  name: rec?.name ?? hit.name,
+                  outcome: "confirmed",
+                  taskLabelId: hit.id,
+                },
+              },
+            };
+          } else {
+            allLabelsConfirmed = false;
+            if (rec?.outcome === "maybe_sent") hasUnconfirmedMaybeOrConfirmed = true;
+          }
+        }
+        try {
+          saveRecoveryState(feedbackId, curV3, "核对标签确认状态");
+        } catch {
+          /* 尽力而为 */
+        }
+      }
+
       const allAttachmentsConfirmed = (!screenshot || screenshotConfirmed) && allLogsConfirmed;
-      if (allAttachmentsConfirmed) {
+      if (allAttachmentsConfirmed && allLabelsConfirmed) {
         if (
           !gateUpdate(feedbackId, "核对归档", { status: "archived", archive_stage: "complete", error_summary: null })
         ) {
@@ -1761,8 +2336,8 @@ export function createWorker(deps: WorkerDeps) {
         );
         if (!saved) return { ok: false, reason: "persist_failed" };
         const logs = getFeedbackLogs(deps.db, feedbackId);
-        const freshV2 = normalizeToV2(saved);
-        if (isFullyArchived(freshV2, true, logs)) {
+        const freshV3 = normalizeToV3(saved);
+        if (isFullyArchived(freshV3, true, logs)) {
           if (
             !gateUpdate(feedbackId, "核对归档", { status: "archived", archive_stage: "complete", error_summary: null })
           ) {
@@ -1834,15 +2409,15 @@ export function createWorker(deps: WorkerDeps) {
         updateFeedback(deps.db, feedbackId, { error_summary: "retry_comment 重发后核对未发现，待人工核对" });
         return { ok: true, status: "needs_review", revision: currentRevision(feedbackId) };
       }
-      const freshV2Base = normalizeToV2(fresh.data);
+      const freshV3Base = normalizeToV3(fresh.data);
       const confirmedComment = { marker, id: created.id || null, outcome: "confirmed" as const };
-      const screenshotAtt = freshV2Base.attachments?.screenshot
-        ? { ...freshV2Base.attachments.screenshot, comment: confirmedComment }
+      const screenshotAtt = freshV3Base.attachments?.screenshot
+        ? { ...freshV3Base.attachments.screenshot, comment: confirmedComment }
         : undefined;
       const confirmedData: ArchiveDataNext = {
-        ...freshV2Base,
+        ...freshV3Base,
         comment: confirmedComment,
-        ...(screenshotAtt ? { attachments: { ...freshV2Base.attachments, screenshot: screenshotAtt } } : {}),
+        ...(screenshotAtt ? { attachments: { ...freshV3Base.attachments, screenshot: screenshotAtt } } : {}),
       };
       let savedState: ArchiveData | null = null;
       try {
@@ -1850,8 +2425,8 @@ export function createWorker(deps: WorkerDeps) {
       } catch {
         /* 尽力而为 */
       }
-      const freshV2 = normalizeToV2(savedState ?? (confirmedData as ArchiveData));
-      if (isFullyArchived(freshV2, true, logs)) {
+      const freshV3 = normalizeToV3(savedState ?? (confirmedData as ArchiveData));
+      if (isFullyArchived(freshV3, true, logs)) {
         if (
           !gateUpdate(feedbackId, "核对归档", { status: "archived", archive_stage: "complete", error_summary: null })
         ) {
@@ -2056,15 +2631,15 @@ export function createWorker(deps: WorkerDeps) {
         updateFeedback(deps.db, feedbackId, { error_summary: "替换上传后评论核对未发现，待人工核对" });
         return { ok: true, status: "needs_review", revision: currentRevision(feedbackId) };
       }
-      const freshV2Base = normalizeToV2(fresh.data);
+      const freshV3Base = normalizeToV3(fresh.data);
       const confirmedComment = { marker, id: created.id || null, outcome: "confirmed" as const };
-      const screenshotAtt = freshV2Base.attachments?.screenshot
-        ? { ...freshV2Base.attachments.screenshot, comment: confirmedComment }
+      const screenshotAtt = freshV3Base.attachments?.screenshot
+        ? { ...freshV3Base.attachments.screenshot, comment: confirmedComment }
         : undefined;
       const confirmedData: ArchiveDataNext = {
-        ...freshV2Base,
+        ...freshV3Base,
         comment: confirmedComment,
-        ...(screenshotAtt ? { attachments: { ...freshV2Base.attachments, screenshot: screenshotAtt } } : {}),
+        ...(screenshotAtt ? { attachments: { ...freshV3Base.attachments, screenshot: screenshotAtt } } : {}),
       };
       let savedState: ArchiveData | null = null;
       try {
@@ -2072,8 +2647,8 @@ export function createWorker(deps: WorkerDeps) {
       } catch {
         /* 尽力而为 */
       }
-      const freshV2 = normalizeToV2(savedState ?? (confirmedData as ArchiveData));
-      if (isFullyArchived(freshV2, true, logs)) {
+      const freshV3 = normalizeToV3(savedState ?? (confirmedData as ArchiveData));
+      if (isFullyArchived(freshV3, true, logs)) {
         if (
           !gateUpdate(feedbackId, "核对归档", {
             status: "archived",
@@ -2105,7 +2680,7 @@ export function createWorker(deps: WorkerDeps) {
       if (row.status !== "needs_review") return { ok: false, reason: "invalid_state", status: row.status };
       const parsed = loadArchiveData(deps.db, feedbackId);
       if (parsed.kind !== "valid") return { ok: false, reason: "invalid_state", status: row.status };
-      let data = normalizeToV2(parsed.data);
+      let data = normalizeToV3(parsed.data);
       const logs = getFeedbackLogs(deps.db, feedbackId);
       const log = logs.find((l) => l.id === logId);
       if (!log || !row.kaneo_task_id) {
@@ -2154,7 +2729,7 @@ export function createWorker(deps: WorkerDeps) {
           `补记日志 ${log.filename} 评论确认`,
         );
         if (!saved) return { ok: false, reason: "persist_failed" };
-        data = normalizeToV2(saved);
+        data = normalizeToV3(saved);
       } else {
         // 2. 上传日志（申请新地址）
         if (!logAssetUrl) {
@@ -2185,7 +2760,7 @@ export function createWorker(deps: WorkerDeps) {
             `保存重传日志 ${log.filename} 凭证`,
           );
           if (!savedUpload) return { ok: false, reason: "persist_failed" };
-          data = normalizeToV2(savedUpload);
+          data = normalizeToV3(savedUpload);
 
           // maybe_sent
           logAtt = { ...logAtt, upload: { ...newUpload, outcome: "maybe_sent" } };
@@ -2195,7 +2770,7 @@ export function createWorker(deps: WorkerDeps) {
             `登记日志 ${log.filename} 上传已发出（结果未知）`,
           );
           if (!pendingUpload) return { ok: false, reason: "persist_failed" };
-          data = normalizeToV2(pendingUpload);
+          data = normalizeToV3(pendingUpload);
 
           await client.uploadImageToPresigned(presigned.uploadUrl, presigned.headers, Buffer.from(log.bytes));
 
@@ -2206,7 +2781,7 @@ export function createWorker(deps: WorkerDeps) {
             `登记日志 ${log.filename} 上传成功`,
           );
           if (!confirmedUpload) return { ok: false, reason: "persist_failed" };
-          data = normalizeToV2(confirmedUpload);
+          data = normalizeToV3(confirmedUpload);
 
           const asset = await client.finalizeImageUpload(taskId, {
             key: newUpload.key,
@@ -2238,7 +2813,7 @@ export function createWorker(deps: WorkerDeps) {
             `保存重传日志 ${log.filename} 资产信息`,
           );
           if (!savedAsset) return { ok: false, reason: "persist_failed" };
-          data = normalizeToV2(savedAsset);
+          data = normalizeToV3(savedAsset);
         }
 
         // 3. 挂载日志评论
@@ -2259,7 +2834,7 @@ export function createWorker(deps: WorkerDeps) {
           `登记日志 ${log.filename} 评论已发出（结果未知）`,
         );
         if (!pendingComment) return { ok: false, reason: "persist_failed" };
-        data = normalizeToV2(pendingComment);
+        data = normalizeToV3(pendingComment);
 
         let created: { id: string };
         try {
@@ -2304,7 +2879,7 @@ export function createWorker(deps: WorkerDeps) {
           `登记日志 ${log.filename} 评论成功`,
         );
         if (!savedComment) return { ok: false, reason: "persist_failed" };
-        data = normalizeToV2(savedComment);
+        data = normalizeToV3(savedComment);
       }
 
       const screenshot = getFeedbackScreenshot(deps.db, feedbackId);
@@ -2327,8 +2902,15 @@ export function createWorker(deps: WorkerDeps) {
     }
   }
 
-  /** 服务重启恢复：received/processing 重新入队；archiving 转为待核对。 */
-  function resume(requeue: FeedbackRow[], uncertain: FeedbackRow[]): void {
+  /**
+   * 服务重启恢复：
+   * - received/processing → 重新入队（只做 AI 整理，零远端写入）；
+   * - archiving → 待核对（写入结果不确定）；
+   * - ready_to_archive **且已持久化人工归档授权** → 重新入队。
+   * 重启扫描绝不绕过人工授权门槛：没有授权的记录不会被重新入队归档。
+   * T3：随后请求一次可恢复扫描（恢复立即可执行任务），并按库内最早到期的退避重新安排定时器。
+   */
+  function resume(requeue: FeedbackRow[], uncertain: FeedbackRow[], authorized: FeedbackRow[] = []): void {
     const db = deps.db;
     for (const row of uncertain) {
       updateFeedback(db, row.id, {
@@ -2336,14 +2918,17 @@ export function createWorker(deps: WorkerDeps) {
         error_summary: "服务在处理中断，Kaneo 写入结果不确定，待核对。",
       });
     }
-    for (const row of requeue) {
+    for (const row of [...requeue, ...authorized]) {
       enqueue(row.id);
     }
+    // 重启后：立即扫描可执行积压，并重新安排尚未到期的重试（不依赖管理员再次点击）。
+    requestScan();
   }
 
   return {
     enqueue,
     idle,
+    stop,
     retry,
     recheck,
     forceCreate,
@@ -2351,6 +2936,7 @@ export function createWorker(deps: WorkerDeps) {
     recoverReplaceUpload,
     recoverRetryLog,
     resume,
+    scanAutoArchive: requestScan,
     processOne,
   };
 }

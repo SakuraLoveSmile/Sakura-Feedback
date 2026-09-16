@@ -25,35 +25,97 @@ Base URL：`http(s)://<host>:8787`。所有 JSON 请求必须 `Content-Type: app
 - 登录、会话查询、提交成功与幂等重放响应都带 `user: { id, username, role }` 与 `quota`。
 - 额度用尽返回 `429 daily_quota_exceeded`（**明确未接收**，不扣次），响应携带同结构 `quota`。
 
+## 契约稳定性
+
+本节界定接入方可以依赖的**稳定面**。组件侧（Web 属性 / 方法 / 事件、Flutter 导出符号）的
+对应口径见 [`docs/integration.md`](integration.md) §1.7；逐版本变更见根目录
+[`CHANGELOG.md`](../CHANGELOG.md)。
+
+**稳定面（非破坏性变更中保证不变）**
+
+- 客户端实际用到的端点路径、HTTP 方法与认证类别：`POST /api/feedback`、
+  `GET /api/feedback/:id`、`GET /api/feedback/:id/screenshot`、`POST /api/auth/login`、
+  `GET /api/auth/session`、`POST /api/auth/logout`。
+- 错误信封 `{ "error": { "code", "message" } }` 与本文档已列出的 `code` 取值；
+  `message` 措辞可随版本调整，不作为判等依据。
+- 幂等语义：同一 `idempotencyKey` + 相同内容 → `200` 重放；同 key 不同内容 →
+  `409 idempotency_conflict`。
+- multipart 部件名：`metadata` / `screenshot` / `logs`；已文档化的请求与响应字段名和类型；
+  `status`、`collectionState` 既有取值的含义。
+
+**兼容变更（任何版本都可能出现，客户端必须容忍）**
+
+- 响应 JSON 新增字段、请求新增可选字段、新增端点、枚举**新增取值**
+  （`status` / `collectionState` 只增不减；遇到未知取值请按最保守分支展示，不得当作解析失败）、
+  校验放宽与缺陷修复。
+
+**破坏性变更（只在 CHANGELOG 标注「破坏性」的版本中出现）**
+
+- 删除 / 重命名端点或字段、改变字段类型或语义、移除枚举取值、收窄既有上限
+  （如缩短 `text` 长度或降低图片限制）、改变认证方式或幂等语义，以及行为反转
+  （如「提交成功是否触发远端归档」这类语义翻转）。
+
+**不属于契约面（可随时变）**
+
+- 管理页 UI 与内部页面结构、数据库表结构与迁移编号、本文档未列出的字段与端点、
+  错误 `message` 的具体措辞。标注「兼容保留」的旧入口（如 `/login` + `/api/auth/handshake*`）
+  保留期间可用，但可能在未来版本移除；移除会写入 CHANGELOG。
+
 ## 状态机（反馈记录）
+
+> **人工分类归档改造（v6）**：提交成功**不再授权远端归档**。后台只做 AI 内容整理，
+> 整理完成（成功或失败）后记录停在 `needs_info`，等待管理员在管理页完成分类；只有管理页的
+> 「保存并归档」写入持久化归档授权后，worker 才会执行**首次远端写入**。
+>
+> **先接收、后配置、自动归档（v7）**：软件不必事先登记——首次有效提交会**自动发现**一条待配置软件；
+> 来源逐条记录（待确认/已确认）。管理员配置规则并**显式启用**自动归档后，满足
+> 「自动模式 + 来源已确认 + 规则完整有效」的记录由**自动授权入口**（与人工归档同一事务、同一快照）
+> 进入归档流程；其余记录保持「已接收」并写明等待/阻塞原因。
 
 | status | 含义 | 后继 |
 |---|---|---|
-| `received` | 原话已持久化，等待后台处理 | `processing` / `failed` |
-| `processing` | AI 整理中 | `archiving` / `failed` |
-| `archiving` | 已持久化“将发送 Kaneo”，创建请求已发出或待发 | `archived` / `needs_review` / `failed` |
+| `received` | 原话已持久化，等待 AI 整理 | `processing` |
+| `processing` | AI 整理中（或人工重试中） | `needs_info` / `archiving` |
+| `needs_info` | 等待人工补充分类（缺项目/列/标签） | `ready_to_archive` / `processing` |
+| `ready_to_archive` | 分类完整，等待人工归档授权（**零远端写入**） | `archiving` |
+| `archiving` | 已持久化人工归档授权，创建请求已发出或待发 | `archived` / `needs_review` / `failed` |
 | `needs_review` | Kaneo 写入结果不确定，待核对 | `archived` / `archiving` |
 | `archived` | 已写入 Kaneo，终态 | — |
-| `failed` | AI 或归档明确失败，可重试 | `processing` / `archiving` |
+| `failed` | 归档**明确失败**（AI 失败不算 failed，见下），可重试 | `processing` / `archiving` |
+
+- AI 整理失败：**不再置为 `failed`**。保留原文，标题回退为原文首个非空行，`processed_json` 保持 NULL，
+  `error_summary` 说明回退原因；状态进入 `needs_info`。管理页 `retry` 会重新尝试 AI 整理（绝不触发未授权的远端归档）。
+- 老版本遗留记录（`received`/`processing`，从未发生远端写入）在迁移 6 中接入人工流程（→ `needs_info`）；
+  已有 `failed`/`needs_review` 不自动重跑；已开始远端写入（已有 task ID 或恢复数据含上传/资产/评论痕迹）的记录
+  保留原目标与恢复上下文，只能沿既有恢复入口继续。
 
 面板向用户展示的文案（Web 组件 `packages/web/src/element.ts`，Flutter 包文案不同）：
-`received` / `processing` / `archiving` → 「已保存，正在整理」；
+`received` / `processing` / `needs_info` / `ready_to_archive` / `archiving` → 「已保存，正在整理」；
 `archived` → 「反馈已归档。感谢你的支持！」；
 `needs_review` → 「归档结果待确认。原话已保存，将在管理页人工复核。」；
 `failed` 但服务端已接收 → 「原话已保存，后台整理未完成，可在管理页处理。请勿重复提交。」；
 提交未到达服务（无服务端记录）→ 「尚未确认保存，请检查网络后重试。」。
 **注意**：状态值本身（`received` 等）只出现在 HTTP 契约里，不作为用户可见文案。
 
+v7 起组件还会按 `collectionState` 覆盖「已保存，正在整理」这句文案（等待态优先，且停止轮询）：
+- `waiting_configuration` → 「反馈已保存，等待管理员配置该软件。」
+- `waiting_source_confirmation` → 「反馈已保存，等待管理员确认来源。」
+- `waiting_manual_archive` → 「反馈已保存，等待管理员归档。」
+这些提示都表示**已保存**，不是提交失败；`queued` 仍按「已保存，正在整理」继续跟踪。
+
 ## 认证组
 
 ### POST /api/auth/login
 Body: `{ "username": string, "password": string, "clientLabel"?: string, "appId"?: string }`
 - 无 `clientLabel`（管理后台 / 旧登录页）：`200 { "ok": true, "expiresAt": "<iso>", "user", "quota" }` + Set-Cookie；不返回令牌。
-- 有 `clientLabel`（Web 组件 / Flutter）：必须同时携带 `appId`，否则 `400 "invalid_request"`；
-  浏览器请求会按该 `appId` 的 `allowedOrigins` 校验 `Origin`（未登记 `403 "origin_not_allowed"`，`appId` 未配置 `404 "unknown_app"`），
-  原生客户端不发送 `Origin` 时不校验来源。成功返回 `200 { "ok": true, "token": "<bearer，仅此一次明文返回>", "expiresAt", "user", "quota" }`（不附带 Cookie）。
+- 有 `clientLabel`（Web 组件 / Flutter）：必须携带**格式合法**的 `appId`（1..100 字符，仅字母数字与 `. _ : -`），
+  否则 `400 "invalid_request"`。**不再要求软件已登记**：登录只校验账号、启用状态与限流，
+  浏览器携带的 `Origin` 只做合法性校验（非法如 `file://` → `400 "origin_not_allowed"`），不再比对允许来源白名单。
+  **登录本身不创建任何软件记录**——软件在首次有效提交时自动发现。
+  原生客户端不发送 `Origin`。成功返回 `200 { "ok": true, "token": "<bearer，仅此一次明文返回>", "expiresAt", "user", "quota" }`（不附带 Cookie）。
+- 旧登录握手（`/login` + `/api/auth/handshake*`）**保持原有安全限制**：仍要求软件已登记且来源在 `allowedOrigins` 内。
 - 账号不存在 / 已禁用 / 密码错误统一 `401 "invalid_credentials"`；限流后 `429 "rate_limited"`（`Retry-After` 头）。
-- 限流：按 IP+用户名滑动窗口。登录、会话查询、退出支持跨源 Bearer（CORS，见文末），不依赖跨站 Cookie。
+- 限流：按 IP+用户名滑动窗口。组件端点的登录、会话查询、退出支持跨源 Bearer（CORS，见文末），不依赖跨站 Cookie。
 
 ### POST /api/auth/logout
 Cookie 或 Bearer。`204`。撤销当前会话（其 Bearer 令牌同时失效）。
@@ -136,11 +198,11 @@ Cookie 或 Bearer。`200 { "authenticated": true, "kind": "cookie"|"client", "ex
 
 - `GET /api/admin/system/update` → 当前版本、更新配置、暂停状态、最近一次检查结果、最近任务：
   ```jsonc
-  { "current": { "version": "0.3.0", "protocol": 1 },
+  { "current": { "version": "0.4.0", "protocol": 1 },
     "config": { "updateConfigured": true, "updaterBaseUrl": "http://updater:8790", "tokenFile": "…",
                 "controlDir": "…", "protocolSupported": 1, "checkIntervalMs": 86400000 },
     "pause": { "paused": false, "since": null, "marker": null },
-    "check": { "state": "ok", "checkedAt": "<iso>", "latest": { "version": "0.3.0", "notes": "…",
+    "check": { "state": "ok", "checkedAt": "<iso>", "latest": { "version": "0.4.0", "notes": "…",
                "publishedAt": "<iso>", "digest": "sha256:…", "image": "…" },
                "compatible": true, "requiredProtocol": 1, "supportedProtocol": 1, "guidance": null,
                "failedCode": null, "failedMessage": null, "warnings": [] },
@@ -168,7 +230,7 @@ Cookie 或 Bearer。`200 { "authenticated": true, "kind": "cookie"|"client", "ex
 - `GET /api/admin/system/update/:id` → 任务进度（`operationId` 非法 → `400 "invalid_request"`）：
   ```jsonc
   { "status": "known", "fromControlDir": true,
-    "operation": { "operationId": "op-…", "version": "0.3.0", "status": "running",
+    "operation": { "operationId": "op-…", "version": "0.4.0", "status": "running",
                    "outcome": null, "outcomeLabel": "更新进行中", "phase": "backup_copy",
                    "phaseLabel": "③保留备份并复制", "message": "…", "failure": null,
                    "recoveryHint": null, "warnings": [],
@@ -201,7 +263,8 @@ updater 在执行「②暂停并停服」前会向控制目录写入 `paused` �
 ```jsonc
 {
   "idempotencyKey": "client-generated uuid",   // 必填，≤200 字符
-  "appId": "com.example.app",                   // 必填，须已在服务端配置
+  "appId": "com.example.app",                   // 必填；**无需预先登记**（首次提交自动发现）
+  "appName": "我的应用",                         // 可选；仅当管理员尚未设置名称时采用
   "text": "用户原话",                            // 必填，1..10000 字符（按码点计）
   "context": {                                   // 可选，全部由宿主显式传入
     "appVersion": "1.2.3",
@@ -210,11 +273,39 @@ updater 在执行「②暂停并停服」前会向控制目录写入 `paused` �
 }
 ```
 响应（均带 `user: { id, username, role }` 与 `quota`）：
-- `201 { "feedbackId": string, "status": "received", "user", "quota" }`
-- `200 { "feedbackId", "status", "replayed": true, "user", "quota" }`（同 key 同内容，幂等重放；**不扣次数**，额度已满也允许）
+- `201 { "feedbackId": string, "status": "received", "user", "quota", "collectionState" }`
+- `200 { "feedbackId", "status", "replayed": true, "user", "quota", "collectionState" }`（同 key 同内容，幂等重放；**不扣次数**，额度已满也允许）
 - `409 "idempotency_conflict"`（同 key 不同内容；或同 key 被**其他账号**占用 —— 统一通用冲突，不透露原记录）
-- `429 "daily_quota_exceeded"`（当日额度用尽，明确**未接收**；响应携带同结构 `quota`）
-- `401` / `400 "invalid_request"` / `404 "unknown_app"` / `413 "too_large"` / `429 "rate_limited"`
+- `429 "daily_quota_exceeded"`（当日额度用尽，明确**未接收**；响应携带同结构 `quota`，**不创建软件、不扣费**）
+- `401` / `400 "invalid_request"` / `400 "origin_not_allowed"` / `413 "too_large"` / `429 "rate_limited"`
+
+**先接收、后配置（自动发现软件）**：`appId` 不再要求事先在后台登记。
+首次**有效**提交时，服务端在同一事务内创建一条**待配置**软件（默认人工模式、零归档规则），
+并登记本次观察到的来源。幂等重放、额度用尽、校验失败都不会产生空软件记录。
+并发提交同一 `appId` 只会创建一条软件记录（写事务串行 + `app_id` 唯一约束）。
+
+**软件名称**：可选字段 `appName`（≤100 字符）。仅在管理员尚未设置名称时采用；管理员在后台保存过名称后，
+客户端上报的名称不会覆盖它（该软件的 `nameSource` 变为 `admin`）。
+
+**服务端观察到的来源**：浏览器取请求 `Origin`（规范化到 `scheme://host[:port]`）；
+无 `Origin` 的原生客户端记为 `native`，单独确认。客户端**自报**的名称与来源都不作为软件身份凭证。
+
+`collectionState`（可选字段，旧客户端可忽略）：反馈当前卡在哪一步，见下节。
+
+### 收集状态 `collectionState`
+
+组件据此显示「已保存，等待…」，**绝不把等待归档显示为提交失败**。取值与优先级：
+
+| 值 | 含义 | 判定 |
+|---|---|---|
+| `queued` | 会自动处理（继续跟踪） | 已授权（人工或自动）或已有远端任务；或**自动模式 + 来源已确认 + 该记录未被人工编辑**（整理中 / 等待自动重试）。已授权 / 已有远端任务优先级最高，等待配置不会覆盖它 |
+| `waiting_configuration` | 等待管理员配置软件 | 软件 `configStatus = pending`；或自动模式下该记录被**配置类**问题阻塞（规则不完整 / 目标失效），等待管理员修正 |
+| `waiting_source_confirmation` | 等待管理员确认来源 | 自动归档模式，且该记录的来源仍是「待确认」 |
+| `waiting_manual_archive` | 等待管理员人工归档 | 人工模式（含自动归档已关闭）；或自动模式下该记录**已被人工作业**（`classifyVersion > 0` 或存在编辑留痕，含未授权的 `ready_to_archive`） |
+
+POST 提交与 `GET /api/feedback/:id` 响应都会带上该字段（`GET` 按当前状态现算）。
+组件在收到等待态后应停止轮询并保留手动刷新——等待不是「处理中」。
+自动模式下「等待自动重试」属于 `queued`（组件继续跟踪），**不得**显示为等待人工归档。
 
 **multipart 变体**（携带截图与/或日志附件）：`Content-Type: multipart/form-data`，总请求体上限 10 MiB。
 - 字段 `metadata`：同上 JSON，另加可选 `capture`（截图元数据）与可选 `logs`（日志附件描述符数组）。
@@ -248,11 +339,54 @@ updater 在执行「②暂停并停服」前会向控制目录写入 `paused` �
 - 幂等判定：请求内容哈希综合计算 `text`、`context`、`screenshot` 与全部 `logs` 的摘要。日志内容发生任何改变即视为新内容；相同幂等键再次提交相同内容触发幂等重放（`200`，`replayed: true`）。
 
 ### GET /api/feedback/:id （Bearer 或 Cookie）
-`200 { "id", "status", "createdAt", "updatedAt", "errorSummary"?: string|null, "kaneoUrl"?: string|null }`
-**归属隔离**：普通账号只能读取自己的反馈状态与截图，他人记录统一 `404 "not_found"`（不透露存在性）；管理员可读全量。面板轮询此端点（建议 2s 退避至 5s）。
+`200 { "id", "status", "createdAt", "updatedAt", "errorSummary"?: string|null, "kaneoUrl"?: string|null,
+"collectionState"?: string }`
+**归属隔离**：普通账号只能读取自己的反馈状态与截图，他人记录统一 `404 "not_found"`（不透露存在性）；管理员可读全量。面板轮询此端点（建议 2s 退避至 5s）；收到等待态时停止轮询、保留手动刷新。
+
+### GET /api/admin/feedback/options?projectId=&lt;id&gt; （仅管理员 Cookie 会话）
+从 Kaneo **实时**读取分类所需的有效选项。
+`200 { "project": { "id", "name", "workspaceId" }, "columns": [{ "id", "slug", "name" }],
+"labels": [{ "id", "name", "color" }], "members": [{ "id", "name", "email", "role" }] }`。
+- `labels` 只包含**工作区级**标签（`taskId === null`）：关联到任务时 Kaneo 会新建任务级标签行，
+  不会移动其他任务上的标签。
+- 缺 `projectId` → `400 "invalid_request"`；Kaneo 读取失败 → `502 "kaneo_unavailable"`。
+
+### POST /api/admin/feedback/:id/classify （仅管理员 Cookie 会话 + 同源）
+人工分类保存与归档授权（T2/T3 的唯一入口）。
+```jsonc
+{
+  "action": "save" | "archive",
+  "classifyVersion": 0,          // 乐观锁：必须等于页面读到的 classification.version
+  "projectId": "…" | null,
+  "columnId": "…" | null,
+  "columnSlug": "…" | null,
+  "labelIds": ["…"],
+  "assigneeId": "…" | null,      // 可选负责人
+  "assigneeName": "…" | null,
+  "operationId": "…"             // 归档授权必填（缺省服务端生成），用于幂等与防重放
+}
+```
+- `action: "save"`（暂存）：**允许缺项**；完整分类（项目 + 列 + ≥1 标签）→ `ready_to_archive`，
+  缺项 → `needs_info`。`200 { "ok": true, "status", "classifyVersion", "classification", "archiveQueued": false }`。
+  **零远端写入**。
+- `action: "archive"`（归档授权）：服务端**重新读取 Kaneo 有效选项**并校验项目、列、工作区标签与负责人，
+  然后在事务内比较分类版本、固定归档快照（连接 / 项目 / 工作区 / 列 ID+slug / 标签 / 负责人）、
+  记录管理员与操作时间并入队。
+  `202 { "ok": true, "status": "ready_to_archive", "classifyVersion", "classification", "revision", "archiveQueued": true, "replayed": false }`。
+  - 分类不完整 → `422 "incomplete_classification"`；项目/列/标签/负责人与 Kaneo 不符 → `422 "invalid_classification"`；**两种都不产生远端写入**。
+  - 版本过期 → `409 "version_conflict"`；已进入归档队列 / 已归档 / 已有远端任务 → `409 "classification_locked"`；
+    已授权但操作标识不同 → `409 "already_authorized"`。
+  - 同一 `operationId` 重放 → `202` 且 `replayed: true`，不重复入队、不重复写远端。
+  - 授权后配置变化**不会重定向**本次任务：worker 只使用快照里的目标。
+  - 锁定的记录只能沿既有恢复入口（`retry` / `resolve` / `recover`）继续，不能通过分类编辑另建任务。
+- 详情 `GET /api/admin/feedback/:id` 额外返回 `classification`（含 `version`）、`classificationLocked`、
+  `archiveAuthorized`、`archiveAuthorizedAt`、`archiveOperationId` 与 `audit`（操作审计，按时间正序）。
+- 提交成功与保存分类都不会调用 Kaneo；重启扫描只重新入队 `received`/`processing`（仅 AI）与
+  **已持久化授权**的 `ready_to_archive`。
 
 ### POST /api/feedback/:id/retry （仅 Cookie 会话，管理页）
-将 `failed` 重新入队（AI 失败→从 processing 恢复；归档失败→从 archiving 恢复）。
+将 `failed` 重新入队（归档失败→从持久化断点恢复）；对 `needs_info` 且尚无 AI 整理结果
+（AI 失败已按原文回退）的记录，重新尝试 AI 整理。**绝不因重试而发起未经人工授权的远端归档。**
 Body 可选 `{ "expectedRevision": number }`（恢复数据 revision 乐观锁；缺省不校验）。
 `202 { "ok": true, "status": "processing", "revision": number }`；
 非法状态 `409 "invalid_state"`；该反馈正在被其他操作处理 → `409 "busy"`；revision 不一致 → `409 "revision_conflict"`（过期页面不得覆盖新状态，请刷新）。
@@ -339,16 +473,93 @@ App 对象：
   "id": string,
   "appId": "com.example.app",        // 提交时携带的唯一标识，创建后不可改
   "name": "示例软件",
-  "allowedOrigins": ["https://app.example.com"],  // Web 登录握手允许的 origin，精确匹配
-  "kaneoProjectId": "proj-xxx",      // 目标 Kaneo 项目
-  "kaneoColumnSlug": "backlog",      // 目标列的真实 slug，服务端在归档时解析为列 id
+  "allowedOrigins": ["https://app.example.com"],  // 显式放行的来源：登记时直接视为「已确认来源」
+  "kaneoProjectId": "proj-xxx",      // 默认目标项目（归档规则的来源）
+  "kaneoColumnSlug": "backlog",      // 默认目标列 slug
+  // ---- 先接收后配置 / 自动归档 ----
+  "nameSource": "admin" | "client",  // 名称来源：管理员设置后客户端不可覆盖
+  "configStatus": "pending" | "configured",  // pending=自动发现后待配置
+  "archiveMode": "manual" | "automatic",
+  "ruleVersion": 0,                  // 配置保存与归档模式变更时自增（来源确认不推进）
+  "defaults": {
+    "projectId": "", "columnId": "", "columnSlug": "",
+    "labelIds": [], "assigneeId": null, "assigneeName": null
+  },
+  "ruleComplete": false,             // 项目 + 目标列 + ≥1 工作区标签
+  "autoEnabledAt": null, "autoEnabledBy": null,
+  "firstSeenAt": "<iso>", "lastSeenAt": "<iso>",
+  "pendingSources": 0,               // 待确认来源数
+  "confirmedSources": 0,             // 已确认来源数
+  "waitingFeedbacks": 0,             // 尚未授权且无远端任务的反馈数
   "createdAt": "<iso>", "updatedAt": "<iso>"
 }
 ```
-- `GET /api/admin/apps` → `{ "apps": [App] }`
-- `POST /api/admin/apps`（同字段）→ `201 App`；重复 appId → `409 "app_exists"`
-- `PUT /api/admin/apps/:id`（`appId` 字段被忽略）→ `200 App`
+- `GET /api/admin/apps` → `{ "apps": [App] }`（含上表统计字段，供列表显示「待配置 / 待确认来源 / 等待反馈」）
+- `GET /api/admin/apps/:id` → `{ "app": App, "sources": [Source] }`；`Source` 为
+  `{ "origin", "kind": "browser"|"native", "status": "pending"|"confirmed", "firstSeenAt", "lastSeenAt", "confirmedAt", "confirmedBy" }`
+- `POST /api/admin/apps`（同字段）→ `201 App`；重复 appId → `409 "app_exists"`。
+  管理员填写的 `allowedOrigins` 在创建时直接登记为**已确认来源**。
+- `PUT /api/admin/apps/:id`（`appId` 字段被忽略；可带 `kaneoColumnId` / `kaneoLabelIds` / `kaneoAssigneeId` / `kaneoAssigneeName`；
+  **必带** `expectedRuleVersion`）→ `200 App`。**普通保存绝不触发归档**，也不改变归档模式；
+  保存成功即推进一次 `ruleVersion`，并把名称接管为管理员所有（`nameSource = admin`）。
+  页面版本已过期 → `409 "version_conflict"`，**一个字节都不写**（两个管理页面不会互相覆盖配置）；
+  缺少 `expectedRuleVersion` → `400 "invalid_request"`。
 - `DELETE /api/admin/apps/:id` → `204`（历史反馈保留）
+
+### POST /api/admin/apps/:id/sources/confirm （仅管理员 Cookie 会话 + 同源）
+`{ "origin": string, "operationId": string, "expectedRuleVersion": number }` →
+`200 { "ok": true, "replayed", "source": Source, "autoArchiveEnabled", "backlogDispatched" }`。
+把服务端观察到的某个来源标记为**已确认**。两个字段都必填：
+- `operationId` 是**一次操作的稳定幂等键**（页面为同一次点击保留同一个值，网络重试不生成新键）；
+- `expectedRuleVersion` 是页面读到的规则版本；与库内不一致 → `409 "version_conflict"`，
+  **不确认来源、不触发任何归档**。
+
+事务内先识别同一 `operationId` 的成功重放（幂等返回、不重复补处理），再检查版本与来源状态。
+该来源此前已确认（其他操作键）→ `200 { "alreadyConfirmed": true }`；来源不存在 → `404 "not_found"`；
+缺少必填字段 → `400 "invalid_request"`。
+**确认来源不修改 `ruleVersion`**：自动模式下首次确认会清除「等待来源确认」阻塞并
+`backlogDispatched = true`（由扫描补处理积压）；人工模式下只登记确认，`backlogDispatched = false`
+（后台据此提示「已确认来源，等待启用自动归档」）。
+
+### POST /api/admin/apps/:id/auto-archive/enable （仅管理员 Cookie 会话 + 同源）
+`{ "expectedRuleVersion": number, "operationId"?: string }` →
+`200 { "ok": true, "replayed": boolean, "app": App }`。
+管理员显式点击「启用自动归档并处理积压」：启用前用 Kaneo 实时核对默认目标（只读），
+随后把模式切到 `automatic`（推进 `ruleVersion`）并触发补处理扫描。错误语义：
+- 规则不完整（缺项目/列/标签）→ `422 "incomplete_rule"`（不写任何东西）
+- 目标在 Kaneo 中已失效 → `422 "invalid_rule"`；Kaneo 不可达 → `502 "kaneo_unavailable"`
+- `expectedRuleVersion` 与当前不一致 → `409 "version_conflict"`；缺失 → `400 "invalid_request"`
+- 同 `operationId` 重放 → 幂等返回，**不重复处理积压**
+
+### POST /api/admin/apps/:id/auto-archive/disable （仅管理员 Cookie 会话 + 同源）
+`{ "expectedRuleVersion": number, "operationId"?: string }` → `200 { "ok", "replayed", "app" }`。
+关闭自动归档**只阻止新的授权**：已获授权的任务继续执行，不撤销任何已固定的快照；
+模式变更同样推进 `ruleVersion`，因此旧页面再次启用 / 停用会被 `409 "version_conflict"` 拒绝。
+
+## 自动归档（T3）语义
+
+- **授权门槛不变**：普通保存、规则启用、来源确认、重启扫描都不会直接写远端；
+  只有「自动模式已启用 + 来源已确认 + 规则完整有效」的记录才会进入既有的归档授权事务
+  （与人工归档共用同一事务、同一 V3 快照结构）。
+- **固定快照**：自动授权同样在事务内固定项目 / 列 / 标签 / 负责人；此后改规则**不会**重定向已授权记录。
+- **幂等**：自动授权的操作键为 `auto:<feedbackId>:<ruleVersion>`，同记录同规则版本重复扫描只授权一次；
+  事务内还会复核「模式仍为自动 + 规则版本未变 + 来源仍已确认」，因此重复点击、并发扫描与启停竞争都不会重复建任务。
+- **阻塞与退避**：不满足条件的记录保持「已接收」并记录原因（管理页与组件都能看到）。
+  `autoBlockedKind = "config"` 表示配置问题（规则不完整、来源待确认、目标列失效、Kaneo 未配置），
+  **等待管理员修正**，修正后由扫描重新拾起；`"retryable"` 表示可恢复故障（网络/连接类），
+  按有上限的指数退避重试（1 分钟起，最多 30 分钟）。
+- **人工保护（T3）**：已被管理员保存过分类的记录（`classifyVersion > 0` 或存在 `classifyUpdatedAt`/`classifyUpdatedBy` 留痕）
+  **不参与**自动候选，也不在自动授权事务内被覆盖——即使分类不完整或被清空。这类记录仍可由管理员用
+  「保存并归档」完成；候选查询、自动授权入口与最终授权事务三处同时执行这一保护，
+  因此「扫描取到候选之后管理员才保存」的竞争窗口同样不会覆盖人工内容。
+- **积压排空（T3）**：扫描按批（默认 50 条）取候选，一批处理完后**继续查询**直到没有可执行候选；
+  同一轮不重复尝试同一条记录。人工记录、配置阻塞（`config`）、尚未到期的退避与已授权记录都会被排除，
+  不会造成空转或饥饿。
+- **到期重试（T3）**：服务按库内**最早到期的**可恢复退避设置一个可取消定时器，到期重新查库并处理；
+  启用规则、确认来源、配置修正、AI 整理完成与服务恢复都进入同一个调度入口。
+  启动时恢复立即可执行任务并重新安排未来重试；**人工触发扫描不能绕过尚未到期的退避**。
+  优雅退出时先停止调度与定时器，再排空已有队列、关闭数据库。
+- **远端结果不确定**：仍走既有 `needs_review` 待核对流程，绝不重新创建任务。
 
 ## 连接配置组（仅 Cookie 会话）
 
@@ -366,10 +577,12 @@ App 对象：
 
 ## 管理列表组（仅 Cookie 会话）
 
-- `GET /api/admin/feedback?status=&appId=&cursor=&limit=50` →
-  `{ "items": [{ "id", "appId", "username": string|null, "status", "createdAt", "updatedAt", "title"?: string|null, "kaneoUrl"?: string|null, "errorSummary"?: string|null, "archiveStage"?: string|null, "hasScreenshot": boolean, "logCount": number }], "nextCursor": string|null }`
-  （`username` 为提交账号；旧记录归属迁移前的初始账号；`logCount` 为该记录附带的日志文件数量）
-- `GET /api/admin/feedback/:id` → 详情：以上字段 + `{ "username", "text", "processed"?: { "title", "sections": { "experience", "problems", "suggestions", "questions" } }, "kaneoTaskId"?, "attemptCount", "lastError"?, "context"?, "screenshot"?, "logs": Array<{ "id", "feedbackId", "sortOrder", "filename", "source", "byteSize", "sha256", "createdAt" }>, "recovery"? }`，其中 `screenshot` 为截图元数据（`width`/`height`/`byteSize`/`sha256`/`capture`/`createdAt`，无截图则为 `null`；PNG 本体经 `GET /api/admin/feedback/:id/screenshot` 取回），`logs` 为该记录有序排列的日志附件元数据列表，`recovery` 见「管理页允许动作」。
+- `GET /api/admin/feedback?status=&appId=&cursor=&limit=50` → `status` 支持全部状态
+  （`received` / `processing` / `needs_info` / `ready_to_archive` / `archiving` / `needs_review` / `archived` / `failed`）。
+  `{ "items": [{ "id", "appId", "username": string|null, "status", "createdAt", "updatedAt", "title"?: string|null, "kaneoUrl"?: string|null, "errorSummary"?: string|null, "archiveStage"?: string|null, "hasScreenshot": boolean, "logCount": number, "classification": { "projectId", "columnId", "columnSlug", "labelIds", "assigneeId", "assigneeName", "version", "updatedAt", "updatedBy" }, "archiveAuthorized": boolean, "classificationLocked": boolean, "sourceOrigin": string, "collectionState": string, "archiveAuthorizedKind": "manual"|"auto"|null, "archiveRuleVersion": number|null, "autoBlockedKind": "retryable"|"config"|null, "autoBlockedReason": string|null, "autoAttempts": number, "autoNextAttemptAt": string|null }], "nextCursor": string|null }`
+  （`username` 为提交账号；旧记录归属迁移前的初始账号；`logCount` 为该记录附带的日志文件数量；
+  `sourceOrigin` 为服务端观察到的来源，`collectionState` 见前文；`autoBlocked*` 为自动归档阻塞原因与退避时间）
+- `GET /api/admin/feedback/:id` → 详情：以上字段 + `{ "username", "text", "processed"?: {...}, "kaneoTaskId"?, "attemptCount", "lastError"?, "context"?, "screenshot"?, "logs": [...], "recovery"?, "classification", "classificationLocked", "archiveAuthorized", "archiveAuthorizedAt", "archiveOperationId", "audit": [{ "id", "at", "actor", "action", "detail" }] }`，其中 `screenshot` 为截图元数据（`width`/`height`/`byteSize`/`sha256`/`capture`/`createdAt`，无截图则为 `null`；PNG 本体经 `GET /api/admin/feedback/:id/screenshot` 取回），`logs` 为该记录有序排列的日志附件元数据列表，`recovery` 见「管理页允许动作」，`audit` 为持久化操作审计（分类保存 / 归档授权 / 恢复动作）。
 - `GET /api/admin/feedback/:id/logs/:logId/download` → 下载日志原始文件，`Content-Type: application/octet-stream`，附带标准 RFC 5987 / RFC 6266 `Content-Disposition: attachment; filename="..."; filename*=UTF-8''...` 标头。
 - `GET /api/admin/feedback/:id/logs/:logId/preview` → 在浏览器内直接预览纯文本日志内容，`Content-Type: text/plain; charset=utf-8`，`Content-Disposition: inline`。
 - `GET /api/admin/feedback/:id/logs/:logId` → 便捷预览路由，行为等价于 `/preview`。
@@ -379,8 +592,10 @@ App 对象：
 1. 未登录也可在面板内编辑反馈文字与截图；点击主按钮「登录并提交」。
 2. 面板**就地展开**账号密码表单（同一个主按钮文案为「登录并提交」），不打开任何窗口。
 3. 确认后调用 `POST /api/auth/login`，显式携带 `clientLabel`（Web 为 `web:<appId>`，Flutter 为 `flutter-<平台>-<时间>`）
-   与 `appId`；浏览器请求由服务端按该 `appId` 的 `allowedOrigins` 校验 `Origin`。
+   与 `appId`；`appId` 只需格式合法，**无需事先登记**（软件在首次有效提交时自动发现）。
 4. 成功后令牌仅存内存（Web / Flutter Web）或安全存储（原生 Flutter），立即提交一次；取消只收起表单，草稿保留。
+   提交成功后按响应里的 `collectionState` 提示：`queued` 继续跟踪轮询；等待配置/等待来源确认/等待人工归档则
+   显示「已保存，等待…」并停止轮询（保留手动刷新），**绝不显示为提交失败**。
 5. 打开面板、登录成功、提交完成与应用恢复前台时刷新额度；跨过 `resetAt` 后重新查询，不在本地擅自重置。
    剩余 0 次禁止新提交，但结果未知的同键请求仍允许重试（避免丢失已接收结果）。
 
@@ -397,14 +612,24 @@ App 对象：
 | 参数 | 必填 | 说明 |
 |---|---|---|
 | `apiBase` | 是 | 服务地址，如 `https://fb.example.com` |
-| `appId` | 是 | 服务端软件配置中登记的标识 |
+| `appId` | 是 | 软件标识；**无需事先登记**，首次提交自动发现 |
+| `appName`（Web 属性 `app-name`，Flutter `appName`） | 否 | 上报的软件显示名称；管理员设置过名称后不会覆盖 |
 | `appVersion` | 否 | 展示在 Kaneo 任务来源信息 |
 | `pageLabel` | 否 | 宿主显式传入的页面标识 |
 
-目标 Kaneo 项目由服务端按 appId 决定，客户端不可指定。
+自动归档的项目与列由管理员在后台配置，客户端不可指定。
 
 ## 跨源（CORS）
 
-宿主应用与反馈服务通常不同源。`/api/feedback*` 与 `/api/auth/*`（登录、会话查询、退出）仅接受 **Bearer** 类凭据参与跨源：
-服务端只对已在任一软件配置 `allowedOrigins` 中登记的 Origin 回显 CORS 头（含 OPTIONS 预检），不使用跨站 Cookie。
-登录还会按目标 `appId` 的 `allowedOrigins` 校验 `Origin`。管理接口仍限第一方同源 Cookie。Flutter 原生（非浏览器）不受 CORS 约束。
+宿主应用与反馈服务通常不同源，且**软件可以完全没有预先配置**。服务端因此对
+**组件真正用到的端点**开放无凭据跨域，并对任意**合法 http(s) Origin** 回显：
+
+- 允许跨源的路径仅限：`POST /api/auth/login`、`POST /api/auth/logout`、`GET /api/auth/session`、
+  `POST /api/feedback`、`GET /api/feedback/:id`、`GET /api/feedback/:id/screenshot`；
+- 回显 `access-control-allow-origin: <请求 Origin>` 与 `access-control-max-age: 300`，
+  **绝不回显 `access-control-allow-credentials`**——组件一律使用 Bearer + `credentials: omit`；
+- **跨源请求一律不认后台 Cookie**：携带 `Origin` 且与服务 origin 不一致时，Cookie 不参与鉴权
+  （即使浏览器带上了后台会话 Cookie，也只按 Bearer 判定身份）；
+- 其余路径（人工恢复动作、后台管理、会话管理、旧握手、系统更新）**不参与跨源放行**，保持第一方同源 Cookie 限制。
+
+Flutter 原生（非浏览器）不受 CORS 约束；无 `Origin` 的请求按原生客户端处理，来源记为 `native`。

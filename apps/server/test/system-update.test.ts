@@ -19,7 +19,15 @@ import {
   readPackageVersion,
   UNKNOWN_VERSION,
 } from "../src/routes/system-update.ts";
-import { jsonReq, loginAsAdmin, makeConfig, makeMockAi, makeMockKaneo, TEST_PASSWORD } from "./helpers.ts";
+import {
+  authorizeArchive,
+  jsonReq,
+  loginAsAdmin,
+  makeConfig,
+  makeMockAi,
+  makeMockKaneo,
+  TEST_PASSWORD,
+} from "./helpers.ts";
 
 const SHARED_TOKEN = "test-shared-updater-token-0123456789";
 const DIGEST_A = `sha256:${"a".repeat(64)}`;
@@ -99,10 +107,9 @@ interface Harness {
 
 const apps: FeedbackApp[] = [];
 
-afterEach(async () => {
+afterEach(() => {
   for (const app of apps.splice(0)) {
     app.close();
-    await app.worker.idle();
     app.db.close();
   }
 });
@@ -251,7 +258,7 @@ async function makeFullHarness(options: Parameters<typeof makeHarness>[0] = {}) 
     body: { username: "admin", password: TEST_PASSWORD, clientLabel: "test-client", appId: "com.test.app" },
   });
   expect(bearerRes.status).toBe(200);
-  return { ...h, bearer: bearerRes.data.token as string };
+  return { ...h, app: appRes.data, bearer: bearerRes.data.token as string };
 }
 
 describe("U1-4 系统更新：状态与检查", () => {
@@ -879,17 +886,26 @@ describe("U1-4 暂停写入（共享控制文件驱动）", () => {
     expect(Date.now() - started).toBeLessThan(1000);
     expect(h.kaneo.remoteWrites).toBe(0);
 
-    // 解除暂停后队列里的工作继续完成（没有被丢弃）
+    // 解除暂停后队列里的工作继续完成（没有被丢弃）：worker 先做 AI 整理进入 needs_info
     await clearPaused(h);
     await vi.waitFor(
       () => {
         const row = h.feedbackApp.db.prepare("SELECT status FROM feedbacks WHERE id = 'fb-queued'").get() as {
           status: string;
         };
-        expect(row.status).toBe("archived");
+        expect(row.status).toBe("needs_info");
       },
       { timeout: 5000 },
     );
+
+    // 新契约：远端归档需要管理员显式授权，授权后队列继续处理直到 archived
+    const auth = await authorizeArchive(h, "fb-queued");
+    expect(auth.status).toBe(202);
+    await h.feedbackApp.worker.idle();
+    const archived = h.feedbackApp.db.prepare("SELECT status FROM feedbacks WHERE id = 'fb-queued'").get() as {
+      status: string;
+    };
+    expect(archived.status).toBe("archived");
   });
 
   it("暂停期间管理写入同样被拒（管理员设置/账号/连接/软件配置），但更新入口本身可用", async () => {
@@ -939,7 +955,7 @@ describe("U1-4 暂停写入（共享控制文件驱动）", () => {
     expect(accepted.status).toBe(201);
     expect(accepted.data.status).toBe("received");
 
-    // worker 恢复处理（注册后自动入队）
+    // worker 恢复处理：AI 整理完成后进入 needs_info（新契约下远端归档需管理员显式授权）
     await vi.waitFor(
       () => {
         const row = h.feedbackApp.db
@@ -947,10 +963,18 @@ describe("U1-4 暂停写入（共享控制文件驱动）", () => {
           .get(accepted.data.feedbackId) as {
           status: string;
         };
-        expect(row.status).toBe("archived");
+        expect(row.status).toBe("needs_info");
       },
       { timeout: 5000 },
     );
+
+    const auth = await authorizeArchive(h, accepted.data.feedbackId);
+    expect(auth.status).toBe(202);
+    await h.feedbackApp.worker.idle();
+    const row = h.feedbackApp.db.prepare("SELECT status FROM feedbacks WHERE id = ?").get(accepted.data.feedbackId) as {
+      status: string;
+    };
+    expect(row.status).toBe("archived");
     expect(h.kaneo.remoteWrites).toBeGreaterThan(0);
   });
 

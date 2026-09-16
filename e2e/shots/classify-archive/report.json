@@ -1,0 +1,225 @@
+{
+  "results": [
+    {
+      "name": "管理员登录 200",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "name": "Kaneo 连接写入 200",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "name": "AI 连接写入 200",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "name": "软件配置创建 201",
+      "ok": true,
+      "detail": "status=201"
+    },
+    {
+      "name": "提交 0 201",
+      "ok": true,
+      "detail": "status=201 body={'feedbackId': '38db0261-26f8-4a2b-9470-79d7b2a3e436', 'status': 'received', 'user': {'id': '8ac2124d-ba8a-4b4f-827d-c2fa6947fd08', 'username': 'admin', 'role': 'admin'}, 'quota': {'dailyLimit': 3, 'used': 1, 'remaining': 2, 'resetAt': '2026-09-15T16:00:00.000Z'}}"
+    },
+    {
+      "name": "提交 1 201",
+      "ok": true,
+      "detail": "status=201 body={'feedbackId': 'f0014bb1-a083-465d-a6a2-ff13506127b5', 'status': 'received', 'user': {'id': '8ac2124d-ba8a-4b4f-827d-c2fa6947fd08', 'username': 'admin', 'role': 'admin'}, 'quota': {'dailyLimit': 3, 'used': 2, 'remaining': 1, 'resetAt': '2026-09-15T16:00:00.000Z'}}"
+    },
+    {
+      "name": "提交后 Kaneo 无任务（提交不授权远端归档）",
+      "ok": true,
+      "detail": "tasks=[]"
+    },
+    {
+      "name": "状态筛选项含「已接收」",
+      "ok": true,
+      "detail": "options=['全部', '已接收', '处理中', '需要补充信息', '待归档', '归档中', '结果待核对', '已归档', '失败']"
+    },
+    {
+      "name": "状态筛选项含「处理中」",
+      "ok": true,
+      "detail": "options=['全部', '已接收', '处理中', '需要补充信息', '待归档', '归档中', '结果待核对', '已归档', '失败']"
+    },
+    {
+      "name": "状态筛选项含「需要补充信息」",
+      "ok": true,
+      "detail": "options=['全部', '已接收', '处理中', '需要补充信息', '待归档', '归档中', '结果待核对', '已归档', '失败']"
+    },
+    {
+      "name": "状态筛选项含「待归档」",
+      "ok": true,
+      "detail": "options=['全部', '已接收', '处理中', '需要补充信息', '待归档', '归档中', '结果待核对', '已归档', '失败']"
+    },
+    {
+      "name": "状态筛选项含「归档中」",
+      "ok": true,
+      "detail": "options=['全部', '已接收', '处理中', '需要补充信息', '待归档', '归档中', '结果待核对', '已归档', '失败']"
+    },
+    {
+      "name": "状态筛选项含「结果待核对」",
+      "ok": true,
+      "detail": "options=['全部', '已接收', '处理中', '需要补充信息', '待归档', '归档中', '结果待核对', '已归档', '失败']"
+    },
+    {
+      "name": "状态筛选项含「已归档」",
+      "ok": true,
+      "detail": "options=['全部', '已接收', '处理中', '需要补充信息', '待归档', '归档中', '结果待核对', '已归档', '失败']"
+    },
+    {
+      "name": "状态筛选项含「失败」",
+      "ok": true,
+      "detail": "options=['全部', '已接收', '处理中', '需要补充信息', '待归档', '归档中', '结果待核对', '已归档', '失败']"
+    },
+    {
+      "name": "按「需要补充信息」筛出记录",
+      "ok": true,
+      "detail": "rows=2"
+    },
+    {
+      "name": "默认项目已预填软件配置",
+      "ok": true,
+      "detail": "value=p-e2e"
+    },
+    {
+      "name": "默认列按 slug 预填为 triage",
+      "ok": true,
+      "detail": "value=col-1"
+    },
+    {
+      "name": "工作区标签没有自动选择（标签不自动选择）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "缺标签时「保存并归档」按钮禁用",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "面板提示需补齐项目/列/标签",
+      "ok": true,
+      "detail": "变为「待归档」，不会产生任何远端写入。分类版本：0\n\n所在项目\n（未选择）\nE2E 测试项目（p-e2e）\n另一个项目（p-other）\n目标列\n（未选择）\n待筛选（triage）\n进行中（doing）\n负责人（可选）\n（不指定负责人）\nE2E 成员甲\nE2E 成员乙\n工作区标签（至少一个；仅工作区级标签可选，不会移动其他任务的标签）\nbug\nui\n保存\n保存并归档\n归档前请补齐项目、目标列与标签"
+    },
+    {
+      "name": "切换项目后目标列被清空",
+      "ok": true,
+      "detail": "value="
+    },
+    {
+      "name": "切换项目后负责人被清空",
+      "ok": true,
+      "detail": "value="
+    },
+    {
+      "name": "切换项目后标签被清空",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "迟到的旧项目响应被丢弃（列选项仍是当前项目的 triage/doing）",
+      "ok": true,
+      "detail": "options=['（未选择）', '待筛选（triage）', '进行中（doing）']"
+    },
+    {
+      "name": "迟到响应未把旧项目选择写回（列保持未选择）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "完整暂存后状态为待归档",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "暂存后 Kaneo 仍无任务（零远端写入）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "Kaneo 收到 1 个任务",
+      "ok": true,
+      "detail": "tasks=[{'id': 'e2e-task-1', 'projectId': 'p-e2e', 'number': 1, 'title': 'E2E整理：分类验收反馈 1：导出按钮点击后没有', 'description': '## 使用体验\\n\\n（mock）使用体验整理\\n\\n## 问题\\n\\n（mock）问题摘录：分类验收反馈 1：导出按钮点击后没有\\n\\n---\\n\\n**来源**：分类验收软件（com.example.classify-e2e） · 版本 1.0.0 · 页面 export\\n\\n**提交时间**：2026-09-15T07:02:01.760Z\\n\\n**用户原话**：\\n\\n> 分类验收反馈 1：导出按钮点击后没有反应\\n\\n**反馈ID**：f0014bb1-a083-465d-a6a2-ff13506127b5', 'priority': 'no-priority', 'status': 'triage'}]"
+    },
+    {
+      "name": "任务使用真实列 slug（triage）",
+      "ok": true,
+      "detail": "tasks=[{'id': 'e2e-task-1', 'projectId': 'p-e2e', 'number': 1, 'title': 'E2E整理：分类验收反馈 1：导出按钮点击后没有', 'description': '## 使用体验\\n\\n（mock）使用体验整理\\n\\n## 问题\\n\\n（mock）问题摘录：分类验收反馈 1：导出按钮点击后没有\\n\\n---\\n\\n**来源**：分类验收软件（com.example.classify-e2e） · 版本 1.0.0 · 页面 export\\n\\n**提交时间**：2026-09-15T07:02:01.760Z\\n\\n**用户原话**：\\n\\n> 分类验收反馈 1：导出按钮点击后没有反应\\n\\n**反馈ID**：f0014bb1-a083-465d-a6a2-ff13506127b5', 'priority': 'no-priority', 'status': 'triage'}]"
+    },
+    {
+      "name": "任务项目为授权时选择的 p-e2e",
+      "ok": true,
+      "detail": "tasks=[{'id': 'e2e-task-1', 'projectId': 'p-e2e', 'number': 1, 'title': 'E2E整理：分类验收反馈 1：导出按钮点击后没有', 'description': '## 使用体验\\n\\n（mock）使用体验整理\\n\\n## 问题\\n\\n（mock）问题摘录：分类验收反馈 1：导出按钮点击后没有\\n\\n---\\n\\n**来源**：分类验收软件（com.example.classify-e2e） · 版本 1.0.0 · 页面 export\\n\\n**提交时间**：2026-09-15T07:02:01.760Z\\n\\n**用户原话**：\\n\\n> 分类验收反馈 1：导出按钮点击后没有反应\\n\\n**反馈ID**：f0014bb1-a083-465d-a6a2-ff13506127b5', 'priority': 'no-priority', 'status': 'triage'}]"
+    },
+    {
+      "name": "工作区标签已关联到任务",
+      "ok": true,
+      "detail": "attaches=[{'labelId': 'label-bug', 'taskId': 'e2e-task-1', 'created': True, 'at': '2026-09-15T07:02:08.528Z'}]"
+    },
+    {
+      "name": "未选择负责人时省略 userId",
+      "ok": true,
+      "detail": "task={'id': 'e2e-task-1', 'projectId': 'p-e2e', 'number': 1, 'title': 'E2E整理：分类验收反馈 1：导出按钮点击后没有', 'description': '## 使用体验\\n\\n（mock）使用体验整理\\n\\n## 问题\\n\\n（mock）问题摘录：分类验收反馈 1：导出按钮点击后没有\\n\\n---\\n\\n**来源**：分类验收软件（com.example.classify-e2e） · 版本 1.0.0 · 页面 export\\n\\n**提交时间**：2026-09-15T07:02:01.760Z\\n\\n**用户原话**：\\n\\n> 分类验收反馈 1：导出按钮点击后没有反应\\n\\n**反馈ID**：f0014bb1-a083-465d-a6a2-ff13506127b5', 'priority': 'no-priority', 'status': 'triage'}"
+    },
+    {
+      "name": "详情出现 Kaneo 任务链接入口",
+      "ok": true,
+      "detail": "E 成员甲\nE2E 成员乙\n工作区标签（至少一个；仅工作区级标签可选，不会移动其他任务的标签）\nbug\nui\n\n已固定归档快照并加入队列。\n\n操作审计\n9/15/2026, 3:02:08 PM · admin · 保存分类\n9/15/2026, 3:02:08 PM · admin · 归档授权\n9/15/2026, 3:02:08 PM · admin · 入队归档\n在 Kaneo 中查看任务"
+    },
+    {
+      "name": "详情显示操作审计",
+      "ok": true,
+      "detail": "）使用体验整理\n问题：（mock）问题摘录：分类验收反馈 1：导出按钮点击后没有\n人工分类与归档\n\n该记录已进入归档流程或已归档，分类已锁定。已知远端任务只能沿下方「恢复操作」继续，不能通过分类编辑另建任务。\n\n所在项目\n（未选择）\nE2E 测试项目（p-e2e）\n另一个项目（p-other）\n目标列\n（未选择）\n待筛选（triage）\n进行中（doing）\n负责人（可选）\n（不指定负责人）\nE2E 成员甲\nE2E 成员乙\n工作区标签（至少一个；仅工作区级标签可选，不会移动其他任务的标签）\nbug\nui\n\n已固定归档快照并加入队列。\n\n操作审计\n9/15/2026, 3:02:08 PM · admin · 保存分类\n9/15/2026, 3:02:08 PM · admin · 归档授权\n9/15/2026, 3:02:08 PM · admin · 入队归档\n在 Kaneo 中查看任务"
+    },
+    {
+      "name": "项目选择被禁用",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "目标列选择被禁用",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "锁定提示可见",
+      "ok": true,
+      "detail": "反馈详情\n关闭 ✕\n状态\n已归档\n反馈 ID\nf0014bb1-a083-465d-a6a2-ff13506127b5\n软件\ncom.example.classify-e2e\n提交账号\nadmin\n提交时间\n9/15/2026, 3:02:01 PM\n处理轮次\n1\n上下文\n版本 1.0.0 · 页面 export\n用户原话\n分类验收反馈 1：导出按钮点击后没有反应\nAI 整理结果\n\nE2E整理：分"
+    },
+    {
+      "name": "按「已归档」筛出记录",
+      "ok": true,
+      "detail": "rows=1"
+    },
+    {
+      "name": "第二条归档授权 202",
+      "ok": true,
+      "detail": "status=202"
+    },
+    {
+      "name": "按「失败」筛出记录",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "恢复入口「重试处理」可见",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "管理页无预期外的 console 错误",
+      "ok": true,
+      "detail": "errors=[]"
+    },
+    {
+      "name": "登录前的会话探测 401 为唯一 console 错误",
+      "ok": true,
+      "detail": "errors=['Failed to load resource: the server responded with a status of 401 (Unauthorized)']"
+    }
+  ],
+  "failed": 0
+}

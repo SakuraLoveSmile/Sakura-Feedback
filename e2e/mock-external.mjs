@@ -50,6 +50,18 @@ const state = {
   aiCalls: [],
   assets: new Map(), // key -> { bytes, contentType }
   comments: new Map(), // taskId -> [{ id, content }]
+  // ---- 人工分类归档改造（T2/T3）：工作区级标签、任务标签、工作区成员 ----
+  workspaceLabels: [
+    { id: "label-bug", name: "bug", color: "#e11d48" },
+    { id: "label-ui", name: "ui", color: "#0ea5e9" },
+  ],
+  taskLabels: new Map(), // taskId -> [{ id, name, color }]
+  taskLabelSeq: 0,
+  labelAttaches: [], // [{ labelId, taskId, created, at }]
+  members: [
+    { id: "user-e2e-1", name: "E2E 成员甲", email: "member-a@e2e.test", role: "member" },
+    { id: "user-e2e-2", name: "E2E 成员乙", email: "member-b@e2e.test", role: "admin" },
+  ],
   commentSeq: 0,
   assetSeq: 0,
   uploadAuthLeaks: [], // 预签名上传里出现 Authorization 的记录
@@ -252,6 +264,12 @@ http
     const p = url.pathname;
     if (p === "/__health") return json(res, 200, { ok: true });
     if (p === "/__mock/tasks") return json(res, 200, { tasks: state.tasks });
+    if (p === "/__mock/labels")
+      return json(res, 200, {
+        workspaceLabels: state.workspaceLabels,
+        taskLabels: Object.fromEntries(state.taskLabels),
+        attaches: state.labelAttaches,
+      });
     if (p === "/__mock/state" && req.method === "GET") {
       return json(res, 200, {
         kaneoFail: state.kaneoFail,
@@ -316,6 +334,10 @@ http
       state.assetSeq = 0;
       state.commentSeq = 0;
       state.uploadAuthLeaks = [];
+      // 标签 / 成员状态复位
+      state.taskLabels = new Map();
+      state.taskLabelSeq = 0;
+      state.labelAttaches = [];
       // 新增状态一并复位
       state.fail = { stage: null, mode: null, once: true, afterWrite: true, fired: 0 };
       state.expireNextPresign = false;
@@ -396,17 +418,76 @@ http
     if (match) {
       return json(res, 200, {
         id: match[1],
-        name: "E2E 测试项目",
+        name: match[1] === "p-other" ? "另一个项目" : "E2E 测试项目",
         workspaceId: "ws-e2e",
-        slug: "E2E",
+        slug: match[1] === "p-other" ? "OTHER" : "E2E",
       });
+    }
+    // ---- 密钥可见的工作区与项目（管理页项目下拉）----
+    if (p === "/api/auth/organization/list") {
+      return json(res, 200, [{ id: "ws-e2e", name: "E2E 工作区" }]);
+    }
+    if (p === "/api/project" && req.method === "GET") {
+      return json(res, 200, [
+        { id: "p-e2e", workspaceId: "ws-e2e", name: "E2E 测试项目", slug: "E2E" },
+        { id: "p-other", workspaceId: "ws-e2e", name: "另一个项目", slug: "OTHER" },
+      ]);
     }
     match = p.match(/^\/api\/column\/([^/]+)$/);
     if (match) {
+      // 不同项目返回不同列，便于浏览器验证「切换项目后丢弃迟到响应」。
+      if (match[1] === "p-other") {
+        // 故意延迟：制造“旧请求后到”的迟到响应（异步等待不会阻塞其它项目的请求）
+        await new Promise((r) => setTimeout(r, 1500));
+        return json(res, 200, [{ id: "col-x1", projectId: match[1], name: "已上线", slug: "done", position: 1 }]);
+      }
       return json(res, 200, [
         { id: "col-1", projectId: match[1], name: "待筛选", slug: "triage", position: 1 },
         { id: "col-2", projectId: match[1], name: "进行中", slug: "doing", position: 2 },
       ]);
+    }
+    // ---- 工作区级标签（人工分类的可选项来源；taskId 为 null）----
+    match = p.match(/^\/api\/label\/workspace\/([^/]+)$/);
+    if (match) {
+      return json(
+        res,
+        200,
+        state.workspaceLabels.map((l) => ({ ...l, taskId: null, workspaceId: match[1] })),
+      );
+    }
+    // ---- 任务已关联的标签（写入后读回核对）----
+    match = p.match(/^\/api\/label\/task\/([^/]+)$/);
+    if (match) {
+      const taskId = match[1];
+      return json(
+        res,
+        200,
+        (state.taskLabels.get(taskId) ?? []).map((l) => ({ ...l, taskId, workspaceId: "ws-e2e" })),
+      );
+    }
+    // ---- 关联工作区级标签到任务（Kaneo 语义：为任务新建一行，工作区标签保留）----
+    match = p.match(/^\/api\/label\/([^/]+)\/task$/);
+    if (match && req.method === "PUT") {
+      const labelId = match[1];
+      const body = await readBody(req);
+      const taskId = String(body.taskId ?? "");
+      const def = state.workspaceLabels.find((l) => l.id === labelId);
+      if (!def) return json(res, 404, { error: "Label not found" });
+      const current = state.taskLabels.get(taskId) ?? [];
+      const existing = current.find((l) => l.name === def.name);
+      if (existing) {
+        state.labelAttaches.push({ labelId, taskId, created: false, at: new Date().toISOString() });
+        return json(res, 200, { ...existing, taskId, workspaceId: "ws-e2e" });
+      }
+      const created = { id: `tasklabel-${++state.taskLabelSeq}-${def.name}`, name: def.name, color: def.color };
+      state.taskLabels.set(taskId, [...current, created]);
+      state.labelAttaches.push({ labelId, taskId, created: true, at: new Date().toISOString() });
+      return json(res, 200, { ...created, taskId, workspaceId: "ws-e2e" });
+    }
+    // ---- 工作区成员（可选负责人）----
+    match = p.match(/^\/api\/workspace\/([^/]+)\/members$/);
+    if (match) {
+      return json(res, 200, state.members);
     }
     // ---- 阶段 2：图片上传——分配预签名地址 ----
     match = p.match(/^\/api\/task\/image-upload\/([^/]+)$/);

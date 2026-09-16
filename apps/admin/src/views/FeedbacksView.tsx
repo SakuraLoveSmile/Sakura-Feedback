@@ -1,7 +1,41 @@
-import { type ReactNode, useCallback, useEffect, useState } from "react";
-import { ApiError, api, type FeedbackDetail, type FeedbackListItem, STATUS_LABELS } from "../api.ts";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import {
+  ApiError,
+  type AppItem,
+  AUDIT_LABELS,
+  api,
+  type ClassifyOptions,
+  type FeedbackDetail,
+  type FeedbackListItem,
+  STATUS_LABELS,
+} from "../api.ts";
 
 const STATUSES = Object.keys(STATUS_LABELS);
+
+/** 反馈当前卡在哪一步（与组件侧提示同一口径）。 */
+const COLLECTION_LABELS: Record<string, string> = {
+  waiting_configuration: "等待管理员配置软件",
+  waiting_source_confirmation: "等待确认来源",
+  waiting_manual_archive: "等待人工分类归档",
+  queued: "已进入归档流程",
+};
+
+function collectionText(it: FeedbackListItem): string | null {
+  if (!it.collectionState) return null;
+  return COLLECTION_LABELS[it.collectionState] ?? it.collectionState;
+}
+
+/** 自动归档阻塞原因（配置问题 / 可恢复故障）。 */
+function autoBlockedText(it: FeedbackListItem): string | null {
+  if (!it.autoBlockedKind) return null;
+  const prefix = it.autoBlockedKind === "retryable" ? "可恢复故障" : "配置问题";
+  return `${prefix}：${it.autoBlockedReason ?? ""}`.slice(0, 120);
+}
+
+/** 列表「等待项」单元格：优先显示阻塞原因，其次显示收集状态。 */
+function waitingText(it: FeedbackListItem): string | null {
+  return autoBlockedText(it) ?? collectionText(it);
+}
 
 export default function FeedbacksView() {
   const [items, setItems] = useState<FeedbackListItem[]>([]);
@@ -80,6 +114,7 @@ export default function FeedbacksView() {
               <th>提交账号</th>
               <th>标题 / 摘要</th>
               <th>状态</th>
+              <th>等待项</th>
               <th>Kaneo</th>
               <th></th>
             </tr>
@@ -94,6 +129,7 @@ export default function FeedbacksView() {
                 <td>
                   <span className={`tag ${it.status}`}>{STATUS_LABELS[it.status] ?? it.status}</span>
                 </td>
+                <td className="muted">{waitingText(it) ?? "—"}</td>
                 <td>
                   {it.kaneoUrl ? (
                     <a href={it.kaneoUrl} target="_blank" rel="noreferrer">
@@ -112,7 +148,7 @@ export default function FeedbacksView() {
             ))}
             {items.length === 0 && (
               <tr>
-                <td colSpan={7} className="muted" style={{ padding: 20 }}>
+                <td colSpan={8} className="muted" style={{ padding: 20 }}>
                   暂无记录
                 </td>
               </tr>
@@ -366,6 +402,7 @@ function DetailPane({
           </ul>
         </>
       )}
+      <ClassifyPanel detail={detail} onAction={onAction} />
       {detail.errorSummary && (
         <>
           <h3 className="err">错误摘要</h3>
@@ -460,4 +497,326 @@ function DetailPane({
 
 function sectionLabel(k: string): ReactNode {
   return { experience: "使用体验", problems: "问题", suggestions: "建议", questions: "待确认" }[k] ?? k;
+}
+
+/** 分类面板用到的内部状态（受控选择）。 */
+interface ClassifyState {
+  projectId: string;
+  columnId: string;
+  labelIds: string[];
+  assigneeId: string;
+}
+
+function classifyStateOf(detail: FeedbackDetail, fallbackProject: string): ClassifyState {
+  const c = detail.classification;
+  return {
+    projectId: c?.projectId ?? fallbackProject,
+    columnId: c?.columnId ?? "",
+    labelIds: c?.labelIds ?? [],
+    assigneeId: c?.assigneeId ?? "",
+  };
+}
+
+/**
+ * 人工分类与归档（T2）：
+ * - 项目、目标列、至少一个工作区标签必填；负责人可选；
+ * - 「保存」= 暂存（允许缺项）；「保存并归档」= 完整校验后固定快照并入队；
+ * - 切换项目立即清空列/标签/负责人，并用请求序号 + 当前项目校验丢弃迟到响应；
+ * - 已进入归档队列或已归档的记录锁定分类（只读展示）。
+ */
+function ClassifyPanel({
+  detail,
+  onAction,
+}: {
+  detail: FeedbackDetail;
+  onAction: (fn: () => Promise<unknown>) => Promise<void>;
+}) {
+  const locked = Boolean(detail.classificationLocked);
+  const [projects, setProjects] = useState<{ id: string; name: string; workspaceId: string }[]>([]);
+  const [appDefault, setAppDefault] = useState<{ projectId: string; columnSlug: string } | null>(null);
+  const [state, setState] = useState<ClassifyState>(() =>
+    classifyStateOf(detail, detail.classification?.projectId ?? ""),
+  );
+  const [options, setOptions] = useState<ClassifyOptions | null>(null);
+  const [optionsError, setOptionsError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const seqRef = useRef(0);
+  /** 软件默认项目/列只用于**首次**预填；用户手动切换项目后不再自动选择任何列。 */
+  const autoPrefillRef = useRef(true);
+
+  // 软件默认项目/列仅用于预填（标签与负责人绝不自动选择）。
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const [projRes, appsRes] = await Promise.all([
+          api.get<{ ok: boolean; projects?: { id: string; name: string; workspaceId: string }[] }>(
+            "/api/admin/connection/kaneo/projects",
+          ),
+          api.get<{ apps: AppItem[] }>("/api/admin/apps"),
+        ]);
+        if (!alive) return;
+        setProjects(projRes.projects ?? []);
+        const app = (appsRes.apps ?? []).find((a) => a.appId === detail.appId);
+        setAppDefault(app ? { projectId: app.kaneoProjectId, columnSlug: app.kaneoColumnSlug } : null);
+      } catch {
+        /* 连接未配置时保持空列表 */
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [detail.appId]);
+
+  // 首次拿到详情时用软件默认项目/列预填（仅在用户/记录都没有选择、且未手动切换过项目时）。
+  useEffect(() => {
+    if (!appDefault || !autoPrefillRef.current) return;
+    setState((prev) => {
+      if (prev.projectId) return prev;
+      return { ...prev, projectId: appDefault.projectId };
+    });
+  }, [appDefault]);
+
+  const loadOptions = useCallback(async (projectId: string) => {
+    const seq = ++seqRef.current;
+    setOptionsError(null);
+    setOptions(null);
+    if (!projectId) return;
+    try {
+      const res = await api.get<ClassifyOptions>(
+        `/api/admin/feedback/options?projectId=${encodeURIComponent(projectId)}`,
+      );
+      // 迟到响应丢弃：序号必须仍是当前请求，且返回项目必须与当前选择一致。
+      if (seq !== seqRef.current) return;
+      if (res.project.id !== projectId) return;
+      setOptions(res);
+    } catch (err) {
+      if (seq !== seqRef.current) return;
+      setOptionsError(err instanceof ApiError ? err.message : "读取 Kaneo 选项失败");
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadOptions(state.projectId);
+  }, [state.projectId, loadOptions]);
+
+  // 记录自带分类版本变化（保存成功）时，用服务端返回的稳定值刷新本地状态。
+  useEffect(() => {
+    setState((prev) => {
+      const next = classifyStateOf(detail, prev.projectId);
+      return { ...prev, columnId: next.columnId, labelIds: next.labelIds, assigneeId: next.assigneeId };
+    });
+  }, [detail]);
+
+  // 首次加载到列选项时用软件默认列预填（按 slug 匹配实时列选项）；只做一次。
+  useEffect(() => {
+    if (!options || !appDefault || !autoPrefillRef.current) return;
+    autoPrefillRef.current = false;
+    setState((prev) => {
+      if (prev.columnId || detail.classification?.columnId) return prev;
+      const hit = options.columns.find((c) => c.slug === appDefault.columnSlug);
+      return hit ? { ...prev, columnId: hit.id } : prev;
+    });
+  }, [options, appDefault, detail.classification?.columnId]);
+
+  const column = options?.columns.find((c) => c.id === state.columnId) ?? null;
+  const complete = Boolean(state.projectId && column && state.labelIds.length > 0);
+
+  function changeProject(projectId: string) {
+    // 切换项目立即清空列/标签/负责人，避免把上一个项目的选择带过去；同时停止自动预填默认列。
+    autoPrefillRef.current = false;
+    setNotice(null);
+    setState({ projectId, columnId: "", labelIds: [], assigneeId: "" });
+    void loadOptions(projectId);
+  }
+
+  function toggleLabel(id: string) {
+    setState((prev) => ({
+      ...prev,
+      labelIds: prev.labelIds.includes(id) ? prev.labelIds.filter((x) => x !== id) : [...prev.labelIds, id],
+    }));
+  }
+
+  async function submit(action: "save" | "archive") {
+    if (locked) return;
+    setNotice(null);
+    if (action === "archive" && !complete) {
+      setNotice("归档前必须选择项目、目标列与至少一个工作区标签。");
+      return;
+    }
+    const assignee = options?.members.find((m) => m.id === state.assigneeId) ?? null;
+    setBusy(true);
+    try {
+      await onAction(async () => {
+        await api.post(`/api/admin/feedback/${detail.id}/classify`, {
+          action,
+          classifyVersion: detail.classification?.version ?? 0,
+          projectId: state.projectId || null,
+          columnId: state.columnId || null,
+          columnSlug: column?.slug ?? null,
+          labelIds: state.labelIds,
+          assigneeId: state.assigneeId || null,
+          assigneeName: assignee?.name ?? null,
+        });
+        // 归档授权是异步的：稍等 worker 走完任务/标签/附件阶段，让详情直接显示最终状态。
+        if (action === "archive") await new Promise((r) => setTimeout(r, 1500));
+      });
+      setNotice(action === "archive" ? "已固定归档快照并加入队列。" : "已保存分类（暂存）。");
+    } catch (err) {
+      setNotice(err instanceof ApiError ? `${err.message}` : "操作失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const c = detail.classification;
+
+  return (
+    <div style={{ marginTop: 18, borderTop: "1px solid #e3e6ea", paddingTop: 12 }}>
+      <h3 style={{ marginTop: 0 }}>人工分类与归档</h3>
+      <div className="kv" style={{ marginBottom: 8 }}>
+        <span>收集状态</span>
+        <span>{COLLECTION_LABELS[detail.collectionState ?? ""] ?? detail.collectionState ?? "—"}</span>
+        <span>观察到的来源</span>
+        <span>
+          <code>{detail.sourceOrigin || "—"}</code>
+        </span>
+        <span>授权来源</span>
+        <span>
+          {detail.archiveAuthorizedKind === "auto"
+            ? `自动归档规则（规则 v${detail.archiveRuleVersion ?? "?"}）`
+            : detail.archiveAuthorizedKind === "manual"
+              ? "管理员逐条授权"
+              : "—"}
+        </span>
+      </div>
+      {detail.autoBlockedKind && (
+        <p className={detail.autoBlockedKind === "config" ? "err" : "muted"} style={{ fontSize: 13 }}>
+          {detail.autoBlockedKind === "config" ? "配置问题" : "可恢复故障"}：{detail.autoBlockedReason ?? "—"}
+          {detail.autoNextAttemptAt ? `（下次自动重试：${new Date(detail.autoNextAttemptAt).toLocaleString()}）` : ""}
+        </p>
+      )}
+      {locked ? (
+        <p className="muted" style={{ fontSize: 13 }}>
+          该记录已进入归档流程或已归档，分类已锁定。已知远端任务只能沿下方「恢复操作」继续，不能通过分类编辑另建任务。
+        </p>
+      ) : (
+        <p className="muted" style={{ fontSize: 12 }}>
+          项目、目标列与至少一个工作区标签为归档必填；负责人可选。「保存」允许缺项（仅暂存），
+          完整保存只会变为「待归档」，不会产生任何远端写入。分类版本：{c?.version ?? 0}
+        </p>
+      )}
+      <div className="kv" style={{ margin: "10px 0" }}>
+        <span>所在项目</span>
+        <span>
+          <select
+            aria-label="所在项目"
+            style={{ width: 260 }}
+            value={state.projectId}
+            disabled={locked}
+            onChange={(e) => changeProject(e.target.value)}
+          >
+            <option value="">（未选择）</option>
+            {projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}（{p.id}）
+              </option>
+            ))}
+          </select>
+        </span>
+        <span>目标列</span>
+        <span>
+          <select
+            aria-label="目标列"
+            style={{ width: 260 }}
+            value={state.columnId}
+            disabled={locked || !state.projectId || !options}
+            onChange={(e) => setState((prev) => ({ ...prev, columnId: e.target.value }))}
+          >
+            <option value="">（未选择）</option>
+            {(options?.columns ?? []).map((col) => (
+              <option key={col.id} value={col.id}>
+                {col.name}（{col.slug}）
+              </option>
+            ))}
+          </select>
+        </span>
+        <span>负责人（可选）</span>
+        <span>
+          <select
+            aria-label="负责人"
+            style={{ width: 260 }}
+            value={state.assigneeId}
+            disabled={locked || !options}
+            onChange={(e) => setState((prev) => ({ ...prev, assigneeId: e.target.value }))}
+          >
+            <option value="">（不指定负责人）</option>
+            {(options?.members ?? []).map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.name}
+              </option>
+            ))}
+          </select>
+        </span>
+      </div>
+      <div style={{ margin: "8px 0" }}>
+        <div className="muted" style={{ fontSize: 12, marginBottom: 4 }}>
+          工作区标签（至少一个；仅工作区级标签可选，不会移动其他任务的标签）
+        </div>
+        {optionsError && <p className="err">{optionsError}</p>}
+        {options && options.labels.length === 0 && (
+          <p className="muted" style={{ fontSize: 12 }}>
+            该工作区没有工作区级标签。
+          </p>
+        )}
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+          {(options?.labels ?? []).map((l) => (
+            <label key={l.id} style={{ display: "inline-flex", gap: 4, alignItems: "center", fontSize: 13 }}>
+              <input
+                type="checkbox"
+                checked={state.labelIds.includes(l.id)}
+                disabled={locked}
+                onChange={() => toggleLabel(l.id)}
+              />
+              {l.name}
+            </label>
+          ))}
+        </div>
+      </div>
+      {notice && (
+        <p className={notice.includes("失败") || notice.includes("必须") ? "err" : "ok-text"} style={{ fontSize: 13 }}>
+          {notice}
+        </p>
+      )}
+      {!locked && (
+        <div className="row" style={{ marginTop: 6 }}>
+          <button type="button" disabled={busy} onClick={() => void submit("save")}>
+            保存
+          </button>
+          <button type="button" className="primary" disabled={busy || !complete} onClick={() => void submit("archive")}>
+            保存并归档
+          </button>
+          {!complete && (
+            <span className="muted" style={{ fontSize: 12 }}>
+              归档前请补齐项目、目标列与标签
+            </span>
+          )}
+        </div>
+      )}
+      {Array.isArray(detail.audit) && detail.audit.length > 0 && (
+        <div style={{ marginTop: 14 }}>
+          <h4 style={{ marginBottom: 6 }}>操作审计</h4>
+          <ul style={{ fontSize: 12, paddingLeft: 18 }}>
+            {detail.audit.map((a) => (
+              <li key={a.id}>
+                <span className="muted">{new Date(a.at).toLocaleString()}</span> · {a.actor || "系统"} ·{" "}
+                {AUDIT_LABELS[a.action] ?? a.action}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
 }

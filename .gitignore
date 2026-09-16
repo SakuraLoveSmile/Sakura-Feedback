@@ -43,3 +43,10 @@ e2e/flutter_native/work/
 # T1-C 默认存储验收运行产物
 e2e/t1c-runs/
 examples/flutter/t1c-defines.json
+
+# Flutter 矩阵/原生验证的运行输出（日志与解析结果，不入库）
+e2e/flutter_matrix/out/
+e2e/flutter_native/out/
+
+# 本机 IDE/代理会话数据
+.zcode/

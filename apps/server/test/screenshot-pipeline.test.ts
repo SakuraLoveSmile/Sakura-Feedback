@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { getFeedback, getFeedbackScreenshot, getFeedbackScreenshotMeta } from "../src/db/repos.ts";
-import { createTestPng, defaultSubmitBody, jsonReq, makeHarness, submitMultipartFeedback } from "./helpers.ts";
+import {
+  authorizeArchive,
+  createTestPng,
+  defaultSubmitBody,
+  jsonReq,
+  makeHarness,
+  submitMultipartFeedback,
+} from "./helpers.ts";
 
 describe("图文反馈提交与图片处理", () => {
   it("multipart 提交：有效 PNG 截图入库并生成独立截图记录", async () => {
@@ -83,6 +90,10 @@ describe("图文反馈提交与图片处理", () => {
       png,
     );
     expect(ok.status).toBe(201);
+    await h.feedbackApp.worker.idle();
+    // 新契约：提交只做 AI 整理，归档必须显式授权（multipart 提交需手动授权）。
+    const auth = await authorizeArchive(h, ok.data.feedbackId);
+    expect(auth.status).toBe(202);
     await h.feedbackApp.worker.idle();
     const meta = getFeedbackScreenshotMeta(h.feedbackApp.db, ok.data.feedbackId);
     expect(meta?.capture?.pixelWidth).toBeUndefined();
@@ -193,6 +204,10 @@ describe("Kaneo 图文五步归档与阶段恢复", () => {
     expect(res.status).toBe(201);
     const id = res.data.feedbackId;
 
+    await h.feedbackApp.worker.idle();
+    // 新契约：提交只做 AI 整理，归档必须显式授权（multipart 提交需手动授权）。
+    const auth = await authorizeArchive(h, id);
+    expect(auth.status).toBe(202);
     await h.feedbackApp.worker.idle();
 
     // 验证状态

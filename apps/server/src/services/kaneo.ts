@@ -6,6 +6,24 @@ export interface KaneoColumn {
   name: string;
 }
 
+/** 工作区级标签（Kaneo GET /label/workspace/{workspaceId}）。taskId 为 null 表示工作区级标签。 */
+export interface KaneoLabel {
+  id: string;
+  name: string;
+  color: string;
+  /** 已挂在某个任务上时为其任务 ID；工作区级标签为 null。 */
+  taskId: string | null;
+  workspaceId: string | null;
+}
+
+/** 工作区成员（Kaneo GET /workspace/{workspaceId}/members）。 */
+export interface KaneoMember {
+  id: string;
+  name: string;
+  email: string;
+  role: string;
+}
+
 export interface KaneoTaskRef {
   taskId: string;
   taskUrl: string;
@@ -69,12 +87,24 @@ export interface KaneoClient {
   getProjectInfo(projectId: string): Promise<{ id: string; workspaceId: string; name: string; slug: string }>;
   /** 列出密钥可见的工作区与项目（管理页选择目标项目用）。 */
   listProjects(): Promise<{ workspaces: KaneoWorkspace[]; projects: KaneoProjectInfo[] }>;
+  /** 读取项目的全部列（管理页选择目标列与归档前校验真实 slug 用）。只读请求。 */
+  listColumns(projectId: string): Promise<KaneoColumn[]>;
+  /** 读取工作区级标签（仅 taskId 为 null 的标签可选；避免移动其他任务的标签）。只读请求。 */
+  listWorkspaceLabels(workspaceId: string): Promise<KaneoLabel[]>;
+  /** 读取任务当前已关联的标签（写入后读回核对）。只读请求。 */
+  listTaskLabels(taskId: string): Promise<KaneoLabel[]>;
+  /** 把工作区级标签关联到任务（Kaneo PUT /label/{labelId}/task）。写入操作。 */
+  attachLabelToTask(labelId: string, taskId: string): Promise<KaneoLabel>;
+  /** 读取工作区成员（可选负责人）。只读请求。 */
+  listWorkspaceMembers(workspaceId: string): Promise<KaneoMember[]>;
   /** 先解析 columnSlug（查不到抛 KaneoColumnNotFound，保证未发出写请求），再创建任务。 */
   createTask(input: {
     projectId: string;
     columnSlug: string;
     title: string;
     description: string;
+    /** 负责人；未选择时**省略**（不发送 userId）以保持“无负责人”默认。 */
+    userId?: string;
   }): Promise<KaneoTaskRef>;
   /** 按描述中的反馈 ID 标记搜索任务（待核对恢复）。 */
   findByFeedbackId(projectId: string, feedbackId: string): Promise<KaneoTaskRef | null>;

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  authorizeArchive,
   defaultSubmitBody,
   jsonReq,
   loginAsAdmin,
@@ -26,6 +27,7 @@ describe("软件配置管理", () => {
       cookie: h.cookie,
       body: {
         appId: "尝试篡改",
+        expectedRuleVersion: created.ruleVersion,
         name: "改名",
         allowedOrigins: ["https://a.test", "https://b.test"],
         kaneoProjectId: "proj-2",
@@ -50,22 +52,72 @@ describe("软件配置管理", () => {
     expect(list.status).toBe(200);
   });
 
-  it("提交到未登记 appId → 404；登记后成功", async () => {
+  it("提交到未登记 appId：自动发现为待配置软件并成功接收", async () => {
     const h = await makeHarness();
-    const before = await submitFeedback(h.feedbackApp, h.bearer, defaultSubmitBody({ appId: "com.new.app" }));
-    expect(before.status).toBe(404);
-    await jsonReq(h.feedbackApp.app, "POST", "/api/admin/apps", {
+    const key = "discover-key";
+    const before = await submitFeedback(
+      h.feedbackApp,
+      h.bearer,
+      defaultSubmitBody({ appId: "com.new.app", idempotencyKey: key }),
+    );
+    // T1：不再要求预先登记软件；首次有效提交即在事务内创建待配置软件。
+    expect(before.status).toBe(201);
+    expect(before.data.collectionState).toBe("waiting_configuration");
+
+    const list = await jsonReq(h.feedbackApp.app, "GET", "/api/admin/apps", { cookie: h.cookie });
+    const discovered = (list.data.apps as Array<Record<string, unknown>>).find((a) => a.appId === "com.new.app");
+    expect(discovered).toBeTruthy();
+    expect(discovered?.configStatus).toBe("pending");
+    expect(discovered?.archiveMode).toBe("manual");
+    expect(discovered?.name).toBe("com.new.app"); // 未提供 appName 时显示 appId
+    expect(discovered?.pendingSources).toBe(1); // 浏览器来源待确认
+
+    // 幂等重放不产生第二条软件记录、也不重复扣费
+    const replay = await submitFeedback(
+      h.feedbackApp,
+      h.bearer,
+      defaultSubmitBody({ appId: "com.new.app", idempotencyKey: key }),
+    );
+    expect(replay.status).toBe(200);
+    expect(replay.data.replayed).toBe(true);
+    const list2 = await jsonReq(h.feedbackApp.app, "GET", "/api/admin/apps", { cookie: h.cookie });
+    expect((list2.data.apps as Array<{ appId: string }>).filter((a) => a.appId === "com.new.app")).toHaveLength(1);
+  });
+
+  it("客户端上报的 appName 在管理员设置名称后不再覆盖", async () => {
+    const h = await makeHarness();
+    const first = await submitFeedback(
+      h.feedbackApp,
+      h.bearer,
+      defaultSubmitBody({ appId: "com.named.app", appName: "客户端名称" }),
+    );
+    expect(first.status).toBe(201);
+    let list = await jsonReq(h.feedbackApp.app, "GET", "/api/admin/apps", { cookie: h.cookie });
+    let app = (list.data.apps as Array<Record<string, unknown>>).find((a) => a.appId === "com.named.app");
+    expect(app?.name).toBe("客户端名称");
+    expect(app?.nameSource).toBe("client");
+
+    // 管理员保存名称后，客户端上报不再生效
+    const appDetail = await jsonReq(h.feedbackApp.app, "GET", `/api/admin/apps/${app?.id}`, { cookie: h.cookie });
+    await jsonReq(h.feedbackApp.app, "PUT", `/api/admin/apps/${app?.id}`, {
       cookie: h.cookie,
       body: {
-        appId: "com.new.app",
-        name: "新软件",
+        expectedRuleVersion: appDetail.data.app?.ruleVersion ?? 0,
+        name: "管理员名称",
         allowedOrigins: [],
-        kaneoProjectId: "proj-1",
-        kaneoColumnSlug: "triage",
       },
     });
-    const after = await submitFeedback(h.feedbackApp, h.bearer, defaultSubmitBody({ appId: "com.new.app" }));
-    expect(after.status).toBe(201);
+    const second = await submitFeedback(
+      h.feedbackApp,
+      h.bearer,
+      defaultSubmitBody({ appId: "com.named.app", appName: "客户端改名" }),
+    );
+    expect(second.status).toBe(201);
+    list = await jsonReq(h.feedbackApp.app, "GET", "/api/admin/apps", { cookie: h.cookie });
+    app = (list.data.apps as Array<Record<string, unknown>>).find((a) => a.appId === "com.named.app");
+    expect(app?.name).toBe("管理员名称");
+    expect(app?.nameSource).toBe("admin");
+    expect(app?.configStatus).toBe("configured");
   });
 });
 
@@ -134,7 +186,13 @@ describe("管理列表与鉴权边界", () => {
     const viaBearer = await jsonReq(h.feedbackApp.app, "GET", "/api/admin/apps", { bearer: h.bearer });
     expect(viaBearer.status).toBe(403);
 
-    await submitFeedback(h.feedbackApp, h.bearer, defaultSubmitBody());
+    const submitted = await submitFeedback(h.feedbackApp, h.bearer, defaultSubmitBody());
+    expect(submitted.status).toBe(201);
+    await h.feedbackApp.worker.idle();
+    // 新契约：提交只完成 AI 整理（needs_info），远端归档需管理员显式授权后才入队。
+    const detailId = submitted.data.feedbackId as string;
+    const auth = await authorizeArchive(h, detailId);
+    expect(auth.status).toBe(202);
     await h.feedbackApp.worker.idle();
     const list = await jsonReq(h.feedbackApp.app, "GET", "/api/admin/feedback", { cookie: h.cookie });
     expect(list.data.items.length).toBe(1);

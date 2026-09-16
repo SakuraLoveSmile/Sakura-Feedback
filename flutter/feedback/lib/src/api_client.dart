@@ -187,6 +187,54 @@ typedef FeedbackLogProvider = FutureOr<List<FeedbackLogFile>?> Function();
 /// 手动日志文件选择器。
 typedef FeedbackFilePicker = FutureOr<List<FeedbackLogFile>?> Function();
 
+/// 组件侧「已保存、等待什么」状态（T4；旧服务端不返回该字段，缺省即可忽略）。
+///
+/// 等待态**不是失败**：组件应提示已保存，并停止无意义的轮询。
+enum FeedbackCollectionState {
+  /// 软件尚未被管理员配置（首次提交自动发现的软件）。
+  waitingConfiguration,
+
+  /// 自动归档软件出现了新来源，等待管理员确认。
+  waitingSourceConfirmation,
+
+  /// 已配置但为人工归档模式，等待管理员逐条归档。
+  waitingManualArchive,
+
+  /// 已获得归档授权、正在归档流程中。
+  queued,
+}
+
+/// 解析服务端返回的 collectionState；未知或缺失返回 null（按旧行为处理）。
+FeedbackCollectionState? parseCollectionState(Object? raw) {
+  switch (raw) {
+    case 'waiting_configuration':
+      return FeedbackCollectionState.waitingConfiguration;
+    case 'waiting_source_confirmation':
+      return FeedbackCollectionState.waitingSourceConfirmation;
+    case 'waiting_manual_archive':
+      return FeedbackCollectionState.waitingManualArchive;
+    case 'queued':
+      return FeedbackCollectionState.queued;
+    default:
+      return null;
+  }
+}
+
+/// 等待态的用户提示；[FeedbackCollectionState.queued] 与 null 返回 null（按“整理中”展示）。
+String? collectionWaitingText(FeedbackCollectionState? state) {
+  switch (state) {
+    case FeedbackCollectionState.waitingConfiguration:
+      return '反馈已保存，等待管理员配置该软件。';
+    case FeedbackCollectionState.waitingSourceConfirmation:
+      return '反馈已保存，等待管理员确认来源。';
+    case FeedbackCollectionState.waitingManualArchive:
+      return '反馈已保存，等待管理员归档。';
+    case FeedbackCollectionState.queued:
+    case null:
+      return null;
+  }
+}
+
 /// `POST /api/feedback` 的解析结果。
 class FeedbackSubmitResult {
   /// 构造结果。
@@ -196,6 +244,7 @@ class FeedbackSubmitResult {
     this.replayed = false,
     this.quota,
     this.user,
+    this.collectionState,
   });
 
   /// 反馈记录 id。
@@ -213,6 +262,9 @@ class FeedbackSubmitResult {
   /// 提交账号（若服务端返回）。
   final AuthUser? user;
 
+  /// 当前收集状态（等待配置 / 等待确认来源 / 等待人工归档 / 已排队）。
+  final FeedbackCollectionState? collectionState;
+
   /// 从 JSON 解析（宽松）。
   factory FeedbackSubmitResult.fromJson(Map<String, Object?> json) =>
       FeedbackSubmitResult(
@@ -221,6 +273,7 @@ class FeedbackSubmitResult {
         replayed: json['replayed'] == true,
         quota: Quota.fromJson(json['quota']),
         user: AuthUser.fromJson(json['user']),
+        collectionState: parseCollectionState(json['collectionState']),
       );
 }
 
@@ -232,6 +285,7 @@ class FeedbackRecord {
     required this.status,
     this.errorSummary,
     this.kaneoUrl,
+    this.collectionState,
   });
 
   /// 反馈记录 id。
@@ -246,12 +300,16 @@ class FeedbackRecord {
   /// 归档后的 Kaneo 链接（若有）。
   final String? kaneoUrl;
 
+  /// 当前收集状态（等待配置 / 等待确认来源 / 等待人工归档 / 已排队）。
+  final FeedbackCollectionState? collectionState;
+
   /// 从 JSON 解析（宽松）。
   factory FeedbackRecord.fromJson(Map<String, Object?> json) => FeedbackRecord(
         id: json['id'] as String? ?? '',
         status: json['status'] as String? ?? 'received',
         errorSummary: json['errorSummary'] as String?,
         kaneoUrl: json['kaneoUrl'] as String?,
+        collectionState: parseCollectionState(json['collectionState']),
       );
 }
 
@@ -479,6 +537,8 @@ class ApiClient {
         final Map<String, Object?> metadata = <String, Object?>{
           'idempotencyKey': idempotencyKey,
           'appId': config.appId,
+          // 可选上报软件名称：服务端只在管理员尚未设置名称时采用。
+          if (config.appName != null) 'appName': config.appName,
           'text': text,
           if (context.isNotEmpty) 'context': context,
           if (captureInfo != null) 'capture': captureInfo.toJson(),

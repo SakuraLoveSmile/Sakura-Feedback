@@ -7,7 +7,7 @@
 | 变量 | 必填 | 说明 |
 |---|---|---|
 | `FEEDBACK_MASTER_KEY` | 是 | 主密钥。推荐 base64 的 32 字节随机值：`node -e 'console.log(require("crypto").randomBytes(32).toString("base64"))'`。非 base64-32B 值将按口令 scrypt 派生。**丢失则已存密钥（AI/Kaneo）无法解密**，请备份。 |
-| `FEEDBACK_ADMIN_USER` / `FEEDBACK_ADMIN_PASSWORD` | 首次部署 | 初始账号，仅当库中无用户时生效；不开放注册。**改用户名/密码**：登录后台 →「管理员设置」标签，在那里修改自己的用户名与密码（v0.2.1 起支持）。保存成功后该管理员**全部会话（含当前）立即失效**，需要用新凭据重新登录；账号 id、角色、每日额度与历史反馈归属都不变，**无需重建数据库**。 |
+| `FEEDBACK_ADMIN_USER` / `FEEDBACK_ADMIN_PASSWORD` | 首次部署 | 初始账号，仅当库中无用户时生效；不开放注册。**改用户名/密码**：登录后台 →「管理员设置」标签，在那里修改自己的用户名与密码（v0.3.0 起支持）。保存成功后该管理员**全部会话（含当前）立即失效**，需要用新凭据重新登录；账号 id、角色、每日额度与历史反馈归属都不变，**无需重建数据库**。 |
 | `FEEDBACK_PORT` | 否 | 默认 8787 |
 | `FEEDBACK_DATA_DIR` | 否 | 默认 `./data`；容器内 `/data` |
 | `FEEDBACK_COOKIE_SECURE` | 否 | HTTPS 部署设为 `true`（默认 false，本地 http 可用） |

@@ -1,7 +1,15 @@
 import { Hono } from "hono";
 import type { RateLimiter } from "../auth/ratelimit.ts";
-import type { Db, FeedbackStatus, LogInput, SessionRow } from "../db/repos.ts";
-import { contentHash, getAppByAppId, getFeedback, getFeedbackScreenshot, submitFeedbackAtomic } from "../db/repos.ts";
+import type { AppSourceKind, Db, FeedbackStatus, LogInput, SessionRow } from "../db/repos.ts";
+import {
+  collectionStateForFeedback,
+  contentHash,
+  getFeedback,
+  getFeedbackScreenshot,
+  insertFeedbackAudit,
+  NATIVE_SOURCE,
+  submitFeedbackAtomic,
+} from "../db/repos.ts";
 import type { ServerConfig } from "../env.ts";
 import {
   checkLimiter,
@@ -9,6 +17,7 @@ import {
   err,
   fail,
   isErr,
+  normalizeRequestOrigin,
   readJson,
   requireAdminCookie,
   requireSession,
@@ -35,14 +44,18 @@ function textCodepointLen(s: string): number {
   return Array.from(s).length;
 }
 
-function publicStatus(row: {
-  id: string;
-  status: FeedbackStatus;
-  created_at: string;
-  updated_at: string;
-  error_summary: string | null;
-  kaneo_task_url: string | null;
-}) {
+function publicStatus(
+  db: Db,
+  row: {
+    id: string;
+    status: FeedbackStatus;
+    created_at: string;
+    updated_at: string;
+    error_summary: string | null;
+    kaneo_task_url: string | null;
+  },
+) {
+  const full = getFeedback(db, row.id);
   return {
     id: row.id,
     status: row.status,
@@ -50,7 +63,31 @@ function publicStatus(row: {
     updatedAt: row.updated_at,
     errorSummary: row.error_summary,
     kaneoUrl: row.kaneo_task_url,
+    // T4：等待配置 / 等待来源确认 / 等待人工归档 / 已排队。
+    // 旧组件忽略该字段即可；新版组件据此显示“已保存，等待…”而不是提交失败。
+    ...(full ? { collectionState: collectionStateForFeedback(db, full) } : {}),
   };
+}
+
+/**
+ * 解析服务端**观察到**的来源（T1/T2）：
+ * 浏览器取请求 Origin（规范化）；无 Origin 的原生客户端记为 `native` 单独确认。
+ * 非法 Origin 直接拒绝——来源登记必须是可信值，绝不落库客户端自报的字符串。
+ */
+function observedSource(originHeader: string | undefined): { origin: string; kind: AppSourceKind } | Err {
+  if (originHeader === undefined || originHeader === "") {
+    return { origin: NATIVE_SOURCE, kind: "native" };
+  }
+  const normalized = normalizeRequestOrigin(originHeader);
+  if (!normalized) return err("origin_not_allowed", "来源不合法", 400);
+  return { origin: normalized, kind: "browser" };
+}
+
+/** 可选的组件上报名称：仅做长度与类型校验，不影响管理员已设置的名称。 */
+function parseAppName(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const t = raw.trim().slice(0, 100);
+  return t === "" ? null : t;
 }
 
 export function feedbackRoutes(deps: FeedbackDeps): Hono {
@@ -72,6 +109,7 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
     const contentType = c.req.header("content-type") ?? "";
     let idempotencyKey = "";
     let appId = "";
+    let appNameInput: unknown = null;
     let text = "";
     let contextInput: unknown = null;
     let captureInput: unknown = null;
@@ -124,6 +162,7 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
 
       idempotencyKey = typeof metaParsed.idempotencyKey === "string" ? metaParsed.idempotencyKey.trim() : "";
       appId = typeof metaParsed.appId === "string" ? metaParsed.appId.trim() : "";
+      appNameInput = metaParsed.appName;
       text = typeof metaParsed.text === "string" ? metaParsed.text : "";
       contextInput = metaParsed.context;
       captureInput = metaParsed.capture;
@@ -149,6 +188,7 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
       const body = await readJson<{
         idempotencyKey?: unknown;
         appId?: unknown;
+        appName?: unknown;
         text?: unknown;
         context?: unknown;
         logs?: unknown;
@@ -160,6 +200,7 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
 
       idempotencyKey = typeof body.idempotencyKey === "string" ? body.idempotencyKey.trim() : "";
       appId = typeof body.appId === "string" ? body.appId.trim() : "";
+      appNameInput = body.appName;
       text = typeof body.text === "string" ? body.text : "";
       contextInput = body.context;
     }
@@ -249,8 +290,9 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
       return fail(c, err("invalid_log", (errObj as Error).message, 400));
     }
 
-    const app = getAppByAppId(db, appId);
-    if (!app) return fail(c, err("unknown_app", "appId 未在服务端配置", 404));
+    // T1：不再要求软件已登记 —— 服务端按本次观察到的来源记录，软件在事务内按需自动发现。
+    const source = observedSource(c.req.header("origin"));
+    if (isErr(source)) return fail(c, source);
 
     const hash = contentHash(
       appId,
@@ -264,8 +306,10 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
       db,
       {
         userId: user.id,
-        appId: app.app_id,
-        appRowId: app.id,
+        appId,
+        appName: parseAppName(appNameInput),
+        sourceOrigin: source.origin,
+        sourceKind: source.kind,
         text,
         contextJson: context ? JSON.stringify(context) : null,
         idempotencyKey,
@@ -299,18 +343,27 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
       );
     }
     if (outcome.kind === "replayed") {
+      const replayed = getFeedback(db, outcome.row.id) ?? outcome.row;
       return c.json({
         feedbackId: outcome.row.id,
         status: outcome.row.status,
         replayed: true,
         user: publicUser(user),
         quota: outcome.quota,
+        collectionState: collectionStateForFeedback(db, replayed),
       });
     }
 
     worker.enqueue(outcome.row.id); // 先持久化已接收，再后台处理
     return c.json(
-      { feedbackId: outcome.row.id, status: "received", user: publicUser(user), quota: outcome.quota },
+      {
+        feedbackId: outcome.row.id,
+        status: "received",
+        user: publicUser(user),
+        quota: outcome.quota,
+        // T4：提交成功即明确告知“已接收 / 等待什么”，组件据此提示而不是显示失败。
+        collectionState: collectionStateForFeedback(db, outcome.row),
+      },
       201,
     );
   });
@@ -325,7 +378,7 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
     if (!row || (user.role !== "admin" && row.user_id !== user.id)) {
       return fail(c, err("not_found", "反馈不存在", 404));
     }
-    return c.json(publicStatus(row));
+    return c.json(publicStatus(db, row));
   });
 
   routes.get("/:id/screenshot", (c) => {
@@ -355,6 +408,22 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
     if (isErr(s)) return fail(c, s);
     return s;
   };
+
+  /** 人工恢复动作的操作审计（T2：持久化审计记录，详情页可查看）。 */
+  function auditAction(session: SessionRow, feedbackId: string, action: string, detail?: Record<string, unknown>) {
+    const user = sessionUser(db, session);
+    if (!user) return;
+    try {
+      insertFeedbackAudit(db, {
+        feedbackId,
+        actor: { id: user.id, username: user.username },
+        action,
+        ...(detail ? { detail } : {}),
+      });
+    } catch {
+      /* 审计写入失败不影响恢复动作本身 */
+    }
+  }
 
   /** 解析可选的 expectedRevision（≥0 整数；缺省不校验，兼容旧管理页）。 */
   function parseExpectedRevision(v: unknown): number | undefined | Err {
@@ -412,6 +481,7 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
     const rev = parseExpectedRevision(body.expectedRevision);
     if (isErr(rev)) return fail(c, rev);
     const r = worker.retry(c.req.param("id"), rev);
+    if (r.ok) auditAction(g, c.req.param("id"), "retry", { expectedRevision: rev ?? null });
     return opResponse(c, r);
   });
 
@@ -436,6 +506,7 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
     } else {
       return fail(c, err("invalid_request", 'action 必须为 "recheck" 或 "force-create"', 400));
     }
+    if (r.ok) auditAction(g, id, action === "recheck" ? "recheck" : "force_create", { expectedRevision: rev ?? null });
     return opResponse(c, r);
   });
 
@@ -467,6 +538,12 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
       }
     } catch (errObj) {
       return fail(c, err("recover_failed", `恢复操作失败：${(errObj as Error).message.slice(0, 200)}`, 502));
+    }
+    if (r.ok) {
+      auditAction(g, id, String(body.action), {
+        expectedRevision: rev,
+        ...(typeof body.logId === "string" ? { logId: body.logId } : {}),
+      });
     }
     return opResponse(c, r);
   });

@@ -87,7 +87,7 @@ export default defineConfig({
    `feedback-submitted` 的 `detail = { feedbackId, status, replayed }`，表示服务
    **已接收**提交（201/200）。
 
-5. 打开与截图：
+5. 打开与截图（宿主菜单 / 工具栏同样调用这两个方法）：
 
    ```ts
    widget.value?.open();           // 只打开面板，不截图
@@ -102,6 +102,14 @@ export default defineConfig({
    声明了全部受支持 attributes（含 `theme` / `show-launcher` / `launcher-bottom`
    / `launcher-mode` / `capture-mode`），直接拷贝到你的项目即可。
 
+7. 深色模式：用 `theme` 绑定站点主题（`system` / `light` / `dark`，默认跟随系统）：
+
+   ```vue
+   <feedback-widget :theme="theme" ... />
+   ```
+
+   示例顶部菜单提供了主题切换，文案与面板配色会同步，**不会清空草稿**。
+
 ## 属性默认值与显式覆盖
 
 组件默认是 `launcher-mode="tab"`、`capture-mode="off"`（升级不改变旧宿主行为）。
@@ -114,6 +122,7 @@ export default defineConfig({
   app-id="com.example.demo-vue"
   launcher-mode="orb"        <!-- 默认 tab -->
   capture-mode="viewport"    <!-- 默认 off -->
+  :theme="theme"             <!-- 默认 system，与站点主题联动 -->
 />
 ```
 
@@ -121,12 +130,21 @@ export default defineConfig({
 没有系统悬浮窗、不跨应用截图。`data-feedback-capture-mask` 标注的区域在截图中
 会被中性遮罩覆盖。
 
+## 提交成功 ≠ 已归档（人工归档流程）
+
+服务端**不再在提交时自动归档**：`feedback-submitted` 的 `detail.status` 是 `received`，
+表示"原话已保存、AI 已开始整理"。归档需要管理员在 Feedback 管理页打开该记录，
+选择**项目 / 目标列 / 至少一个工作区标签 /（可选）负责人**，再点「保存并归档」。
+宿主文案请写「反馈已保存」，不要写「已创建任务」。
+
 ## 连你本地的服务
 
 - `api-base` 改成你的服务地址，`app-id` 必须是服务端登记过的软件标识。
 - 页面与反馈服务通常跨源：服务端只对**软件配置里登记的 `allowedOrigins`**
   回显 CORS（`apps/server/src/app.ts`）。Vite 开发服务器默认是
   `http://localhost:5173`，记得把它加进该软件配置的 allowedOrigins。
+- 管理员口令、AI 密钥、Kaneo 地址与 API Key **只配置在 Feedback 服务端**，
+  宿主（含 Blog）不需要也不应持有。
 
 ## 不用打包器
 

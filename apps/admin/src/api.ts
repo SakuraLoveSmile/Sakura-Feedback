@@ -52,6 +52,13 @@ export interface FeedbackListItem {
   title?: string | null;
   kaneoUrl?: string | null;
   errorSummary?: string | null;
+  /** 该反馈当前卡在哪一步（等待配置 / 等待来源确认 / 等待人工归档 / 已排队）。 */
+  collectionState?: CollectionState;
+  sourceOrigin?: string;
+  archiveAuthorizedKind?: "manual" | "auto" | null;
+  autoBlockedKind?: "retryable" | "config" | null;
+  autoBlockedReason?: string | null;
+  autoNextAttemptAt?: string | null;
 }
 
 export interface FeedbackScreenshotMeta {
@@ -100,6 +107,36 @@ export interface FeedbackLogMeta {
   createdAt: string;
 }
 
+/** 人工分类（T1/T2）：项目、目标列、工作区标签、可选负责人与分类版本。 */
+export interface FeedbackClassification {
+  projectId: string | null;
+  columnId: string | null;
+  columnSlug: string | null;
+  labelIds: string[];
+  assigneeId: string | null;
+  assigneeName: string | null;
+  version: number;
+  updatedAt: string | null;
+  updatedBy: string | null;
+}
+
+export interface FeedbackAuditEntry {
+  id: string;
+  at: string;
+  actor: string;
+  action: string;
+  detail: Record<string, unknown> | null;
+}
+
+/** Kaneo 分类选项（GET /api/admin/feedback/options）。 */
+export interface ClassifyOptions {
+  project: { id: string; name: string; workspaceId: string };
+  columns: { id: string; slug: string; name: string }[];
+  /** 只有工作区级标签才会返回（避免移动其他任务的标签）。 */
+  labels: { id: string; name: string; color: string }[];
+  members: { id: string; name: string; email: string; role: string }[];
+}
+
 export interface FeedbackDetail extends FeedbackListItem {
   text: string;
   context: { appVersion?: string; pageLabel?: string } | null;
@@ -113,6 +150,41 @@ export interface FeedbackDetail extends FeedbackListItem {
   recovery?: FeedbackRecovery | null;
   screenshot?: FeedbackScreenshotMeta | null;
   logs?: FeedbackLogMeta[] | null;
+  classification?: FeedbackClassification | null;
+  classificationLocked?: boolean;
+  archiveAuthorized?: boolean;
+  archiveAuthorizedAt?: string | null;
+  archiveOperationId?: string | null;
+  audit?: FeedbackAuditEntry[] | null;
+  /** 该反馈的收集状态（等待配置 / 等待来源确认 / 等待人工归档 / 已排队）。 */
+  collectionState?: CollectionState;
+  /** 服务端观察到的来源；空表示历史数据来源无法确定。 */
+  sourceOrigin?: string;
+  archiveAuthorizedKind?: "manual" | "auto" | null;
+  archiveRuleVersion?: number | null;
+  /** 自动归档阻塞：retryable=可恢复（有退避重试），config=配置问题（等待管理员修正）。 */
+  autoBlockedKind?: "retryable" | "config" | null;
+  autoBlockedReason?: string | null;
+  autoAttempts?: number;
+  autoNextAttemptAt?: string | null;
+  app?: {
+    id: string;
+    appId: string;
+    name: string;
+    configStatus: "pending" | "configured";
+    archiveMode: "manual" | "automatic";
+    ruleVersion: number;
+  } | null;
+}
+
+/** 软件默认归档目标（自动归档规则的来源）。 */
+export interface AppDefaults {
+  projectId: string;
+  columnId: string;
+  columnSlug: string;
+  labelIds: string[];
+  assigneeId: string | null;
+  assigneeName: string | null;
 }
 
 export interface AppItem {
@@ -122,7 +194,49 @@ export interface AppItem {
   allowedOrigins: string[];
   kaneoProjectId: string;
   kaneoColumnSlug: string;
+  /** ---- 先接收后配置 / 自动归档 ---- */
+  /** admin=管理员设置的名称（客户端不可覆盖），client=组件上报。 */
+  nameSource: "client" | "admin";
+  /** pending=自动发现后待配置；configured=管理员已配置。 */
+  configStatus: "pending" | "configured";
+  archiveMode: "manual" | "automatic";
+  /** 规则版本：默认目标或归档模式变化时自增（并发与页面过期检查）。 */
+  ruleVersion: number;
+  defaults: AppDefaults;
+  /** 规则是否完整（项目 + 目标列 + ≥1 工作区标签）。 */
+  ruleComplete: boolean;
+  autoEnabledAt: string | null;
+  autoEnabledBy: string | null;
+  firstSeenAt: string | null;
+  lastSeenAt: string | null;
+  pendingSources: number;
+  confirmedSources: number;
+  /** 尚未获得归档授权、也尚无远端任务的反馈条数。 */
+  waitingFeedbacks: number;
 }
+
+/** 软件来源：服务端观察到的浏览器 Origin，或无 Origin 原生客户端的 native。 */
+export interface AppSourceItem {
+  origin: string;
+  kind: "browser" | "native";
+  status: "pending" | "confirmed";
+  firstSeenAt: string;
+  lastSeenAt: string;
+  confirmedAt: string | null;
+  confirmedBy: string | null;
+}
+
+export interface AppDetail {
+  app: AppItem;
+  sources: AppSourceItem[];
+}
+
+/** 组件侧展示的收集状态（管理页据此解释“为什么还没归档”）。 */
+export type CollectionState =
+  | "waiting_configuration"
+  | "waiting_source_confirmation"
+  | "waiting_manual_archive"
+  | "queued";
 
 export interface SessionItem {
   id: string;
@@ -246,8 +360,23 @@ export type UpdateOperationResult =
 export const STATUS_LABELS: Record<string, string> = {
   received: "已接收",
   processing: "处理中",
+  needs_info: "需要补充信息",
+  ready_to_archive: "待归档",
   archiving: "归档中",
-  needs_review: "待核对",
+  needs_review: "结果待核对",
   archived: "已归档",
   failed: "失败",
+};
+
+/** 审计动作文案（详情页展示）。 */
+export const AUDIT_LABELS: Record<string, string> = {
+  classify_save: "保存分类",
+  archive_authorize: "归档授权",
+  archive_enqueued: "入队归档",
+  retry: "重试处理",
+  recheck: "重新核对",
+  force_create: "确认缺失后再次创建",
+  retry_comment: "重试截图评论",
+  replace_upload: "替换截图上传",
+  retry_log: "重试日志上传",
 };

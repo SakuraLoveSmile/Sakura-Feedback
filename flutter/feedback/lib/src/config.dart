@@ -53,6 +53,7 @@ class FeedbackConfig {
   FeedbackConfig(
     String apiBase,
     String appId, {
+    String? appName,
     this.appVersion,
     this.pageLabel,
     this.side = FeedbackSide.right,
@@ -68,13 +69,20 @@ class FeedbackConfig {
         assert(appId.trim().isNotEmpty, 'appId 不能为空'),
         assert(_isHttpUrl(apiBase), 'apiBase 必须是 http(s) 地址'),
         apiBase = _normalize(apiBase),
-        appId = appId.trim();
+        appId = appId.trim(),
+        appName = normalizeAppName(appName);
 
   /// Feedback 服务地址（无末尾斜杠）。
   final String apiBase;
 
   /// 服务端登记的软件标识。
   final String appId;
+
+  /// 可选的软件显示名称，随提交上报。
+  ///
+  /// 服务端只在**管理员尚未设置名称**（首次自动发现的软件）时采用；
+  /// 管理员在后台设置过名称后，这里上报的值不会覆盖它。
+  final String? appName;
 
   /// 随提交上报的应用版本（仅显式传入时携带）。
   final String? appVersion;
@@ -123,5 +131,13 @@ class FeedbackConfig {
         (uri.scheme == 'http' || uri.scheme == 'https') &&
         uri.host.isNotEmpty;
   }
+}
+
+/// 归一化可选的软件名称：去空白、空串视为未提供、截断到 100 字符（与服务端上限一致）。
+String? normalizeAppName(String? raw) {
+  if (raw == null) return null;
+  final String t = raw.trim();
+  if (t.isEmpty) return null;
+  return t.length > 100 ? t.substring(0, 100) : t;
 }
 

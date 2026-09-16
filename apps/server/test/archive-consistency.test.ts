@@ -9,8 +9,10 @@ import {
 } from "../src/pipeline/archive-data.ts";
 import { type KaneoSettings, KaneoUncertainError } from "../src/services/kaneo.ts";
 import {
+  authorizeArchive,
   createTestPng,
   defaultSubmitBody,
+  type Harness,
   instantSleep,
   jsonReq,
   loginAsAdmin,
@@ -37,9 +39,19 @@ import {
 
 interface Rig {
   app: ReturnType<typeof createApp> & { config: { dataDir: string } };
+  /** 同一个 app 实例的别名：helpers 的归档授权脚手架按 Harness 形状取用。 */
+  feedbackApp: ReturnType<typeof createApp>;
   inner: MockKaneo;
   cookie: string;
   bearer: string;
+}
+
+/**
+ * helpers.authorizeArchive / submitAndArchive 需要 Harness 形状。
+ * Rig 已经持有同一个 app、cookie 与 bearer，这里只做形状适配，不新建应用。
+ */
+function harnessOf(rig: Rig): Harness {
+  return rig as unknown as Harness;
 }
 
 async function buildRig(wrap?: (inner: MockKaneo) => Partial<MockKaneo>): Promise<Rig> {
@@ -58,7 +70,7 @@ async function buildRig(wrap?: (inner: MockKaneo) => Partial<MockKaneo>): Promis
   await seedConnections(app, cookie);
   await seedApp(app, cookie);
   const bearer = await loginAsClient(app);
-  return { app: app as unknown as Rig["app"], inner, cookie, bearer };
+  return { app: app as unknown as Rig["app"], feedbackApp: app, inner, cookie, bearer };
 }
 
 function state(rig: Rig, id: string): ArchiveData {
@@ -67,12 +79,20 @@ function state(rig: Rig, id: string): ArchiveData {
   return parsed.data;
 }
 
+/**
+ * 提交带截图的反馈 → AI 整理（needs_info）→ 管理员显式归档授权 → 归档完成。
+ * 提交本身不再触发远端写入；Kaneo 归档只能由管理接口 `POST /api/admin/feedback/:id/classify` 授权。
+ */
 async function submitScreenshot(rig: Rig, size = 80): Promise<{ id: string; png: Buffer }> {
   const png = await createTestPng(size, size);
   const res = await submitMultipartFeedback(rig.app, rig.bearer, defaultSubmitBody(), png);
   expect(res.status).toBe(201);
   await rig.app.worker.idle();
-  return { id: res.data.feedbackId, png };
+  const id = res.data.feedbackId as string;
+  const auth = await authorizeArchive(harnessOf(rig), id);
+  expect(auth.status).toBe(202);
+  await rig.app.worker.idle();
+  return { id, png };
 }
 
 /** 把已归档记录改回“待核对”，保留恢复数据（人工恢复入口的前置状态）。 */
@@ -80,19 +100,17 @@ function toNeedsReview(rig: Rig, id: string, patch: Record<string, unknown> = {}
   updateFeedback(rig.app.db, id, { status: "needs_review", error_summary: null, last_error: null, ...patch });
 }
 
-/** 把应用的目标项目改成另一个（模拟管理员改了 Kaneo 目标）。 */
-async function changeProject(rig: Rig, projectId: string): Promise<void> {
-  const apps = (await jsonReq(rig.app.app, "GET", "/api/admin/apps", { cookie: rig.cookie })).data.apps as Array<{
-    id: string;
-  }>;
-  const r = await jsonReq(rig.app.app, "PUT", `/api/admin/apps/${apps[0]!.id}`, {
+/**
+ * 把 Kaneo 实例地址改成另一个（模拟管理员把归档目标指向了另一台 Kaneo）。
+ *
+ * 注意：人工归档授权会把项目/列/标签固定进快照（T3），此后改软件的默认项目
+ * **不会**改变该记录的归档目标（见 classify-archive 的“授权后改配置不得重定向”用例）；
+ * 能真实造成“已保存目标 ≠ 当前目标”的是 Kaneo 实例地址本身。
+ */
+async function changeKaneoBaseUrl(rig: Rig, baseUrl: string): Promise<void> {
+  const r = await jsonReq(rig.app.app, "PUT", "/api/admin/connection/kaneo", {
     cookie: rig.cookie,
-    body: {
-      name: "测试软件",
-      allowedOrigins: ["http://host.test"],
-      kaneoProjectId: projectId,
-      kaneoColumnSlug: "triage",
-    },
+    body: { baseUrl },
   });
   expect(r.status).toBe(200);
 }
@@ -110,7 +128,7 @@ describe("归档一致性：所有恢复入口统一检查已保存的 Kaneo 目
     expect(pinned.target.projectId).toBe("proj-1");
 
     toNeedsReview(rig, id);
-    await changeProject(rig, "proj-2");
+    await changeKaneoBaseUrl(rig, "http://other-kaneo.test/api");
 
     const before = rig.inner.remoteWrites;
     const rev = revisionOf(rig, id);
@@ -156,13 +174,17 @@ describe("归档一致性：所有恢复入口统一检查已保存的 Kaneo 目
     expect(res.status).toBe(201);
     await rig.app.worker.idle();
     const id = res.data.feedbackId as string;
+    // 提交只做 AI 整理；归档必须先经管理员显式授权。
+    const auth = await authorizeArchive(harnessOf(rig), id);
+    expect(auth.status).toBe(202);
+    await rig.app.worker.idle();
     expect(getFeedback(rig.app.db, id)?.status).toBe("archived");
     const pinned = state(rig, id);
 
     // 构造“任务创建结果未知”的待核对记录（无 task ID、无附件状态）
     saveArchiveData(rig.app.db, id, loadArchiveData(rig.app.db, id), { target: pinned.target });
     toNeedsReview(rig, id, { kaneo_task_id: null, kaneo_task_url: null, archive_stage: "task_pending" });
-    await changeProject(rig, "proj-2");
+    await changeKaneoBaseUrl(rig, "http://other-kaneo.test/api");
 
     const before = rig.inner.remoteWrites;
     const rev = revisionOf(rig, id);
@@ -177,7 +199,7 @@ describe("归档一致性：所有恢复入口统一检查已保存的 Kaneo 目
     expect(getFeedback(rig.app.db, id)?.status).toBe("needs_review");
 
     // 目标改回 → force-create 恢复正常
-    await changeProject(rig, "proj-1");
+    await changeKaneoBaseUrl(rig, "http://kaneo.test/api");
     const ok = await jsonReq(rig.app.app, "POST", `/api/feedback/${id}/resolve`, {
       cookie: rig.cookie,
       body: { action: "force-create", expectedRevision: revisionOf(rig, id) },
@@ -235,6 +257,10 @@ describe("归档一致性：评论写入先落盘意图", () => {
     const res = await submitMultipartFeedback(rig.app, rig.bearer, defaultSubmitBody(), png);
     expect(res.status).toBe(201);
     const feedbackId = res.data.feedbackId as string;
+    await rig.app.worker.idle();
+    // 提交只做 AI 整理；注入的写失败只会在归档授权后的评论意图落盘时命中。
+    const auth = await authorizeArchive(harnessOf(rig), feedbackId);
+    expect(auth.status).toBe(202);
     await rig.app.worker.idle();
 
     expect(commentCalls).toBe(0); // 意图落盘失败 → 零评论请求

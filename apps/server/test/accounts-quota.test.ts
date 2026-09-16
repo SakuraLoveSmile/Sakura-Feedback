@@ -117,7 +117,7 @@ describe("数据库迁移 v2 → v4", () => {
     const fb = db.prepare("SELECT user_id FROM feedbacks WHERE id = 'fb-old'").get() as any;
     expect(fb.user_id).toBe(userId);
     const uv = (db.prepare("PRAGMA user_version").get() as any).user_version;
-    expect(uv).toBe(5);
+    expect(uv).toBe(7);
     const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as any[]).map((t) => t.name);
     expect(tables).toContain("feedback_logs");
     db.prepare("INSERT INTO daily_usage (user_id, day, used, reset_at) VALUES (?, '2026-01-01', 0, 'x')").run(userId);
@@ -136,7 +136,7 @@ describe("数据库迁移 v2 → v4", () => {
     raw.close();
   });
 
-  it("从 v3 升级到 v4：保留既有数据并建立 feedback_logs 表", () => {
+  it("从 v3 升级到最新版本：保留既有数据并建立 feedback_logs 表", () => {
     const dir = mkdtempSync(path.join(tmpdir(), "fb-v3-upgrade-"));
     const raw = new DatabaseSync(path.join(dir, "feedback.db"));
     raw.exec(`
@@ -150,7 +150,7 @@ describe("数据库迁移 v2 → v4", () => {
 
     const db = openDb(dir);
     const uv = (db.prepare("PRAGMA user_version").get() as any).user_version;
-    expect(uv).toBe(5);
+    expect(uv).toBe(7);
     const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as any[]).map((t) => t.name);
     expect(tables).toContain("feedback_logs");
     db.close();

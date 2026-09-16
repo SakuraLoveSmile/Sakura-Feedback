@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { getFeedback } from "../src/db/repos.ts";
 import {
+  authorizeArchive,
   createTestPng,
   defaultSubmitBody,
   jsonReq,
@@ -559,7 +560,11 @@ describe("L2: 日志附件全链路（契约、存储、幂等、管理下载与
     expect(res.status).toBe(201);
     const feedbackId = res.data.feedbackId;
 
-    // 等待后台 AI 整理与 Kaneo 归档完成
+    // 等待后台 AI 整理完成
+    await h.feedbackApp.worker.idle();
+    // 新契约：提交只做 AI 整理，Kaneo 归档需管理员显式授权（multipart 提交需手动授权）。
+    const auth = await authorizeArchive(h, feedbackId);
+    expect(auth.status).toBe(202);
     await h.feedbackApp.worker.idle();
 
     // 1. AI 整理接收到日志诊断材料
@@ -619,6 +624,11 @@ describe("L2: 日志附件全链路（契约、存储、幂等、管理下载与
     expect(res.status).toBe(201);
     const feedbackId = res.data.feedbackId;
 
+    await h.feedbackApp.worker.idle();
+
+    // 新契约：提交只做 AI 整理；先完成一次显式归档授权，归档流程才会下载远端资产并做字节校验。
+    const auth = await authorizeArchive(h, feedbackId);
+    expect(auth.status).toBe(202);
     await h.feedbackApp.worker.idle();
 
     const row = getFeedback(h.feedbackApp.db, feedbackId);

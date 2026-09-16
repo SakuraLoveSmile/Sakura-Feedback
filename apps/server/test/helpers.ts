@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createApp, type FeedbackApp } from "../src/app.ts";
@@ -85,12 +85,16 @@ export interface MockKaneoOptions {
   /** 搜索命中的预置任务。 */
   searchHit?: { taskId: string };
   existingTasks?: Array<{ taskId: string; description: string }>;
+  /** 工作区级标签（fixture 默认提供一个，便于分类归档断言）。 */
+  labels?: Array<{ id: string; name: string; color?: string }>;
+  /** 工作区成员（可选负责人）。 */
+  members?: Array<{ id: string; name: string; email?: string; role?: string }>;
 }
 
 export type KaneoFail = "column-not-found" | "definite" | "uncertain" | "access-denied";
 
 export interface MockKaneo extends KaneoClient {
-  created: Array<{ projectId: string; columnSlug: string; title: string; description: string }>;
+  created: Array<{ projectId: string; columnSlug: string; title: string; description: string; userId?: string }>;
   comments: Array<{ taskId: string; content: string }>;
   uploads: Array<{ taskId: string; bytes: Buffer | Uint8Array }>;
   finalizes: Array<{ taskId: string; key: string }>;
@@ -101,14 +105,31 @@ export interface MockKaneo extends KaneoClient {
   searches: number;
   /** 依次出队；空则成功。测试可 push/splice 控制后续行为。 */
   createErrorQueue: KaneoFail[];
+  /** 标签关联失败队列（"definite" | "uncertain"）。 */
+  labelErrorQueue: Array<"definite" | "uncertain">;
+  /** 已成功后端关联的标签记录。 */
+  labelAttaches: Array<{ labelId: string; taskId: string }>;
+  /** 覆盖工作区级标签（模拟标签在授权后被删除/改名）。 */
+  setWorkspaceLabels(labels: Array<{ id: string; name: string; color?: string }>): void;
   testError: string | null;
   listError: string | null;
+  /**
+   * 只读目标读取的故障注入（自动归档的阻塞原因分类用）：
+   * `definite` = 业务拒绝（配置问题），`uncertain` = 连接类故障（可恢复，需退避）。
+   */
+  readError: { kind: "definite" | "uncertain"; message: string } | null;
   /** 每次 bind(settings) 的入参（断言“配置在操作开始时固定一次”）。 */
   boundSettings: KaneoSettings[];
   /** 全部远端调用次数（含只读请求）。 */
   remoteCalls: number;
-  /** 远端**写入**调用次数（创建任务/申请地址/传字节/finalize/评论；断言“目标改变时零远端写入”）。 */
+  /** 远端**写入**调用次数（创建任务/申请地址/传字节/finalize/评论/标签；断言“目标改变时零远端写入”）。 */
   remoteWrites: number;
+}
+
+/** 按注入的故障类型抛出对应的 Kaneo 错误（区分“配置问题”与“可恢复故障”）。 */
+function throwReadError(err: { kind: "definite" | "uncertain"; message: string }): never {
+  if (err.kind === "uncertain") throw new KaneoUncertainError(err.message);
+  throw new KaneoDefiniteError(err.message);
 }
 
 export function makeMockKaneo(opts: MockKaneoOptions = {}): MockKaneo {
@@ -116,9 +137,21 @@ export function makeMockKaneo(opts: MockKaneoOptions = {}): MockKaneo {
   const comments: MockKaneo["comments"] = [];
   const uploads: MockKaneo["uploads"] = [];
   const finalizes: MockKaneo["finalizes"] = [];
+  const labelAttaches: MockKaneo["labelAttaches"] = [];
   const presignSeq = new Map<string, number>();
   let searches = 0;
   const columns = opts.columns ?? [{ id: "col-db-id", slug: "triage", name: "待筛选" }];
+  // 工作区级标签（taskId 为 null）：可选项来源；关联到任务时 Kaneo 会新建任务级标签行。
+  const workspaceLabelDefs = (opts.labels ?? [{ id: "label-bug", name: "bug", color: "#e11d48" }]).map((l) => ({
+    id: l.id,
+    name: l.name,
+    color: l.color ?? "#888888",
+  }));
+  const workspaceMembers = (opts.members ?? [{ id: "user-1", name: "负责人甲", email: "a@test", role: "member" }]).map(
+    (m) => ({ id: m.id, name: m.name, email: m.email ?? `${m.id}@test`, role: m.role ?? "member" }),
+  );
+  // taskId → 已关联的任务级标签（含从工作区级标签复制而来的新行）。
+  const taskLabels = new Map<string, Array<{ id: string; name: string; color: string }>>();
   let existing = opts.existingTasks ?? [];
   let remoteCalls = 0;
   let remoteWrites = 0;
@@ -147,8 +180,15 @@ export function makeMockKaneo(opts: MockKaneoOptions = {}): MockKaneo {
       return searches;
     },
     createErrorQueue: [],
+    labelErrorQueue: [],
+    labelAttaches,
+    setWorkspaceLabels(labels) {
+      workspaceLabelDefs.length = 0;
+      for (const l of labels) workspaceLabelDefs.push({ id: l.id, name: l.name, color: l.color ?? "#888888" });
+    },
     testError: null,
     listError: null,
+    readError: null,
     bind(settings: KaneoSettings) {
       boundSettings.push(settings);
       if (this !== null && typeof this === "object" && "created" in this) {
@@ -164,6 +204,46 @@ export function makeMockKaneo(opts: MockKaneoOptions = {}): MockKaneo {
         projects: [{ id: "proj-1", workspaceId: "ws-1", name: "测试项目", slug: "TST" }],
       };
     },
+    async listColumns(projectId: string) {
+      count();
+      if (mock.testError !== null) throw new KaneoDefiniteError(mock.testError);
+      if (mock.readError !== null) throwReadError(mock.readError);
+      return columns.map((c) => ({ ...c }));
+    },
+    async listWorkspaceLabels() {
+      count();
+      if (mock.testError !== null) throw new KaneoDefiniteError(mock.testError);
+      if (mock.readError !== null) throwReadError(mock.readError);
+      return workspaceLabelDefs.map((l) => ({ ...l, taskId: null, workspaceId: "ws-1" }));
+    },
+    async listTaskLabels(taskId: string) {
+      count();
+      return (taskLabels.get(taskId) ?? []).map((l) => ({ ...l, taskId, workspaceId: "ws-1" }));
+    },
+    async attachLabelToTask(labelId: string, taskId: string) {
+      countWrite();
+      const failKind = mock.labelErrorQueue.shift() ?? null;
+      if (failKind === "definite") throw new KaneoDefiniteError("Kaneo 拒绝关联标签 (400)");
+      if (failKind === "uncertain") throw new KaneoUncertainError("标签关联连接中断");
+      const def = workspaceLabelDefs.find((l) => l.id === labelId);
+      if (!def) throw new KaneoDefiniteError(`标签 ${labelId} 不存在`);
+      const current = taskLabels.get(taskId) ?? [];
+      labelAttaches.push({ labelId, taskId });
+      const existingLabel = current.find((l) => l.name === def.name);
+      if (existingLabel) {
+        // Kaneo 对 (taskId, name) 幂等：重复关联返回既有任务级标签，不产生第二行。
+        return { ...existingLabel, taskId, workspaceId: "ws-1" };
+      }
+      const createdLabel = { id: `tasklabel-${taskId}-${def.name}`, name: def.name, color: def.color };
+      taskLabels.set(taskId, [...current, createdLabel]);
+      return { ...createdLabel, taskId, workspaceId: "ws-1" };
+    },
+    async listWorkspaceMembers() {
+      count();
+      if (mock.testError !== null) throw new KaneoDefiniteError(mock.testError);
+      if (mock.readError !== null) throwReadError(mock.readError);
+      return workspaceMembers.map((m) => ({ ...m }));
+    },
     async test(projectId: string) {
       count();
       if (mock.testError !== null) throw new KaneoDefiniteError(mock.testError);
@@ -175,6 +255,7 @@ export function makeMockKaneo(opts: MockKaneoOptions = {}): MockKaneo {
     async getProjectInfo(projectId: string) {
       count();
       if (mock.testError !== null) throw new KaneoDefiniteError(mock.testError);
+      if (mock.readError !== null) throwReadError(mock.readError);
       return { id: projectId, workspaceId: "ws-1", name: "测试项目", slug: "TST" };
     },
     async createTask(input) {
@@ -378,8 +459,101 @@ export async function loginAsClient(
   return r.data.token as string;
 }
 
-export async function submitFeedback(feedbackApp: FeedbackApp, bearer: string, body: Record<string, unknown>) {
-  return jsonReq(feedbackApp.app, "POST", "/api/feedback", { bearer, body });
+export async function submitFeedback(
+  feedbackApp: FeedbackApp,
+  bearer: string,
+  body: Record<string, unknown>,
+  init: { origin?: string } = {},
+) {
+  return jsonReq(feedbackApp.app, "POST", "/api/feedback", {
+    bearer,
+    body,
+    ...(init.origin ? { origin: init.origin } : {}),
+  });
+}
+
+/**
+ * 建一个额度充足的普通账号并返回其令牌：
+ * 额度按账号计算，并发/批量提交类测试不能用共享的管理员账号。
+ */
+export async function createUserBearer(
+  h: Harness,
+  input: { username: string; password?: string; dailyLimit?: number },
+): Promise<string> {
+  const created = await jsonReq(h.feedbackApp.app, "POST", "/api/admin/users", {
+    cookie: h.cookie,
+    body: {
+      username: input.username,
+      password: input.password ?? TEST_PASSWORD,
+      dailyLimit: input.dailyLimit ?? 50,
+    },
+  });
+  if (created.status !== 201) throw new Error(`创建账号失败 ${created.status}: ${created.text}`);
+  const login = await jsonReq(h.feedbackApp.app, "POST", "/api/auth/login", {
+    body: {
+      username: input.username,
+      password: input.password ?? TEST_PASSWORD,
+      clientLabel: "test-client",
+      appId: h.app?.appId ?? "com.test.app",
+    },
+  });
+  if (login.status !== 200) throw new Error(`账号登录失败 ${login.status}: ${login.text}`);
+  return login.data.token as string;
+}
+
+/**
+ * 测试脚手架：通过管理接口完成「人工分类 + 归档授权」。
+ *
+ * 真实产品里这一步只能由管理员在管理页显式触发（T2/T3）；提交成功不再授权远端归档。
+ * 测试用它替代旧版本“提交即自动归档”的假设，同时验证归档接口本身。
+ */
+export async function authorizeArchive(
+  h: Harness,
+  feedbackId: string,
+  over: {
+    projectId?: string | null;
+    columnId?: string | null;
+    columnSlug?: string | null;
+    labelIds?: string[];
+    assigneeId?: string | null;
+    assigneeName?: string;
+    action?: "save" | "archive";
+  } = {},
+) {
+  const detail = await jsonReq(h.feedbackApp.app, "GET", `/api/admin/feedback/${feedbackId}`, { cookie: h.cookie });
+  const version = detail.data?.classification?.version ?? 0;
+  // undefined = 用默认值；显式 null = 清空（测试“缺项暂存”用）。
+  const pick = <T>(v: T | null | undefined, dflt: T): T | null => (v === undefined ? dflt : v);
+  const assigneeId = pick(over.assigneeId, null);
+  return jsonReq(h.feedbackApp.app, "POST", `/api/admin/feedback/${feedbackId}/classify`, {
+    cookie: h.cookie,
+    body: {
+      action: over.action ?? "archive",
+      classifyVersion: version,
+      projectId: pick(over.projectId, "proj-1"),
+      columnId: pick(over.columnId, "col-db-id"),
+      columnSlug: pick(over.columnSlug, "triage"),
+      labelIds: over.labelIds ?? ["label-bug"],
+      assigneeId,
+      ...(assigneeId ? { assigneeName: over.assigneeName ?? "负责人甲" } : {}),
+    },
+  });
+}
+
+/** 提交（JSON）→ AI 整理 → 人工归档授权 → 归档完成；返回 feedbackId。 */
+export async function submitAndArchive(
+  h: Harness,
+  body: Record<string, unknown> = {},
+  over: Parameters<typeof authorizeArchive>[2] = {},
+): Promise<string> {
+  const r = await submitFeedback(h.feedbackApp, h.bearer, defaultSubmitBody(body));
+  if (r.status !== 201) throw new Error(`提交失败 ${r.status}: ${r.text}`);
+  const id = r.data.feedbackId as string;
+  await h.feedbackApp.worker.idle();
+  const auth = await authorizeArchive(h, id, over);
+  if (auth.status !== 202) throw new Error(`归档授权失败 ${auth.status}: ${auth.text}`);
+  await h.feedbackApp.worker.idle();
+  return id;
 }
 
 export interface Harness {
@@ -391,6 +565,125 @@ export interface Harness {
   bearer: string;
   /** 建好默认软件 com.test.app（列 triage），返回其 public 对象。 */
   app: any;
+  /** 启用暂停控制面时的 paused 标记路径（否则为 null）。 */
+  pausedFile: string | null;
+}
+
+// ---------- v7：先接收后配置 / 自动归档 ----------
+
+/** 读取软件当前规则版本（T2：写操作必须带页面读到的版本）。 */
+export async function appRuleVersion(h: Harness, appId?: string): Promise<number> {
+  const detail = await jsonReq(h.feedbackApp.app, "GET", `/api/admin/apps/${appId ?? h.app.id}`, { cookie: h.cookie });
+  if (detail.status !== 200) throw new Error(`读取软件详情失败 ${detail.status}: ${detail.text}`);
+  return Number(detail.data.app?.ruleVersion ?? 0);
+}
+
+/** 保存软件默认归档目标（普通保存）：**不触发归档**，只写规则；默认带当前规则版本。 */
+export async function saveAppDefaults(
+  h: Harness,
+  over: {
+    appId?: string;
+    name?: string;
+    allowedOrigins?: string[];
+    projectId?: string;
+    columnId?: string;
+    columnSlug?: string;
+    labelIds?: string[];
+    assigneeId?: string | null;
+    assigneeName?: string;
+    /** 覆盖期望规则版本（测试版本冲突用）；缺省读取当前版本。 */
+    expectedRuleVersion?: number;
+  } = {},
+) {
+  const assigneeId = over.assigneeId ?? null;
+  const expectedRuleVersion = over.expectedRuleVersion ?? (await appRuleVersion(h, over.appId));
+  return jsonReq(h.feedbackApp.app, "PUT", `/api/admin/apps/${over.appId ?? h.app.id}`, {
+    cookie: h.cookie,
+    body: {
+      expectedRuleVersion,
+      name: over.name ?? h.app.name ?? "测试软件",
+      allowedOrigins: over.allowedOrigins ?? ["http://host.test"],
+      kaneoProjectId: over.projectId ?? "proj-1",
+      kaneoColumnId: over.columnId ?? "col-db-id",
+      kaneoColumnSlug: over.columnSlug ?? "triage",
+      kaneoLabelIds: over.labelIds ?? ["label-bug"],
+      kaneoAssigneeId: assigneeId,
+      ...(assigneeId ? { kaneoAssigneeName: over.assigneeName ?? "负责人甲" } : {}),
+    },
+  });
+}
+
+/** 启用自动归档（管理员显式点击“启用自动归档并处理积压”）。 */
+export async function enableAutoArchive(
+  h: Harness,
+  over: { appId?: string; operationId?: string; expectedRuleVersion?: number | null } = {},
+) {
+  const expectedRuleVersion =
+    over.expectedRuleVersion === undefined ? await appRuleVersion(h, over.appId) : over.expectedRuleVersion;
+  return jsonReq(h.feedbackApp.app, "POST", `/api/admin/apps/${over.appId ?? h.app.id}/auto-archive/enable`, {
+    cookie: h.cookie,
+    body: {
+      ...(over.operationId ? { operationId: over.operationId } : {}),
+      ...(expectedRuleVersion === null ? {} : { expectedRuleVersion }),
+    },
+  });
+}
+
+/** 关闭自动归档（只阻止新的授权）。 */
+export async function disableAutoArchive(
+  h: Harness,
+  over: { appId?: string; operationId?: string; expectedRuleVersion?: number | null } = {},
+) {
+  const expectedRuleVersion =
+    over.expectedRuleVersion === undefined ? await appRuleVersion(h, over.appId) : over.expectedRuleVersion;
+  return jsonReq(h.feedbackApp.app, "POST", `/api/admin/apps/${over.appId ?? h.app.id}/auto-archive/disable`, {
+    cookie: h.cookie,
+    body: {
+      ...(over.operationId ? { operationId: over.operationId } : {}),
+      ...(expectedRuleVersion === null ? {} : { expectedRuleVersion }),
+    },
+  });
+}
+
+/**
+ * 确认某个来源（管理员显式动作）。
+ * T2：`operationId`（一次操作的稳定幂等键）与 `expectedRuleVersion` 都是必填；
+ * 缺省 operationId 自动生成一个（测试重放时显式传同一个值）。
+ */
+export async function confirmSource(
+  h: Harness,
+  origin: string,
+  over: { appId?: string; operationId?: string; expectedRuleVersion?: number | null } = {},
+) {
+  const operationId = over.operationId ?? `confirm-${Math.random().toString(36).slice(2)}`;
+  const expectedRuleVersion =
+    over.expectedRuleVersion === undefined ? await appRuleVersion(h, over.appId) : over.expectedRuleVersion;
+  return jsonReq(h.feedbackApp.app, "POST", `/api/admin/apps/${over.appId ?? h.app.id}/sources/confirm`, {
+    cookie: h.cookie,
+    body: {
+      origin,
+      operationId,
+      ...(expectedRuleVersion === null ? {} : { expectedRuleVersion }),
+    },
+  });
+}
+
+/** 读取软件详情（含逐条来源）。 */
+export async function getAppDetail(h: Harness, appId?: string) {
+  return jsonReq(h.feedbackApp.app, "GET", `/api/admin/apps/${appId ?? h.app.id}`, { cookie: h.cookie });
+}
+
+/** 读取反馈详情。 */
+export async function getFeedbackDetail(h: Harness, feedbackId: string) {
+  return jsonReq(h.feedbackApp.app, "GET", `/api/admin/feedback/${feedbackId}`, { cookie: h.cookie });
+}
+
+/** 走完“保存规则 → 启用自动归档”的完整准备流程。 */
+export async function prepareAutoArchive(h: Harness, over: Parameters<typeof saveAppDefaults>[1] = {}): Promise<void> {
+  const saved = await saveAppDefaults(h, over);
+  if (saved.status !== 200) throw new Error(`保存默认目标失败 ${saved.status}: ${saved.text}`);
+  const enabled = await enableAutoArchive(h, { appId: over.appId ?? h.app.id });
+  if (enabled.status !== 200) throw new Error(`启用自动归档失败 ${enabled.status}: ${enabled.text}`);
 }
 
 export async function makeHarness(
@@ -398,17 +691,105 @@ export async function makeHarness(
     aiOutcomes?: MockAiBehavior["outcomes"];
     kaneo?: MockKaneoOptions;
     seedAppOver?: { appId?: string; origins?: string[]; columnSlug?: string };
+    /** T3：注入可控时钟与定时器，用推进时间观察真实调度。 */
+    clock?: FakeClock;
+    /** T3：收紧单次扫描批量，覆盖多轮补处理。 */
+    scanBatch?: number;
+    /** T3：启用更新暂停控制面（写 paused 标记即可暂停 worker 与业务写入）。 */
+    pausable?: boolean;
   } = {},
 ): Promise<Harness> {
   const config = makeConfig();
+  const controlDir = path.join(config.dataDir, "update-control");
+  if (opts.pausable) {
+    mkdirSync(controlDir, { recursive: true });
+    config.updateControlDir = controlDir;
+  }
   const ai = makeMockAi({ outcomes: opts.aiOutcomes ?? ["ok"] });
   const kaneo = makeMockKaneo(opts.kaneo);
-  const feedbackApp = createApp(config, { ai, kaneo, workerSleep: instantSleep });
+  const feedbackApp = createApp(config, {
+    ai,
+    kaneo,
+    workerSleep: instantSleep,
+    ...(opts.clock ? { now: opts.clock.now, setTimer: opts.clock.setTimer, clearTimer: opts.clock.clearTimer } : {}),
+    ...(opts.scanBatch !== undefined ? { scanBatch: opts.scanBatch } : {}),
+    ...(opts.pausable ? { controlTtlMs: 0 } : {}),
+  });
   const cookie = await loginAsAdmin(feedbackApp);
   await seedConnections(feedbackApp, cookie);
   const publicApp = await seedAppWithColumn(feedbackApp, cookie, opts.seedAppOver);
   const bearer = await loginAsClient(feedbackApp);
-  return { feedbackApp, config, ai, kaneo, cookie, bearer, app: publicApp };
+  return {
+    feedbackApp,
+    config,
+    ai,
+    kaneo,
+    cookie,
+    bearer,
+    app: publicApp,
+    pausedFile: opts.pausable ? path.join(controlDir, "paused") : null,
+  };
+}
+
+/** T3：写入 / 清除真实的 paused 标记（更新暂停期间不授权、不归档）。 */
+export function setPaused(h: Harness, paused: boolean): void {
+  if (!h.pausedFile) throw new Error("该 harness 未启用暂停控制面（makeHarness({ pausable: true })）");
+  if (paused) {
+    mkdirSync(path.dirname(h.pausedFile), { recursive: true });
+    writeFileSync(h.pausedFile, JSON.stringify({ phase: "backup_copy", message: "系统更新进行中" }));
+  } else {
+    rmSync(h.pausedFile, { force: true });
+  }
+}
+
+/**
+ * T3 测试用可控时钟 + 定时器：
+ * `advance(ms)` 推进时间并同步触发所有到期定时器（含回调里新安排的任务），
+ * 之后调用方仍需 `await worker.idle()` 等异步处理跑完——绝不手动清空退避字段。
+ */
+export interface FakeClock {
+  now(): number;
+  setTimer(fn: () => void, ms: number): number;
+  clearTimer(handle: unknown): void;
+  pending(): number;
+  advance(ms: number): Promise<void>;
+}
+
+export function makeFakeClock(startAt = Date.UTC(2026, 0, 1, 0, 0, 0)): FakeClock {
+  let current = startAt;
+  let seq = 1;
+  const timers = new Map<number, { at: number; fn: () => void }>();
+  return {
+    now: () => current,
+    setTimer(fn, ms) {
+      const id = seq++;
+      timers.set(id, { at: current + Math.max(0, ms), fn });
+      return id;
+    },
+    clearTimer(handle) {
+      timers.delete(Number(handle));
+    },
+    pending: () => timers.size,
+    async advance(ms: number): Promise<void> {
+      current += ms;
+      // 触发所有到期定时器；回调可能安排新的（0 延迟）定时器，因此循环处理。
+      for (let guard = 0; guard < 500; guard++) {
+        const due = [...timers.entries()]
+          .filter(([, t]) => t.at <= current)
+          .sort((a, b) => a[1].at - b[1].at)
+          .map(([id]) => id);
+        if (due.length === 0) return;
+        for (const id of due) {
+          const t = timers.get(id);
+          if (!t) continue;
+          timers.delete(id);
+          t.fn();
+        }
+        await new Promise((r) => setImmediate(r));
+      }
+      throw new Error("fake clock advance 触发次数异常：疑似调度空转");
+    },
+  };
 }
 
 /** 写入 Kaneo/AI 连接配置（worker 归档前置检查依赖 settings 存在）。 */
@@ -435,7 +816,7 @@ async function seedAppWithColumn(
     body: {
       appId: over.appId ?? "com.test.app",
       name: "测试软件",
-      allowedOrigins: over.origins ?? ["http://host.test"],
+      allowedOrigins: over.origins ?? ["http://localhost", "http://host.test"],
       kaneoProjectId: "proj-1",
       kaneoColumnSlug: over.columnSlug ?? "triage",
     },
