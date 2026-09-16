@@ -7,6 +7,16 @@
 [`docs/integration.md`](docs/integration.md) §1.7。标注 **破坏性** 的条目表示
 宿主升级时需要处理；未标注的均为兼容变更（新增可选字段 / 属性 / 端点）或内部变更。
 
+## [未发布]
+
+### 新增
+
+- **简易部署模式**：`deploy/compose.simple.yml`（单服务、可变镜像标签、compose 自管理数据卷）、
+  `deploy/bootstrap.sh`（交互式首次部署：生成主密钥与管理员密码、写 `.env.prod`、拉镜像启动）、
+  `deploy/update.sh`（数据卷 tar 备份 → `compose pull` → 重建 → 等健康，`--to vX.Y.Z` 可回退）。
+  更新路径从「抄 digest → 改 env → pull/up」简化为一条命令。完整模式（digest 固定 + updater
+  一键更新）不变，取舍对比见 `deploy/README.md`「两种部署形态」。
+
 ## [0.4.0] — 2026-09-16
 
 > 对应文档中的 v6 / v7 里程碑。
