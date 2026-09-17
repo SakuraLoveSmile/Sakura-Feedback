@@ -33,27 +33,27 @@
     [
       "提交 synced 201",
       true,
-      "status=201 body={'feedbackId': 'a7c3a8e1-7381-4e7c-a2fd-26457fa3619b', 'status': 'received', 'user': {'id': '998e2bd3-e745-4318-ba1d-2a98d88a97d0', 'username': 'e2e-lc-user', 'role': 'user'}, 'quota': {'dailyLimit': 50, 'used': 1, 'remaining': 49, 'resetAt': '2026-09-17T16:00:00.000Z'}, 'collectionState': 'waiting_manual_archive'}"
+      "status=201 body={'feedbackId': '98026b4c-433c-4888-86fb-c99eeac899a3', 'status': 'received', 'user': {'id': 'f356328e-4923-439c-b980-c871d390144e', 'username': 'e2e-lc-user', 'role': 'user'}, 'quota': {'dailyLimit': 50, 'used': 1, 'remaining': 49, 'resetAt': '2026-09-18T16:00:00.000Z'}, 'collectionState': 'waiting_manual_archive'}"
     ],
     [
       "提交 inbox 201",
       true,
-      "status=201 body={'feedbackId': 'b2c2b30b-f109-4cae-8eec-c5d85f89b149', 'status': 'received', 'user': {'id': '998e2bd3-e745-4318-ba1d-2a98d88a97d0', 'username': 'e2e-lc-user', 'role': 'user'}, 'quota': {'dailyLimit': 50, 'used': 2, 'remaining': 48, 'resetAt': '2026-09-17T16:00:00.000Z'}, 'collectionState': 'waiting_manual_archive'}"
+      "status=201 body={'feedbackId': 'cbbdcf92-ac53-45b9-adf7-c13277b8cdc5', 'status': 'received', 'user': {'id': 'f356328e-4923-439c-b980-c871d390144e', 'username': 'e2e-lc-user', 'role': 'user'}, 'quota': {'dailyLimit': 50, 'used': 2, 'remaining': 48, 'resetAt': '2026-09-18T16:00:00.000Z'}, 'collectionState': 'waiting_manual_archive'}"
     ],
     [
       "提交 trash 201",
       true,
-      "status=201 body={'feedbackId': '1edb7607-a149-4675-806a-2b8a93851cf8', 'status': 'received', 'user': {'id': '998e2bd3-e745-4318-ba1d-2a98d88a97d0', 'username': 'e2e-lc-user', 'role': 'user'}, 'quota': {'dailyLimit': 50, 'used': 3, 'remaining': 47, 'resetAt': '2026-09-17T16:00:00.000Z'}, 'collectionState': 'waiting_manual_archive'}"
+      "status=201 body={'feedbackId': 'd29c7ee4-2fe5-4905-be4d-690e9df8254f', 'status': 'received', 'user': {'id': 'f356328e-4923-439c-b980-c871d390144e', 'username': 'e2e-lc-user', 'role': 'user'}, 'quota': {'dailyLimit': 50, 'used': 3, 'remaining': 47, 'resetAt': '2026-09-18T16:00:00.000Z'}, 'collectionState': 'waiting_manual_archive'}"
     ],
     [
       "提交 purge 201",
       true,
-      "status=201 body={'feedbackId': '56505d81-5173-42be-8999-1a3327ccb2d7', 'status': 'received', 'user': {'id': '998e2bd3-e745-4318-ba1d-2a98d88a97d0', 'username': 'e2e-lc-user', 'role': 'user'}, 'quota': {'dailyLimit': 50, 'used': 4, 'remaining': 46, 'resetAt': '2026-09-17T16:00:00.000Z'}, 'collectionState': 'waiting_manual_archive'}"
+      "status=201 body={'feedbackId': '433fe79c-e33c-4318-b26a-01a8521da0ca', 'status': 'received', 'user': {'id': 'f356328e-4923-439c-b980-c871d390144e', 'username': 'e2e-lc-user', 'role': 'user'}, 'quota': {'dailyLimit': 50, 'used': 4, 'remaining': 46, 'resetAt': '2026-09-18T16:00:00.000Z'}, 'collectionState': 'waiting_manual_archive'}"
     ],
     [
       "分类+同步受理",
       true,
-      "status=202 body={'ok': True, 'status': 'ready_to_archive', 'classifyVersion': 1, 'classification': {'projectId': 'p-e2e', 'columnId': 'col-1', 'columnSlug': 'triage', 'labelIds': ['label-bug'], 'assigneeId': None, 'assigneeName': None, 'version': 1, 'updatedAt': '2026-09-17T14:59:03.745Z', 'updatedBy': '79650bb4-1b96-4878-909a-9913d181fad1'}, 'revision': 1, 'archiveQueued': True, 'replayed': False}"
+      "status=202 body={'ok': True, 'status': 'ready_to_archive', 'classifyVersion': 1, 'classification': {'projectId': 'p-e2e', 'columnId': 'col-1', 'columnSlug': 'triage', 'labelIds': ['label-bug'], 'assigneeId': None, 'assigneeName': None, 'version': 1, 'updatedAt': '2026-09-17T17:13:44.744Z', 'updatedBy': '3e5d57aa-6bd1-4e5b-9d8c-50d30177e561'}, 'revision': 1, 'archiveQueued': True, 'replayed': False}"
     ],
     [
       "反馈 A 已同步（status=archived）",
@@ -294,6 +294,201 @@
       "wide 1920×1080 无横向滚动",
       true,
       ""
+    ],
+    [
+      "桌面侧栏 224px",
+      true,
+      "w=224"
+    ],
+    [
+      "反馈抽屉 680px",
+      true,
+      "w=680"
+    ],
+    [
+      "软件抽屉 640px",
+      true,
+      "w=640"
+    ],
+    [
+      "宽屏列表内容上限 1440px",
+      true,
+      "w=1440"
+    ],
+    [
+      "767px 图标栏隐藏",
+      true,
+      ""
+    ],
+    [
+      "767px 顶部菜单显示",
+      true,
+      ""
+    ],
+    [
+      "768px 图标栏显示",
+      true,
+      ""
+    ],
+    [
+      "768px 顶部菜单隐藏",
+      true,
+      ""
+    ],
+    [
+      "1199px 图标栏显示",
+      true,
+      ""
+    ],
+    [
+      "1199px 顶部菜单隐藏",
+      true,
+      ""
+    ],
+    [
+      "1200px 图标栏隐藏",
+      true,
+      ""
+    ],
+    [
+      "1200px 顶部菜单隐藏",
+      true,
+      ""
+    ],
+    [
+      "平板图标栏 72px",
+      true,
+      "w=72"
+    ],
+    [
+      "rail 名称提示显示",
+      true,
+      ""
+    ],
+    [
+      "rail 提示 portal 到侧栏外",
+      true,
+      ""
+    ],
+    [
+      "手机抽屉全宽",
+      true,
+      "w=390"
+    ],
+    [
+      "手机抽屉底部操作区可见",
+      true,
+      ""
+    ],
+    [
+      "内层确认关闭后抽屉仍在",
+      true,
+      ""
+    ],
+    [
+      "再次 Escape 关闭抽屉",
+      true,
+      ""
+    ],
+    [
+      "方向键打开菜单",
+      true,
+      ""
+    ],
+    [
+      "焦点进入菜单项",
+      true,
+      "active='归档'"
+    ],
+    [
+      "Home/End 跳首尾项",
+      true,
+      "home='归档' end='移入回收站'"
+    ],
+    [
+      "Escape 关闭菜单",
+      true,
+      ""
+    ],
+    [
+      "焦点回到触发按钮",
+      true,
+      "cls='icon-btn'"
+    ],
+    [
+      "出现放弃修改确认",
+      true,
+      ""
+    ],
+    [
+      "确认期间抽屉保持打开",
+      true,
+      ""
+    ],
+    [
+      "确认后抽屉关闭",
+      true,
+      ""
+    ],
+    [
+      "200% 缩放无横向滚动",
+      true,
+      ""
+    ],
+    [
+      "200% 缩放回落到手机外壳",
+      true,
+      ""
+    ],
+    [
+      "200% 缩放卡片列表显示",
+      true,
+      ""
+    ],
+    [
+      "长内容反馈提交 201",
+      true,
+      "status=201"
+    ],
+    [
+      "长标题行存在",
+      true,
+      ""
+    ],
+    [
+      "长标题以省略号截断",
+      true,
+      ""
+    ],
+    [
+      "长内容无横向滚动(桌面)",
+      true,
+      ""
+    ],
+    [
+      "长内容无横向滚动(手机)",
+      true,
+      ""
+    ],
+    [
+      "减少动效：反馈页渲染",
+      true,
+      ""
+    ],
+    [
+      "减少动效：抽屉可打开",
+      true,
+      ""
+    ],
+    [
+      "减少动效：抽屉可关闭",
+      true,
+      ""
+    ],
+    [
+      "管理页加载本次构建产物",
+      true,
+      "asset=index-C0GX0Kj7.js"
     ]
   ],
   "warnings": []

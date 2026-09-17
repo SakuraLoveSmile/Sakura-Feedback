@@ -48,9 +48,9 @@ SHOTS = os.sep.join([ROOT, "e2e", "shots", "admin-delete"])
 REPORT = os.sep.join([SHOTS, "report.json"])
 
 APP_ID = "com.e2e.delete-app"
-KANEO_PORT = 8898
-AI_PORT = 8899
-PAGES_PORT = 5195  # 独占宿主源端口，避免与其他 e2e 脚本撞车
+KANEO_PORT = int(os.environ.get("E2E_KANEO_PORT", "8898"))
+AI_PORT = int(os.environ.get("E2E_AI_PORT", "8899"))
+PAGES_PORT = int(os.environ.get("E2E_PAGES_PORT", "5195"))  # 独占宿主源端口，避免与其他 e2e 脚本撞车
 
 ADMIN_PASS = "admin-" + secrets.token_hex(12)
 USER_NAME = "e2e-del-user"
@@ -296,7 +296,9 @@ def main() -> int:
     servers = []
     try:
         step("启动 mock 外部服务（AI / Kaneo）与宿主源")
-        p, log = start_proc(["node", "e2e/mock-external.mjs"], ROOT, log_path="/tmp/fb-del-mock.log")
+        mock_env = dict(os.environ)
+        mock_env.update(E2E_KANEO_PORT=str(KANEO_PORT), E2E_AI_PORT=str(AI_PORT), E2E_KANEO_PUBLIC_BASE=f"http://127.0.0.1:{KANEO_PORT}")
+        p, log = start_proc(["node", "e2e/mock-external.mjs"], ROOT, env=mock_env, log_path="/tmp/fb-del-mock.log")
         procs.append(p)
         logs.append(log)
         wait_http(f"http://127.0.0.1:{KANEO_PORT}/__health")
@@ -471,8 +473,9 @@ def main() -> int:
 
             step("C2 反馈列表页显示「软件已删除」标记")
             page.locator(".nav-item:visible", has_text="反馈").first.click()
-            # 新列表软件列显示名称（appId 移入详情抽屉）
-            page.wait_for_selector("text=E2E 待删除软件", timeout=15000)
+            # 新列表软件列显示名称（appId 移入详情抽屉）；范围限定到表行，
+            # 避免先匹配到筛选下拉里不可见的 <option> 而误判
+            page.wait_for_selector(".fb-table tbody tr:has-text('E2E 待删除软件')", timeout=15000)
             body_text = page.locator("body").inner_text()
             check("反馈列表标记软件已删除", "软件已删除" in body_text, body_text[:400])
             shot(page, "02-feedback-deleted-mark")

@@ -13,6 +13,7 @@ import {
   Drawer,
   EmptyState,
   FormSection,
+  fmtDateTime,
   Icon,
   InlineError,
   PageHeader,
@@ -643,7 +644,7 @@ export default function AppsView() {
                           <tr key={s.origin}>
                             <td>
                               <code className="wrap-anywhere">{s.origin}</code>
-                              <div className="muted small">最近出现 {s.lastSeenAt}</div>
+                              <div className="muted small">最近出现 {fmtDateTime(s.lastSeenAt)}</div>
                             </td>
                             <td>{s.kind === "native" ? "原生客户端" : "浏览器"}</td>
                             <td>

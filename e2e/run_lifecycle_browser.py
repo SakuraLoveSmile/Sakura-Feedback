@@ -53,9 +53,9 @@ REPORT = os.sep.join([SHOTS, "report.json"])
 APP_ID = "com.e2e.lifecycle"
 APP_NAME = "生命周期验收软件"
 APP_ORIGIN = "http://127.0.0.1:5196"
-KANEO_PORT = 8898
-AI_PORT = 8899
-PAGES_PORT = 5196
+KANEO_PORT = int(os.environ.get("E2E_KANEO_PORT", "8898"))
+AI_PORT = int(os.environ.get("E2E_AI_PORT", "8899"))
+PAGES_PORT = int(os.environ.get("E2E_PAGES_PORT", "5196"))
 
 ADMIN_PASS = "admin-" + secrets.token_hex(12)
 
@@ -198,7 +198,10 @@ def admin_login(page, base: str) -> None:
         page.fill("#u", "admin")
         page.fill("#p", ADMIN_PASS)
         page.click("form:has(#u) button[type=submit]")
-    page.locator(".nav-item:visible").first.wait_for(timeout=20000)
+    # 三档外壳：等任一导航入口出现（桌面侧栏 / 平板图标栏 / 手机菜单钮）
+    page.locator(
+        '.nav-item:visible, .rail-item:visible, button[aria-label="打开导航菜单"]:visible'
+    ).first.wait_for(timeout=20000)
 
 
 def goto_view(page, view: str) -> None:
@@ -215,7 +218,7 @@ def click_nav(page, label: str) -> None:
         item.first.click()
         page.wait_for_timeout(300)
         return
-    rail = page.locator(".rail-item:visible", has_text=label)
+    rail = page.locator(f'.rail-item:visible[aria-label="{label}"]')
     if rail.count() >= 1:
         rail.first.click()
         page.wait_for_timeout(300)
@@ -256,7 +259,9 @@ def main() -> int:
     servers = []
     try:
         step("启动 mock 外部服务（AI / Kaneo）与宿主源")
-        p, log = start_proc(["node", "e2e/mock-external.mjs"], ROOT, log_path="/tmp/fb-lc-mock.log")
+        mock_env = dict(os.environ)
+        mock_env.update(E2E_KANEO_PORT=str(KANEO_PORT), E2E_AI_PORT=str(AI_PORT), E2E_KANEO_PUBLIC_BASE=f"http://127.0.0.1:{KANEO_PORT}")
+        p, log = start_proc(["node", "e2e/mock-external.mjs"], ROOT, env=mock_env, log_path="/tmp/fb-lc-mock.log")
         procs.append(p)
         logs.append(log)
         wait_http(f"http://127.0.0.1:{KANEO_PORT}/__health")
@@ -560,6 +565,204 @@ def main() -> int:
                 if name == "desktop":
                     check("桌面表格显示", page.locator(".fb-table").first.is_visible())
                 shot(page, f"07-viewport-{name}", full_page=(name == "mobile"))
+
+            step("设计尺寸断言：侧栏/图标栏/抽屉/内容上限")
+            # 清掉前面遗留的搜索词，避免筛选影响后续行定位
+            page.locator('input[type="search"]').fill("")
+            page.wait_for_timeout(800)
+
+            def px(sel: str) -> float:
+                return page.locator(sel).first.evaluate("el => el.getBoundingClientRect().width")
+
+            page.set_viewport_size({"width": 1440, "height": 900})
+            click_nav(page, "反馈")
+            page.wait_for_timeout(500)
+            check("桌面侧栏 224px", abs(px(".shell-nav") - 224) <= 2, f"w={px('.shell-nav'):.0f}")
+            open_drawer(page, "反馈 A")
+            check("反馈抽屉 680px", abs(px(".drawer") - 680) <= 2, f"w={px('.drawer'):.0f}")
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(400)
+            click_nav(page, "软件配置")
+            page.wait_for_timeout(600)
+            page.locator("tbody tr .btn", has_text="配置").first.click()
+            page.wait_for_selector(".drawer", timeout=8000)
+            page.wait_for_timeout(400)
+            check("软件抽屉 640px", abs(px(".drawer") - 640) <= 2, f"w={px('.drawer'):.0f}")
+            shot(page, "08-app-drawer-640")
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(400)
+            page.set_viewport_size({"width": 1920, "height": 1080})
+            click_nav(page, "反馈")
+            page.wait_for_timeout(500)
+            lw = px(".page-list")
+            check("宽屏列表内容上限 1440px", lw <= 1441, f"w={lw:.0f}")
+
+            step("断点边界：767/768/1199/1200")
+            for w, rail, top in ((767, False, True), (768, True, False), (1199, True, False), (1200, False, False)):
+                page.set_viewport_size({"width": w, "height": 800})
+                page.wait_for_timeout(400)
+                check(
+                    f"{w}px 图标栏{'显示' if rail else '隐藏'}",
+                    page.locator(".shell-rail").first.is_visible() == rail,
+                )
+                check(
+                    f"{w}px 顶部菜单{'显示' if top else '隐藏'}",
+                    page.locator(".shell-top").first.is_visible() == top,
+                )
+            # 平板图标栏：72px + portal 名称提示不被裁切
+            page.set_viewport_size({"width": 1024, "height": 768})
+            page.wait_for_timeout(400)
+            check("平板图标栏 72px", abs(px(".shell-rail") - 72) <= 2, f"w={px('.shell-rail'):.0f}")
+            page.locator(".rail-item").first.hover()
+            page.wait_for_timeout(300)
+            tip = page.locator(".rail-tip")
+            check("rail 名称提示显示", tip.count() == 1 and tip.is_visible())
+            check("rail 提示 portal 到侧栏外", page.locator("body > .rail-tip").count() == 1)
+            shot(page, "09-rail-tooltip")
+
+            step("手机：抽屉全宽＋底部操作区")
+            page.set_viewport_size({"width": 390, "height": 844})
+            click_nav(page, "反馈")
+            page.wait_for_timeout(600)
+            page.locator(".fb-card", has_text="反馈 A").locator(".fb-card-open").first.click()
+            page.wait_for_selector(".drawer", timeout=8000)
+            page.wait_for_timeout(400)
+            mw = px(".drawer")
+            check("手机抽屉全宽", abs(mw - 390) <= 2, f"w={mw:.0f}")
+            check("手机抽屉底部操作区可见", page.locator(".drawer-foot").first.is_visible())
+            shot(page, "10-mobile-drawer")
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(400)
+
+            step("嵌套弹层：内层关闭不误关外层")
+            page.set_viewport_size({"width": 1440, "height": 900})
+            click_nav(page, "反馈")
+            page.wait_for_timeout(500)
+            open_drawer(page, "反馈 A")
+            page.locator(".drawer-foot .btn", has_text="移入回收站").click()
+            page.wait_for_selector(".modal", timeout=5000)
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(300)
+            check(
+                "内层确认关闭后抽屉仍在",
+                page.locator(".modal").count() == 0 and page.locator(".drawer").count() == 1,
+            )
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(300)
+            check("再次 Escape 关闭抽屉", page.locator(".drawer").count() == 0)
+
+            step("菜单键盘：方向键/Home/End/Escape 与焦点恢复")
+            row = page.locator(".fb-table tbody tr", has_text="反馈 A")
+            trigger = row.locator(".more-menu > button")
+            trigger.focus()
+            page.keyboard.press("ArrowDown")
+            page.wait_for_timeout(300)
+            check("方向键打开菜单", page.locator(".more-menu .menu").count() == 1)
+            active = page.evaluate("() => (document.activeElement && document.activeElement.textContent.trim()) || ''")
+            check("焦点进入菜单项", active != "", f"active={active!r}")
+            page.keyboard.press("End")
+            page.wait_for_timeout(120)
+            end_item = page.evaluate("() => (document.activeElement && document.activeElement.textContent.trim()) || ''")
+            page.keyboard.press("Home")
+            page.wait_for_timeout(120)
+            home_item = page.evaluate("() => (document.activeElement && document.activeElement.textContent.trim()) || ''")
+            check("Home/End 跳首尾项", home_item != end_item or page.locator(".more-menu .menu button").count() == 1,
+                  f"home={home_item!r} end={end_item!r}")
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(250)
+            check("Escape 关闭菜单", page.locator(".more-menu .menu").count() == 0)
+            cls = page.evaluate("() => (document.activeElement && document.activeElement.className) || ''")
+            check("焦点回到触发按钮", "icon-btn" in cls, f"cls={cls!r}")
+
+            step("未保存修改：放弃确认")
+            click_nav(page, "软件配置")
+            page.wait_for_timeout(600)
+            page.locator(".btn", has_text="新增软件").first.click()
+            page.wait_for_selector(".drawer", timeout=5000)
+            page.locator("#an").fill("未保存的草稿")
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(400)
+            check("出现放弃修改确认", page.locator(".modal", has_text="放弃未保存的修改").count() == 1)
+            check("确认期间抽屉保持打开", page.locator(".drawer").count() == 1)
+            page.locator(".modal .btn", has_text="放弃修改").click()
+            page.wait_for_timeout(400)
+            check("确认后抽屉关闭", page.locator(".drawer").count() == 0)
+
+            step("200% 缩放与减少动态效果")
+            # 等效 200% 缩放：1440 物理像素 ≈ 720 CSS px @ deviceScaleFactor=2
+            ctx3 = browser.new_context(viewport={"width": 720, "height": 450}, device_scale_factor=2)
+            page3 = ctx3.new_page()
+            admin_login(page3, base)
+            page3.wait_for_timeout(500)
+            overflow = page3.evaluate(
+                "() => document.scrollingElement.scrollWidth > document.scrollingElement.clientWidth + 1"
+            )
+            check("200% 缩放无横向滚动", not overflow)
+            # 720 CSS px < 768 → 正确回落到手机外壳与卡片列表
+            check("200% 缩放回落到手机外壳", page3.locator(".shell-top").first.is_visible())
+            check("200% 缩放卡片列表显示", page3.locator(".fb-card").count() >= 1)
+            page3.screenshot(path=os.sep.join([SHOTS, "11-zoom-200.png"]))
+            ctx3.close()
+
+            step("长内容：超长标题不撑破布局")
+            st, body = uh.call(
+                "POST",
+                f"{base}/api/feedback",
+                {
+                    "idempotencyKey": "lifecycle-e2e-longtext",
+                    "appId": APP_ID,
+                    "text": "超长标题验收：" + "非常长的反馈标题用于验证列表省略号与卡片换行不会撑破容器" * 6,
+                    "context": {"appVersion": "1.0.0", "pageLabel": "lifecycle"},
+                },
+            )
+            check("长内容反馈提交 201", st == 201, f"status={st}")
+            # 轮询原位刷新不会在顶部插入新行（防滚动跳动），需重新加载才会取到新记录
+            page.reload(wait_until="domcontentloaded")
+            page.wait_for_selector(".nav-item:visible", timeout=20000)
+            click_nav(page, "反馈")
+            page.wait_for_selector(".fb-table tbody tr", timeout=10000)
+            row = page.locator(".fb-table tbody tr", has_text="超长标题验收")
+            check("长标题行存在", row.count() == 1)
+            if row.count():
+                # AI 可能生成较短标题，长原文落在摘要行；标题或摘要任一被截断即符合省略号规范
+                clipped = row.evaluate(
+                    """el => Array.from(el.querySelectorAll('.fb-cell-title, .fb-cell-sum'))
+                        .some(n => n.scrollWidth > n.clientWidth)"""
+                )
+                check("长标题以省略号截断", clipped)
+            overflow = page.evaluate(
+                "() => document.scrollingElement.scrollWidth > document.scrollingElement.clientWidth + 1"
+            )
+            check("长内容无横向滚动(桌面)", not overflow)
+            page.set_viewport_size({"width": 390, "height": 844})
+            page.wait_for_timeout(600)
+            overflow = page.evaluate(
+                "() => document.scrollingElement.scrollWidth > document.scrollingElement.clientWidth + 1"
+            )
+            check("长内容无横向滚动(手机)", not overflow)
+            shot(page, "12-long-content")
+
+            step("减少动态效果环境冒烟")
+            ctx2 = browser.new_context(viewport={"width": 1440, "height": 900}, reduced_motion="reduce")
+            page2 = ctx2.new_page()
+            admin_login(page2, base)
+            check("减少动效：反馈页渲染", page2.locator(".view-tab").count() == 3)
+            open_drawer(page2, "反馈 A")
+            check("减少动效：抽屉可打开", page2.locator(".drawer").count() == 1)
+            page2.keyboard.press("Escape")
+            page2.wait_for_timeout(300)
+            check("减少动效：抽屉可关闭", page2.locator(".drawer").count() == 0)
+            ctx2.close()
+
+            # 核对浏览器加载的是本 worktree 的构建产物
+            assets_dir = os.path.join(ADMIN_DIST, "assets")
+            js_assets = [f for f in os.listdir(assets_dir) if f.endswith(".js")]
+            html = urllib.request.urlopen(f"{base}/admin/", timeout=10).read().decode()
+            check(
+                "管理页加载本次构建产物",
+                bool(js_assets) and js_assets[0] in html,
+                f"asset={js_assets[0] if js_assets else 'none'}",
+            )
 
             browser.close()
 
