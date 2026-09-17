@@ -33,6 +33,7 @@ import {
   Drawer,
   EmptyState,
   FormSection,
+  fmtDateTime,
   Icon,
   InlineError,
   Modal,
@@ -299,7 +300,7 @@ export default function FeedbackDrawer({
           <dt>提交账号</dt>
           <dd>{detail.username ?? "—"}</dd>
           <dt>提交时间</dt>
-          <dd>{new Date(detail.createdAt).toLocaleString()}</dd>
+          <dd>{fmtDateTime(detail.createdAt)}</dd>
         </dl>
         <details className="info-more">
           <summary>更多信息</summary>
@@ -441,7 +442,7 @@ export default function FeedbackDrawer({
             <ul className="audit-list">
               {detail.audit.map((a) => (
                 <li key={a.id}>
-                  <span className="muted">{new Date(a.at).toLocaleString()}</span> · {a.actor || "系统"} ·{" "}
+                  <span className="muted">{fmtDateTime(a.at)}</span> · {a.actor || "系统"} ·{" "}
                   {AUDIT_LABELS[a.action] ?? a.action}
                 </li>
               ))}

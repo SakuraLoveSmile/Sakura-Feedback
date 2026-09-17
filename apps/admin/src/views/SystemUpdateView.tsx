@@ -7,7 +7,7 @@ import {
   type UpdateOperationView,
   type UpdatePauseState,
 } from "../api.ts";
-import { InlineError, PageHeader, SkeletonRows, StatusBadge } from "../ui.tsx";
+import { fmtDateTime, InlineError, PageHeader, SkeletonRows, StatusBadge } from "../ui.tsx";
 
 /** 保留最近一次提交的任务 ID（刷新页面或重开标签后仍能恢复进度展示）。 */
 const OPERATION_KEY = "feedback.systemUpdate.operationId";
@@ -37,7 +37,7 @@ function newRequestId(): string {
 }
 
 function fmt(iso: string | null): string {
-  return iso ? new Date(iso).toLocaleString() : "—";
+  return fmtDateTime(iso);
 }
 
 function isTerminal(op: UpdateOperationView): boolean {

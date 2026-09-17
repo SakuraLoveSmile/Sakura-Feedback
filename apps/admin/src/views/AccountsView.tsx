@@ -1,7 +1,9 @@
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { type AccountItem, ApiError, api } from "../api.ts";
 import {
+  ConfirmDialog,
   EmptyState,
+  fmtDateTime,
   Icon,
   InlineError,
   Modal,
@@ -26,6 +28,8 @@ export default function AccountsView() {
   const [accounts, setAccounts] = useState<AccountItem[] | null>(null);
   const [draft, setDraft] = useState<Draft>(empty);
   const [createOpen, setCreateOpen] = useState(false);
+  /** 新建账号有未保存输入时的放弃确认。 */
+  const [discardAsk, setDiscardAsk] = useState(false);
   const [quotaTarget, setQuotaTarget] = useState<AccountItem | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -35,6 +39,18 @@ export default function AccountsView() {
     const r = await api.get<{ users: AccountItem[] }>("/api/admin/users");
     setAccounts(r.users);
   }, []);
+
+  /** 有未保存输入时先确认，避免背景点击/意外关闭丢输入。 */
+  const createDirty = draft.username !== "" || draft.password !== "" || draft.dailyLimit !== "";
+  const closeCreate = () => {
+    setCreateOpen(false);
+    setDiscardAsk(false);
+    setError(null);
+  };
+  const requestCloseCreate = () => {
+    if (createDirty) setDiscardAsk(true);
+    else closeCreate();
+  };
 
   useEffect(() => {
     void load().catch((e) => setError(e instanceof ApiError ? e.message : "加载失败"));
@@ -180,20 +196,10 @@ export default function AccountsView() {
       {createOpen && (
         <Modal
           title="新建账号"
-          onClose={() => {
-            setCreateOpen(false);
-            setError(null);
-          }}
+          onClose={requestCloseCreate}
           actions={
             <>
-              <button
-                type="button"
-                className="btn"
-                onClick={() => {
-                  setCreateOpen(false);
-                  setError(null);
-                }}
-              >
+              <button type="button" className="btn" onClick={requestCloseCreate}>
                 取消
               </button>
               <button
@@ -233,6 +239,17 @@ export default function AccountsView() {
             <p className="field-help">留空使用默认值 3；0 表示禁止新提交。</p>
           </div>
         </Modal>
+      )}
+
+      {discardAsk && (
+        <ConfirmDialog
+          title="放弃未保存的输入？"
+          body="新建账号表单中有未保存的内容，关闭后将丢失。"
+          confirmLabel="放弃输入"
+          danger
+          onConfirm={closeCreate}
+          onClose={() => setDiscardAsk(false)}
+        />
       )}
 
       {quotaTarget && (
@@ -281,5 +298,5 @@ function usagePct(a: AccountItem): number {
 function resetLabel(resetAt: string): string {
   const d = new Date(resetAt);
   if (Number.isNaN(d.getTime())) return "";
-  return `${d.toLocaleString()} `;
+  return `${fmtDateTime(resetAt)} `;
 }

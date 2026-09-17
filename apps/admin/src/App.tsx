@@ -143,23 +143,57 @@ function NavItems({ page, onNav }: { page: Page; onNav: (p: Page) => void }) {
   );
 }
 
-/** 768–1199px 图标栏：只显示图标，悬停/键盘聚焦时浮出名称。 */
-function RailItems({ page, onNav }: { page: Page; onNav: (p: Page) => void }) {
+/** 768–1199px 图标栏：只显示图标，悬停/键盘聚焦时浮出名称。
+ * 名称提示经 portal 放到侧栏外，避免被可滚动的侧栏容器裁切。 */
+function ShellRail({ page, onNav, onLogout }: { page: Page; onNav: (p: Page) => void; onLogout: () => void }) {
+  const [tip, setTip] = useState<{ label: string; top: number; left: number } | null>(null);
+  const tipProps = (label: string) => ({
+    onMouseEnter: (e: React.SyntheticEvent<HTMLElement>) => {
+      const r = e.currentTarget.getBoundingClientRect();
+      setTip({ label, top: r.top + r.height / 2, left: r.right + 8 });
+    },
+    onMouseLeave: () => setTip(null),
+    onFocus: (e: React.SyntheticEvent<HTMLElement>) => {
+      const r = e.currentTarget.getBoundingClientRect();
+      setTip({ label, top: r.top + r.height / 2, left: r.right + 8 });
+    },
+    onBlur: () => setTip(null),
+  });
   return (
-    <>
+    <nav className="shell-rail" aria-label="管理导航" onScroll={() => setTip(null)}>
+      <span className="brand-mark rail-brand" aria-hidden="true">
+        <Icon name="feedback" size={18} />
+      </span>
       {NAV_GROUPS.flatMap((g) => g.items).map((it) => (
         <button
           type="button"
           key={it.id}
           className={`rail-item${page === it.id ? " active" : ""}`}
           aria-current={page === it.id ? "page" : undefined}
+          aria-label={it.label}
           onClick={() => onNav(it.id)}
+          {...tipProps(it.label)}
         >
           <Icon name={it.icon} />
-          <span className="rail-label">{it.label}</span>
         </button>
       ))}
-    </>
+      <button
+        type="button"
+        className="rail-item rail-logout"
+        aria-label="退出登录"
+        onClick={onLogout}
+        {...tipProps("退出登录")}
+      >
+        <Icon name="logout" />
+      </button>
+      {tip &&
+        createPortal(
+          <div className="rail-tip" role="tooltip" style={{ top: tip.top, left: tip.left }}>
+            {tip.label}
+          </div>,
+          document.body,
+        )}
+    </nav>
   );
 }
 
@@ -300,16 +334,7 @@ export default function App() {
           </div>
         </nav>
         {/* 图标栏：768–1199px */}
-        <nav className="shell-rail" aria-label="管理导航">
-          <span className="brand-mark rail-brand" aria-hidden="true">
-            <Icon name="feedback" size={18} />
-          </span>
-          <RailItems page={page} onNav={nav} />
-          <button type="button" className="rail-item rail-logout" onClick={logout} aria-label="退出登录">
-            <Icon name="logout" />
-            <span className="rail-label">退出登录</span>
-          </button>
-        </nav>
+        <ShellRail page={page} onNav={nav} onLogout={logout} />
         <main className="shell-body">{renderPage(page, handleCredentialsUpdated)}</main>
       </div>
     </ToastProvider>

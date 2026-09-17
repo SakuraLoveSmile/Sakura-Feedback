@@ -259,6 +259,20 @@ blockquote {
 .nav-drawer {
   display: none;
 }
+/* 图标栏名称提示：portal 到 body，按触发按钮定位，不受侧栏滚动裁切 */
+.rail-tip {
+  position: fixed;
+  transform: translateY(-50%);
+  background: var(--text);
+  color: #fff;
+  font-size: 12px;
+  line-height: 18px;
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: 6px;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 80;
+}
 
 /* 图标栏（768–1199px）：72px，悬停/聚焦浮出名称 */
 @media (min-width: 768px) and (max-width: 1199px) {
@@ -303,26 +317,9 @@ blockquote {
     background: var(--selected);
     color: var(--primary);
   }
-  .rail-label {
-    position: absolute;
-    left: calc(100% + var(--sp-2));
-    top: 50%;
-    transform: translateY(-50%);
-    background: var(--text);
-    color: #fff;
-    font-size: 12px;
-    line-height: 18px;
-    padding: var(--sp-1) var(--sp-2);
-    border-radius: 6px;
-    white-space: nowrap;
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity var(--dur);
-    z-index: 70;
-  }
-  .rail-item:hover .rail-label,
-  .rail-item:focus-visible .rail-label {
-    opacity: 1;
+  .rail-item:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
   }
   .rail-logout {
     margin-top: auto;
@@ -898,6 +895,25 @@ tbody tr.selected {
   .icon-btn {
     width: 44px;
     height: 44px;
+  }
+  /* 触控目标 ≥44px：筛选清除、菜单项、标签移除 */
+  .chip-x {
+    padding: var(--sp-2);
+  }
+  .chips .clear-all {
+    padding: var(--sp-3) var(--sp-2);
+  }
+  .label-pill button {
+    padding: var(--sp-2);
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .label-picker-list label {
+    padding: var(--sp-3) var(--sp-2);
+  }
+  .more-menu .menu button {
+    padding-top: var(--sp-3);
+    padding-bottom: var(--sp-3);
   }
 }
 
@@ -1537,11 +1553,11 @@ details summary:focus-visible {
   flex: 0 0 auto;
 }
 
-/* ---------- 反馈列表行 ---------- */
+/* ---------- 反馈列表行：双行内容，约 76px 行高 ---------- */
 .fb-table tbody tr td {
   vertical-align: middle;
-  padding-top: var(--sp-3);
-  padding-bottom: var(--sp-3);
+  padding-top: var(--sp-4);
+  padding-bottom: var(--sp-4);
 }
 .fb-cell {
   min-width: 220px;

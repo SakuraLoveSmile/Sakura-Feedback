@@ -23,12 +23,15 @@ import {
   ConfirmDialog,
   EmptyState,
   FilterChip,
+  fmtDateTime,
   Icon,
   InlineError,
+  layerIsTop,
   MoreMenu,
   PageHeader,
   SkeletonRows,
   StatusBadge,
+  useLayerId,
   useToast,
 } from "../ui.tsx";
 import { useUrlState } from "../url.ts";
@@ -100,6 +103,7 @@ export default function FeedbacksView() {
   /** 列表请求序号：切换筛选/区域后的迟到响应直接丢弃，不回写旧数据。 */
   const listSeq = useRef(0);
   const dateRef = useRef<HTMLSpanElement>(null);
+  const dateBtnRef = useRef<HTMLButtonElement>(null);
 
   // 搜索输入防抖 300ms：本地草稿即时回显，防抖后写入 URL（replace，不产生历史）。
   const [qDraft, setQDraft] = useState(q);
@@ -115,14 +119,20 @@ export default function FeedbacksView() {
     [setParams],
   );
 
-  // 日期面板点击外部 / Escape 关闭
+  // 日期面板注册进弹层层级栈：打开后焦点进入首个输入，Escape 仅关本层并还原焦点，
+  // 不会误关下方可能存在的抽屉/弹窗。
+  const dateLayer = useLayerId(dateOpen);
   useEffect(() => {
     if (!dateOpen) return;
+    dateRef.current?.querySelector<HTMLElement>("input")?.focus();
     function onDoc(e: MouseEvent) {
       if (dateRef.current && !dateRef.current.contains(e.target as Node)) setDateOpen(false);
     }
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") setDateOpen(false);
+      if (e.key === "Escape" && layerIsTop(dateLayer.current)) {
+        setDateOpen(false);
+        dateBtnRef.current?.focus();
+      }
     }
     document.addEventListener("mousedown", onDoc);
     document.addEventListener("keydown", onKey);
@@ -130,7 +140,7 @@ export default function FeedbacksView() {
       document.removeEventListener("mousedown", onDoc);
       document.removeEventListener("keydown", onKey);
     };
-  }, [dateOpen]);
+  }, [dateOpen, dateLayer]);
 
   const filterQuery = useCallback(
     (extra?: Record<string, string>) => {
@@ -447,6 +457,7 @@ export default function FeedbacksView() {
         </select>
         <span className="date-popover-wrap" ref={dateRef}>
           <button
+            ref={dateBtnRef}
             type="button"
             className={`btn${from || to ? " active-filter" : ""}`}
             aria-expanded={dateOpen}
@@ -543,6 +554,9 @@ export default function FeedbacksView() {
                 <Icon name="archive" size={14} />
                 归档
               </button>
+              {!selectedItems.every((i) => i.status === "archived") && (
+                <span className="muted small">仅已同步完成的反馈可归档</span>
+              )}
               <button type="button" className="btn sm" onClick={() => askTrash(selectedItems)}>
                 <Icon name="trash" size={14} />
                 移入回收站
@@ -712,7 +726,7 @@ export default function FeedbacksView() {
                       )}
                     </td>
                     <td>
-                      <span className="fb-time" title={new Date(it.createdAt).toLocaleString()}>
+                      <span className="fb-time" title={fmtDateTime(it.createdAt)}>
                         {fmtTime(it.createdAt)}
                       </span>
                     </td>
@@ -816,7 +830,7 @@ export default function FeedbacksView() {
                       ) : null}
                     </span>
                   ) : null}
-                  <span className="fb-time" title={new Date(it.createdAt).toLocaleString()}>
+                  <span className="fb-time" title={fmtDateTime(it.createdAt)}>
                     {fmtTime(it.createdAt)}
                   </span>
                   {it.resumePaused && <span>已暂停</span>}

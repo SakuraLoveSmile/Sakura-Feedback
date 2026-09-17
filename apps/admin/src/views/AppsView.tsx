@@ -64,6 +64,11 @@ export default function AppsView() {
   const [deletingId, setDeletingId] = useState<string | null>(null);
   /** 编辑抽屉是否打开（新增或配置）。 */
   const [editorOpen, setEditorOpen] = useState(false);
+  /** 打开抽屉时的表单基线：用于判断是否有未保存修改。 */
+  const [baseDraft, setBaseDraft] = useState<Draft>(empty);
+  const [baseRule, setBaseRule] = useState<RuleDraft>(emptyRule);
+  /** 关闭前的放弃修改确认。 */
+  const [discardAsk, setDiscardAsk] = useState(false);
   /**
    * 详情读取序号：删除软件后自增，使在途的详情响应失效——
    * 迟到的响应不得把已删软件重新写回详情面板。
@@ -144,21 +149,25 @@ export default function AppsView() {
         const fresh = detail.app;
         setSelected(fresh);
         setSources(detail.sources);
-        setDraft({
+        const nextDraft: Draft = {
           id: fresh.id,
           appId: fresh.appId,
           name: fresh.name,
           originsText: fresh.allowedOrigins.join("\n"),
           kaneoProjectId: fresh.defaults.projectId,
           kaneoColumnSlug: fresh.defaults.columnSlug,
-        });
-        setRule({
+        };
+        const nextRule: RuleDraft = {
           projectId: fresh.defaults.projectId,
           columnId: fresh.defaults.columnId,
           columnSlug: fresh.defaults.columnSlug,
           labelIds: fresh.defaults.labelIds,
           assigneeId: fresh.defaults.assigneeId ?? "",
-        });
+        };
+        setDraft(nextDraft);
+        setBaseDraft(nextDraft);
+        setRule(nextRule);
+        setBaseRule(nextRule);
         await loadOptions(fresh.defaults.projectId);
       } catch (err) {
         if (seq !== detailSeq.current) return;
@@ -173,7 +182,9 @@ export default function AppsView() {
   function openNew() {
     detailSeq.current++;
     setDraft(empty);
+    setBaseDraft(empty);
     setRule(emptyRule);
+    setBaseRule(emptyRule);
     setColumns([]);
     setSelected(null);
     setSources([]);
@@ -186,14 +197,25 @@ export default function AppsView() {
   function closeEditor() {
     detailSeq.current++;
     setEditorOpen(false);
+    setDiscardAsk(false);
     setDraft(empty);
+    setBaseDraft(empty);
     setRule(emptyRule);
+    setBaseRule(emptyRule);
     setColumns([]);
     setSelected(null);
     setSources([]);
     setOptions(null);
     setOptionsError(null);
   }
+
+  /** 有未保存修改时先确认，避免背景点击/意外关闭丢输入。 */
+  const editorDirty =
+    JSON.stringify(draft) !== JSON.stringify(baseDraft) || JSON.stringify(rule) !== JSON.stringify(baseRule);
+  const requestCloseEditor = () => {
+    if (editorDirty) setDiscardAsk(true);
+    else closeEditor();
+  };
 
   const loadProjects = useCallback(async () => {
     setBusy(true);
@@ -541,7 +563,7 @@ export default function AppsView() {
         <Drawer
           narrow
           title={draft.id ? `配置：${draft.name || selected?.name || ""}` : "新增软件"}
-          onClose={closeEditor}
+          onClose={requestCloseEditor}
           footer={
             <>
               <div className="drawer-foot-left">
@@ -811,6 +833,17 @@ export default function AppsView() {
             </>
           )}
         </Drawer>
+      )}
+
+      {discardAsk && (
+        <ConfirmDialog
+          title="放弃未保存的修改？"
+          body="表单中有未保存的修改，关闭后将丢失。"
+          confirmLabel="放弃修改"
+          danger
+          onConfirm={closeEditor}
+          onClose={() => setDiscardAsk(false)}
+        />
       )}
 
       {confirmState?.kind === "enable" && (

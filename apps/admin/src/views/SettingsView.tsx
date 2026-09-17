@@ -61,7 +61,6 @@ export default function SettingsView({ onCredentialsUpdated }: { onCredentialsUp
   return (
     <div className="page-form">
       <PageHeader title="管理员设置" sub="修改当前登录管理员自己的用户名与密码。" />
-      {error && <InlineError message={error} />}
       <form className="card" onSubmit={submit}>
         <FormSection title="管理员身份">
           <div className="field" style={{ marginBottom: 0 }}>
@@ -111,6 +110,7 @@ export default function SettingsView({ onCredentialsUpdated }: { onCredentialsUp
           </div>
         </FormSection>
         <div className="form-section" style={{ paddingBottom: 0 }}>
+          {error && <InlineError message={error} />}
           <p className="muted small" style={{ marginTop: 0 }}>
             保存后需要重新登录：该账号全部会话（含当前）立即失效。
           </p>

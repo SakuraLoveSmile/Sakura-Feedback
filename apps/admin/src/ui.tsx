@@ -215,26 +215,79 @@ export function fmtDateTime(iso: string | null | undefined): string {
   });
 }
 
-// ---------- 焦点约束（弹窗/抽屉共用） ----------
+// ---------- 焦点约束与弹层层级（弹窗/抽屉/菜单共用） ----------
 
 const FOCUSABLE =
-  'a[href], button:not([disabled]), textarea, input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  'a[href], button:not([disabled]), textarea, input:not([disabled]), select:not([disabled]), summary, [tabindex]:not([tabindex="-1"])';
 
-/** 焦点约束 + Escape 关闭 + 关闭后焦点恢复（弹窗 / 抽屉 / 移动菜单共用）。 */
+/** 弹层层级栈：仅最上层响应 Escape 与焦点循环，内层关闭不会误关外层。 */
+const layerStack: number[] = [];
+let layerSeq = 0;
+
+function pushLayer(): number {
+  const id = ++layerSeq;
+  layerStack.push(id);
+  return id;
+}
+
+function popLayer(id: number) {
+  const i = layerStack.indexOf(id);
+  if (i >= 0) layerStack.splice(i, 1);
+}
+
+function isTopLayer(id: number): boolean {
+  return id !== 0 && layerStack[layerStack.length - 1] === id;
+}
+
+function isVisible(n: HTMLElement): boolean {
+  if (n.getClientRects().length === 0) return false;
+  return n.checkVisibility?.({ checkVisibilityCSS: true }) ?? true;
+}
+
+/**
+ * 非模态弹层（菜单 / 日期气泡等）注册进层级栈：
+ * 打开期间下层弹层不再响应 Escape/Tab。返回层 id 的 ref，
+ * 事件回调里用 isTopLayer(ref.current) 做实时判定（比 state 可靠，不会因上层新弹层而残留 true）。
+ */
+export function useLayerId(open: boolean): React.RefObject<number> {
+  const idRef = useRef(0);
+  useEffect(() => {
+    if (!open) return;
+    const id = pushLayer();
+    idRef.current = id;
+    return () => {
+      popLayer(id);
+      idRef.current = 0;
+    };
+  }, [open]);
+  return idRef;
+}
+
+export function layerIsTop(id: number): boolean {
+  return isTopLayer(id);
+}
+
+/**
+ * 焦点约束 + Escape 关闭 + 关闭后焦点恢复（弹窗 / 抽屉 / 移动菜单共用）。
+ * 仅在激活时聚焦一次，后续重渲染（如轮询刷新）不会抢占用户正在操作的焦点。
+ */
 export function useFocusTrap(active: boolean, ref: React.RefObject<HTMLElement | null>, onEscape?: () => void) {
   const restoreRef = useRef<HTMLElement | null>(null);
+  const escRef = useRef(onEscape);
+  escRef.current = onEscape;
   useEffect(() => {
     if (!active) return;
     restoreRef.current = document.activeElement as HTMLElement | null;
     const el = ref.current;
     if (!el) return;
-    const focusables = () => Array.from(el.querySelectorAll<HTMLElement>(FOCUSABLE));
-    const first = focusables()[0];
-    (first ?? el).focus();
+    const id = pushLayer();
+    const focusables = () => Array.from(el.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(isVisible);
+    (focusables()[0] ?? el).focus();
     function onKey(e: KeyboardEvent) {
+      if (!isTopLayer(id)) return;
       if (e.key === "Escape") {
         e.stopPropagation();
-        onEscape?.();
+        escRef.current?.();
         return;
       }
       if (e.key !== "Tab") return;
@@ -256,9 +309,10 @@ export function useFocusTrap(active: boolean, ref: React.RefObject<HTMLElement |
     document.addEventListener("keydown", onKey, true);
     return () => {
       document.removeEventListener("keydown", onKey, true);
+      popLayer(id);
       restoreRef.current?.focus?.();
     };
-  }, [active, ref, onEscape]);
+  }, [active, ref]);
 }
 
 // ---------- 弹窗 ----------
@@ -646,24 +700,55 @@ export function MoreMenu({
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLSpanElement>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLSpanElement>(null);
+  const layerRef = useLayerId(open);
   useEffect(() => {
     if (!open) return;
+    menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
     function onDoc(e: MouseEvent) {
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
     }
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") setOpen(false);
-    }
     document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKey);
-    };
+    return () => document.removeEventListener("mousedown", onDoc);
   }, [open]);
+  const menuItems = () => Array.from(menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? []);
+  function onKey(e: React.KeyboardEvent) {
+    if (!open) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        setOpen(true);
+      }
+      return;
+    }
+    if (!layerIsTop(layerRef.current)) return;
+    const list = menuItems();
+    const i = list.indexOf(document.activeElement as HTMLElement);
+    if (e.key === "Escape") {
+      e.preventDefault();
+      setOpen(false);
+      btnRef.current?.focus();
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      (list[i + 1] ?? list[0])?.focus();
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      (list[i - 1] ?? list[list.length - 1])?.focus();
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      list[0]?.focus();
+    } else if (e.key === "End") {
+      e.preventDefault();
+      list[list.length - 1]?.focus();
+    } else if (e.key === "Tab") {
+      setOpen(false);
+    }
+  }
   return (
-    <span className="more-menu" ref={ref}>
+    // biome-ignore lint/a11y/noStaticElementInteractions: 菜单容器负责转发方向键/Escape，自身无交互语义
+    <span className="more-menu" ref={ref} onKeyDown={onKey}>
       <button
+        ref={btnRef}
         type="button"
         className="icon-btn"
         aria-label={label}
@@ -674,7 +759,7 @@ export function MoreMenu({
         <Icon name="more" />
       </button>
       {open && (
-        <span className="menu" role="menu">
+        <span className="menu" role="menu" ref={menuRef}>
           {items.map((it) => (
             <button
               key={it.label}

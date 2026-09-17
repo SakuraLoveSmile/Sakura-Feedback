@@ -3,6 +3,7 @@ import { ApiError, api, type SessionItem } from "../api.ts";
 import {
   ConfirmDialog,
   EmptyState,
+  fmtDateTime,
   Icon,
   InlineError,
   PageHeader,
@@ -107,9 +108,9 @@ export default function SessionsView() {
                       )}
                     </td>
                     <td>{s.clientLabel ?? "—"}</td>
-                    <td className="muted">{new Date(s.createdAt).toLocaleString()}</td>
-                    <td className="muted">{s.lastUsedAt ? new Date(s.lastUsedAt).toLocaleString() : "—"}</td>
-                    <td className="muted">{new Date(s.expiresAt).toLocaleString()}</td>
+                    <td className="muted">{fmtDateTime(s.createdAt)}</td>
+                    <td className="muted">{fmtDateTime(s.lastUsedAt)}</td>
+                    <td className="muted">{fmtDateTime(s.expiresAt)}</td>
                     <td>
                       {s.current ? (
                         <span className="muted">—</span>
@@ -146,15 +147,15 @@ export default function SessionsView() {
                 </div>
                 <div className="kv-card-row">
                   <span>创建时间</span>
-                  <span>{new Date(s.createdAt).toLocaleString()}</span>
+                  <span>{fmtDateTime(s.createdAt)}</span>
                 </div>
                 <div className="kv-card-row">
                   <span>最近使用</span>
-                  <span>{s.lastUsedAt ? new Date(s.lastUsedAt).toLocaleString() : "—"}</span>
+                  <span>{fmtDateTime(s.lastUsedAt)}</span>
                 </div>
                 <div className="kv-card-row">
                   <span>过期时间</span>
-                  <span>{new Date(s.expiresAt).toLocaleString()}</span>
+                  <span>{fmtDateTime(s.expiresAt)}</span>
                 </div>
                 {!s.current && (
                   <div style={{ marginTop: "var(--sp-2)", textAlign: "right" }}>
