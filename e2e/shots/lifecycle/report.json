@@ -1,0 +1,300 @@
+{
+  "results": [
+    [
+      "管理员登录 200",
+      true,
+      "status=200"
+    ],
+    [
+      "Kaneo 连接写入 200",
+      true,
+      "status=200"
+    ],
+    [
+      "AI 连接写入 200",
+      true,
+      "status=200"
+    ],
+    [
+      "软件配置创建 201",
+      true,
+      "status=201"
+    ],
+    [
+      "创建普通账号 201",
+      true,
+      "status=201"
+    ],
+    [
+      "普通账号登录 200",
+      true,
+      "status=200"
+    ],
+    [
+      "提交 synced 201",
+      true,
+      "status=201 body={'feedbackId': 'a7c3a8e1-7381-4e7c-a2fd-26457fa3619b', 'status': 'received', 'user': {'id': '998e2bd3-e745-4318-ba1d-2a98d88a97d0', 'username': 'e2e-lc-user', 'role': 'user'}, 'quota': {'dailyLimit': 50, 'used': 1, 'remaining': 49, 'resetAt': '2026-09-17T16:00:00.000Z'}, 'collectionState': 'waiting_manual_archive'}"
+    ],
+    [
+      "提交 inbox 201",
+      true,
+      "status=201 body={'feedbackId': 'b2c2b30b-f109-4cae-8eec-c5d85f89b149', 'status': 'received', 'user': {'id': '998e2bd3-e745-4318-ba1d-2a98d88a97d0', 'username': 'e2e-lc-user', 'role': 'user'}, 'quota': {'dailyLimit': 50, 'used': 2, 'remaining': 48, 'resetAt': '2026-09-17T16:00:00.000Z'}, 'collectionState': 'waiting_manual_archive'}"
+    ],
+    [
+      "提交 trash 201",
+      true,
+      "status=201 body={'feedbackId': '1edb7607-a149-4675-806a-2b8a93851cf8', 'status': 'received', 'user': {'id': '998e2bd3-e745-4318-ba1d-2a98d88a97d0', 'username': 'e2e-lc-user', 'role': 'user'}, 'quota': {'dailyLimit': 50, 'used': 3, 'remaining': 47, 'resetAt': '2026-09-17T16:00:00.000Z'}, 'collectionState': 'waiting_manual_archive'}"
+    ],
+    [
+      "提交 purge 201",
+      true,
+      "status=201 body={'feedbackId': '56505d81-5173-42be-8999-1a3327ccb2d7', 'status': 'received', 'user': {'id': '998e2bd3-e745-4318-ba1d-2a98d88a97d0', 'username': 'e2e-lc-user', 'role': 'user'}, 'quota': {'dailyLimit': 50, 'used': 4, 'remaining': 46, 'resetAt': '2026-09-17T16:00:00.000Z'}, 'collectionState': 'waiting_manual_archive'}"
+    ],
+    [
+      "分类+同步受理",
+      true,
+      "status=202 body={'ok': True, 'status': 'ready_to_archive', 'classifyVersion': 1, 'classification': {'projectId': 'p-e2e', 'columnId': 'col-1', 'columnSlug': 'triage', 'labelIds': ['label-bug'], 'assigneeId': None, 'assigneeName': None, 'version': 1, 'updatedAt': '2026-09-17T14:59:03.745Z', 'updatedBy': '79650bb4-1b96-4878-909a-9913d181fad1'}, 'revision': 1, 'archiveQueued': True, 'replayed': False}"
+    ],
+    [
+      "反馈 A 已同步（status=archived）",
+      true,
+      "status=archived"
+    ],
+    [
+      "分组导航：工作台",
+      true,
+      ""
+    ],
+    [
+      "分组导航：管理",
+      true,
+      ""
+    ],
+    [
+      "分组导航：系统",
+      true,
+      ""
+    ],
+    [
+      "默认落在反馈页",
+      true,
+      ""
+    ],
+    [
+      "收件箱计数=4",
+      true,
+      "count=4"
+    ],
+    [
+      "列表含反馈 B",
+      true,
+      ""
+    ],
+    [
+      "搜索后仅剩 1 行",
+      true,
+      "rows=1"
+    ],
+    [
+      "抽屉打开",
+      true,
+      ""
+    ],
+    [
+      "抽屉含「用户原话」",
+      true,
+      ""
+    ],
+    [
+      "抽屉含「分类与同步目标」",
+      true,
+      ""
+    ],
+    [
+      "URL 写入 id 参数",
+      true,
+      ""
+    ],
+    [
+      "归档后收件箱不再显示 A",
+      true,
+      ""
+    ],
+    [
+      "已归档含 A",
+      true,
+      ""
+    ],
+    [
+      "恢复后已归档为空",
+      true,
+      ""
+    ],
+    [
+      "A 回到收件箱",
+      true,
+      ""
+    ],
+    [
+      "确认框说明保留远端内容",
+      true,
+      ""
+    ],
+    [
+      "回收站含 C",
+      true,
+      ""
+    ],
+    [
+      "抽屉只读标记",
+      true,
+      ""
+    ],
+    [
+      "只读：无分类控件",
+      true,
+      ""
+    ],
+    [
+      "只读：无恢复动作区",
+      true,
+      ""
+    ],
+    [
+      "恢复后回收站为空",
+      true,
+      ""
+    ],
+    [
+      "未输入确认文本时按钮禁用",
+      true,
+      ""
+    ],
+    [
+      "彻底删除后回收站为空",
+      true,
+      ""
+    ],
+    [
+      "管理端详情 410（已清理）",
+      true,
+      "status=410"
+    ],
+    [
+      "所属用户公开查询 410",
+      true,
+      "status=410 body={'error': {'code': 'feedback_purged', 'message': '该反馈已被彻底删除'}}"
+    ],
+    [
+      "批量栏出现",
+      true,
+      ""
+    ],
+    [
+      "归档按钮禁用（未全同步）",
+      true,
+      ""
+    ],
+    [
+      "B 已离开收件箱",
+      true,
+      ""
+    ],
+    [
+      "回收站含 B",
+      true,
+      ""
+    ],
+    [
+      "URL 含 q= ",
+      true,
+      ""
+    ],
+    [
+      "刷新后搜索保持",
+      true,
+      ""
+    ],
+    [
+      "详情 URL 可直达",
+      true,
+      ""
+    ],
+    [
+      "后退关闭抽屉",
+      true,
+      ""
+    ],
+    [
+      "页面「软件配置」渲染",
+      true,
+      ""
+    ],
+    [
+      "页面「账号」渲染",
+      true,
+      ""
+    ],
+    [
+      "页面「连接配置」渲染",
+      true,
+      ""
+    ],
+    [
+      "页面「会话」渲染",
+      true,
+      ""
+    ],
+    [
+      "页面「管理员设置」渲染",
+      true,
+      ""
+    ],
+    [
+      "页面「系统更新」渲染",
+      true,
+      ""
+    ],
+    [
+      "mobile 390×844 无横向滚动",
+      true,
+      ""
+    ],
+    [
+      "移动端卡片列表显示",
+      true,
+      ""
+    ],
+    [
+      "移动端表格隐藏",
+      true,
+      ""
+    ],
+    [
+      "tablet 768×1024 无横向滚动",
+      true,
+      ""
+    ],
+    [
+      "laptop 1024×768 无横向滚动",
+      true,
+      ""
+    ],
+    [
+      "desktop 1440×900 无横向滚动",
+      true,
+      ""
+    ],
+    [
+      "桌面表格显示",
+      true,
+      ""
+    ],
+    [
+      "wide 1920×1080 无横向滚动",
+      true,
+      ""
+    ]
+  ],
+  "warnings": []
+}

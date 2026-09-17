@@ -40,6 +40,29 @@
   <body>
     <div id="plain">DEFAULT-CAPTURE-MODE-HOST</div>
 
+    <script>
+      // 测试脚手架（仅 e2e）：与 mask.html 同一套读取入口（本页无任何敏感区）。
+      window.__fbE2E = {
+        widget: () => document.querySelector('feedback-widget'),
+        thumbSrc() {
+          const img = this.widget().shadowRoot.querySelector('.fb-screenshot-thumb');
+          return img ? img.getAttribute('src') : null;
+        },
+        async blobBase64() {
+          const img = this.widget().shadowRoot.querySelector('.fb-screenshot-thumb');
+          if (!img || !img.getAttribute('src')) return null;
+          const res = await fetch(img.getAttribute('src'));
+          const bytes = new Uint8Array(await res.arrayBuffer());
+          let s = '';
+          const chunk = 0x8000;
+          for (let i = 0; i < bytes.length; i += chunk) {
+            s += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+          }
+          return btoa(s);
+        },
+      };
+    </script>
+
     <script src="/sdk/feedback-web.umd.js"></script>
     <!-- 注意：这里**没有** launcher-mode / capture-mode 属性 -->
     <feedback-widget

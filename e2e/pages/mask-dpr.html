@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>E2E 宿主页 · 多 DPR/视口遮罩</title>
+    <!--
+      e2e 专用宿主页（不是产品代码）：随视口尺寸自适应的敏感区布局，
+      用于在 1440x900@dpr1/2、390x844@dpr1/3、2560x1440@dpr1 上做像素级遮挡断言。
+
+      版面（全部用 vw/vh/% 定位，任何视口下成立）：
+        #pw-top       左上密码框            纯青 #00ffff input[type=password]
+        #secret-card  右侧遮罩块            纯品红 #ff00ff [data-feedback-capture-mask]
+        #pw-bottom    右下贴边角密码框      纯青（同时覆盖「底部」与「右边缘」）
+        #secret-edge  左边缘遮罩块          纯品红（x=0 贴边）
+        #decoy-green  右上角正常内容        纯绿 #00ff00   必须可见
+        #decoy-blue   左下角正常内容        纯蓝 #0000ff   必须可见
+    -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: #ffffff;
+      }
+      body {
+        position: relative;
+        width: 100vw;
+        height: 100vh;
+        overflow: hidden;
+        font-family: system-ui, -apple-system, sans-serif;
+      }
+      .block {
+        position: absolute;
+        color: #000000;
+        font-size: 18px;
+        padding: 8px;
+        box-sizing: border-box;
+      }
+      #pw-top {
+        position: absolute;
+        left: 4%;
+        top: 6%;
+        width: 38%;
+        height: 44px;
+        background: #00ffff;
+        border: 0;
+        font-size: 18px;
+        padding: 0 8px;
+        box-sizing: border-box;
+      }
+      #secret-card {
+        right: 6%;
+        top: 16%;
+        width: 34%;
+        height: 24%;
+        background: #ff00ff;
+        color: #ffff00;
+      }
+      #pw-bottom {
+        position: absolute;
+        right: 0;
+        bottom: 0;
+        width: 34%;
+        height: 44px;
+        background: #00ffff;
+        border: 0;
+        font-size: 18px;
+        padding: 0 8px;
+        box-sizing: border-box;
+      }
+      #secret-edge {
+        left: 0;
+        bottom: 9%;
+        width: 20%;
+        height: 14%;
+        background: #ff00ff;
+      }
+      #decoy-green {
+        right: 0;
+        top: 0;
+        width: 14%;
+        height: 9%;
+        background: #00ff00;
+      }
+      #decoy-blue {
+        left: 26%;
+        bottom: 0;
+        width: 20%;
+        height: 7%;
+        background: #0000ff;
+        color: #ffffff;
+      }
+    </style>
+  </head>
+  <body>
+    <input id="pw-top" type="password" value="pw-canary-dpr-001" />
+    <div id="secret-card" class="block" data-feedback-capture-mask>
+      SECRET-CANARY-TOKEN-dpr-check
+    </div>
+    <input id="pw-bottom" type="password" value="pw-canary-dpr-002" />
+    <div id="secret-edge" class="block" data-feedback-capture-mask>EDGE</div>
+    <!-- decoy 块不放文字：窄视口下文字/抗锯齿像素占比过高会拉低原色占比断言 -->
+    <div id="decoy-green" class="block"></div>
+    <div id="decoy-blue" class="block"></div>
+
+    <script>
+      // 测试脚手架（仅 e2e）：与 mask.html 同一套读取入口。
+      window.__fbE2E = {
+        widget: () => document.querySelector('feedback-widget'),
+        rects() {
+          const r = {};
+          for (const id of ['pw-top', 'secret-card', 'pw-bottom', 'secret-edge', 'decoy-green', 'decoy-blue']) {
+            const b = document.getElementById(id).getBoundingClientRect();
+            r[id] = { x: b.x, y: b.y, width: b.width, height: b.height };
+          }
+          return r;
+        },
+        thumbSrc() {
+          const img = this.widget().shadowRoot.querySelector('.fb-screenshot-thumb');
+          return img ? img.getAttribute('src') : null;
+        },
+        statusText() {
+          const el = this.widget().shadowRoot.querySelector('.fb-status');
+          return el ? el.textContent : '';
+        },
+        async blobBase64() {
+          const img = this.widget().shadowRoot.querySelector('.fb-screenshot-thumb');
+          if (!img || !img.getAttribute('src')) return null;
+          const res = await fetch(img.getAttribute('src'));
+          const bytes = new Uint8Array(await res.arrayBuffer());
+          let s = '';
+          const chunk = 0x8000;
+          for (let i = 0; i < bytes.length; i += chunk) {
+            s += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+          }
+          return btoa(s);
+        },
+      };
+    </script>
+
+    <script src="/sdk/feedback-web.umd.js"></script>
+    <feedback-widget
+      id="widget"
+      api-base="http://localhost:8787"
+      app-id="com.example.demo-e2e"
+      app-version="3.1.4"
+      page-label="e2e-mask-dpr"
+      side="right"
+      launcher-mode="orb"
+      capture-mode="viewport"
+    ></feedback-widget>
+  </body>
+</html>

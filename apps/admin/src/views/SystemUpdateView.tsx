@@ -7,6 +7,7 @@ import {
   type UpdateOperationView,
   type UpdatePauseState,
 } from "../api.ts";
+import { InlineError, PageHeader, SkeletonRows, StatusBadge } from "../ui.tsx";
 
 /** 保留最近一次提交的任务 ID（刷新页面或重开标签后仍能恢复进度展示）。 */
 const OPERATION_KEY = "feedback.systemUpdate.operationId";
@@ -181,65 +182,110 @@ export default function SystemUpdateView() {
   const running = operation !== null && !isTerminal(operation);
   const canUpdate = Boolean(checkView?.latest?.digest) && checkView?.compatible === true && !running && !submitting;
 
-  if (!status) return <p className="muted">加载中…</p>;
+  /** 更新条件未满足时的就近解释（放在按钮下方）。 */
+  function blockedReason(): string | null {
+    if (canUpdate) return null;
+    if (running) return null; // 进行中由任务面板说明
+    if (!status?.config.updateConfigured) return "未接入更新执行器（缺少 FEEDBACK_UPDATE_URL），无法发起更新";
+    if (!checkView || checkView.state === "never") return "请先「检查更新」获取可用版本";
+    if (checkView.state === "failed") return "上次检查失败，请重试";
+    if (checkView.state === "up_to_date") return "当前已是最新稳定版";
+    if (checkView.state === "incompatible" || checkView.compatible === false)
+      return "更新执行器协议不兼容，请先升级执行器";
+    if (!checkView.latest?.digest) return "清单缺少可用的版本摘要，无法更新";
+    return null;
+  }
+
+  if (!status) {
+    return (
+      <div className="page-config">
+        <PageHeader title="系统更新" sub="当前版本、检查更新与更新任务进度。" />
+        <div className="card">
+          <SkeletonRows rows={3} />
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div>
-      {error && <p className="err">{error}</p>}
+    <div className="page-config">
+      <PageHeader title="系统更新" sub="只提交版本与摘要信息；更新执行器负责下载、校验与切换。" />
+      {error && <InlineError message={error} onRetry={() => void loadStatus().catch(() => undefined)} />}
       {notice && <p className="ok-text">{notice}</p>}
       {status.pause.paused && <PauseBanner pause={status.pause} />}
 
       <div className="card">
-        <div className="kv">
-          <span className="muted">当前版本</span>
-          <span>
-            <code>{status.current.version}</code>
-            <span className="muted">（更新执行器协议 v{status.current.protocol}）</span>
-          </span>
-          <span className="muted">更新执行器</span>
-          <span>
-            {status.config.updateConfigured ? (
-              <>
-                已接入 <code>{status.config.updaterBaseUrl}</code>
-                <span className="muted">（{status.config.controlDir ? "控制目录已挂载" : "未挂载控制目录"}）</span>
-              </>
-            ) : (
-              <span className="muted">未接入（缺少 FEEDBACK_UPDATE_URL）</span>
-            )}
-          </span>
-          <span className="muted">自动检查</span>
-          <span className="muted">
-            {status.config.checkIntervalMs > 0
-              ? `每 ${Math.round(status.config.checkIntervalMs / 3600_000)} 小时检查一次（只检查，绝不自动安装）`
-              : "已关闭自动检查（仅手动）"}
-          </span>
-        </div>
-      </div>
-
-      <div className="card">
-        <div className="row spread" style={{ marginBottom: 12 }}>
-          <h2 style={{ margin: 0, fontSize: 15 }}>版本状态</h2>
-          <div className="row">
-            <button type="button" onClick={check} disabled={checking || submitting}>
+        <div className="ver-row">
+          <div className="ver-item">
+            <span className="ver-label">当前版本</span>
+            <span className="ver-value">{status.current.version}</span>
+            <span className="muted small">执行器协议 v{status.current.protocol}</span>
+          </div>
+          <div className="ver-item">
+            <span className="ver-label">可用版本</span>
+            <span className="ver-value">
+              {checkView?.latest?.version ?? "—"}
+              {checkView?.state === "up_to_date" && (
+                <>
+                  {" "}
+                  <StatusBadge tone="ok">已是最新</StatusBadge>
+                </>
+              )}
+              {checkView?.state === "ok" && checkView.latest && (
+                <>
+                  {" "}
+                  <StatusBadge tone="info">可更新</StatusBadge>
+                </>
+              )}
+            </span>
+            {checkView?.checkedAt && <span className="muted small">检查于 {fmt(checkView.checkedAt)}</span>}
+          </div>
+          <div className="ver-actions">
+            <button type="button" className="btn" onClick={check} disabled={checking || submitting}>
               {checking ? "检查中…" : "检查更新"}
             </button>
-            <button className="primary" type="button" onClick={startUpdate} disabled={!canUpdate}>
+            <button className="btn primary" type="button" onClick={startUpdate} disabled={!canUpdate}>
               {submitting ? "提交中…" : running ? "更新进行中…" : "更新到最新稳定版"}
             </button>
           </div>
         </div>
-        <CheckSummary check={checkView} />
-        {checkView?.guidance && (
-          <p className="err" style={{ marginBottom: 0 }}>
-            {checkView.guidance}
+        {blockedReason() && (
+          <p className="muted small" style={{ marginTop: "var(--sp-2)", marginBottom: 0 }}>
+            {blockedReason()}
           </p>
         )}
-        {checkView?.warnings.map((w: string) => (
-          <p className="muted" key={w} style={{ marginBottom: 0 }}>
-            ⚠ {w}
-          </p>
-        ))}
+        <p className="muted small" style={{ marginTop: "var(--sp-3)", marginBottom: 0 }}>
+          {status.config.updateConfigured ? (
+            <>
+              更新执行器已接入 <code>{status.config.updaterBaseUrl}</code>
+              {status.config.controlDir ? "，控制目录已挂载" : "，未挂载控制目录"}
+            </>
+          ) : (
+            "未接入更新执行器（缺少 FEEDBACK_UPDATE_URL）"
+          )}
+          {"　·　"}
+          {status.config.checkIntervalMs > 0
+            ? `每 ${Math.round(status.config.checkIntervalMs / 3600_000)} 小时自动检查（只检查，绝不自动安装）`
+            : "已关闭自动检查（仅手动）"}
+        </p>
       </div>
+
+      {checkView && checkView.state !== "never" && (
+        <div className="card">
+          <h2 style={{ marginBottom: "var(--sp-3)" }}>版本详情</h2>
+          <CheckSummary check={checkView} />
+          {checkView.guidance && (
+            <p className="err" style={{ marginBottom: 0 }}>
+              {checkView.guidance}
+            </p>
+          )}
+          {checkView.warnings.map((w: string) => (
+            <p className="muted" key={w} style={{ marginBottom: 0 }}>
+              ⚠ {w}
+            </p>
+          ))}
+        </div>
+      )}
 
       {operationId && (
         <OperationPanel
@@ -321,7 +367,7 @@ function CheckSummary({ check }: { check: SystemUpdateStatus["check"] | undefine
           <div className="muted" style={{ marginBottom: 4 }}>
             发布说明
           </div>
-          <blockquote>{latest.notes}</blockquote>
+          <blockquote className="quote">{latest.notes}</blockquote>
         </div>
       ) : (
         <p className="muted">该版本清单未包含发布说明。</p>
@@ -344,8 +390,8 @@ function OperationPanel({
   return (
     <div className="card">
       <div className="row spread" style={{ marginBottom: 12 }}>
-        <h2 style={{ margin: 0, fontSize: 15 }}>更新任务</h2>
-        <button type="button" onClick={onForget}>
+        <h2 style={{ margin: 0 }}>更新任务</h2>
+        <button type="button" className="btn sm" onClick={onForget}>
           停止跟踪
         </button>
       </div>
@@ -417,7 +463,7 @@ function OperationProgress({ operation }: { operation: UpdateOperationView }) {
       {operation.evidence.length > 0 && (
         <details style={{ marginTop: 10 }}>
           <summary className="muted">任务证据（{operation.evidence.length} 条）</summary>
-          <div className="card" style={{ padding: 0, overflow: "hidden", marginTop: 8 }}>
+          <div className="table-wrap" style={{ marginTop: 8 }}>
             <table>
               <thead>
                 <tr>
@@ -460,7 +506,7 @@ function OperationProgress({ operation }: { operation: UpdateOperationView }) {
 function RecentOperations({ operations }: { operations: UpdateOperationView[] }) {
   if (operations.length === 0) return null;
   return (
-    <div className="card" style={{ padding: 0, overflow: "hidden" }}>
+    <div className="table-wrap">
       <table>
         <thead>
           <tr>

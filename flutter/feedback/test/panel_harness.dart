@@ -24,19 +24,21 @@ class PanelServer {
       _handlers = <String, List<Future<http.Response> Function(http.BaseRequest)>>{};
 
   /// MockClient（注入 [FeedbackPanel.httpClient]）。
-  http.Client get client => MockClient((request) async {
-        requests.add(request);
-        final key =
-            '${request.method} ${Uri.parse(request.url.toString()).path}';
-        final queue = _handlers[key];
-        if (queue == null || queue.isEmpty) {
-          return jsonResponse({
-            'error': {'code': 'not_found', 'message': 'mock 未编排: $key'}
-          }, 404);
-        }
-        final handler = queue.length > 1 ? queue.removeAt(0) : queue.first;
-        return handler(request);
-      });
+  http.Client get client => MockClient(handle);
+
+  /// 处理单个请求：记录 + 按编排响应（多服务路由 mock 可直接复用）。
+  Future<http.Response> handle(http.BaseRequest request) async {
+    requests.add(request);
+    final key = '${request.method} ${Uri.parse(request.url.toString()).path}';
+    final queue = _handlers[key];
+    if (queue == null || queue.isEmpty) {
+      return jsonResponse({
+        'error': {'code': 'not_found', 'message': 'mock 未编排: $key'}
+      }, 404);
+    }
+    final handler = queue.length > 1 ? queue.removeAt(0) : queue.first;
+    return handler(request);
+  }
 
   /// 追加一个处理器；同 key 多个响应按注册顺序弹出，最后一个常驻。
   void on(String key, Future<http.Response> Function(http.BaseRequest) handler) {
@@ -158,10 +160,16 @@ Map<String, Object?> sessionJson(Map<String, Object?> quota) =>
 ///
 /// [visible] 为面板的真实开关状态（内部协作接口）；null 表示未接入
 /// （与旧测试完全兼容）。重复调用会更新同一棵面板子树。
+///
+/// [serverPrefStore] 为服务器覆盖偏好仓库（T6）；缺省用内存实现，
+/// 避免测试环境走 flutter_secure_storage 插件通道。
+/// [tokenStoreFactory] 按有效配置派生令牌仓库（T7 身份隔离测试用）。
 Future<void> pumpPanel(
   WidgetTester tester, {
   required PanelServer server,
-  required FeedbackTokenStore tokenStore,
+  FeedbackTokenStore? tokenStore,
+  FeedbackTokenStore Function(FeedbackConfig config)? tokenStoreFactory,
+  FeedbackServerPrefStore? serverPrefStore,
   FeedbackConfig? config,
   bool? visible,
   Size surface = const Size(1000, 800),
@@ -174,6 +182,8 @@ Future<void> pumpPanel(
           FeedbackConfig('https://svc.test', 'com.example.app',
               appVersion: '9.9.9', pageLabel: 'home'),
       tokenStore: tokenStore,
+      tokenStoreFactory: tokenStoreFactory,
+      serverPrefStore: serverPrefStore ?? MemoryServerPrefStore(),
       httpClient: server.client,
       visible: visible,
     ),

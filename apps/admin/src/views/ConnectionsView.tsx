@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { ApiError, api, type KaneoTestResult } from "../api.ts";
+import { Icon, PageHeader, SkeletonRows, StatusBadge } from "../ui.tsx";
 
 interface KaneoGet {
   baseUrl: string | null;
@@ -12,6 +13,8 @@ interface AiGet {
   apiKeySet: boolean;
 }
 
+type PanelMsg = { kind: "ok" | "err"; text: string } | null;
+
 export default function ConnectionsView() {
   const [k, setK] = useState<KaneoGet | null>(null);
   const [a, setA] = useState<AiGet | null>(null);
@@ -22,7 +25,9 @@ export default function ConnectionsView() {
   const [aModel, setAModel] = useState("");
   const [aApiKey, setAApiKey] = useState("");
   const [testProjectId, setTestProjectId] = useState("");
-  const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+  /** 每个面板各自的就近提示（保存结果 / 测试结果显示在对应按钮旁）。 */
+  const [kMsg, setKMsg] = useState<PanelMsg>(null);
+  const [aMsg, setAMsg] = useState<PanelMsg>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -40,7 +45,7 @@ export default function ConnectionsView() {
     })();
   }, []);
 
-  async function run(fn: () => Promise<unknown>, okText: string) {
+  async function run(setMsg: (m: PanelMsg) => void, fn: () => Promise<unknown>, okText: string) {
     setBusy(true);
     setMsg(null);
     try {
@@ -64,38 +69,62 @@ export default function ConnectionsView() {
     }
   }
 
-  if (!k || !a) return <p className="muted">加载中…</p>;
+  if (!k || !a) {
+    return (
+      <div className="page-config">
+        <PageHeader title="连接配置" sub="Kaneo 同步目标与 AI 整理服务。" />
+        <div className="card">
+          <SkeletonRows rows={4} />
+        </div>
+      </div>
+    );
+  }
+
+  const kaneoConfigured = Boolean(k.baseUrl) && k.apiKeySet;
+  const aiConfigured = Boolean(a.baseUrl && a.model) && a.apiKeySet;
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(320px,1fr))", gap: 16 }}>
-      {msg && (
-        <p className={msg.kind === "ok" ? "ok-text" : "err"} style={{ gridColumn: "1/-1" }}>
-          {msg.text}
-        </p>
-      )}
+    <div className="page-config">
+      <PageHeader title="连接配置" sub="Kaneo 同步目标与 AI 整理服务；密钥只写服务器，不回显。" />
 
+      {/* Kaneo 面板 */}
       <div className="card">
-        <h1>Kaneo 连接</h1>
+        <div className="conn-panel-head">
+          <span className="conn-icon">
+            <Icon name="server" />
+          </span>
+          <h2>Kaneo</h2>
+          <span className="conn-status">
+            {kaneoConfigured ? (
+              <StatusBadge tone="ok">已配置</StatusBadge>
+            ) : (
+              <StatusBadge tone="warn">未配置</StatusBadge>
+            )}
+          </span>
+        </div>
+        <p className="conn-desc">反馈的分类目标与任务同步到 Kaneo 工作区。</p>
         <div className="field">
-          <label htmlFor="kb">API 地址（含或不含 /api 后缀）</label>
+          <label htmlFor="kb">API 地址</label>
           <input
             id="kb"
             value={kBaseUrl}
             onChange={(e) => setKBaseUrl(e.target.value)}
             placeholder="http://kaneo.local:1337"
           />
+          <p className="field-help">含或不含 /api 后缀均可。</p>
         </div>
         <div className="field">
-          <label htmlFor="kc">Web 地址（任务链接基址，可留空=同 API 地址）</label>
+          <label htmlFor="kc">Web 地址</label>
           <input
             id="kc"
             value={kClientUrl}
             onChange={(e) => setKClientUrl(e.target.value)}
             placeholder="https://kaneo.example.com"
           />
+          <p className="field-help">任务链接基址，可留空 = 同 API 地址。</p>
         </div>
         <div className="field">
-          <label htmlFor="kk">API Key {k.apiKeySet && <span className="ok-text">（已保存，留空则不修改）</span>}</label>
+          <label htmlFor="kk">API Key</label>
           <input
             id="kk"
             type="password"
@@ -103,65 +132,98 @@ export default function ConnectionsView() {
             onChange={(e) => setKApiKey(e.target.value)}
             placeholder={k.apiKeySet ? "••••••••" : "sk_…"}
           />
+          <p className="field-help">{k.apiKeySet ? "已保存，留空则不修改。" : "尚未保存密钥。"}</p>
         </div>
         <div className="row">
           <button
             type="button"
-            className="primary"
+            className="btn primary"
             disabled={busy}
             onClick={() =>
-              run(async () => {
-                const r = await api.put("/api/admin/connection/kaneo", {
-                  baseUrl: kBaseUrl,
-                  clientUrl: kClientUrl || undefined,
-                  ...(kApiKey ? { apiKey: kApiKey } : {}),
-                });
-                setKApiKey("");
-                const kk = await api.get<KaneoGet>("/api/admin/connection/kaneo");
-                setK(kk);
-                return r;
-              }, "Kaneo 配置已保存")
+              run(
+                setKMsg,
+                async () => {
+                  const r = await api.put("/api/admin/connection/kaneo", {
+                    baseUrl: kBaseUrl,
+                    clientUrl: kClientUrl || undefined,
+                    ...(kApiKey ? { apiKey: kApiKey } : {}),
+                  });
+                  setKApiKey("");
+                  const kk = await api.get<KaneoGet>("/api/admin/connection/kaneo");
+                  setK(kk);
+                  return r;
+                },
+                "Kaneo 配置已保存",
+              )
             }
           >
             保存
           </button>
+          {kMsg && (
+            <span className={`test-result ${kMsg.kind}`}>
+              <Icon name={kMsg.kind === "ok" ? "check" : "alert"} size={14} />
+              {kMsg.text}
+            </span>
+          )}
         </div>
-        <hr style={{ margin: "16px 0", border: "none", borderTop: "1px solid #e5e7eb" }} />
-        <div className="row">
-          <div className="field" style={{ flex: 1, marginBottom: 0 }}>
-            <label htmlFor="tp">测试用项目 id</label>
-            <input id="tp" value={testProjectId} onChange={(e) => setTestProjectId(e.target.value)} />
+        <hr className="sep" />
+        <div className="field" style={{ marginBottom: "var(--sp-2)" }}>
+          <label htmlFor="tp">测试项目</label>
+          <div className="row">
+            <input
+              id="tp"
+              style={{ maxWidth: 320 }}
+              value={testProjectId}
+              onChange={(e) => setTestProjectId(e.target.value)}
+              placeholder="Kaneo 项目 id"
+            />
+            <button
+              type="button"
+              className="btn"
+              disabled={busy || !testProjectId}
+              onClick={() =>
+                run(
+                  setKMsg,
+                  () => api.post("/api/admin/connection/kaneo/test", { projectId: testProjectId }),
+                  "连通正常",
+                )
+              }
+            >
+              连接测试
+            </button>
           </div>
-          <button
-            type="button"
-            disabled={busy || !testProjectId}
-            onClick={() =>
-              run(() => api.post("/api/admin/connection/kaneo/test", { projectId: testProjectId }), "连通正常")
-            }
-            style={{ marginTop: 22 }}
-          >
-            连接测试
-          </button>
+          <p className="field-help">测试使用已保存的配置（未保存的修改不参与测试）。</p>
         </div>
       </div>
 
+      {/* AI 面板 */}
       <div className="card">
-        <h1>AI（OpenAI 兼容）</h1>
+        <div className="conn-panel-head">
+          <span className="conn-icon">
+            <Icon name="sparkles" />
+          </span>
+          <h2>AI（OpenAI 兼容）</h2>
+          <span className="conn-status">
+            {aiConfigured ? <StatusBadge tone="ok">已配置</StatusBadge> : <StatusBadge tone="warn">未配置</StatusBadge>}
+          </span>
+        </div>
+        <p className="conn-desc">把用户原话整理为标题与分段内容；图像识别用于截图理解。</p>
         <div className="field">
-          <label htmlFor="ab">接口地址（Chat Completions 的基址）</label>
+          <label htmlFor="ab">接口地址</label>
           <input
             id="ab"
             value={aBaseUrl}
             onChange={(e) => setABaseUrl(e.target.value)}
             placeholder="https://api.openai.com/v1"
           />
+          <p className="field-help">Chat Completions 的基址。</p>
         </div>
         <div className="field">
           <label htmlFor="am">模型</label>
           <input id="am" value={aModel} onChange={(e) => setAModel(e.target.value)} placeholder="gpt-4o-mini" />
         </div>
         <div className="field">
-          <label htmlFor="ak">密钥 {a.apiKeySet && <span className="ok-text">（已保存，留空则不修改）</span>}</label>
+          <label htmlFor="ak">密钥</label>
           <input
             id="ak"
             type="password"
@@ -169,43 +231,57 @@ export default function ConnectionsView() {
             onChange={(e) => setAApiKey(e.target.value)}
             placeholder={a.apiKeySet ? "••••••••" : "sk-…"}
           />
+          <p className="field-help">{a.apiKeySet ? "已保存，留空则不修改。" : "尚未保存密钥。"}</p>
         </div>
-        <div className="row">
+        <div className="row" style={{ flexWrap: "wrap" }}>
           <button
             type="button"
-            className="primary"
+            className="btn primary"
             disabled={busy}
             onClick={() =>
-              run(async () => {
-                const r = await api.put("/api/admin/connection/ai", {
-                  baseUrl: aBaseUrl,
-                  model: aModel,
-                  ...(aApiKey ? { apiKey: aApiKey } : {}),
-                });
-                setAApiKey("");
-                const aa = await api.get<AiGet>("/api/admin/connection/ai");
-                setA(aa);
-                return r;
-              }, "AI 配置已保存")
+              run(
+                setAMsg,
+                async () => {
+                  const r = await api.put("/api/admin/connection/ai", {
+                    baseUrl: aBaseUrl,
+                    model: aModel,
+                    ...(aApiKey ? { apiKey: aApiKey } : {}),
+                  });
+                  setAApiKey("");
+                  const aa = await api.get<AiGet>("/api/admin/connection/ai");
+                  setA(aa);
+                  return r;
+                },
+                "AI 配置已保存",
+              )
             }
           >
             保存
           </button>
           <button
             type="button"
+            className="btn"
             disabled={busy}
-            onClick={() => run(() => api.post("/api/admin/connection/ai/test"), "AI 连通正常")}
+            onClick={() => run(setAMsg, () => api.post("/api/admin/connection/ai/test"), "AI 连通正常")}
           >
-            连接测试
+            文本测试
           </button>
           <button
             type="button"
+            className="btn"
             disabled={busy}
-            onClick={() => run(() => api.post("/api/admin/connection/ai/test-vision"), "AI 图像识别测试正常")}
+            onClick={() => run(setAMsg, () => api.post("/api/admin/connection/ai/test-vision"), "图像识别正常")}
           >
-            测试图像识别 (Vision)
+            图像测试
           </button>
+          {aMsg && (
+            <span className={`test-result ${aMsg.kind}`}>
+              <Icon name={aMsg.kind === "ok" ? "check" : "alert"} size={14} />
+              {aMsg.text}
+            </span>
+          )}
         </div>
+        <p className="field-help">测试使用已保存的配置（未保存的修改不参与测试）。</p>
       </div>
     </div>
   );

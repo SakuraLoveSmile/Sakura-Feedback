@@ -217,6 +217,12 @@ export function submitLoginForm(m: Mounted, username = 'admin', password = 'secr
 
 export function cleanup(): void {
   document.body.innerHTML = '';
+  // T6：服务器覆盖偏好按 localStorage 持久化——每个用例后清空，避免跨用例泄漏
+  try {
+    window.localStorage.clear();
+  } catch {
+    /* 存储不可用时忽略 */
+  }
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 }

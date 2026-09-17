@@ -8,6 +8,18 @@ import {
   type ClassifyOptions,
   type KaneoTestResult,
 } from "../api.ts";
+import {
+  ConfirmDialog,
+  Drawer,
+  EmptyState,
+  FormSection,
+  Icon,
+  InlineError,
+  PageHeader,
+  SkeletonRows,
+  StatusBadge,
+  useToast,
+} from "../ui.tsx";
 
 interface Draft {
   id?: string;
@@ -30,27 +42,35 @@ interface RuleDraft {
 const empty: Draft = { appId: "", name: "", originsText: "", kaneoProjectId: "", kaneoColumnSlug: "" };
 const emptyRule: RuleDraft = { projectId: "", columnId: "", columnSlug: "", labelIds: [], assigneeId: "" };
 
-function configStatusText(a: AppItem): string {
-  return a.configStatus === "pending" ? "待配置" : "已配置";
-}
-
 function archiveModeText(a: AppItem): string {
-  return a.archiveMode === "automatic" ? "自动归档" : "人工归档";
+  return a.archiveMode === "automatic" ? "自动同步" : "人工同步";
 }
 
 export default function AppsView() {
-  const [apps, setApps] = useState<AppItem[]>([]);
+  const toast = useToast();
+  const [apps, setApps] = useState<AppItem[] | null>(null);
   const [draft, setDraft] = useState<Draft>(empty);
   const [rule, setRule] = useState<RuleDraft>(emptyRule);
   const [columns, setColumns] = useState<{ slug: string; name: string }[]>([]);
   const [projects, setProjects] = useState<{ id: string; workspaceId: string; name: string; slug: string }[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [confirmState, setConfirmState] = useState<
+    { kind: "enable"; app: AppItem } | { kind: "disable"; app: AppItem } | { kind: "remove"; app: AppItem } | null
+  >(null);
   const [busy, setBusy] = useState(false);
   /** 正在读取软件详情：期间禁用规则编辑器，避免迟到的详情回写覆盖用户刚做的选择。 */
   const [detailLoading, setDetailLoading] = useState(false);
+  /** 删除进行中的软件 id：期间所有删除按钮禁用（防重复点击/并发删除）。 */
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  /** 编辑抽屉是否打开（新增或配置）。 */
+  const [editorOpen, setEditorOpen] = useState(false);
+  /**
+   * 详情读取序号：删除软件后自增，使在途的详情响应失效——
+   * 迟到的响应不得把已删软件重新写回详情面板。
+   */
+  const detailSeq = useRef(0);
 
-  // 详情面板：来源列表与规则选项
+  // 抽屉内的来源列表与规则选项
   const [selected, setSelected] = useState<AppItem | null>(null);
   const [sources, setSources] = useState<AppSourceItem[]>([]);
   const [options, setOptions] = useState<ClassifyOptions | null>(null);
@@ -82,7 +102,9 @@ export default function AppsView() {
   }, []);
 
   const loadDetail = useCallback(async (appId: string) => {
+    const seq = ++detailSeq.current;
     const d = await api.get<AppDetail>(`/api/admin/apps/${appId}`);
+    if (seq !== detailSeq.current) return null; // 删除/切换后的迟到响应直接丢弃
     setSelected(d.app);
     setSources(d.sources);
     return d.app;
@@ -110,12 +132,15 @@ export default function AppsView() {
 
   const openDetail = useCallback(
     async (app: AppItem) => {
+      const seq = ++detailSeq.current;
       setError(null);
       setColumns([]);
+      setEditorOpen(true);
       // 加载期间禁用规则编辑器：详情回写不会覆盖管理员已经做出的选择。
       setDetailLoading(true);
       try {
         const detail = await api.get<AppDetail>(`/api/admin/apps/${app.id}`);
+        if (seq !== detailSeq.current) return; // 删除/切换后的迟到响应直接丢弃
         const fresh = detail.app;
         setSelected(fresh);
         setSources(detail.sources);
@@ -136,13 +161,39 @@ export default function AppsView() {
         });
         await loadOptions(fresh.defaults.projectId);
       } catch (err) {
+        if (seq !== detailSeq.current) return;
         setError(err instanceof ApiError ? err.message : "读取软件详情失败");
       } finally {
-        setDetailLoading(false);
+        if (seq === detailSeq.current) setDetailLoading(false);
       }
     },
     [loadOptions],
   );
+
+  function openNew() {
+    detailSeq.current++;
+    setDraft(empty);
+    setRule(emptyRule);
+    setColumns([]);
+    setSelected(null);
+    setSources([]);
+    setOptions(null);
+    setOptionsError(null);
+    setError(null);
+    setEditorOpen(true);
+  }
+
+  function closeEditor() {
+    detailSeq.current++;
+    setEditorOpen(false);
+    setDraft(empty);
+    setRule(emptyRule);
+    setColumns([]);
+    setSelected(null);
+    setSources([]);
+    setOptions(null);
+    setOptionsError(null);
+  }
 
   const loadProjects = useCallback(async () => {
     setBusy(true);
@@ -159,14 +210,14 @@ export default function AppsView() {
         setProjects([]);
       } else {
         setProjects(r.projects ?? []);
-        setNotice(`已加载 ${r.projects?.length ?? 0} 个项目`);
+        toast("ok", `已加载 ${r.projects?.length ?? 0} 个项目`);
       }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "项目列表请求失败");
     } finally {
       setBusy(false);
     }
-  }, []);
+  }, [toast]);
 
   useEffect(() => {
     void load().catch((e) => setError(e instanceof ApiError ? e.message : "加载失败"));
@@ -177,7 +228,6 @@ export default function AppsView() {
   async function save() {
     setBusy(true);
     setError(null);
-    setNotice(null);
     try {
       const body = {
         appId: draft.appId,
@@ -212,19 +262,15 @@ export default function AppsView() {
         // 管理员保存完规则后应该能直接点启用，而不必再找一遍。
         const updated = list.find((a) => a.id === draft.id);
         if (updated) await openDetail(updated);
-        setNotice(
+        toast(
+          "ok",
           updated?.ruleComplete
-            ? "已保存（普通保存不会触发归档）。规则已完整，可点「启用自动归档并处理积压」。"
-            : "已保存（普通保存不会触发归档）。规则尚不完整：需要项目、目标列与至少一个工作区标签。",
+            ? "已保存（普通保存不会触发同步）。规则已完整，可点「启用自动同步并处理积压」。"
+            : "已保存（普通保存不会触发同步）。规则尚不完整：需要项目、目标列与至少一个工作区标签。",
         );
       } else {
-        setDraft(empty);
-        setRule(emptyRule);
-        setColumns([]);
-        setSelected(null);
-        setSources([]);
-        setOptions(null);
-        setNotice(`已保存（共 ${list.length} 个软件）；普通保存不会触发归档`);
+        closeEditor();
+        toast("ok", `已保存（共 ${list.length} 个软件）；普通保存不会触发同步`);
       }
     } catch (err) {
       await reportWriteFailure(err, draft.id, "保存失败");
@@ -260,7 +306,6 @@ export default function AppsView() {
     if (!projectId) return;
     setBusy(true);
     setError(null);
-    setNotice(null);
     try {
       const r = await api.post<KaneoTestResult>("/api/admin/connection/kaneo/test", { projectId });
       if (!r.ok) {
@@ -268,7 +313,7 @@ export default function AppsView() {
         setColumns([]);
       } else {
         setColumns(r.columns ?? []);
-        setNotice(`项目「${r.project?.name}」连通，共 ${r.columns?.length} 列`);
+        toast("ok", `项目「${r.project?.name}」连通，共 ${r.columns?.length} 列`);
       }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "测试失败");
@@ -277,16 +322,18 @@ export default function AppsView() {
     }
   }
 
-  /** 明确启用自动归档并处理积压（与“普通保存”是两个独立动作）。 */
+  /** 明确启用自动同步并处理积压（与“普通保存”是两个独立动作）。 */
   async function enableAuto(app: AppItem) {
     if (!app.ruleComplete) {
-      setError("自动归档规则不完整：请先选择项目、目标列与至少一个工作区标签（点“编辑”配置并保存）");
+      setError("自动同步规则不完整：请先选择项目、目标列与至少一个工作区标签（点“配置”并保存）");
       return;
     }
-    if (!window.confirm(`启用「${app.name}」的自动归档并立即处理积压反馈？`)) return;
+    setConfirmState({ kind: "enable", app });
+  }
+
+  async function doEnableAuto(app: AppItem) {
     setBusy(true);
     setError(null);
-    setNotice(null);
     try {
       const r = await api.post<{ ok: boolean; replayed: boolean }>(`/api/admin/apps/${app.id}/auto-archive/enable`, {
         expectedRuleVersion: app.ruleVersion,
@@ -295,7 +342,7 @@ export default function AppsView() {
       confirmOps.current.delete(`enable:${app.id}`);
       await load();
       if (selected?.id === app.id) await loadDetail(app.id);
-      setNotice(r.replayed ? "该操作已执行过（幂等返回），未重复处理积压" : "已启用自动归档，正在补处理积压");
+      toast("ok", r.replayed ? "该操作已执行过（幂等返回），未重复处理积压" : "已启用自动同步，正在补处理积压");
     } catch (err) {
       await reportWriteFailure(err, app.id, "启用失败");
     } finally {
@@ -304,10 +351,12 @@ export default function AppsView() {
   }
 
   async function disableAuto(app: AppItem) {
-    if (!window.confirm(`关闭「${app.name}」的自动归档？已授权的任务会继续执行，只阻止新的自动授权。`)) return;
+    setConfirmState({ kind: "disable", app });
+  }
+
+  async function doDisableAuto(app: AppItem) {
     setBusy(true);
     setError(null);
-    setNotice(null);
     try {
       await api.post(`/api/admin/apps/${app.id}/auto-archive/disable`, {
         expectedRuleVersion: app.ruleVersion,
@@ -316,7 +365,7 @@ export default function AppsView() {
       confirmOps.current.delete(`disable:${app.id}`);
       await load();
       if (selected?.id === app.id) await loadDetail(app.id);
-      setNotice("已关闭自动归档：已授权的任务继续执行");
+      toast("ok", "已关闭自动同步：已授权的任务继续执行");
     } catch (err) {
       await reportWriteFailure(err, app.id, "关闭失败");
     } finally {
@@ -332,7 +381,6 @@ export default function AppsView() {
   async function confirmSource(app: AppItem, origin: string) {
     setBusy(true);
     setError(null);
-    setNotice(null);
     const scope = `confirm:${app.id}:${origin}`;
     try {
       const r = await api.post<{
@@ -349,14 +397,15 @@ export default function AppsView() {
       confirmOps.current.delete(scope);
       await load();
       await loadDetail(app.id);
-      setNotice(
+      toast(
+        "ok",
         r.alreadyConfirmed
           ? "该来源此前已确认"
           : r.replayed
             ? "该确认操作已执行过（幂等返回）"
             : r.backlogDispatched
               ? "已确认来源，正在自动补处理该来源的积压反馈"
-              : "已确认来源。当前仍是人工归档模式：需要点「启用自动归档并处理积压」后才会自动处理",
+              : "已确认来源。当前仍是人工同步模式：需要点「启用自动同步并处理积压」后才会自动处理",
       );
     } catch (err) {
       await reportWriteFailure(err, app.id, "确认来源失败");
@@ -365,325 +414,452 @@ export default function AppsView() {
     }
   }
 
+  /**
+   * 删除软件（T4/T5）：软删除——历史反馈、截图与日志全部保留；
+   * 该 appId 再次提交反馈时会以全新配置重新出现。
+   * 流程：确认 → 进行中禁用删除按钮（防重复点击）→ 失败给出可重试的错误提示；
+   * 成功但列表刷新失败与删除失败分开提示；先使在途详情响应失效再乐观移除行。
+   */
   async function remove(app: AppItem) {
-    if (!window.confirm(`删除软件「${app.name}」？历史反馈保留。`)) return;
-    await api.del(`/api/admin/apps/${app.id}`);
-    if (selected?.id === app.id) {
-      setSelected(null);
-      setSources([]);
-      setDraft(empty);
-      setRule(emptyRule);
-    }
-    await load();
+    if (deletingId) return; // 已有删除进行中：忽略重复点击
+    setConfirmState({ kind: "remove", app });
   }
 
-  const pendingTotal = apps.filter((a) => a.configStatus === "pending").length;
-  const pendingSourceTotal = apps.reduce((n, a) => n + a.pendingSources, 0);
-  const waitingTotal = apps.reduce((n, a) => n + a.waitingFeedbacks, 0);
+  async function doRemove(app: AppItem) {
+    setDeletingId(app.id);
+    setError(null);
+    try {
+      await api.del(`/api/admin/apps/${app.id}`);
+    } catch (err) {
+      setError(`删除失败：${err instanceof ApiError ? err.message : "请求失败"}（可重试）`);
+      setDeletingId(null);
+      return;
+    }
+    // 删除已成功：先使在途详情响应失效，再关闭对应详情并乐观移除列表行
+    detailSeq.current++;
+    if (selected?.id === app.id) {
+      closeEditor();
+    }
+    setApps((prev) => prev?.filter((a) => a.id !== app.id) ?? null);
+    setDeletingId(null);
+    try {
+      await load();
+      toast("ok", `已删除「${app.name}」：历史反馈与附件保留；该 appId 再次提交时会重新出现。`);
+    } catch {
+      toast("info", `已删除「${app.name}」，但列表刷新失败，请手动刷新页面确认。`);
+    }
+  }
 
   return (
-    <div>
-      {error && <p className="err">{error}</p>}
-      {notice && <p className="ok-text">{notice}</p>}
+    <div className="page-config">
+      <PageHeader
+        title="软件配置"
+        sub="管理接入软件、来源授权与默认同步目标。"
+        actions={
+          <button type="button" className="btn primary" onClick={openNew}>
+            <Icon name="plus" size={16} />
+            新增软件
+          </button>
+        }
+      />
+      {!editorOpen && error && <InlineError message={error} />}
 
-      <p className="muted">
-        待配置软件 <b>{pendingTotal}</b> 个 · 待确认来源 <b>{pendingSourceTotal}</b> 条 · 等待归档反馈{" "}
-        <b>{waitingTotal}</b> 条
-      </p>
-
-      <div className="card" style={{ padding: 0, overflow: "hidden" }}>
-        <table>
-          <thead>
-            <tr>
-              <th>名称</th>
-              <th>appId</th>
-              <th>状态</th>
-              <th>归档方式</th>
-              <th>来源（待确认/已确认）</th>
-              <th>等待反馈</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {apps.map((a) => (
-              <tr key={a.id}>
-                <td>{a.name}</td>
-                <td>
-                  <code>{a.appId}</code>
-                </td>
-                <td>
-                  {configStatusText(a)}
-                  {a.configStatus === "pending" && <span className="muted"> · 自动发现</span>}
-                </td>
-                <td>
-                  {archiveModeText(a)}
-                  {a.archiveMode === "automatic" && !a.ruleComplete && <span className="err"> · 规则不完整</span>}
-                  <span className="muted"> · 规则 v{a.ruleVersion}</span>
-                </td>
-                <td>
-                  <b>{a.pendingSources}</b> / {a.confirmedSources}
-                </td>
-                <td>{a.waitingFeedbacks}</td>
-                <td className="row">
-                  <button type="button" onClick={() => void openDetail(a)}>
-                    配置
-                  </button>
-                  {a.archiveMode === "automatic" ? (
-                    <button type="button" onClick={() => void disableAuto(a)} disabled={busy}>
-                      关闭自动归档
-                    </button>
-                  ) : (
-                    <button type="button" onClick={() => void enableAuto(a)} disabled={busy}>
-                      启用自动归档
-                    </button>
-                  )}
-                  <button type="button" onClick={() => void remove(a)}>
-                    删除
-                  </button>
-                </td>
-              </tr>
-            ))}
-            {apps.length === 0 && (
-              <tr>
-                <td colSpan={7} className="muted" style={{ padding: 16 }}>
-                  还没有软件配置：组件首次提交反馈后会自动出现在这里，也可以手动新增
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-
-      {selected && (
-        <div className="card">
-          <h1>来源确认：{selected.name}</h1>
-          <p className="muted">
-            服务端按请求 Origin 逐条记录来源；无 Origin 的原生客户端记为 <code>native</code>。待确认来源不会自动归档，
-            确认后由扫描自动补处理。
-          </p>
+      <div className="table-wrap">
+        {apps === null ? (
+          <SkeletonRows rows={4} />
+        ) : apps.length === 0 ? (
+          <EmptyState title="还没有软件配置" hint="组件首次提交反馈后会自动出现在这里，也可以点右上角新增。" />
+        ) : (
           <table>
             <thead>
               <tr>
-                <th>来源</th>
-                <th>类型</th>
-                <th>状态</th>
-                <th>最近出现</th>
-                <th></th>
+                <th>名称</th>
+                <th>启用状态</th>
+                <th>同步方式</th>
+                <th>待确认来源</th>
+                <th>等待反馈</th>
+                <th style={{ width: 220 }}>操作</th>
               </tr>
             </thead>
             <tbody>
-              {sources.map((s) => (
-                <tr key={s.origin}>
+              {apps.map((a) => (
+                <tr key={a.id}>
                   <td>
-                    <code>{s.origin}</code>
+                    <div>{a.name}</div>
+                    <code className="muted small wrap-anywhere">{a.appId}</code>
                   </td>
-                  <td>{s.kind === "native" ? "原生客户端" : "浏览器"}</td>
-                  <td>{s.status === "confirmed" ? "已确认" : "待确认"}</td>
-                  <td className="muted">{s.lastSeenAt}</td>
                   <td>
-                    {s.status === "pending" ? (
-                      <button type="button" onClick={() => void confirmSource(selected, s.origin)} disabled={busy}>
-                        确认来源
-                      </button>
+                    {a.configStatus === "pending" ? (
+                      <StatusBadge tone="warn">待配置</StatusBadge>
                     ) : (
-                      <span className="muted">—</span>
+                      <StatusBadge tone="ok">已配置</StatusBadge>
                     )}
+                    {a.configStatus === "pending" && <div className="muted small">自动发现</div>}
+                  </td>
+                  <td>
+                    {archiveModeText(a)}
+                    {a.archiveMode === "automatic" && !a.ruleComplete && <div className="err small">规则不完整</div>}
+                  </td>
+                  <td>
+                    <b>{a.pendingSources}</b>
+                    <span className="muted"> / {a.confirmedSources} 已确认</span>
+                  </td>
+                  <td>{a.waitingFeedbacks}</td>
+                  <td>
+                    <div className="row" style={{ gap: "var(--sp-1)", flexWrap: "wrap" }}>
+                      <button type="button" className="btn sm" onClick={() => void openDetail(a)}>
+                        配置
+                      </button>
+                      {a.archiveMode === "automatic" ? (
+                        <button type="button" className="btn sm" onClick={() => disableAuto(a)} disabled={busy}>
+                          关闭自动同步
+                        </button>
+                      ) : (
+                        <button type="button" className="btn sm" onClick={() => enableAuto(a)} disabled={busy}>
+                          启用自动同步
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="btn sm danger"
+                        onClick={() => void remove(a)}
+                        disabled={busy || deletingId !== null}
+                      >
+                        {deletingId === a.id ? "删除中…" : "删除"}
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
-              {sources.length === 0 && (
-                <tr>
-                  <td colSpan={5} className="muted" style={{ padding: 16 }}>
-                    还没有观察到任何来源（组件提交后自动登记）
-                  </td>
-                </tr>
-              )}
             </tbody>
           </table>
-        </div>
-      )}
+        )}
+      </div>
 
-      <div className="card">
-        <h1>{draft.id ? `配置：${draft.name}` : "新增软件"}</h1>
-        <div className="row" style={{ alignItems: "flex-start" }}>
-          <div className="field" style={{ flex: 1 }}>
-            <label htmlFor="an">名称</label>
-            <input id="an" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
-          </div>
-          <div className="field" style={{ flex: 1 }}>
-            <label htmlFor="ai2">appId（创建后不可改）</label>
-            <input
-              id="ai2"
-              value={draft.appId}
-              disabled={Boolean(draft.id)}
-              onChange={(e) => setDraft({ ...draft, appId: e.target.value })}
-            />
-          </div>
-        </div>
-        <div className="field">
-          <label htmlFor="orig">允许的 Web 来源（每行一个 origin；此处登记的来源直接视为已确认）</label>
-          <textarea
-            id="orig"
-            rows={2}
-            value={draft.originsText}
-            onChange={(e) => setDraft({ ...draft, originsText: e.target.value })}
-          />
-        </div>
+      {/* 编辑抽屉：新增 / 配置（640px，三段式） */}
+      {editorOpen && (
+        <Drawer
+          narrow
+          title={draft.id ? `配置：${draft.name || selected?.name || ""}` : "新增软件"}
+          onClose={closeEditor}
+          footer={
+            <>
+              <div className="drawer-foot-left">
+                <button type="button" className="btn primary" onClick={save} disabled={busy || detailLoading}>
+                  {draft.id ? "保存配置（不触发同步）" : "创建"}
+                </button>
+                {selected && selected.archiveMode !== "automatic" && (
+                  <button type="button" className="btn" onClick={() => enableAuto(selected)} disabled={busy}>
+                    启用自动同步并处理积压
+                  </button>
+                )}
+                {selected && selected.archiveMode === "automatic" && (
+                  <button type="button" className="btn" onClick={() => disableAuto(selected)} disabled={busy}>
+                    关闭自动同步
+                  </button>
+                )}
+              </div>
+              <div className="drawer-foot-right">
+                <button type="button" className="btn ghost" onClick={closeEditor}>
+                  取消
+                </button>
+              </div>
+            </>
+          }
+        >
+          {error && <InlineError message={error} />}
+          {detailLoading && !draft.id ? (
+            <SkeletonRows rows={6} />
+          ) : (
+            <>
+              {/* 基本信息 */}
+              <FormSection title="基本信息">
+                <div className="field">
+                  <label htmlFor="an">名称</label>
+                  <input id="an" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
+                </div>
+                <div className="field">
+                  <label htmlFor="ai2">appId</label>
+                  <input
+                    id="ai2"
+                    value={draft.appId}
+                    disabled={Boolean(draft.id)}
+                    onChange={(e) => setDraft({ ...draft, appId: e.target.value })}
+                  />
+                  <p className="field-help">创建后不可修改；组件按 appId 上报反馈。</p>
+                </div>
+                <div className="field" style={{ marginBottom: 0 }}>
+                  <label htmlFor="orig">允许的 Web 来源</label>
+                  <textarea
+                    id="orig"
+                    rows={3}
+                    value={draft.originsText}
+                    onChange={(e) => setDraft({ ...draft, originsText: e.target.value })}
+                  />
+                  <p className="field-help">每行一个 origin；此处登记的来源直接视为已确认。</p>
+                </div>
+              </FormSection>
 
-        <h1 style={{ fontSize: 15, marginTop: 8 }}>默认归档目标（自动归档规则）</h1>
-        <div className="row" style={{ alignItems: "flex-start" }}>
-          <div className="field" style={{ flex: 1 }}>
-            <label htmlFor="pid">Kaneo 项目 {projects.length > 0 ? "（从实例加载）" : "id"}</label>
-            {projects.length > 0 ? (
-              <select
-                id="pid"
-                value={rule.projectId}
-                disabled={detailLoading}
-                onChange={(e) => {
-                  // 切换项目：立即清空列/标签/负责人，并丢弃旧项目的迟到响应
-                  setRule({
-                    ...rule,
-                    projectId: e.target.value,
-                    columnId: "",
-                    columnSlug: "",
-                    labelIds: [],
-                    assigneeId: "",
-                  });
-                  setOptions(null);
-                  void loadOptions(e.target.value);
-                  void testProjectWith(e.target.value);
-                }}
-              >
-                <option value="">— 选择项目 —</option>
-                {projects.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}（{p.slug}）
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <input
-                id="pid"
-                value={rule.projectId}
-                disabled={detailLoading}
-                onChange={(e) => setRule({ ...rule, projectId: e.target.value })}
-              />
-            )}
-          </div>
-          <button type="button" onClick={loadProjects} disabled={busy} style={{ marginTop: 22, whiteSpace: "nowrap" }}>
-            {busy ? "…" : "↻ 刷新项目列表"}
-          </button>
-          <div className="field" style={{ flex: 1 }}>
-            <label htmlFor="col">目标列</label>
-            {options && options.columns.length > 0 ? (
-              <select
-                id="col"
-                value={rule.columnId}
-                disabled={detailLoading}
-                onChange={(e) => {
-                  const hit = options.columns.find((c) => c.id === e.target.value);
-                  setRule({ ...rule, columnId: e.target.value, columnSlug: hit?.slug ?? "" });
-                }}
-              >
-                <option value="">— 选择列 —</option>
-                {options.columns.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}（{c.slug}）
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <input
-                id="col"
-                value={rule.columnSlug}
-                disabled={detailLoading}
-                onChange={(e) => setRule({ ...rule, columnSlug: e.target.value })}
-              />
-            )}
-          </div>
-          <button
-            type="button"
-            onClick={() => void loadOptions(rule.projectId)}
-            disabled={busy || !rule.projectId}
-            style={{ marginTop: 22 }}
-          >
-            加载列 / 标签 / 成员
-          </button>
-        </div>
+              {/* 来源确认与授权（仅已有软件） */}
+              {selected && (
+                <FormSection
+                  title="来源确认与授权"
+                  desc="服务端按请求 Origin 逐条记录来源；无 Origin 的原生客户端记为 native。待确认来源不会自动同步，确认后由扫描自动补处理。"
+                >
+                  <div className="table-wrap" style={{ border: "none", borderRadius: 0 }}>
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>来源</th>
+                          <th>类型</th>
+                          <th>状态</th>
+                          <th>操作</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sources.map((s) => (
+                          <tr key={s.origin}>
+                            <td>
+                              <code className="wrap-anywhere">{s.origin}</code>
+                              <div className="muted small">最近出现 {s.lastSeenAt}</div>
+                            </td>
+                            <td>{s.kind === "native" ? "原生客户端" : "浏览器"}</td>
+                            <td>
+                              {s.status === "confirmed" ? (
+                                <StatusBadge tone="ok">已确认</StatusBadge>
+                              ) : (
+                                <StatusBadge tone="warn">待确认</StatusBadge>
+                              )}
+                            </td>
+                            <td>
+                              {s.status === "pending" ? (
+                                <button
+                                  type="button"
+                                  className="btn sm"
+                                  onClick={() => void confirmSource(selected, s.origin)}
+                                  disabled={busy}
+                                >
+                                  确认来源
+                                </button>
+                              ) : (
+                                <span className="muted">—</span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                        {sources.length === 0 && (
+                          <tr>
+                            <td colSpan={4}>
+                              <EmptyState title="还没有观察到任何来源" hint="组件提交后自动登记。" />
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </FormSection>
+              )}
 
-        {optionsError && <p className="err">{optionsError}</p>}
-
-        {options && (
-          <div className="row" style={{ alignItems: "flex-start" }}>
-            <div className="field" style={{ flex: 2 }}>
-              <span className="muted">工作区标签（至少选一个）</span>
-              <div className="row" style={{ flexWrap: "wrap" }}>
-                {options.labels.map((l) => (
-                  <label key={l.id} style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
-                    <input
-                      type="checkbox"
-                      checked={rule.labelIds.includes(l.id)}
+              {/* 默认同步目标 */}
+              <FormSection title="默认同步目标" desc="自动同步规则：项目、目标列与至少一个工作区标签齐全才完整。">
+                <div className="field">
+                  <label htmlFor="pid">Kaneo 项目 {projects.length > 0 ? "（从实例加载）" : "id"}</label>
+                  {projects.length > 0 ? (
+                    <select
+                      id="pid"
+                      value={rule.projectId}
                       disabled={detailLoading}
-                      onChange={(e) =>
+                      onChange={(e) => {
+                        // 切换项目：立即清空列/标签/负责人，并丢弃旧项目的迟到响应
                         setRule({
                           ...rule,
-                          labelIds: e.target.checked
-                            ? [...rule.labelIds, l.id]
-                            : rule.labelIds.filter((x) => x !== l.id),
-                        })
-                      }
+                          projectId: e.target.value,
+                          columnId: "",
+                          columnSlug: "",
+                          labelIds: [],
+                          assigneeId: "",
+                        });
+                        setOptions(null);
+                        void loadOptions(e.target.value);
+                        void testProjectWith(e.target.value);
+                      }}
+                    >
+                      <option value="">— 选择项目 —</option>
+                      {projects.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}（{p.slug}）
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      id="pid"
+                      value={rule.projectId}
+                      disabled={detailLoading}
+                      onChange={(e) => setRule({ ...rule, projectId: e.target.value })}
                     />
-                    {l.name}
-                  </label>
-                ))}
-                {options.labels.length === 0 && <span className="muted">该项目工作区没有可用标签</span>}
-              </div>
-            </div>
-            <div className="field" style={{ flex: 1 }}>
-              <label htmlFor="as">负责人（可选）</label>
-              <select
-                id="as"
-                value={rule.assigneeId}
-                onChange={(e) => setRule({ ...rule, assigneeId: e.target.value })}
-              >
-                <option value="">— 不指定 —</option>
-                {options.members.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-        )}
+                  )}
+                </div>
+                <div className="row" style={{ marginBottom: "var(--sp-3)" }}>
+                  <button type="button" className="btn sm" onClick={loadProjects} disabled={busy}>
+                    <Icon name="refresh" size={14} />
+                    {busy ? "加载中…" : "刷新项目列表"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn sm"
+                    onClick={() => void loadOptions(rule.projectId)}
+                    disabled={busy || !rule.projectId}
+                  >
+                    加载列 / 标签 / 成员
+                  </button>
+                  {columns.length > 0 && (
+                    <span className="muted small">项目共 {columns.length} 列（已通过连接测试）</span>
+                  )}
+                </div>
+                <div className="field">
+                  <label htmlFor="col">目标列</label>
+                  {options && options.columns.length > 0 ? (
+                    <select
+                      id="col"
+                      value={rule.columnId}
+                      disabled={detailLoading}
+                      onChange={(e) => {
+                        const hit = options.columns.find((c) => c.id === e.target.value);
+                        setRule({ ...rule, columnId: e.target.value, columnSlug: hit?.slug ?? "" });
+                      }}
+                    >
+                      <option value="">— 选择列 —</option>
+                      {options.columns.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}（{c.slug}）
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      id="col"
+                      value={rule.columnSlug}
+                      disabled={detailLoading}
+                      onChange={(e) => setRule({ ...rule, columnSlug: e.target.value })}
+                    />
+                  )}
+                </div>
+                {optionsError && (
+                  <InlineError message={optionsError} onRetry={() => void loadOptions(rule.projectId)} />
+                )}
+                {options && (
+                  <>
+                    <div className="field">
+                      <span className="muted small" style={{ display: "block", marginBottom: 4 }}>
+                        工作区标签（至少选一个）
+                      </span>
+                      <div className="label-picker">
+                        {options.labels.map((l) => (
+                          <label key={l.id}>
+                            <input
+                              type="checkbox"
+                              checked={rule.labelIds.includes(l.id)}
+                              disabled={detailLoading}
+                              onChange={(e) =>
+                                setRule({
+                                  ...rule,
+                                  labelIds: e.target.checked
+                                    ? [...rule.labelIds, l.id]
+                                    : rule.labelIds.filter((x) => x !== l.id),
+                                })
+                              }
+                            />
+                            {l.name}
+                          </label>
+                        ))}
+                        {options.labels.length === 0 && <span className="muted">该项目工作区没有可用标签</span>}
+                      </div>
+                    </div>
+                    <div className="field" style={{ marginBottom: 0 }}>
+                      <label htmlFor="as">负责人（可选）</label>
+                      <select
+                        id="as"
+                        value={rule.assigneeId}
+                        onChange={(e) => setRule({ ...rule, assigneeId: e.target.value })}
+                      >
+                        <option value="">— 不指定 —</option>
+                        {options.members.map((m) => (
+                          <option key={m.id} value={m.id}>
+                            {m.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </>
+                )}
+              </FormSection>
 
-        <div className="row">
-          <button type="button" className="primary" onClick={save} disabled={busy}>
-            {draft.id ? "保存配置（不触发归档）" : "创建"}
-          </button>
-          {selected && (
-            <button type="button" onClick={() => void enableAuto(selected)} disabled={busy}>
-              启用自动归档并处理积压
-            </button>
+              {/* 危险操作区（仅已有软件） */}
+              {selected && (
+                <FormSection danger title="危险操作" desc="删除为软删除：历史反馈、截图与日志全部保留。">
+                  <button
+                    type="button"
+                    className="btn danger"
+                    onClick={() => void remove(selected)}
+                    disabled={busy || deletingId !== null}
+                  >
+                    {deletingId === selected.id ? "删除中…" : "删除软件"}
+                  </button>
+                </FormSection>
+              )}
+            </>
           )}
-          {draft.id && (
-            <button
-              type="button"
-              onClick={() => {
-                setDraft(empty);
-                setRule(emptyRule);
-                setColumns([]);
-                setSelected(null);
-                setSources([]);
-                setOptions(null);
-              }}
-            >
-              取消编辑
-            </button>
-          )}
-        </div>
-        {columns.length > 0 && <p className="muted">项目共 {columns.length} 列（已通过连接测试）</p>}
-      </div>
+        </Drawer>
+      )}
+
+      {confirmState?.kind === "enable" && (
+        <ConfirmDialog
+          title={`启用「${confirmState.app.name}」的自动同步？`}
+          body={<p>启用后立即开始处理该软件的积压反馈，按当前规则同步到 Kaneo。</p>}
+          confirmLabel="启用并处理积压"
+          onClose={() => setConfirmState(null)}
+          onConfirm={() => {
+            const app = confirmState.app;
+            setConfirmState(null);
+            void doEnableAuto(app);
+          }}
+        />
+      )}
+      {confirmState?.kind === "disable" && (
+        <ConfirmDialog
+          title={`关闭「${confirmState.app.name}」的自动同步？`}
+          body={<p>已授权的任务会继续执行，只阻止新的自动授权。</p>}
+          confirmLabel="关闭自动同步"
+          onClose={() => setConfirmState(null)}
+          onConfirm={() => {
+            const app = confirmState.app;
+            setConfirmState(null);
+            void doDisableAuto(app);
+          }}
+        />
+      )}
+      {confirmState?.kind === "remove" && (
+        <ConfirmDialog
+          title={`删除软件「${confirmState.app.name}」？`}
+          body={
+            <>
+              <p>
+                <code className="wrap-anywhere">{confirmState.app.appId}</code>
+              </p>
+              <p>历史反馈、截图与日志全部保留；该 appId 再次提交反馈时会以全新的待配置记录重新出现。</p>
+            </>
+          }
+          confirmLabel="删除软件"
+          danger
+          onClose={() => setConfirmState(null)}
+          onConfirm={() => {
+            const app = confirmState.app;
+            setConfirmState(null);
+            void doRemove(app);
+          }}
+        />
+      )}
     </div>
   );
 }

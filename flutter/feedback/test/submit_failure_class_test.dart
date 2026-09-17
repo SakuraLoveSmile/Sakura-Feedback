@@ -131,6 +131,7 @@ void main() {
       home: FeedbackPanel(
         config: FeedbackConfig('https://svc.test', 'com.example.app'),
         tokenStore: MemoryTokenStore('bearer-token'),
+        serverPrefStore: MemoryServerPrefStore(),
         httpClient: buildClient(),
       ),
     ));

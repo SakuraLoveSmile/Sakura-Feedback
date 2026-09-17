@@ -1,0 +1,277 @@
+{
+  "summary": {
+    "total": 53,
+    "passed": 53,
+    "failed": [],
+    "dataDir": "/var/folders/3f/d270m3fx56b4ff4x8l0xcn8m0000gn/T/fb-admin-delete-e2e-92pr7kdx",
+    "base": "http://127.0.0.1:59135"
+  },
+  "results": [
+    [
+      "管理员登录 200",
+      true,
+      "status=200"
+    ],
+    [
+      "Kaneo 连接写入 200",
+      true,
+      "status=200"
+    ],
+    [
+      "AI 连接写入 200",
+      true,
+      "status=200"
+    ],
+    [
+      "创建普通账号 201",
+      true,
+      "status=201 body={'id': '17fd2b68-26ca-458e-a496-3c63316f6981', 'username': 'e2e-del-user', 'enabled': True, 'dailyLimit': 20, 'used': 0, 'remaining': 20, 'resetAt': '2026-09-17T16:00:00.000Z', 'createdAt': '2026-09-17T14:54:54.723Z'}"
+    ],
+    [
+      "提交被接收",
+      true,
+      "\n:host {\n  --fb-z-index-default: 2147483000;\n  --fb-accent: #0071e3;\n  --fb-accent-hover: #0077ed;\n  --fb-accent-active: #006edb;\n  --fb-accent-disabled: #a0c7f5;\n  --fb-focus-ring: rgba(0, 113, 227, "
+    ],
+    [
+      "后台自动发现软件",
+      true,
+      "apps=[{'id': 'bf9eff0d-f9c3-4041-ab37-1f6499177caf', 'appId': 'com.e2e.delete-app', 'name': 'E2E 待删除软件', 'allowedOrigins': [], 'kaneoProjectId': '', 'kaneoColumnSlug': '', 'createdAt': '2026-09-17T14:54:58.930Z', 'updatedAt': '2026-09-17T14:54:58.930Z', 'nameSource': 'client', 'configStatus': 'pending', 'archiveMode': 'manual', 'ruleVersion': 0, 'defaults': {'projectId': '', 'columnId': '', 'columnSlug': '', 'labelIds': [], 'assigneeId': None, 'assigneeName': None}, 'ruleComplete': False, 'autoEnabledAt': None, 'autoEnabledBy': None, 'firstSeenAt': '2026-09-17T14:54:58.930Z', 'lastSeenAt': '2026-09-17T14:54:58.930Z', 'pendingSources': 1, 'confirmedSources': 0, 'waitingFeedbacks': 1}]"
+    ],
+    [
+      "归档授权已受理",
+      true,
+      "status=202 body={'ok': True, 'status': 'ready_to_archive', 'classifyVersion': 1, 'classification': {'projectId': 'p-e2e', 'columnId': 'col-1', 'columnSlug': 'triage', 'labelIds': ['label-bug'], 'assigneeId': None, 'assigneeName': None, 'version': 1, 'updatedAt': '2026-09-17T14:55:00.644Z', 'updatedBy': '08068891-d439-403e-ba83-c65188cf5c9d'}, 'revision': 1, 'archiveQueued': True, 'replayed': False}"
+    ],
+    [
+      "反馈已归档到 mock Kaneo（历史含远端任务）",
+      true,
+      ""
+    ],
+    [
+      "详情面板已打开",
+      true,
+      ""
+    ],
+    [
+      "确认文案说明历史保留与重新出现",
+      true,
+      "dialog=删除软件「E2E 待删除软件」？\n\ncom.e2e.delete-app\n\n历史反馈、截图与日志全部保留；该 appId 再次提交反馈时会以全新的待配置记录重新出现。\n\n取消\n删除软件"
+    ],
+    [
+      "发出且仅发出一个 DELETE",
+      true,
+      "delete=['http://127.0.0.1:59135/api/admin/apps/bf9eff0d-f9c3-4041-ab37-1f6499177caf']"
+    ],
+    [
+      "删除后列表行被移除",
+      true,
+      "Feedback\n反馈管理\n工作台\n反馈\n管理\n软件配置\n账号\n系统\n连接配置\n会话\n管理员设置\n系统更新\n退出登录\n软件配置\n管理接入软件、来源授权与默认同步目标。\n新增软件\n还没有软件配置\n组件首次提交反馈后会自动出现在这里，也可以点右上角新增。\n已加载 2 个项目\n已删除「E2E 待删除软件」：历史反馈与附件保留；该 appId 再次提交时会重新出现。"
+    ],
+    [
+      "删除后详情面板关闭",
+      true,
+      "Feedback\n反馈管理\n工作台\n反馈\n管理\n软件配置\n账号\n系统\n连接配置\n会话\n管理员设置\n系统更新\n退出登录\n软件配置\n管理接入软件、来源授权与默认同步目标。\n新增软件\n还没有软件配置\n组件首次提交反馈后会自动出现在这里，也可以点右上角新增。\n已加载 2 个项目\n已删除「E2E 待删除软件」：历史反馈与附件保留；该 appId 再次提交时会重新出现。"
+    ],
+    [
+      "出现删除成功提示",
+      true,
+      "Feedback\n反馈管理\n工作台\n反馈\n管理\n软件配置\n账号\n系统\n连接配置\n会话\n管理员设置\n系统更新\n退出登录\n软件配置\n管理接入软件、来源授权与默认同步目标。\n新增软件\n还没有软件配置\n组件首次提交反馈后会自动出现在这里，也可以点右上角新增。\n已加载 2 个项目\n已删除「E2E 待删除软件」：历史反馈与附件保留；该 appId 再次提交时会重新出现。"
+    ],
+    [
+      "历史反馈仍在列表",
+      true,
+      "items=[{'id': '48e9e7da-248c-4da8-9105-92bb401948e9', 'appId': 'com.e2e.delete-app', 'appName': 'E2E 待删除软件', 'username': 'e2e-del-user', 'status': 'archived', 'createdAt': '2026-09-17T14:54:58.930Z', 'updatedAt': '2026-09-17T14:55:00.703Z', 'title': 'E2E整理：将被删除软件的反馈：含截图与日志', 'textPreview': '将被删除软件的反馈：含截图与日志', 'kaneoUrl': 'http://127.0.0.1:8898/dashboard/workspace/ws-e2e/project/p-e2e/task/e2e-task-1', 'errorSummary': None, 'archiveStage': 'complete', 'hasScreenshot': True, 'logCount': 1, 'classification': {'projectId': 'p-e2e', 'columnId': 'col-1', 'columnSlug': 'triage', 'labelIds': ['label-bug'], 'assigneeId': None, 'assigneeName': None, 'version': 1, 'updatedAt': '2026-09-17T14:55:00.644Z', 'updatedBy': '08068891-d439-403e-ba83-c65188cf5c9d'}, 'archiveAuthorized': True, 'classificationLocked': True, 'appDeleted': True, 'sourceOrigin': 'http://127.0.0.1:5195', 'collectionState': 'queued', 'archiveAuthorizedKind': 'manual', 'archiveRuleVersion': None, 'autoBlockedKind': None, 'autoBlockedReason': None, 'autoAttempts': 0, 'autoNextAttemptAt': None, 'mgmtState': 'inbox', 'lifecycleVersion': 0, 'resumePaused': False, 'archivedAt': None, 'trashedAt': None, 'availableActions': ['archive', 'trash']}]"
+    ],
+    [
+      "列表标记软件已删除",
+      true,
+      "item={'id': '48e9e7da-248c-4da8-9105-92bb401948e9', 'appId': 'com.e2e.delete-app', 'appName': 'E2E 待删除软件', 'username': 'e2e-del-user', 'status': 'archived', 'createdAt': '2026-09-17T14:54:58.930Z', 'updatedAt': '2026-09-17T14:55:00.703Z', 'title': 'E2E整理：将被删除软件的反馈：含截图与日志', 'textPreview': '将被删除软件的反馈：含截图与日志', 'kaneoUrl': 'http://127.0.0.1:8898/dashboard/workspace/ws-e2e/project/p-e2e/task/e2e-task-1', 'errorSummary': None, 'archiveStage': 'complete', 'hasScreenshot': True, 'logCount': 1, 'classification': {'projectId': 'p-e2e', 'columnId': 'col-1', 'columnSlug': 'triage', 'labelIds': ['label-bug'], 'assigneeId': None, 'assigneeName': None, 'version': 1, 'updatedAt': '2026-09-17T14:55:00.644Z', 'updatedBy': '08068891-d439-403e-ba83-c65188cf5c9d'}, 'archiveAuthorized': True, 'classificationLocked': True, 'appDeleted': True, 'sourceOrigin': 'http://127.0.0.1:5195', 'collectionState': 'queued', 'archiveAuthorizedKind': 'manual', 'archiveRuleVersion': None, 'autoBlockedKind': None, 'autoBlockedReason': None, 'autoAttempts': 0, 'autoNextAttemptAt': None, 'mgmtState': 'inbox', 'lifecycleVersion': 0, 'resumePaused': False, 'archivedAt': None, 'trashedAt': None, 'availableActions': ['archive', 'trash']}"
+    ],
+    [
+      "历史反馈保持已归档状态",
+      true,
+      "status=archived"
+    ],
+    [
+      "详情可读取且 app.deletedAt 非空",
+      true,
+      "status=200"
+    ],
+    [
+      "详情仍关联旧软件行",
+      true,
+      "app={'id': 'bf9eff0d-f9c3-4041-ab37-1f6499177caf', 'appId': 'com.e2e.delete-app', 'name': 'E2E 待删除软件', 'configStatus': 'pending', 'archiveMode': 'manual', 'ruleVersion': 1, 'deletedAt': '2026-09-17T14:55:01.452Z'}"
+    ],
+    [
+      "截图元数据仍在",
+      true,
+      "screenshot={'width': 1280, 'height': 900, 'byteSize': 15302, 'sha256': 'c52ff76b544bae8214055bedd1a6281b140391cd9fc2621696f804df14eb8dec', 'capture': {'viewportWidth': 1280, 'viewportHeight': 900, 'capturedAt': '2026-09-17T14:54:55.566Z', 'pixelWidth': 1280, 'pixelHeight': 900}, 'createdAt': '2026-09-17T14:54:58.930Z'}"
+    ],
+    [
+      "日志元数据仍在",
+      true,
+      "logs=[{'id': '52475dc8-8f7c-49cc-b96e-d5862f71b147', 'feedbackId': '48e9e7da-248c-4da8-9105-92bb401948e9', 'sortOrder': 0, 'filename': 'app.log', 'source': 'manual', 'byteSize': 28, 'sha256': '6408634c6d8fd83b81ef411c103a2fe0eb4380beb524110e959a76c0f1c7dcea', 'createdAt': '2026-09-17T14:54:58.930Z'}]"
+    ],
+    [
+      "审计记录仍在",
+      true,
+      "audit=[{'id': '1ceba227-a5dd-4953-bb88-9397a8aef27e', 'at': '2026-09-17T14:55:00.645Z', 'actor': 'admin', 'action': 'archive_authorize', 'detail': {'operationId': '1f8623e6-a805-4c22-b5e7-ca9de6ca223b', 'projectId': 'p-e2e', 'columnId': 'col-1', 'columnSlug': 'triage', 'labelIds': ['label-bug'], 'assigneeId': None, 'version': 1}}, {'id': '6e99d869-3257-4359-9b10-65819e2ada71', 'at': '2026-09-17T14:55:00.645Z', 'actor': 'admin', 'action': 'archive_enqueued', 'detail': {'operationId': '1f8623e6-a805-4c22-b5e7-ca9de6ca223b', 'projectId': 'p-e2e', 'columnId': 'col-1'}}]"
+    ],
+    [
+      "历史截图字节可读（PNG）",
+      true,
+      "status=200 head=b'\\x89PNG\\r\\n\\x1a\\n'"
+    ],
+    [
+      "历史日志字节可读",
+      true,
+      "status=200"
+    ],
+    [
+      "反馈列表标记软件已删除",
+      true,
+      "Feedback\n反馈管理\n工作台\n反馈\n管理\n软件配置\n账号\n系统\n连接配置\n会话\n管理员设置\n系统更新\n退出登录\n反馈\n查看用户反馈，完成分类与同步。\n刷新\n收件箱\n1\n已归档\n0\n回收站\n0\n全部软件\nE2E 待删除软件（已删除）\n全部状态\n已接收\n处理中\n待人工分类\n待同步\n同步中\n待核对\n已同步\n失败\n提交时间\n\t反馈内容\t软件\t处理状态\t附件\t提交时间\t操作\n\t\nE2E整理：将被删除软件的反馈：含截图与日志\n将被删除软件的反馈：含截图与日志　e2e-del-user\n\tE2E 待删除软件\n软件已删除\t\n已同步\t\n1\n1\n\t今天 22:54\t\n已加载 1 条（全部）\n已加载 2 个项目\n已删除「E2E 待删除软件」：历史反馈与附件保留；该 appId 再次提交时会重新出现。"
+    ],
+    [
+      "重复删除返回 204",
+      true,
+      "status=204"
+    ],
+    [
+      "不存在的软件返回 404",
+      true,
+      "status=404"
+    ],
+    [
+      "未登录删除返回 401",
+      true,
+      "status=401"
+    ],
+    [
+      "已删除软件拒绝配置修改",
+      true,
+      "status=404"
+    ],
+    [
+      "重新提交被接收",
+      true,
+      "\n:host {\n  --fb-z-index-default: 2147483000;\n  --fb-accent: #0071e3;\n  --fb-accent-hover: #0077ed;\n  --fb-accent-active: #006edb;\n  --fb-accent-disabled: #a0c7f5;\n  --fb-focus-ring: rgba(0, 113, 227, "
+    ],
+    [
+      "重新发现出新的活跃软件",
+      true,
+      "apps=[{'id': '355cb372-97ba-47c2-a0ad-4391c1980c5e', 'appId': 'com.e2e.delete-app', 'name': 'E2E 未登记软件', 'allowedOrigins': [], 'kaneoProjectId': '', 'kaneoColumnSlug': '', 'createdAt': '2026-09-17T14:55:03.212Z', 'updatedAt': '2026-09-17T14:55:03.212Z', 'nameSource': 'client', 'configStatus': 'pending', 'archiveMode': 'manual', 'ruleVersion': 0, 'defaults': {'projectId': '', 'columnId': '', 'columnSlug': '', 'labelIds': [], 'assigneeId': None, 'assigneeName': None}, 'ruleComplete': False, 'autoEnabledAt': None, 'autoEnabledBy': None, 'firstSeenAt': '2026-09-17T14:55:03.212Z', 'lastSeenAt': '2026-09-17T14:55:03.212Z', 'pendingSources': 1, 'confirmedSources': 0, 'waitingFeedbacks': 1}]"
+    ],
+    [
+      "新记录内部 id 不同",
+      true,
+      "old=bf9eff0d-f9c3-4041-ab37-1f6499177caf new=355cb372-97ba-47c2-a0ad-4391c1980c5e"
+    ],
+    [
+      "新记录为待配置 + 人工模式（不继承旧配置）",
+      true,
+      "app={'id': '355cb372-97ba-47c2-a0ad-4391c1980c5e', 'appId': 'com.e2e.delete-app', 'name': 'E2E 未登记软件', 'allowedOrigins': [], 'kaneoProjectId': '', 'kaneoColumnSlug': '', 'createdAt': '2026-09-17T14:55:03.212Z', 'updatedAt': '2026-09-17T14:55:03.212Z', 'nameSource': 'client', 'configStatus': 'pending', 'archiveMode': 'manual', 'ruleVersion': 0, 'defaults': {'projectId': '', 'columnId': '', 'columnSlug': '', 'labelIds': [], 'assigneeId': None, 'assigneeName': None}, 'ruleComplete': False, 'autoEnabledAt': None, 'autoEnabledBy': None, 'firstSeenAt': '2026-09-17T14:55:03.212Z', 'lastSeenAt': '2026-09-17T14:55:03.212Z', 'pendingSources': 1, 'confirmedSources': 0, 'waitingFeedbacks': 1}"
+    ],
+    [
+      "旧反馈仍关联旧软件行",
+      true,
+      "app={'id': 'bf9eff0d-f9c3-4041-ab37-1f6499177caf', 'appId': 'com.e2e.delete-app', 'name': 'E2E 待删除软件', 'configStatus': 'pending', 'archiveMode': 'manual', 'ruleVersion': 1, 'deletedAt': '2026-09-17T14:55:01.452Z'}"
+    ],
+    [
+      "进行中按钮变为「删除中…」且禁用",
+      true,
+      ""
+    ],
+    [
+      "挂起期间仅发出一个 DELETE",
+      true,
+      "delete=['http://127.0.0.1:59135/api/admin/apps/355cb372-97ba-47c2-a0ad-4391c1980c5e']"
+    ],
+    [
+      "未弹出第二个确认框",
+      true,
+      ""
+    ],
+    [
+      "挂起释放后删除完成、行移除",
+      true,
+      "Feedback\n反馈管理\n工作台\n反馈\n管理\n软件配置\n账号\n系统\n连接配置\n会话\n管理员设置\n系统更新\n退出登录\n软件配置\n管理接入软件、来源授权与默认同步目标。\n新增软件\n还没有软件配置\n组件首次提交反馈后会自动出现在这里，也可以点右上角新增。\n已加载 2 个项目\n已删除「E2E 未登记软件」：历史反馈与附件保留；该 appId 再次提交时会重新出现。"
+    ],
+    [
+      "手动新增空软件 201",
+      true,
+      "status=201 body={'id': 'd04fe457-b243-4c22-9007-a2bba5167514', 'appId': 'com.e2e.delete-empty', 'name': '空软件', 'allowedOrigins': [], 'kaneoProjectId': '', 'kaneoColumnSlug': '', 'createdAt': '2026-09-17T14:55:11.056Z', 'updatedAt': '2026-09-17T14:55:11.056Z', 'nameSource': 'admin', 'configStatus': 'configured', 'archiveMode': 'manual', 'ruleVersion': 0, 'defaults': {'projectId': '', 'columnId': '', 'columnSlug': '', 'labelIds': [], 'assigneeId': None, 'assigneeName': None}, 'ruleComplete': False, 'autoEnabledAt': None, 'autoEnabledBy': None, 'firstSeenAt': '2026-09-17T14:55:11.056Z', 'lastSeenAt': '2026-09-17T14:55:11.056Z', 'pendingSources': 0, 'confirmedSources': 0, 'waitingFeedbacks': 0}"
+    ],
+    [
+      "删除失败显示可重试错误",
+      true,
+      "Feedback\n反馈管理\n工作台\n反馈\n管理\n软件配置\n账号\n系统\n连接配置\n会话\n管理员设置\n系统更新\n退出登录\n软件配置\n管理接入软件、来源授权与默认同步目标。\n新增软件\n删除失败：请求失败（可重试）\n名称\t启用状态\t同步方式\t待确认来源\t等待反馈\t操作\n\n空软件\ncom.e2e.delete-empty\t\n已配置\t人工同步\t0 / 0 已确认\t0\t\n配置\n启用自动同步\n删除\n已加载 2 个项目"
+    ],
+    [
+      "失败后行仍在列表",
+      true,
+      ""
+    ],
+    [
+      "重试删除成功、行移除",
+      true,
+      "Feedback\n反馈管理\n工作台\n反馈\n管理\n软件配置\n账号\n系统\n连接配置\n会话\n管理员设置\n系统更新\n退出登录\n软件配置\n管理接入软件、来源授权与默认同步目标。\n新增软件\n还没有软件配置\n组件首次提交反馈后会自动出现在这里，也可以点右上角新增。\n已加载 2 个项目\n已删除「空软件」：历史反馈与附件保留；该 appId 再次提交时会重新出现。"
+    ],
+    [
+      "重试后出现成功提示",
+      true,
+      "Feedback\n反馈管理\n工作台\n反馈\n管理\n软件配置\n账号\n系统\n连接配置\n会话\n管理员设置\n系统更新\n退出登录\n软件配置\n管理接入软件、来源授权与默认同步目标。\n新增软件\n还没有软件配置\n组件首次提交反馈后会自动出现在这里，也可以点右上角新增。\n已加载 2 个项目\n已删除「空软件」：历史反馈与附件保留；该 appId 再次提交时会重新出现。"
+    ],
+    [
+      "手动新增软件（迟到响应用）201",
+      true,
+      "status=201 body={'id': 'd4d3082b-07ab-4270-9157-e3eeda0d3a5a', 'appId': 'com.e2e.delete-late', 'name': '迟到详情软件', 'allowedOrigins': [], 'kaneoProjectId': '', 'kaneoColumnSlug': '', 'createdAt': '2026-09-17T14:55:13.668Z', 'updatedAt': '2026-09-17T14:55:13.668Z', 'nameSource': 'admin', 'configStatus': 'configured', 'archiveMode': 'manual', 'ruleVersion': 0, 'defaults': {'projectId': '', 'columnId': '', 'columnSlug': '', 'labelIds': [], 'assigneeId': None, 'assigneeName': None}, 'ruleComplete': False, 'autoEnabledAt': None, 'autoEnabledBy': None, 'firstSeenAt': '2026-09-17T14:55:13.668Z', 'lastSeenAt': '2026-09-17T14:55:13.668Z', 'pendingSources': 0, 'confirmedSources': 0, 'waitingFeedbacks': 0}"
+    ],
+    [
+      "预先抓取详情 200",
+      true,
+      "status=200"
+    ],
+    [
+      "详情响应被挂起（面板尚未出现）",
+      true,
+      ""
+    ],
+    [
+      "迟到详情未回写（无该软件的「来源确认」面板）",
+      true,
+      "Feedback\n反馈管理\n工作台\n反馈\n管理\n软件配置\n账号\n系统\n连接配置\n会话\n管理员设置\n系统更新\n退出登录\n软件配置\n管理接入软件、来源授权与默认同步目标。\n新增软件\n还没有软件配置\n组件首次提交反馈后会自动出现在这里，也可以点右上角新增。\n已加载 2 个项目\n已删除「迟到详情软件」：历史反馈与附件保留；该 appId 再次提交时会重新出现。"
+    ],
+    [
+      "迟到响应未触发详情错误提示",
+      true,
+      "Feedback\n反馈管理\n工作台\n反馈\n管理\n软件配置\n账号\n系统\n连接配置\n会话\n管理员设置\n系统更新\n退出登录\n软件配置\n管理接入软件、来源授权与默认同步目标。\n新增软件\n还没有软件配置\n组件首次提交反馈后会自动出现在这里，也可以点右上角新增。\n已加载 2 个项目\n已删除「迟到详情软件」：历史反馈与附件保留；该 appId 再次提交时会重新出现。"
+    ],
+    [
+      "手动新增软件（刷新失败用）201",
+      true,
+      "status=201 body={'id': 'fe08e3e6-5443-4af2-a7c7-da11b6c270a8', 'appId': 'com.e2e.delete-refresh', 'name': '刷新失败软件', 'allowedOrigins': [], 'kaneoProjectId': '', 'kaneoColumnSlug': '', 'createdAt': '2026-09-17T14:55:16.547Z', 'updatedAt': '2026-09-17T14:55:16.547Z', 'nameSource': 'admin', 'configStatus': 'configured', 'archiveMode': 'manual', 'ruleVersion': 0, 'defaults': {'projectId': '', 'columnId': '', 'columnSlug': '', 'labelIds': [], 'assigneeId': None, 'assigneeName': None}, 'ruleComplete': False, 'autoEnabledAt': None, 'autoEnabledBy': None, 'firstSeenAt': '2026-09-17T14:55:16.547Z', 'lastSeenAt': '2026-09-17T14:55:16.547Z', 'pendingSources': 0, 'confirmedSources': 0, 'waitingFeedbacks': 0}"
+    ],
+    [
+      "删除成功但刷新失败有独立提示",
+      true,
+      "Feedback\n反馈管理\n工作台\n反馈\n管理\n软件配置\n账号\n系统\n连接配置\n会话\n管理员设置\n系统更新\n退出登录\n软件配置\n管理接入软件、来源授权与默认同步目标。\n新增软件\n还没有软件配置\n组件首次提交反馈后会自动出现在这里，也可以点右上角新增。\n已加载 2 个项目\n已删除「刷新失败软件」，但列表刷新失败，请手动刷新页面确认。"
+    ],
+    [
+      "删除成功的行已被乐观移除",
+      true,
+      ""
+    ],
+    [
+      "手动刷新后列表与服务端一致（无已删软件）",
+      true,
+      ""
+    ],
+    [
+      "浏览器控制台无 JS 运行时错误",
+      true,
+      "errors=[]"
+    ]
+  ],
+  "warnings": []
+}
