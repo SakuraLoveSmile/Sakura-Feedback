@@ -7,15 +7,35 @@
 [`docs/integration.md`](docs/integration.md) §1.7。标注 **破坏性** 的条目表示
 宿主升级时需要处理；未标注的均为兼容变更（新增可选字段 / 属性 / 端点）或内部变更。
 
-## [未发布]
+## [0.5.1] — 2026-09-19
 
-### 变更（放宽，非破坏）
+### 破坏性
 
-- **完整模式受管 compose 文件名放宽**：`deploy/install-updater.sh` 接受 `compose.yml` /
-  `compose.yaml` / `docker-compose.yml` / `docker-compose.yaml`（部署目录内绝对路径），实际路径经
-  `UPDATER_COMPOSE_FILE` 写入 `.env.prod` 供 updater 使用；既有 1Panel `docker-compose.yml` 部署
-  可原地接入，无需改名重建。同时新增核对：`--env-file` 必须是 `<deploy>/.env.prod`，
-  `--compose-file` 必须位于部署目录内。
+- **移除自动更新执行器（updater）**：`apps/updater`、完整模式部署资产（`deploy/compose.prod.yml`、
+  `deploy/install-updater.sh`、`deploy/.env.prod.example`）与更新控制链路整体移除。后台「系统更新」
+  改为**只检查不安装**：服务端直接拉取 GitHub Release 清单比对版本，展示最新版本、发布时间、
+  镜像 digest 与 Release 链接；实际升级由管理员手动执行 `deploy/update.sh`（先打数据卷备份）
+  或 `docker compose pull && up -d`。
+- **API 收敛**：移除 `POST /api/admin/system/update`（发起更新）与
+  `GET /api/admin/system/update/:id`（任务进度）；保留 `GET /api/admin/system/update` 与
+  `POST /api/admin/system/update/check`（限流）。更新期间不再暂停业务写入（`paused` 标记与
+  `503 update_paused` 行为一并移除）。
+- **环境变量变更**：移除 `FEEDBACK_UPDATER_URL` / `FEEDBACK_UPDATE_URL` /
+  `FEEDBACK_UPDATE_TOKEN_FILE` / `FEEDBACK_UPDATE_CONTROL_DIR` 及全部 `UPDATER_*` 变量；新增
+  `FEEDBACK_UPDATE_MANIFEST_URL`（默认指向本仓库最新 Release 的 `release-manifest.json`，
+  `off` 可禁用检查）与 `FEEDBACK_UPDATE_CHECK_INTERVAL_MS`（默认 24h，`0` = 仅手动检查）。
+- **发布流水线**：只构建并推送 feedback 单镜像；`release-manifest.json` 不再包含
+  `services.updater` 与 `requiredUpdaterProtocol` 字段。
+
+### 迁移说明（原完整模式 → 简易模式）
+
+- 停机并备份后，把 `deploy/compose.simple.yml` 以 `docker-compose.yml`（或 `compose.yml`）放回部署
+  目录；`.env.prod` 中 `FEEDBACK_DATA_VOLUME` 必须指向**原数据卷名**（完整模式为 external 卷，不带
+  项目前缀），`FEEDBACK_IMAGE` 改为版本标签（如
+  `ghcr.io/sakuralovesmile/sakura-feedback:v0.5.1`），删除全部 updater 相关变量与 `update-control/`
+  目录，然后 `docker compose --env-file .env.prod up -d`。详细步骤见
+  `deploy/README.md`「从完整模式迁移」。**卷名指错会挂上一个新的空卷，表现为数据丢失**——先
+  `docker volume ls` 核对再启动。
 
 ## [0.5.0] — 2026-09-18
 

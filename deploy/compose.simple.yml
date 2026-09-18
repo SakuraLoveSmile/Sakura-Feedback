@@ -1,8 +1,6 @@
-# 简易生产部署：单服务、可变镜像标签、compose 自管理的数据卷。
-# 与 compose.prod.yml（digest 固定 + updater 一键更新 + 卷备份）相比：
+# 生产部署：单服务、可变镜像标签、compose 自管理的数据卷。
 #   - 更新 = docker compose pull && up -d（或 deploy/update.sh 一条命令，会先打卷备份）
-#   - 没有更新期间暂停写入、没有逐版本数据卷副本
-#   - 回退：改 FEEDBACK_IMAGE 为旧版本标签（如 ...:v0.3.0）后 up -d；
+#   - 回退：改 FEEDBACK_IMAGE 为旧版本标签（如 ...:v0.4.0）后 up -d；
 #     注意数据库迁移是单向的，跨 schema 版本回退必须先恢复 update.sh 的备份包
 #
 # 使用：

@@ -35,10 +35,10 @@
 | job | needs | 权限 | 作用 |
 |---|---|---|---|
 | `checks` | — | 复用 `ci.yml`（`contents: read`） | secrets-guard、node-checks、flutter-checks 门禁 |
-| `plan` | `checks` | `contents: read` | 读两个 `package.json` 的 version，判定渠道（表见第 1 节） |
+| `plan` | `checks` | `contents: read` | 读根 `package.json` 的 version，判定渠道（表见第 1 节） |
 | `artifacts` | `plan` | `contents: read` | Web `.tgz`、两份 dist `.zip`、`SHA256SUMS`、`SOURCE.txt` |
-| `publish` | `plan`, `artifacts` | `contents: read` + **`packages: write`** | 构建并推送 feedback 与 updater 两个镜像，记录并校验 digest |
-| `manifest` | `plan`, `artifacts`, `publish` | `contents: read` | 生成 `release-manifest.json`，再用执行器解析器验收 |
+| `publish` | `plan`, `artifacts` | `contents: read` + **`packages: write`** | 构建并推送 feedback 单镜像，记录并校验 digest |
+| `manifest` | `plan`, `artifacts`, `publish` | `contents: read` | 生成 `release-manifest.json`，再按服务端解析规则验收 |
 | `release` | `plan`, `artifacts`, `publish`, `manifest` | **`contents: write`** | 创建 draft、上传全部资产、复查齐全、最后一步公开 |
 
 权限约束：顶层只有 `contents: read`；`packages: write` 只属于 `publish`；`contents: write` 只属于 `release`，
@@ -50,45 +50,43 @@
 ## 3. `release-manifest.json` 契约
 
 冻结版本 `manifestVersion = 1`，由 `manifest` job 生成，字段与
-[`apps/updater/src/manifest.ts`](../apps/updater/src/manifest.ts) 的 `parseManifest` 一一对应：
+[`apps/server/src/routes/system-update.ts`](../apps/server/src/routes/system-update.ts) 的
+`parseManifest`（「检查更新」消费方）一一对应：
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `manifestVersion` | number | 固定 `1`；执行器只接受这一版 |
-| `version` | string | 正式语义版本（如 `0.3.0`），等于根 `package.json` 的 version（去 `v` 前缀） |
+| `manifestVersion` | number | 固定 `1`；服务端只接受这一版 |
+| `version` | string | 正式语义版本（如 `0.5.1`），等于根 `package.json` 的 version（去 `v` 前缀） |
 | `commit` | string | 本次运行的提交 SHA（`github.sha`） |
-| `tag` | string | 版本标签（如 `v0.3.0`） |
+| `tag` | string | 版本标签（如 `v0.5.1`） |
 | `channel` | string | 稳定清单恒为 `"stable"`；非 stable 时根本不产出清单 |
-| `services.feedback.image` / `.digest` | string | `ghcr.io/sakuralovesmile/sakura-feedback` + `sha256:<64 位小写十六进制>` |
-| `services.updater.image` / `.digest` | string | `ghcr.io/sakuralovesmile/sakura-feedback-updater` + digest（必填，不接受 `null`） |
+| `services.feedback.image` / `.digest` | string | `ghcr.io/sakuralovesmile/sakura-feedback` + `sha256:<64 位小写十六进制>`（必填） |
 | `platform` | string | 固定 `linux/amd64` |
 | `dbSchemaVersion` | number | 服务端 `PRAGMA user_version` 的当前值（现为 `10`），见下 |
-| `requiredUpdaterProtocol` | number | 更新执行器协议版本，现为 `1` |
 | `publishedAt` | string | 生成清单的时刻（UTC，`YYYY-MM-DDTHH:MM:SSZ`） |
+| `releaseNotes` | string | 可选；发布说明（当前由 `gh release` 正文承载，清单内可不填） |
+
+> v0.5.1 起清单**不再包含** `services.updater` 与 `requiredUpdaterProtocol`（updater 执行器已移除）；
+> 消费方只剩服务端的「检查更新」解析器，多余的 updater 字段会被校验步骤拒绝。
 
 示例：
 
 ```json
 {
   "manifestVersion": 1,
-  "version": "0.3.0",
+  "version": "0.5.1",
   "commit": "0f4c9b2e1d7a8c3f5e6b0a1d2c3e4f5a6b7c8d9e",
-  "tag": "v0.3.0",
+  "tag": "v0.5.1",
   "channel": "stable",
   "services": {
     "feedback": {
       "image": "ghcr.io/sakuralovesmile/sakura-feedback",
       "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-    },
-    "updater": {
-      "image": "ghcr.io/sakuralovesmile/sakura-feedback-updater",
-      "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
     }
   },
   "platform": "linux/amd64",
-  "dbSchemaVersion": 5,
-  "requiredUpdaterProtocol": 1,
-  "publishedAt": "2026-09-14T05:55:17Z"
+  "dbSchemaVersion": 10,
+  "publishedAt": "2026-09-19T05:55:17Z"
 }
 ```
 
@@ -96,27 +94,27 @@
 
 - **`dbSchemaVersion` 读自源码**：生成脚本解析 `apps/server/src/db/db.ts` 里所有 `PRAGMA user_version = N`，
   取最大值（现为 `10`）。不是硬编码，也不是猜的；读不到就失败退出。
-- **两个镜像 digest 都必须存在且非空**：`publish` job 任一 digest 为空或格式非法就失败退出，
+- **镜像 digest 必须存在且非空**：`publish` job digest 为空或格式非法就失败退出，
   后续 `manifest` job 根本不会运行；`manifest` job 还会把 digest 与记录文件、job output 交叉核对。
-- **清单必须被执行器接受**：生成后立刻用 `apps/updater` 的**真实解析器**（`parseManifest`）验收，
-  并要求 `services.updater` 与 `dbSchemaVersion` 非空。零依赖实现：Node 22 的类型剥离直接跑 TS，不需要 `pnpm install`。
-- **消费地址**：执行器按 `UPDATER_IMAGE_NAME` 推导
-  `https://github.com/<owner>/<repo>/releases/latest/download/release-manifest.json`，
-  再用 `requiredUpdaterProtocol` 判断自己的协议版本够不够（不够则拒绝更新并提示先手工升级 updater）。
+- **清单必须能被服务端接受**：生成后立刻按「检查更新」的解析规则验收
+  （`manifestVersion`/`version`/`channel`/`services.feedback` 与 digest 格式逐项断言，
+  并断言**不再出现** `services.updater`）。
+- **消费地址**：服务端按 `FEEDBACK_UPDATE_MANIFEST_URL`（默认
+  `https://github.com/<owner>/<repo>/releases/latest/download/release-manifest.json`）拉取清单做版本检查。
   因此清单必须挂在**已公开**（非 draft、非 prerelease）的 Release 上，且资产名必须正好是 `release-manifest.json`。
-- 两个 digest 同时作为 Release 资产存在：`feedback-image-digest.txt`、`updater-image-digest.txt`
-  （文件内含 `image:` / `digest:` / `tags:`，供人工核对；`image-digest.txt` 这个旧名字已由前者取代）。
+- digest 同时作为 Release 资产存在：`feedback-image-digest.txt`
+  （文件内含 `image:` / `digest:` / `tags:`，供人工核对）。
 
 ## 4. draft → 公开的顺序与不变量
 
 `release` job 内的顺序是固定的，全部产物齐全前 Release 一直是 draft：
 
-1. 下载四份 artifact：Web 产物（`feedback-web-<sha>`）、两份 digest、稳定清单；
-2. 校验本地产物齐全且互相一致：`sha256sum -c SHA256SUMS`、清单里的两个 digest 必须与 digest 文件相同、
+1. 下载三份 artifact：Web 产物（`feedback-web-<sha>`）、digest、稳定清单；
+2. 校验本地产物齐全且互相一致：`sha256sum -c SHA256SUMS`、清单里的 digest 必须与 digest 文件相同、
    清单的 `version` / `tag` / `commit` 必须等于本次运行的值、至少 1 个 `.tgz` + 2 个 `.zip` + `SHA256SUMS` + `SOURCE.txt`；
 3. 若 Release 不存在 → `gh release create --draft`；若已存在**且已公开** → 直接失败退出（不修改已公开版本）；
 4. `gh release upload` 上传全部资产：`*.tgz`、`*.zip`、`SHA256SUMS`、`SOURCE.txt`、
-   两份 digest、`release-manifest.json`；
+   digest、`release-manifest.json`；
 5. **复查远端**：`gh release view --json assets` 的资产名必须覆盖第 4 步全部文件（缺一即失败退出）；
 6. 最后一步才 `gh release edit --draft=false --latest`。
 
@@ -133,8 +131,7 @@
 ## 5. 人工发布步骤
 
 前置：`main` 上 CI 绿、版本号已收口（根 `package.json` 与 `apps/server`、`apps/admin`、`packages/web`、
-`flutter/feedback/pubspec.yaml` 统一为要发布的版本；`apps/updater` 保持自己的 `0.1.0` 不动——
-与 `apps/updater/src/version.ts` 的 `UPDATER_VERSION` 常量一致，仅当 updater 自身变更时才升）。
+`flutter/feedback/pubspec.yaml` 统一为要发布的版本）。
 
 ```bash
 # 1) 确认版本号（必须等于要去掉的 v 之后的标签名）
@@ -168,10 +165,13 @@ gh release download v0.3.0 -p release-manifest.json -O -
   或人工 `gh release edit v0.3.0 --draft=false --latest`。
 - 已经公开的版本要「重发」：流水线拒绝改动已公开 Release。请人工删除该 Release（或换新版本号）后重跑。
 
-部署侧（生产）：compose 按 digest 固定镜像，**不使用可变标签**；updater 容器按第 3 节的地址自行拉取清单，
-人工步骤与前置条件见 `docs/deployment.md` 与 `apps/updater/README.md`（由 U1-2 / U1-4 收口）。
+部署侧（生产）：服务端按第 3 节的地址自行拉取清单做版本检查（后台「系统更新」只检查不安装）；
+升级走 `deploy/update.sh`，人工步骤与前置条件见 `docs/deployment.md` 与 `deploy/README.md`。
 
 ## 6. 本机静态验证（本轮做了什么、没做什么）
+
+> 本节是 **v0.5.1 移除 updater 之前**的静态验证记录，其中涉及 updater 镜像 / `services.updater` /
+> `apps/updater` 解析器的条目描述的是当时的流水线形态，与当前单镜像流水线不一致。
 
 本轮**没有**运行 GitHub Actions（本机没有该环境，也没有权限触发）。实际做过的检查：
 
@@ -191,6 +191,11 @@ gh release download v0.3.0 -p release-manifest.json -O -
 当前 harness 共 47 项断言，其中 46 项通过；唯一失败是旧的“ci.yml 未被修改”断言，而本次 `ci.yml` 新增的 Flutter 存储矩阵是有意的发布门禁变更。其余 YAML、权限、版本、digest、清单、篡改检测和 fail-closed 路径均通过。
 被验证的 `release.yml` sha256：`afede6cc252b78f1be7bf0cc2764a34727cf30eeab2e19060693148ed6caaf91`。
 
+> v0.5.1 更新：`e2e/check-release-workflow.py` 已适配单镜像流水线（48 项断言全部通过）——
+> 反向断言 release.yml 不再出现 `sakura-feedback-updater` / `apps/updater`，digest 步骤改为单文件
+> `feedback-image-digest.txt`，清单验收改为「按服务端解析规则校验」并拒绝混入 `services.updater`，
+> 远端资产复查为 7 项。被验证的 `release.yml` sha256：`e7e80119f77390b53b414e90ce1ac871a975a7fda73a56445f0974e326310b1c`。
+
 **未验证**（真机发布前必须人工确认）：job 依赖与 `if` 求值、`actions/upload-artifact` /
 `download-artifact` 的跨 job 取件、`gh release create/upload/edit` 的真实网络行为、`docker/build-push-action`
 两个镜像的真实推送与 digest、`metadata-action` 生成的标签集合、以及 `manifest` job 里
@@ -201,10 +206,8 @@ gh release download v0.3.0 -p release-manifest.json -O -
 
 - **本机无法运行 Actions**：上表所有结论都是静态/脚本级，不等价于真机验证；第一次发布请按第 5 节逐步核对。
 - **预发布/手动触发不再创建 Release**（相对 v0.1.0 时期「任何标签都挂 Release」的行为是收紧）：
-  原因是执行器按 `releases/latest/download/` 取清单，任何非稳定内容都不应出现在 Releases 里。
+  原因是「检查更新」按 `releases/latest/download/` 取清单，任何非稳定内容都不应出现在 Releases 里。
   如果确实要把预发布挂出来，请人工用 `gh release create --prerelease` 处理（流水线不会代替你判断）。
-- **updater 镜像的标签语义**：`0.1.0` 来自 `apps/updater/package.json`（与反馈服务版本解耦），
-  `v0.3.0` 表示「随 v0.3.0 一起构建的这个 updater 镜像」，另有 `sha-<提交>`；部署一律按 digest 固定，标签仅供人读。
-- 两个镜像的 `provenance` 与 `sbom` 仍开启；`latest` 标签由 `metadata-action` 自动附加，**不要**在部署里用它。
+- 镜像的 `provenance` 与 `sbom` 仍开启；`latest` 标签由 `metadata-action` 自动附加，部署可自行选择是否使用。
 - `docs/closeout.md` 里「release.yml 只推一个镜像、标签推送即挂 Release」的描述是 v0.1.0 时期的历史记录，
   与本文档不一致；该文件不在本任务改动范围内，需要在 U1 收口时一并更新。

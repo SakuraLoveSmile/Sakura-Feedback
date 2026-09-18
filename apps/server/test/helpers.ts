@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createApp, type FeedbackApp } from "../src/app.ts";
@@ -565,8 +565,6 @@ export interface Harness {
   bearer: string;
   /** 建好默认软件 com.test.app（列 triage），返回其 public 对象。 */
   app: any;
-  /** 启用暂停控制面时的 paused 标记路径（否则为 null）。 */
-  pausedFile: string | null;
 }
 
 // ---------- v7：先接收后配置 / 自动归档 ----------
@@ -695,16 +693,9 @@ export async function makeHarness(
     clock?: FakeClock;
     /** T3：收紧单次扫描批量，覆盖多轮补处理。 */
     scanBatch?: number;
-    /** T3：启用更新暂停控制面（写 paused 标记即可暂停 worker 与业务写入）。 */
-    pausable?: boolean;
   } = {},
 ): Promise<Harness> {
   const config = makeConfig();
-  const controlDir = path.join(config.dataDir, "update-control");
-  if (opts.pausable) {
-    mkdirSync(controlDir, { recursive: true });
-    config.updateControlDir = controlDir;
-  }
   const ai = makeMockAi({ outcomes: opts.aiOutcomes ?? ["ok"] });
   const kaneo = makeMockKaneo(opts.kaneo);
   const feedbackApp = createApp(config, {
@@ -713,7 +704,6 @@ export async function makeHarness(
     workerSleep: instantSleep,
     ...(opts.clock ? { now: opts.clock.now, setTimer: opts.clock.setTimer, clearTimer: opts.clock.clearTimer } : {}),
     ...(opts.scanBatch !== undefined ? { scanBatch: opts.scanBatch } : {}),
-    ...(opts.pausable ? { controlTtlMs: 0 } : {}),
   });
   const cookie = await loginAsAdmin(feedbackApp);
   await seedConnections(feedbackApp, cookie);
@@ -727,19 +717,7 @@ export async function makeHarness(
     cookie,
     bearer,
     app: publicApp,
-    pausedFile: opts.pausable ? path.join(controlDir, "paused") : null,
   };
-}
-
-/** T3：写入 / 清除真实的 paused 标记（更新暂停期间不授权、不归档）。 */
-export function setPaused(h: Harness, paused: boolean): void {
-  if (!h.pausedFile) throw new Error("该 harness 未启用暂停控制面（makeHarness({ pausable: true })）");
-  if (paused) {
-    mkdirSync(path.dirname(h.pausedFile), { recursive: true });
-    writeFileSync(h.pausedFile, JSON.stringify({ phase: "backup_copy", message: "系统更新进行中" }));
-  } else {
-    rmSync(h.pausedFile, { force: true });
-  }
 }
 
 /**

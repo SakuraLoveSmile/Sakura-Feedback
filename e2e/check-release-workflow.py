@@ -11,8 +11,8 @@
 这套流水线尚未在真实 CI 运行过，结论不得读作「已在真实 CI 验证」。
 
 覆盖：契约命令、run 块内无 ${{ }} 插值、权限最小化、ci.yml 门禁保留、全部 run 块 bash -n、
-渠道判定（稳定/预发布/手动/非法标签/提交不一致/fail-closed）、两个镜像的 digest 记录步骤、
-release-manifest.json 生成器（含被 apps/updater 真实解析器验收与 7 类失败路径）、
+渠道判定（稳定/预发布/手动/非法标签/提交不一致/fail-closed）、镜像 digest 记录步骤、
+release-manifest.json 生成器（含按服务端解析规则验收与失败路径）、
 release job 的本地产物校验与远端资产复查。
 """
 
@@ -76,7 +76,9 @@ def check_contract_commands():
 
     raw = WF_PATH.read_text(encoding="utf-8")
     record("grep release-manifest.json", "release-manifest.json" in raw)
-    record("grep sakura-feedback-updater", "sakura-feedback-updater" in raw)
+    # v0.5.1 起 updater 已移除：发布流水线不得再构建/发布 updater 镜像或引用其包路径
+    record("release.yml 不再引用 sakura-feedback-updater 镜像", "sakura-feedback-updater" not in raw)
+    record("release.yml 不再引用 apps/updater", "apps/updater" not in raw)
 
 
 def check_no_shell_interpolation():
@@ -110,9 +112,9 @@ def check_ci_gate_preserved():
     record(
         "ci.yml 保留 node-checks（build→typecheck→lint→test 顺序）",
         "node-checks" in ci["jobs"]
-        and [s.get("name") for s in ci["jobs"]["node-checks"]["steps"]][-7:]
+        and [s.get("name") for s in ci["jobs"]["node-checks"]["steps"]][-6:]
         == ["build（先产出 workspace 包的 dist 与类型声明）", "typecheck", "lint",
-            "test admin", "test server", "test updater", "test web"],
+            "test admin", "test server", "test web"],
     )
     record("ci.yml 保留 flutter-checks", "flutter-checks" in ci["jobs"])
     record("release.yml 仍以 workflow_call 复用 ci.yml", WF["jobs"]["checks"].get("uses") == "./.github/workflows/ci.yml")
@@ -122,40 +124,36 @@ def check_ci_gate_preserved():
 
 
 def check_manifest_generation():
-    """抽取 manifest 的 Python 生成器，在沙箱里跑（含失败路径），并用执行器真实解析器验收。"""
+    """抽取 manifest 的 Python 生成器，在沙箱里跑（含失败路径），并按服务端解析规则验收。"""
     run = step_run("manifest", "生成 release-manifest.json")
     generator = heredoc(run, "PY")
+    # 服务端解析规则的验收步骤（消费方 = 「检查更新」，断言无 services.updater）
+    validator = heredoc(step_run("manifest", "按服务端解析规则校验清单"), "PY")
     digest = "sha256:" + "a" * 64
-    updater_digest = "sha256:" + "b" * 64
     commit = "c" * 40
     base_env = {
-        "VERSION": "0.3.0",
+        "VERSION": "0.5.1",
         "CHANNEL": "stable",
-        "TAG": "v0.3.0",
+        "TAG": "v0.5.1",
         "COMMIT": commit,
         "IMAGE_NAME": "ghcr.io/sakuralovesmile/sakura-feedback",
-        "UPDATER_IMAGE_NAME": "ghcr.io/sakuralovesmile/sakura-feedback-updater",
         "PLATFORM": "linux/amd64",
-        "UPDATER_PROTOCOL_VERSION": "1",
         "FEEDBACK_DIGEST": digest,
-        "UPDATER_DIGEST": updater_digest,
     }
 
     def sandbox():
         tmp = pathlib.Path(tempfile.mkdtemp(prefix="t5-gen-"))
         (tmp / "digests").mkdir()
         (tmp / "digests/feedback-image-digest.txt").write_text(
-            f"image: {base_env['IMAGE_NAME']}\ndigest: {digest}\ntags:\n  - v0.3.0\n", encoding="utf-8"
-        )
-        (tmp / "digests/updater-image-digest.txt").write_text(
-            f"image: {base_env['UPDATER_IMAGE_NAME']}\ndigest: {updater_digest}\ntags:\n  - 0.1.0\n", encoding="utf-8"
+            f"image: {base_env['IMAGE_NAME']}\ndigest: {digest}\ntags:\n  - v0.5.1\n", encoding="utf-8"
         )
         (tmp / "apps/server/src/db").mkdir(parents=True)
         shutil.copy(ROOT / "apps/server/src/db/db.ts", tmp / "apps/server/src/db/db.ts")
         (tmp / "gen.py").write_text(generator, encoding="utf-8")
+        (tmp / "validate.py").write_text(validator, encoding="utf-8")
         return tmp
 
-    # schema 期望值从真实源码的迁移常量推导（不写死 3：源码新增迁移后 harness 不该误报）
+    # schema 期望值从真实源码的迁移常量推导（不写死：源码新增迁移后 harness 不该误报）
     real_db_text = (ROOT / "apps/server/src/db/db.ts").read_text(encoding="utf-8")
     schema_versions = [int(value) for value in re.findall(r"PRAGMA\s+user_version\s*=\s*(\d+)", real_db_text)]
     assert schema_versions, "apps/server/src/db/db.ts 里找不到 PRAGMA user_version 迁移常量"
@@ -165,57 +163,45 @@ def check_manifest_generation():
     tmp = sandbox()
     proc = run_cmd("python3 gen.py", tmp, env=base_env)
     ok = proc.returncode == 0 and (tmp / "release-manifest.json").is_file()
-    record("生成器：两个 digest 齐全时产出清单", ok, proc.stdout.strip().splitlines()[-1][:140] if proc.stdout.strip() else proc.stderr[-200:])
+    record("生成器：digest 齐全时产出清单", ok, proc.stdout.strip().splitlines()[-1][:140] if proc.stdout.strip() else proc.stderr[-200:])
     produced_manifest = None
     if ok:
         manifest = json.loads((tmp / "release-manifest.json").read_text(encoding="utf-8"))
         produced_manifest = manifest
         expected_keys = [
             "manifestVersion", "version", "commit", "tag", "channel", "services",
-            "platform", "dbSchemaVersion", "requiredUpdaterProtocol", "publishedAt",
+            "platform", "dbSchemaVersion", "publishedAt",
         ]
         record("清单字段与冻结契约完全一致（键集合）", sorted(manifest) == sorted(expected_keys), f"{sorted(manifest)}")
         record(
-            "清单取值符合契约（stable/linux-amd64/v%s/dbSchema=%d/protocol=1）" % (base_env["VERSION"], expected_schema),
+            "清单取值符合契约（stable/linux-amd64/v%s/dbSchema=%d）" % (base_env["VERSION"], expected_schema),
             manifest["manifestVersion"] == 1
-            and manifest["version"] == "0.3.0"
+            and manifest["version"] == "0.5.1"
             and manifest["channel"] == "stable"
-            and manifest["tag"] == "v0.3.0"
+            and manifest["tag"] == "v0.5.1"
             and manifest["commit"] == commit
             and manifest["platform"] == "linux/amd64"
             and manifest["dbSchemaVersion"] == expected_schema
-            and manifest["requiredUpdaterProtocol"] == 1
             and manifest["services"]["feedback"]["digest"] == digest
-            and manifest["services"]["updater"]["digest"] == updater_digest
+            and "updater" not in manifest["services"]
+            and "requiredUpdaterProtocol" not in manifest
             and re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", manifest["publishedAt"]),
             json.dumps(manifest, ensure_ascii=False),
         )
-        # 用执行器真实解析器验收
-        node_script = """
-import fs from "node:fs";
-import { parseManifest } from "%s/apps/updater/src/manifest.ts";
-const parsed = parseManifest(JSON.parse(fs.readFileSync("%s/release-manifest.json", "utf8")), "stable");
-if (parsed.services.updater === null) throw new Error("no updater ref");
-console.log(JSON.stringify({version: parsed.version, channel: parsed.channel, dbSchemaVersion: parsed.dbSchemaVersion, protocol: parsed.requiredUpdaterProtocol}));
-""" % (ROOT, tmp)
-        proc = run_cmd(
-            "node --experimental-strip-types --input-type=module --no-warnings -",
-            tmp,
-            script=node_script,
-        )
+        # 按服务端解析规则验收（与「检查更新」的 parseManifest 要求一致）
+        proc = run_cmd("python3 validate.py", tmp, env={"MANIFEST_FILE": "release-manifest.json"})
         record(
-            "生成的清单被 apps/updater 真实解析器 parseManifest 接受",
-            proc.returncode == 0 and '"channel":"stable"' in proc.stdout,
+            "生成的清单通过服务端解析规则校验",
+            proc.returncode == 0,
             (proc.stdout.strip() or proc.stderr.strip())[-200:],
         )
 
     # 失败路径
     negative_cases = [
         ("渠道非 stable 时拒绝生成", {"CHANNEL": "prerelease"}),
-        ("标签与源码版本不一致时拒绝生成", {"TAG": "v0.2.9"}),
-        ("UPDATER_DIGEST 与记录文件不一致时拒绝生成", {"UPDATER_DIGEST": "sha256:" + "d" * 64}),
+        ("标签与源码版本不一致时拒绝生成", {"TAG": "v0.5.0"}),
+        ("FEEDBACK_DIGEST 与记录文件不一致时拒绝生成", {"FEEDBACK_DIGEST": "sha256:" + "d" * 64}),
         ("digest 格式非法时拒绝生成", {"FEEDBACK_DIGEST": "not-a-digest"}),
-        ("协议版本缺失时拒绝生成", {"UPDATER_PROTOCOL_VERSION": ""}),
     ]
     for label, override in negative_cases:
         tmp = sandbox()
@@ -225,17 +211,29 @@ console.log(JSON.stringify({version: parsed.version, channel: parsed.channel, db
         produced = (tmp / "release-manifest.json").is_file()
         record(f"生成器：{label}", proc.returncode != 0 and not produced, f"exit={proc.returncode} 产出清单={produced}")
 
-    # updater digest 文件缺失
+    # feedback digest 文件缺失
     tmp = sandbox()
-    (tmp / "digests/updater-image-digest.txt").unlink()
+    (tmp / "digests/feedback-image-digest.txt").unlink()
     proc = run_cmd("python3 gen.py", tmp, env=base_env)
-    record("生成器：任一镜像 digest 文件缺失即失败且不产出清单", proc.returncode != 0 and not (tmp / "release-manifest.json").is_file(), f"exit={proc.returncode}")
+    record("生成器：镜像 digest 文件缺失即失败且不产出清单", proc.returncode != 0 and not (tmp / "release-manifest.json").is_file(), f"exit={proc.returncode}")
 
     # db.ts 读不到迁移常量
     tmp = sandbox()
     (tmp / "apps/server/src/db/db.ts").write_text("// 没有 PRAGMA user_version\n", encoding="utf-8")
     proc = run_cmd("python3 gen.py", tmp, env=base_env)
     record("生成器：读不到 PRAGMA user_version 即失败（不硬编码猜测）", proc.returncode != 0, f"exit={proc.returncode}")
+
+    # 验收器反向断言：混入 services.updater 的清单必须被拒
+    tmp = sandbox()
+    bad = json.loads(json.dumps({"manifestVersion": 1, "version": "0.5.1", "commit": commit, "tag": "v0.5.1",
+                                 "channel": "stable",
+                                 "services": {"feedback": {"image": base_env["IMAGE_NAME"], "digest": digest},
+                                              "updater": {"image": "x", "digest": digest}},
+                                 "platform": "linux/amd64", "dbSchemaVersion": expected_schema,
+                                 "publishedAt": "2026-01-01T00:00:00Z"}))
+    (tmp / "release-manifest.json").write_text(json.dumps(bad), encoding="utf-8")
+    proc = run_cmd("python3 validate.py", tmp, env={"MANIFEST_FILE": "release-manifest.json"})
+    record("验收器：清单混入 services.updater 即拒绝", proc.returncode != 0, f"exit={proc.returncode}")
 
     # 清单里的 schema 版本必须等于真实 db.ts 迁移常量的最大值（读源码，不硬编码猜测）
     record(
@@ -245,11 +243,11 @@ console.log(JSON.stringify({version: parsed.version, channel: parsed.channel, db
     )
 
 
-def make_local_fixture(tmp, digest="sha256:" + "a" * 64, updater_digest="sha256:" + "b" * 64, commit="c" * 40, version="0.3.0"):
+def make_local_fixture(tmp, digest="sha256:" + "a" * 64, commit="c" * 40, version="0.5.1"):
     (tmp / "out").mkdir(parents=True, exist_ok=True)
     (tmp / "digests").mkdir(parents=True, exist_ok=True)
     (tmp / "manifest").mkdir(parents=True, exist_ok=True)
-    (tmp / "out/feedback-web-0.3.0.tgz").write_bytes(b"tgz-bytes")
+    (tmp / "out/feedback-web-0.5.1.tgz").write_bytes(b"tgz-bytes")
     (tmp / "out/feedback-web-dist.zip").write_bytes(b"web-zip")
     (tmp / "out/feedback-admin-dist.zip").write_bytes(b"admin-zip")
     if (tmp / "out/SHA256SUMS").exists():
@@ -262,15 +260,12 @@ def make_local_fixture(tmp, digest="sha256:" + "a" * 64, updater_digest="sha256:
     (tmp / "out/SOURCE.txt").write_text(f"commit={commit}\nversion={version}\nchannel=stable\ntag=v{version}\n", encoding="utf-8")
     (tmp / "digests/feedback-image-digest.txt").write_text(
         f"image: ghcr.io/sakuralovesmile/sakura-feedback\ndigest: {digest}\n", encoding="utf-8")
-    (tmp / "digests/updater-image-digest.txt").write_text(
-        f"image: ghcr.io/sakuralovesmile/sakura-feedback-updater\ndigest: {updater_digest}\n", encoding="utf-8")
     manifest = {
         "manifestVersion": 1, "version": version, "commit": commit, "tag": f"v{version}", "channel": "stable",
         "services": {
             "feedback": {"image": "ghcr.io/sakuralovesmile/sakura-feedback", "digest": digest},
-            "updater": {"image": "ghcr.io/sakuralovesmile/sakura-feedback-updater", "digest": updater_digest},
         },
-        "platform": "linux/amd64", "dbSchemaVersion": 3, "requiredUpdaterProtocol": 1,
+        "platform": "linux/amd64", "dbSchemaVersion": 10,
         "publishedAt": "2026-01-01T00:00:00Z",
     }
     (tmp / "manifest/release-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
@@ -279,7 +274,7 @@ def make_local_fixture(tmp, digest="sha256:" + "a" * 64, updater_digest="sha256:
 def check_release_job_local_validation():
     run = step_run("release", "校验本地产物齐全且互相一致")
     validator = heredoc(run, "PY")
-    env = {"VERSION": "0.3.0", "TAG": "v0.3.0", "COMMIT": "c" * 40}
+    env = {"VERSION": "0.5.1", "TAG": "v0.5.1", "COMMIT": "c" * 40}
 
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="t5-local-"))
     make_local_fixture(tmp)
@@ -318,13 +313,13 @@ def check_release_job_remote_validation():
     make_local_fixture(tmp)
     (tmp / "check.py").write_text(validator, encoding="utf-8")
     expected = [
-        "feedback-web-0.3.0.tgz", "feedback-web-dist.zip", "feedback-admin-dist.zip",
-        "SHA256SUMS", "SOURCE.txt", "feedback-image-digest.txt", "updater-image-digest.txt",
+        "feedback-web-0.5.1.tgz", "feedback-web-dist.zip", "feedback-admin-dist.zip",
+        "SHA256SUMS", "SOURCE.txt", "feedback-image-digest.txt",
         "release-manifest.json",
     ]
     (tmp / "release-assets.txt").write_text("\n".join(expected) + "\n", encoding="utf-8")
     proc = run_cmd("python3 check.py", tmp)
-    record("release job：远端资产齐全时通过（8 项）", proc.returncode == 0 and "远端资产齐全（8 项）" in proc.stdout, proc.stdout.strip()[-160:])
+    record("release job：远端资产齐全时通过（7 项）", proc.returncode == 0 and "远端资产齐全（7 项）" in proc.stdout, proc.stdout.strip()[-160:])
 
     (tmp / "release-assets.txt").write_text("\n".join(expected[:-1]) + "\n", encoding="utf-8")
     proc = run_cmd("python3 check.py", tmp)
@@ -337,9 +332,8 @@ def check_release_job_remote_validation():
 
 def check_digest_step():
     """抽取 publish job 的 digest 记录步骤（真实 shell 函数），验证空/非法 digest 失败。"""
-    run = step_run("publish", "记录并校验两个镜像的 digest（任一缺失/为空即失败）")
+    run = step_run("publish", "记录并校验镜像 digest（缺失/为空即失败）")
     good = "sha256:" + "a" * 64
-    bad = "sha256:" + "b" * 64
 
     def sandbox(env):
         tmp = pathlib.Path(tempfile.mkdtemp(prefix="t5-digest-"))
@@ -347,29 +341,27 @@ def check_digest_step():
         (tmp / "summary.md").write_text("", encoding="utf-8")
         base = {
             "IMAGE_NAME": "ghcr.io/sakuralovesmile/sakura-feedback",
-            "UPDATER_IMAGE_NAME": "ghcr.io/sakuralovesmile/sakura-feedback-updater",
             "GITHUB_STEP_SUMMARY": str(tmp / "summary.md"),
         }
         base.update(env)
         proc = run_cmd("bash step.sh", tmp, env=base)
         return tmp, proc
 
-    tmp, proc = sandbox({"FEEDBACK_DIGEST": good, "UPDATER_DIGEST": bad, "FEEDBACK_TAGS": "v0.3.0", "UPDATER_TAGS": "0.1.0"})
-    files_ok = (tmp / "digests/feedback-image-digest.txt").is_file() and (tmp / "digests/updater-image-digest.txt").is_file()
-    content = (tmp / "digests/updater-image-digest.txt").read_text(encoding="utf-8") if files_ok else ""
+    tmp, proc = sandbox({"FEEDBACK_DIGEST": good, "FEEDBACK_TAGS": "v0.5.1"})
+    digest_file = tmp / "digests/feedback-image-digest.txt"
+    content = digest_file.read_text(encoding="utf-8") if digest_file.is_file() else ""
     record(
-        "digest 记录步骤：正常路径写出两份 digest 且带 image/digest/tags",
-        proc.returncode == 0 and files_ok and "image: ghcr.io/sakuralovesmile/sakura-feedback-updater" in content,
+        "digest 记录步骤：正常路径写出 digest 且带 image/digest/tags",
+        proc.returncode == 0 and digest_file.is_file()
+        and "image: ghcr.io/sakuralovesmile/sakura-feedback" in content
+        and f"digest: {good}" in content,
         content.replace("\n", " | ")[:160],
     )
 
-    _, proc = sandbox({"FEEDBACK_DIGEST": good, "UPDATER_DIGEST": "", "FEEDBACK_TAGS": "v0.3.0", "UPDATER_TAGS": "0.1.0"})
-    record("digest 记录步骤：updater digest 为空即失败", proc.returncode != 0, f"exit={proc.returncode}")
+    _, proc = sandbox({"FEEDBACK_DIGEST": "", "FEEDBACK_TAGS": "v0.5.1"})
+    record("digest 记录步骤：digest 为空即失败", proc.returncode != 0, f"exit={proc.returncode}")
 
-    _, proc = sandbox({"FEEDBACK_DIGEST": "", "UPDATER_DIGEST": bad, "FEEDBACK_TAGS": "v0.3.0", "UPDATER_TAGS": "0.1.0"})
-    record("digest 记录步骤：feedback digest 为空即失败", proc.returncode != 0, f"exit={proc.returncode}")
-
-    _, proc = sandbox({"FEEDBACK_DIGEST": "sha256:short", "UPDATER_DIGEST": bad, "FEEDBACK_TAGS": "v0.3.0", "UPDATER_TAGS": "0.1.0"})
+    _, proc = sandbox({"FEEDBACK_DIGEST": "sha256:short", "FEEDBACK_TAGS": "v0.5.1"})
     record("digest 记录步骤：digest 格式非法即失败", proc.returncode != 0, f"exit={proc.returncode}")
 
 
@@ -378,11 +370,9 @@ def check_classify():
     run = step_run("plan", "判定版本与渠道")
     git_dir = ROOT / ".git"
 
-    def sandbox(version="0.3.0", updater_version="0.1.0"):
+    def sandbox(version="0.3.0"):
         tmp = pathlib.Path(tempfile.mkdtemp(prefix="t5-plan-"))
         (tmp / "package.json").write_text(json.dumps({"version": version}), encoding="utf-8")
-        (tmp / "apps/updater").mkdir(parents=True)
-        (tmp / "apps/updater/package.json").write_text(json.dumps({"version": updater_version}), encoding="utf-8")
         (tmp / "step.sh").write_text(run, encoding="utf-8")
         (tmp / "github_output").write_text("", encoding="utf-8")
         return tmp
@@ -475,7 +465,7 @@ def check_classify():
         env={"GITHUB_OUTPUT": str(tmp / "github_output"), "GIT_DIR": str(git_dir), "EVENT_NAME": "workflow_dispatch",
              "REF_TYPE": "branch", "TAG_NAME": "main", "HEAD_SHA": real_commit},
     )
-    record("plan 判定：updater 版本单独输出且与反馈服务版本解耦（0.1.0）", outputs(tmp).get("updater_version") == "0.1.0", str(outputs(tmp)))
+    record("plan 判定：version 输出与源码版本一致（0.3.0）", outputs(tmp).get("version") == "0.3.0", str(outputs(tmp)))
 
     tmp = sandbox(version="0.3")
     (tmp / "step.sh").write_text(run, encoding="utf-8")

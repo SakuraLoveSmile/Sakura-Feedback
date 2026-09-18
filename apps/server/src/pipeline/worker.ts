@@ -182,13 +182,6 @@ export interface WorkerDeps {
   snapshotKaneoSettings: () => KaneoSettings | null;
   sleep?: (ms: number) => Promise<void>;
   /**
-   * U1-4：更新暂停判定。返回 true 时 worker 既不取队也不处理——更新期间**零归档调用**
-   * （不写 Kaneo、不调 AI、不改本地状态）。队列保留在内存中，解除暂停后自动继续。
-   */
-  writesPaused?: () => boolean;
-  /** 暂停期间的轮询间隔（毫秒），默认 500。 */
-  pausePollMs?: number;
-  /**
    * T3 可注入时钟与定时器：默认用 `Date.now` / `setTimeout`（自动 unref，不阻止进程退出）。
    * 测试注入可控时钟并推进时间，观察真实调度（绝不靠手动清空退避字段或调用扫描代替）。
    */
@@ -227,35 +220,17 @@ export function createWorker(deps: WorkerDeps) {
   let stopped = false;
   // 反馈级操作锁：同一反馈并发操作只有一个获得处理权，其余返回可识别 busy。
   const busyFeedbacks = new Set<string>();
-  const pausePollMs = deps.pausePollMs ?? 500;
-
-  /** 当前是否处于更新暂停（控制面读取异常一律按未暂停处理，绝不因此卡死流水线）。 */
-  function paused(): boolean {
-    if (!deps.writesPaused) return false;
-    try {
-      return deps.writesPaused();
-    } catch {
-      return false;
-    }
-  }
 
   function enqueue(feedbackId: string): void {
     if (!queue.includes(feedbackId)) queue.push(feedbackId);
     void drain();
   }
 
-  /**
-   * 排空内存队列（并发调用共享同一次排空）。
-   * 更新暂停：不取队、不处理，等暂停解除后继续（绝不丢弃已入队的工作）。
-   */
+  /** 排空内存队列（并发调用共享同一次排空）。 */
   function drain(): Promise<void> {
     if (drainPromise) return drainPromise;
     const p = (async () => {
       while (queue.length > 0) {
-        if (paused()) {
-          await sleep(pausePollMs);
-          continue;
-        }
         const id = queue.shift()!;
         activeId = id;
         try {
@@ -282,15 +257,10 @@ export function createWorker(deps: WorkerDeps) {
 
   /**
    * 等待队列排空（测试与优雅关闭用）。
-   * U1-4：更新暂停期间立即返回——此时执行器正在等待本服务退出（`compose stop -t 30`），
-   * 若在这里死等排空会让停机超时被 SIGKILL，WAL 留在盘上、升级中止。
-   * 队列仍保留在内存（服务随后会被重建），解除暂停后由 drain 继续处理。
-   * 注意：暂停期间调用方不应再写数据库（调用顺序见 index.ts 的优雅退出）。
    * T3：同时等待调度器当前这一轮扫描跑完，否则 `idle()` 可能在两批之间提前返回。
    */
   async function idle(): Promise<void> {
     while (drainPromise || queue.length > 0 || scanRunning) {
-      if (paused()) return;
       await sleep(5);
     }
   }
@@ -727,8 +697,6 @@ export function createWorker(deps: WorkerDeps) {
   }
 
   async function processOne(feedbackId: string): Promise<void> {
-    // 更新暂停期间连单条处理入口也不放行（人工动作与 drain 都经过这里）。
-    if (paused()) return;
     if (!tryAcquire(feedbackId)) return; // 该反馈正被其他操作处理；持锁方负责后续入队
     try {
       await processLocked(feedbackId);

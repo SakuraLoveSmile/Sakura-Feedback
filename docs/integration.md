@@ -372,24 +372,22 @@ macOS / iOS 只做构建，**未做 Keychain 运行时验证**；Windows / Linux
 
 条件 3、4 不成立 → **在推送任何镜像之前就失败退出**；条件 1、2 不成立（手动触发、预发布标签）→
 仍可构建推送镜像（用于验证），但**不产出稳定清单、不创建任何 Release**。
-**这是有意收紧**：更新执行器按
+**这是有意收紧**：「检查更新」按
 `https://github.com/<owner>/<repo>/releases/latest/download/release-manifest.json` 取清单，
-任何非稳定内容都不能出现在 Releases 里，否则生产更新会被引到未发布的版本上。
+任何非稳定内容都不能出现在 Releases 里，否则版本检查会被引到未发布的版本上。
 
 **镜像坐标与标签**
 
 | 项 | 值 |
 |---|---|
-| 反馈服务镜像 | `ghcr.io/sakuralovesmile/sakura-feedback` |
-| 更新执行器镜像 | `ghcr.io/sakuralovesmile/sakura-feedback-updater`（自身版本 `0.1.0`，与反馈服务版本解耦；另带 `vX.Y.Z` 标签表示「随该版本一起构建」） |
+| 反馈服务镜像 | `ghcr.io/sakuralovesmile/sakura-feedback`（v0.5.1 起唯一镜像；`sakura-feedback-updater` 已随 updater 移除而停发） |
 | 平台 | 仅 **linux/amd64** |
 | 标签 | 版本标签（`v*`）、提交 SHA 标签（`sha-<40位>`）、以及 digest（`latest` 由 docker metadata-action 在标签构建时自动附加，指向同一 digest，仅供人读） |
-| 生产引用 | **固定 digest**（`@sha256:...`），不使用 `latest` |
+| 生产引用 | compose.simple.yml 默认 `latest`；要固定版本可写 `vX.Y.Z` 标签或 digest（`@sha256:...`） |
 
 一次发布的产物（同一轮构建）：Web `.tgz`、完整浏览器 `dist` 压缩包、管理页 `dist` 压缩包、
-`SHA256SUMS` 清单、`SOURCE.txt`（含来源提交）、两个镜像的 digest
-（`feedback-image-digest.txt`、`updater-image-digest.txt`）与稳定清单 `release-manifest.json`
-（清单字段见 [`docs/release.md`](./release.md)）。
+`SHA256SUMS` 清单、`SOURCE.txt`（含来源提交）、镜像 digest（`feedback-image-digest.txt`）
+与稳定清单 `release-manifest.json`（清单字段见 [`docs/release.md`](./release.md)）。
 
 **draft → 公开的顺序**：标签推送时先创建 **draft** Release，把上述全部产物与清单传上去，**复查资产齐全**
 （缺一即失败退出、保持 draft），**最后一步才公开**。流水线不改动已公开的 Release，
@@ -406,27 +404,28 @@ docker pull ghcr.io/sakuralovesmile/sakura-feedback@sha256:<digest>
 **部署**
 
 ```bash
-cp deploy/.env.prod.example deploy/.env.prod   # 填 MASTER_KEY / FEEDBACK_PUBLIC_URL / FEEDBACK_IMAGE
-docker compose --env-file deploy/.env.prod -f deploy/compose.prod.yml up -d
+bash deploy/bootstrap.sh   # 交互式：收集域名、生成主密钥与管理员密码、写 .env.prod、启动
 ```
 
-该 compose 已保证：端口只绑 `127.0.0.1:8787`（公网入口一律走 Nginx TLS）、`FEEDBACK_COOKIE_SECURE=true`、
-`/data` 用命名卷持久化、`FEEDBACK_PUBLIC_URL` 必填（它决定 Cookie 写操作的同源校验基准）。
+生成的 compose（`compose.simple.yml`）已保证：端口只绑 `127.0.0.1:8787`（公网入口一律走 Nginx TLS）、
+`FEEDBACK_COOKIE_SECURE=true`、`/data` 用命名卷持久化、`FEEDBACK_PUBLIC_URL` 必填
+（它决定 Cookie 写操作的同源校验基准）。
 Nginx TLS 模板见 [`deploy/nginx/feedback.conf.template`](../deploy/nginx/feedback.conf.template)。
 
 **升级**
 
-装了 updater 容器（`apps/updater`，U1 批次）时，后台「系统更新」会按 Release 上的
-`release-manifest.json` 自动完成等价动作（取 digest → 改 `FEEDBACK_IMAGE` → 重建 feedback 服务）；
-未装 updater 或需要手工操作（例如回退）时按下面的手工步骤来，
-细节以 [`docs/deployment.md`](./deployment.md) 与 [`apps/updater/README.md`](../apps/updater/README.md) 为准：
+后台「系统更新」页会按 Release 上的 `release-manifest.json` 提示是否有新版本（只检查不安装）。
+确认后走 `deploy/update.sh`（自动卷备份 → pull → 重建 → 等健康），或手动：
 
-1. 取新版本 digest：`gh release view vX.Y.Z` 里的 `feedback-image-digest.txt` 资产，
-   或 Actions 工作流产物 `feedback-image-digest`（更新执行器镜像同理，见 `updater-image-digest.txt`）。
-2. 改 `deploy/.env.prod` 的 `FEEDBACK_IMAGE=...@sha256:<新 digest>`。
-3. `docker compose --env-file deploy/.env.prod -f deploy/compose.prod.yml up -d`。
+```bash
+cd <部署目录>
+docker compose --env-file .env.prod pull && docker compose --env-file .env.prod up -d
+```
 
-**回退**：把 digest 改回上一个值再 `up -d`。`/data` 不在镜像里，回退镜像不会丢反馈数据。
+细节以 [`docs/deployment.md`](./deployment.md) 与 [`deploy/README.md`](../deploy/README.md) 为准。
+
+**回退**：先恢复 `backups/` 里的升级前 tar 备份，再把 `FEEDBACK_IMAGE` 改回旧版本标签后 `up -d`。
+`/data` 不在镜像里；数据库迁移单向，跨 schema 版本回退必须先恢复备份。
 
 **客户端如何跟上同一版本**
 
