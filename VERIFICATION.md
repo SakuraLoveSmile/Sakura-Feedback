@@ -2646,7 +2646,7 @@ Web 入口按既有契约只在浏览器加载，直接在 Node 导入会因 `HT
 ### 发布与验收边界
 
 准备版本为 **0.5.0**（root/server/admin/web/Flutter），updater 保持 **0.1.0**。
-数据库 schema v9，升级前备份；回退时配套恢复升级前数据。CHANGELOG 已注明本地删除不撤回远端数据、
+数据库 schema v10（含 Assist 迁移），升级前备份；回退时配套恢复升级前数据。CHANGELOG 已注明本地删除不撤回远端数据、
 HTTP 410 与管理员列表默认收件箱的兼容性变化。
 
 真实 AI、Kaneo、Assist、原生设备、Docker 镜像发布、GitHub Actions 本版本实际运行与生产升级

@@ -62,7 +62,7 @@
 | `services.feedback.image` / `.digest` | string | `ghcr.io/sakuralovesmile/sakura-feedback` + `sha256:<64 位小写十六进制>` |
 | `services.updater.image` / `.digest` | string | `ghcr.io/sakuralovesmile/sakura-feedback-updater` + digest（必填，不接受 `null`） |
 | `platform` | string | 固定 `linux/amd64` |
-| `dbSchemaVersion` | number | 服务端 `PRAGMA user_version` 的当前值（现为 `9`），见下 |
+| `dbSchemaVersion` | number | 服务端 `PRAGMA user_version` 的当前值（现为 `10`），见下 |
 | `requiredUpdaterProtocol` | number | 更新执行器协议版本，现为 `1` |
 | `publishedAt` | string | 生成清单的时刻（UTC，`YYYY-MM-DDTHH:MM:SSZ`） |
 
@@ -95,7 +95,7 @@
 要点：
 
 - **`dbSchemaVersion` 读自源码**：生成脚本解析 `apps/server/src/db/db.ts` 里所有 `PRAGMA user_version = N`，
-  取最大值（现为 `9`）。不是硬编码，也不是猜的；读不到就失败退出。
+  取最大值（现为 `10`）。不是硬编码，也不是猜的；读不到就失败退出。
 - **两个镜像 digest 都必须存在且非空**：`publish` job 任一 digest 为空或格式非法就失败退出，
   后续 `manifest` job 根本不会运行；`manifest` job 还会把 digest 与记录文件、job output 交叉核对。
 - **清单必须被执行器接受**：生成后立刻用 `apps/updater` 的**真实解析器**（`parseManifest`）验收，
