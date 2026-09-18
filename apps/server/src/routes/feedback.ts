@@ -4,6 +4,7 @@ import type { AppSourceKind, Db, FeedbackStatus, LogInput, SessionRow } from "..
 import {
   collectionStateForFeedback,
   contentHash,
+  getDeletionReceiptByFeedbackId,
   getFeedback,
   getFeedbackScreenshot,
   insertFeedbackAudit,
@@ -342,6 +343,10 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
         429,
       );
     }
+    if (outcome.kind === "purged") {
+      // 提交键属于一条已彻底删除的反馈：键永久作废，不扣次数、不新建记录。
+      return fail(c, err("feedback_purged", "该提交已被彻底删除；如需重新提交请使用新的提交标识", 410));
+    }
     if (outcome.kind === "replayed") {
       const replayed = getFeedback(db, outcome.row.id) ?? outcome.row;
       return c.json({
@@ -374,8 +379,16 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
     const user = sessionUser(db, session);
     if (!user) return fail(c, err("unauthorized", "需要登录", 401));
     const row = getFeedback(db, c.req.param("id"));
+    if (!row) {
+      // 已彻底删除：所属用户（或管理员）得到明确 410；其他人统一 404 不透露存在性。
+      const receipt = getDeletionReceiptByFeedbackId(db, c.req.param("id"));
+      if (receipt && (receipt.user_id === user.id || user.role === "admin")) {
+        return fail(c, err("feedback_purged", "该反馈已被彻底删除", 410));
+      }
+      return fail(c, err("not_found", "反馈不存在", 404));
+    }
     // 普通账号只能读取自己的记录；他人记录统一 404（不透露存在性）。
-    if (!row || (user.role !== "admin" && row.user_id !== user.id)) {
+    if (user.role !== "admin" && row.user_id !== user.id) {
       return fail(c, err("not_found", "反馈不存在", 404));
     }
     return c.json(publicStatus(db, row));

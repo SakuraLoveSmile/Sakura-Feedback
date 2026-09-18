@@ -123,6 +123,12 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "版本 v$version / updater $updater_version / 渠道 $channel / stable=$stable / 标签 ${tag:-<none>}"
 
+      - name: 正式发布前校验更新日志
+        if: steps.classify.outputs.stable == 'true'
+        env:
+          TAG: ${{ steps.classify.outputs.tag }}
+        run: python3 tools/release-notes.py "$TAG" > /dev/null
+
   # 与镜像同一轮构建：Web .tgz、完整浏览器 dist、SHA-256 清单、来源提交。
   # 不读取任何生产 .env / 数据库 / AI / Kaneo 凭据；本 job 不接触 GitHub Release（只有 release job 能写 Release）。
   artifacts:
@@ -597,8 +603,12 @@ jobs:
               echo "::error::Release $TAG 已公开，重跑不会改动已公开版本（如需重发请先人工删除该 Release）"; exit 1
             fi
           else
-            gh release create "$TAG" --draft --title "$TAG" --generate-notes
+            python3 tools/release-notes.py "$TAG" > release-notes.md
+            gh release create "$TAG" --draft --title "$TAG" --notes-file release-notes.md
           fi
+          # 重跑 draft 也使用同一标签源码的更新日志；缺失或空白时拒绝发布。
+          python3 tools/release-notes.py "$TAG" > release-notes.md
+          gh release edit "$TAG" --notes-file release-notes.md
           gh release upload "$TAG" \
             out/*.tgz out/*.zip out/SHA256SUMS out/SOURCE.txt \
             digests/feedback-image-digest.txt digests/updater-image-digest.txt \
@@ -646,6 +656,17 @@ jobs:
           if missing:
               fail(f"远端 Release 缺少资产：{', '.join(missing)}（Release 保持 draft，不会公开）")
           print(f"远端资产齐全（{len(expected)} 项）：{', '.join(sorted(expected))}")
+          PY
+          gh release view "$TAG" --json body > release-body.json
+          python3 - <<'PY'
+          import json
+          import pathlib
+
+          expected = pathlib.Path("release-notes.md").read_text(encoding="utf-8").strip()
+          actual = json.loads(pathlib.Path("release-body.json").read_text(encoding="utf-8"))["body"].strip()
+          if not expected or actual != expected:
+              raise SystemExit("Release 更新日志与本标签 CHANGELOG 不一致；保持 draft")
+          print("远端 Release 更新日志与本标签源码一致")
           PY
 
       - name: 最后一步：公开 Release（失败即保持 draft）

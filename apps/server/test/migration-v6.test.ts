@@ -226,8 +226,8 @@ describe("迁移 6：历史数据库升级", () => {
     it(`v${version} → 最新版本：状态接管、外键、内容摘要与附件全部保留`, () => {
       const { db, before } = runMigration(version, SPECS);
 
-      // v6 引入人工分类归档；v7 再叠加“先接收后配置 / 自动归档”，因此终态为 7。
-      expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(7);
+      // v6 引入人工分类归档；v7 叠加“先接收后配置 / 自动归档”；v8 软件软删除；v9 反馈生命周期，终态为 9。
+      expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(10);
       expect(db.prepare("PRAGMA foreign_key_check").all()).toHaveLength(0);
 
       // 未发生远端写入的 received/processing 接入人工流程
@@ -321,7 +321,7 @@ describe("迁移 6：历史数据库升级", () => {
     first.close();
 
     const second = openDb(dir);
-    expect((second.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(7);
+    expect((second.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(10);
     expect(digest(second)).toBe(snapshot);
     expect(second.prepare("PRAGMA foreign_key_check").all()).toHaveLength(0);
     second.close();
@@ -330,7 +330,7 @@ describe("迁移 6：历史数据库升级", () => {
   it("全新空库直接建为最新版本（不触发重建），状态约束接受新状态", () => {
     const dir = mkdtempSync(path.join(tmpdir(), "feedback-mig-fresh-"));
     const db = openDb(dir);
-    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(7);
+    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(10);
     expect(db.prepare("SELECT COUNT(*) n FROM feedback_audit").get()).toEqual({ n: 0 });
     db.close();
   });

@@ -613,6 +613,24 @@ class ApiClient {
     _throwApiError(response);
   }
 
+  /// 探测服务连通性：`GET /healthz`（不带令牌，不触发 401 清理）。
+  ///
+  /// 用于设置视图保存自定义服务器后的连通性提示：返回 true 表示拿到
+  /// 2xx 响应；非 2xx / 超时 / 网络异常均返回 false（绝不抛出）。
+  Future<bool> probeHealth() async {
+    try {
+      final http.Response response = await _client
+          .get(
+            _uri('/healthz'),
+            headers: _headers(withAuth: false),
+          )
+          .timeout(const Duration(seconds: 5));
+      return response.statusCode >= 200 && response.statusCode < 300;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// 查询反馈状态：`GET /api/feedback/:id`。
   Future<FeedbackRecord> fetchFeedback(String feedbackId) async {
     final TokenLease lease = await _tokens.lease(); // 请求发出前捕获令牌与世代

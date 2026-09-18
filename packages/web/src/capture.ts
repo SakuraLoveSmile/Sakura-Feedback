@@ -475,15 +475,26 @@ export function maskRectToOutputPixels(
   return { x: x0, y: y0, width: w, height: h };
 }
 
+/**
+ * 在最终位图上以**输出像素坐标**填充不透明遮挡矩形。
+ *
+ * 渲染器（html2canvas-pro CanvasRenderer/ForeignObjectRenderer）返回画布时会在
+ * 2D 上下文上残留 `scale(scale)·translate(-x,-y)` 变换；此处必须先重置为恒等
+ * 变换再绘制，否则遮挡矩形会被二次缩放/平移而偏离目标区域。
+ */
 function paintMaskRects(canvas: HTMLCanvasElement, rectsPx: CaptureRect[]): void {
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new CaptureError('verify-failed', '无法取得最终位图的 2D 上下文');
   ctx.save();
-  ctx.globalAlpha = 1;
-  ctx.globalCompositeOperation = 'source-over';
-  ctx.fillStyle = MASK_COVER_CSS;
-  for (const r of rectsPx) ctx.fillRect(r.x, r.y, r.width, r.height);
-  ctx.restore();
+  try {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = MASK_COVER_CSS;
+    for (const r of rectsPx) ctx.fillRect(r.x, r.y, r.width, r.height);
+  } finally {
+    ctx.restore();
+  }
 }
 
 /** 采样验证每个遮挡矩形确实被不透明覆盖色覆盖（含四角与内部网格）。 */

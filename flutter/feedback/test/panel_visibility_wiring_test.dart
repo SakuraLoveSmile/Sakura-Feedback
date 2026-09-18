@@ -57,6 +57,7 @@ void main() {
         ),
         controller: controller,
         tokenStore: MemoryTokenStore('tok'),
+        serverPrefStore: MemoryServerPrefStore(),
         httpClient: client(),
         child: const SizedBox.expand(
           child: ColoredBox(color: Colors.blue),

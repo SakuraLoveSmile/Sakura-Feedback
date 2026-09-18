@@ -9,11 +9,24 @@ import 'package:flutter/foundation.dart';
 class FeedbackController extends ChangeNotifier {
   bool _isOpen = false;
 
+  /// T6：当前实际使用的服务器地址（由组件维护，宿主只读）：
+  /// 本机覆盖偏好优先于 [FeedbackConfig.apiBase]；偏好加载完成前
+  /// 先返回配置默认值。
+  String? get effectiveApiBase => _effectiveApiBase;
+  String? _effectiveApiBase;
+
   /// 截图并呼出面板的底层委托函数（由 [FeedbackWidget] 绑定）。
   Future<void> Function({Offset? releasePoint})? onCaptureAndOpen;
 
   /// 取消截图与拖拽的底层委托函数（由 [FeedbackWidget] 绑定）。
   void Function()? onCancelCapture;
+
+  /// 组件内部更新实际使用地址（宿主不应调用；调用即触发监听通知）。
+  void setEffectiveApiBase(String base) {
+    if (_effectiveApiBase == base) return;
+    _effectiveApiBase = base;
+    notifyListeners();
+  }
 
   /// 面板当前是否展开。
   bool get isOpen => _isOpen;

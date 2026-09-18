@@ -2378,3 +2378,276 @@ Flutter 3.41.3 (Dart 3.11.1)，Chromium（Playwright，`chromium_headless_shell-
 
 因此「真实 Kaneo 兼容性」的状态更新为：**除图片上传（被环境阻塞）与评论写入（未取得证据）外，均已验证**；
 整轮状态仍为**待体验**，`已验收` 需要你确认。
+
+## 2026-09-17 四项修复：截图遮罩 / 软件删除 / 自定义服务器 / Android 键盘（T1–T9，状态：**待体验**）
+
+四项效果全部落地：敏感区域截图遮罩修复（T1–T3）、管理网页软删除软件（T4–T5）、
+Web/Flutter 组件自定义 Feedback 服务器（T6–T7）、Android 输入法避让（T9）。
+未修改宿主应用与 Kaneo；未提交、未推送、未发布、未部署。
+
+### 1. 实现摘要
+
+| 任务 | 关键变更 |
+|---|---|
+| T1–T3 遮罩 | `paintMaskRects` 在 `save()` 后重置为恒等变换、以**输出像素坐标**绘制，`try/finally` 恢复；修复 html2canvas-pro 残余 `scale/translate` 导致遮挡矩形被二次变换的真实缺陷。`packages/web/src/capture.ts`、像素夹具 `test/pixel-fixture.ts` 扩展变换状态，`test/masking.test.ts` 新增 scale=1/2/1.5/0.5 + 滚动 + 残余变换用例 |
+| T4–T5 软删除 | `apps` 表加 `deleted_at`（迁移 **v8**：重建表移除列级 UNIQUE，新建活跃 appId 部分唯一索引 `apps_active_app_id_uq`）；appId 仅活跃唯一；`DELETE /api/admin/apps/:id` 成功/重复 204、不存在 404；已删记录拒绝来源确认/规则保存/启停/自动授权/登录放行；同 appId 再次有效提交创建**新内部 ID**（不继承旧规则/授权），幂等重放与非法请求不产生记录；历史反馈/截图/日志/审计/远端引用全部保留。管理页删除确认（明示历史保留+重新出现）、进行中防重复、错误重试、成功后移除行并丢弃迟到详情、反馈列表/详情标注「已删除」 |
+| T6–T7 自定义服务器 | Web：`packages/web/src/server_pref.ts`（规范化：trim → http(s) → 主机非空 → 拒凭据/查询/片段 → 去末尾斜杠与默认端口、保留路径前缀 → HTTPS 页面拒 HTTP）+ 面板设置视图（未登录可进、当前有效地址、保存/取消/恢复默认、localStorage 按 `规范化默认地址+appId` 隔离、保存后 `/healthz` 无凭据探测）。Flutter：`lib/src/server_pref*.dart`（同规则 + `MemoryServerPrefStore` / IO 安全存储 / Web localStorage）+ 面板设置视图。两端身份 = `effectiveApiBase + appId`：异址且有草稿 → 确认后清空文字/截图/日志，取消原样保留；切换作废令牌/任务/额度/幂等键/轮询，世代号忽略迟到响应，旧令牌绝不发往新地址，同址保存不重置；Flutter 按身份派生令牌仓库键并重建 `ApiClient` |
+| T9 键盘避让 | `widget.dart` 按面板盒子全局底边 vs `viewInsets.bottom` 计算**实际重叠**，只扣未避让部分（兼容宿主已 resize，不双重留白）；`panel.dart` 撰写/登录/设置内容改有界可滚动（`LayoutBuilder + SingleChildScrollView + ConstrainedBox + IntrinsicHeight`），账号→密码焦点链、密码 done 直接登录、`didChangeMetrics` 与焦点变化后 post-frame `ensureVisible` 滚动至可见；键盘开合/旋转不清草稿。**真机已验证**（见 §3.2） |
+
+### 2. 仓库门禁（本轮全部真实运行）
+
+| 门禁 | 结果 |
+|---|---|
+| `apps/server` vitest | **302/302** |
+| `packages/web` vitest | **179/179** |
+| `flutter/feedback` test | **150/150**（含 T6/T7 服务器偏好 17 用例 + T9 键盘避让 12 用例） |
+| `apps/updater` vitest | **75/75** |
+| 各 workspace `tsc --noEmit` | 通过 |
+| `flutter analyze` | No issues found |
+| 根 lint（biome + eslint） | 通过（仅 server 测试既有 `any` 警告） |
+| web / admin / server / updater / React / Vue 示例构建 | 全部通过 |
+| 源文件字面 NUL 扫描 | 无（仅 PNG 二进制含预期字节） |
+
+### 3. 真实浏览器验证
+
+- **全量套件** `python3 e2e/run_browser.py`（真实系统 Chrome + 真实 `tsx` 服务 ×2 + mock AI/Kaneo +
+  三个跨源宿主页）：**354/354 通过、0 失败**，顺序单次运行。
+  控制台证据 `e2e/shots/run-browser-2026-09-17.log`，像素证据 `e2e/shots/P9-*.png`、`P10` 相关截图。
+  路径覆盖 T1–T10 + P1–P10，其中本轮新增：
+  - **P9 遮罩矩阵**：1440×900@dpr1/2、390×844@dpr1/3、2560×1440@dpr1，滚动 0/100vh/max、
+    贴边/角落敏感区、无敏感区、高 DPR 服务端图核对 —— 客户端与服务端 PNG 逐像素校验全过。
+  - **P10 自定义服务器**：设置 UI 完成 A→B→A；规范化、草稿取消保留/确认清空、`/healthz` 探测、
+    双服务令牌互不错发、刷新后覆盖仍生效、恢复默认、回 A 需重新登录。
+  - P10 使用独立测试账号 `E2E_USER3`，避免与主账号登录限流串扰（前一轮 329/330 的唯一失败即此限流，非功能缺陷）。
+
+#### 3.2 Android 真机验证（Mi 10 · Android 16 API 36 · 微信输入法 WeType，adb 驱动）
+
+环境：`flutter build apk --debug`（JAVA_HOME=openjdk@17，不改全局 jenv）→ `adb install`；
+`adb reverse tcp:8787/8788` 把设备 localhost 映射到本机两个真实 `tsx` 服务（Android 默认放行 localhost 明文，
+不改 manifest）；宿主为 `examples/flutter`（`adjustResize`）。截图证据 `e2e/shots/android-kb/*.png`。
+
+| 验收点 | 结果 | 证据 |
+|---|---|---|
+| 撰写视图 + 真实键盘 | ✅ 文本域、字数、「登录并提交」均在键盘上沿之上 | `02-panel.png` |
+| 真实 IME 组合输入 → 草稿 | ✅ WeType 候选条提交 "keyboard"（8/10000） | `03-compose-typed.png` → `03b-compose-committed.png` |
+| 登录视图 + 键盘 | ✅ 用户名/密码/「登录并提交」/「取消」全部可见可达 | `06-login-kb2.png` |
+| 焦点链：用户名→密码 | ✅ 用户名回车触发 `next` → 密码聚焦 | `07-username.png` |
+| 密码 done → 登录 → 自动提交草稿 | ✅ 服务端落库 `needs_info / waiting_source_confirmation / native` | `08-after-login.png` + 管理 API 回读 |
+| 返回键收键盘不关面板 | ✅ `mInputShown=false`，面板保持、额度「今日剩余 49 次」仍在 | `09-back-dismiss.png` |
+| 设置视图 + 键盘 | ✅ 地址框预填有效地址、保存/恢复默认/返回均可见 | `11-settings-kb.png` |
+| 横屏 + 键盘 | ✅ 聚焦控件 `ensureVisible` 到可见区、内容可滚动至按钮 | `12/13/13b` |
+| 旋转与开合不丢内容 | ✅ 横→竖、键盘开合后地址框内容与视图状态完整 | `15-back-portrait.png` |
+| **附带：T6/T7 原生链路** | ✅ 保存 `:8788` →「已保存，服务连接正常」（`/healthz` 探测）；**force-stop 冷启动后覆盖仍在**（`SecureServerPrefStore` 真实 Keystore 读写）；重启后面向 B 显示「登录并提交」未登录态（A 令牌未泄漏到 B）；「恢复默认」回到 :8787 | `16/17/18/19b` |
+| **日志附件链路** | ✅「添加日志」→ DocumentsUI（PickActivity 前台）→ `manual-android.txt` 入列表（1/3）→ 随反馈上传，服务端 `logs[]` 含该文件（137 B / manual / sha256）；提交失败后草稿+附件保留，重试成功 | `33/34/35/36/39` |
+
+**用户反馈核查（「日志附件无法添加」）**：功能链路本身正常——`_pickLogs` 经 `file_selector` 打开系统
+DocumentsUI 并成功添加/上传。实测发现的真实问题是**命中目标过小**：「添加日志」为紧凑 TextButton
+（约 28dp，低于 48dp 触控下限），指尖轻微偏移即落空、无任何反馈，观感等同「点了没反应」。
+已修复：`tapTargetSize: MaterialTapTargetSize.padded`（命中区 ≥48dp，视觉不变），
+日志行预览/移除图标命中约束 28→36dp。诊断手段：VM service `evaluate`/render-dump 坐标换算 +
+临时 `Listener`/`debugPrint`（已撤除）。
+
+遗留环境备注：WeType 曾在一次 `input text` 后短暂不渲染键区（`dumpsys` 显示窗口 HAS_DRAWN 但无内容），
+`am force-stop com.tencent.wetype` 后恢复，与组件无关；测试后已恢复默认地址、自动旋转，拆除 `adb reverse`，
+测试服务与 mock 均已停止。
+
+- **管理页删除** `python3 e2e/run_admin_delete_browser.py`：**53/53 通过**，
+  报告 `e2e/shots/admin-delete/report.json`。覆盖确认文案、进行中防重复、空/有历史软件、
+  附件可读、重复删除、并发重新发现、删除与自动归档授权竞争、迟到详情丢弃、刷新失败区分。
+
+### 4. 新增/更新的自动化测试
+
+- `apps/server/test/app-soft-delete.test.ts`（13 用例：软删幂等/404、活跃唯一、重新发现新内部 ID、
+  历史保留可读、已删记录拒绝配置与授权、在途授权记录保留恢复信息）。
+- `apps/server/test/migration-v8.test.ts`（v7 历史库→v8：内部 ID/反馈/附件全保留、外键完整、
+  部分唯一索引行为、失败回滚、重启幂等）。
+- `packages/web/test/server-pref.test.ts`（15 用例：规范化全分支、HTTPS 拒 HTTP、
+  偏好读写隔离、设置 UI、覆盖生效与恢复默认）。
+- `flutter/feedback/test/server_pref_test.dart`（17 用例：规范化、双服务路由、
+  身份派生令牌仓库、切换清空/保留草稿、迟到响应抑制、持久化）。
+- `flutter/feedback/test/keyboard_avoidance_test.dart`（12 用例：多键盘高度、横竖屏、
+  放大字体、宿主已避让/未避让、有截图与日志、焦点可达、草稿保留）。
+- 更新：`masking.test.ts`（5 回归用例先在旧实现上以 `verify-failed` 失败，修复后通过）、
+  `pixel-fixture.ts`（FakeCtx 支持变换与残余变换）、`a11y.test.ts`（焦点锁含设置视图）、
+  `helpers.ts`（localStorage 清理防泄漏）、`accounts-quota.test.ts`/`migration-v6.test.ts`（版本 7→8）、
+  Flutter 测试脚手架（`serverPrefStore`/`tokenStoreFactory` 注入，`PanelServer.handle` 双服务路由）。
+
+### 5. 文档
+
+`docs/integration.md` §4.1/§4.2/§5.3/§5.4（Web 属性、Flutter 配置、运行时身份切换语义、
+键盘行为）、`packages/web/README.md`、`flutter/feedback/README.md`（自定义服务器 + 键盘避让）。
+
+### 6. BLOCKED / 未验证（如实标注，不得读作已通过）
+
+- **Android 真机键盘验证：已完成**（见 §3.2，Mi 10 + WeType）。iOS 侧键盘行为**未验证**
+  （本机 iPad 未跑过组件；Flutter 的 `viewInsets` 语义在 iOS 一致，但真实观感未观测）。
+- **真实 Kaneo**：本轮未触改归档链路；上一轮记录的真实 Kaneo 结论仍有效
+  （图片上传阻塞为 Kaneo 侧 S3 未配置）。
+- **Flutter iOS 持久化**：`SecureServerPrefStore` 在 Android Keystore 上已真机验证（§3.2）；
+  iOS Keychain 路径**未验证**（无 iOS 构建环境）。
+- **多实例/长期退避**：沿用上轮限制，不在本轮范围。
+
+### 7. 体验入口（建议验收顺序）
+
+1. 管理页删除一个**有历史**的软件 → 确认弹窗明示历史保留 → 列表行消失、详情关闭；
+   历史反馈仍可读（标注「已删除」）、附件可打开；同 appId 再提交 → 出现新待配置记录。
+2. 组件面板右上角齿轮 → 输入第二个服务地址（带路径前缀/端口）→ 有草稿时确认清空 →
+   自动探测 → 重新登录提交；齿轮里「恢复默认」→ 回到宿主地址并需重新登录。
+3. Android 键盘行为已在 Mi 10 真机验证（§3.2）；如需复验：面板内账号→（下一步）→密码→（完成）
+   登录，撰写页键盘展开时文本框与按钮均在键盘上方，返回键收键盘不关面板，旋转不丢内容。
+
+---
+
+## 2026-09-17 网页端改进：反馈整理、删除与统一 UI（T1–T4，状态：**待体验**）
+
+「查看 → 处理 → 同步 → 归档 → 清理」全流程落地：反馈页三区（收件箱/已归档/回收站）+
+生命周期动作 + 队列保护 + 共享设计语言。详见 [`docs/closeout-admin-lifecycle.md`](docs/closeout-admin-lifecycle.md)。
+未修改 Kaneo、宿主组件或线上数据；未提交、未推送、未部署。
+
+### 1. 实现摘要
+
+| 任务 | 关键变更 |
+|---|---|
+| T1 收件箱归档 | 迁移 **v9**：`mgmt_state`/`archived_at`/`archived_by`/`lifecycle_version`/`resume_paused` + `feedback_deletion_receipts`；列表 `view/q/from/to`、三区计数、单条/批量动作（逐项结果、乐观版本、部分失败不回滚）；仅 `status=archived` 可归档，历史数据全部落收件箱 |
+| T2 回收站 | 软删除→回收站（正文/附件/远端关联全保留）、恢复回收件箱且未完成记录暂停、worker 与全部扫描排除回收站+暂停、`withFeedbackLock` 与 worker 同锁、彻底删除事务清理 BLOB+审计留最小防重放凭据、所有者 410、不返还额度、不碰远端 |
+| T3 列表/批量/URL | 三区计数、防抖搜索、软件/状态/日期筛选、游标 50/页、勾选批量 ≤100、`?view&q&status&appId&from&to&id` 全入 URL（刷新/前进后退/直达详情）、5s 原位轮询（隐藏停止、有新仅提示）、请求序号丢弃迟到响应 |
+| T4 详情+全站 UI | 600px 抽屉八段固定顺序、回收站只读、分类草稿保护、共享组件库（ui.tsx）、设计令牌全变量化、分组导航（工作台/管理/系统）、六页统一外壳、原生 confirm/prompt/alert 全替换、归档→同步文案 |
+
+### 2. 仓库门禁（本轮全部真实运行）
+
+| 门禁 | 结果 |
+|---|---|
+| `apps/server` vitest | **323/323**（302 既有 + 21 生命周期） |
+| `apps/server` typecheck / lint | ✅ / ✅ 0 error（36 warning 均既有） |
+| `apps/admin` typecheck / lint / build | ✅ / ✅ 0 error 0 warning / ✅ 282 kB JS + 17 kB CSS |
+
+### 3. 浏览器回归（`e2e/run_lifecycle_browser.py`，真实产物+真实进程+mock 外部服务）
+
+**58/58 通过，0 警告**，报告与截图：`e2e/shots/lifecycle/`（含 `report.json`）。
+覆盖：登录/配置/提交/worker 整理、人工分类+同步、三区计数与搜索、详情抽屉区块与 `?id=`、
+归档/恢复、回收站只读、输入「删除」确认彻底删除+双端 410、批量逐项与禁用规则、
+`?q=` 刷新保持/后退关抽屉、其余六页共享外壳、390/768/1440/1920 四档无横向滚动。
+
+软件删除流程回归 `e2e/run_admin_delete_browser.py`：**53/53 通过**
+（脚本适配新外壳：`.nav-item:visible`、共享 `ConfirmDialog`、空列表 EmptyState），
+报告 `e2e/shots/admin-delete/report.json`。
+
+### 4. 新增/更新的自动化测试
+
+- `apps/server/test/lifecycle-v9.test.ts`（21 用例：v8→v9 升级/空库/幂等、归档条件、
+  批量乐观并发与部分失败、持锁/排队/扫描保护、暂停恢复、防重放凭据、额度不返还、410、权限）。
+- `migration-v6.test.ts`、`accounts-quota.test.ts`：终态断言 7→9（纯版本号）。
+
+### 5. 未验证（如实标注）
+
+- 真实 Kaneo 兼容性未复验（同步契约未改，mock 验证）；200% 缩放未逐项截图；
+  彻底删除不承诺数据库文件立即缩小；批量 >100 并发未专项压测。
+
+### 6. 状态
+
+**待体验**——真实浏览器体验确认后才记「已验收」。
+
+## 2026-09-18 管理端浅色/深色/跟随系统主题与统一表单控件（T1–T2，状态：**待体验**）
+
+登录页与全部七个管理页支持浅色、深色与跟随系统主题；偏好持久化于
+`localStorage["feedback.admin.theme"]` 并在首屏绘制前应用（无闪烁）；共享
+Field/控件/对话框/抽屉/通知统一为一套可访问 UI 体系。仅改动 `apps/admin` 与新增
+验收脚本；未修改 Kaneo、宿主组件、服务端业务逻辑或线上数据；未提交、未推送、未部署。
+
+### 1. 实现摘要
+
+| 任务 | 关键变更 |
+|---|---|
+| T1 主题系统 | `theme.tsx`：`"system"\|"light"\|"dark"` 单存储（`useSyncExternalStore`），缺失/非法/读写异常均回退 system；`data-theme` 只写解析结果、`color-scheme` 同步；仅 system 注册 `matchMedia` 监听，StrictMode 双挂载清理正确；`index.html` 内联启动脚本在模块渲染前解析应用（解析逻辑与运行时一致，注释标注同步维护）；切换主题不重建业务页（草稿保留）；登录页/桌面侧栏/移动顶栏三处 `ThemeSelect` 共享同一偏好 |
+| T2 统一 UI | `ui.tsx` 新增 `Field`（渲染 prop 注入 `id`/`aria-describedby`/`aria-invalid`，hint 与 error 关联）；`styles.css` 全量令牌化（颜色/间距/圆角/控件高/遮罩/阴影），`html[data-theme="dark"]` 整套覆盖；文本类控件（无 type + text/password/email/number/search/date/url/tel/time/select/textarea）统一 36px/移动端 44px/8px 圆角，checkbox/radio/file/range 不误伤；统一 hover/focus-visible/disabled/readonly/invalid/placeholder/autofill；七页字段迁移 `Field`、按钮行 `.btn-row` 可换行、长 URL/操作 ID `.wrap-anywhere`、四档宽度无横向溢出 |
+
+### 2. 仓库门禁（本轮全部真实运行）
+
+| 门禁 | 结果 |
+|---|---|
+| `pnpm --filter @feedback/admin lint`（biome） | ✅ 0 error |
+| `pnpm --filter @feedback/admin typecheck` | ✅ exit 0 |
+| `pnpm --filter @feedback/admin build` | ✅ exit 0（283.13 kB JS + 19.83 kB CSS，产物含首屏启动脚本与 `data-theme="dark"` 块） |
+
+### 3. 浏览器验收（`e2e/run_admin_ui_browser.py`，真实产物 + 真实服务进程 + mock 外部服务 :8898/:8899）
+
+**75/75 硬断言通过，0 项待实现，2 条警告**（均为「反馈页无 `.btn.primary` 元素，跳过主按钮对比度」的测量性跳过，非产品缺陷；登录页主按钮已实测）。
+报告与截图：`e2e/shots/admin-ui/`（含 `report.json` 与 11 张双主题截图）。
+
+覆盖：默认跟随系统、手动浅色/深色、刷新持久化、非法值回退、手动偏好屏蔽系统变更、
+localStorage 读写异常回退、登出/再登偏好保留、草稿在切换主题后保留、双主题截图与
+对比度、390/768/1440/1920 四档 + 200% 缩放无横向溢出、390 视口控件 ≥44px、
+未写 type 的 input 与 `type="password"` 等效样式、Field ARIA 关联、键盘可达与
+focus-visible；业务回归：登录、反馈页、创建软件、搜索、抽屉、归档、回收站、
+输入「删除」彻底删除。
+
+实测对比度：正文 16.65（light）/ 15.74（dark）≥4.5；主按钮文字 5.17 / 7.80 ≥4.5；
+控件边框 **3.87**（light）/ **4.33**（dark）≥3。
+
+### 4. 评审 → 修复 → 复验记录
+
+- 评审发现浅色 `--border: #e2e8f0` 控件边界实测 **1.23:1 < 3:1**（验收标准未达）。
+- 修复：新增 **`--control-border`** 令牌——浅色 `#75829b`（对 panel/bg/subtle 均 ≥3.5）、
+  深色 `#71809f`（对 panel/subtle/bg 均 ≥3.6）；仅 `.btn` 与文本类控件边界改用该令牌，
+  卡片/表格/导航等装饰性分隔仍用 `--border`，避免全站分隔线变重。
+- 复验：上门禁与浏览器验收均为修复后重新真实运行，浅色/深色边框断言由警告转为通过。
+
+### 5. 未验证（如实标注）
+
+- Firefox / WebKit 未跑本套件（仅 Chromium）；真实设备未测。
+- 200% 缩放断言了无整页横向溢出，未逐屏留存截图。
+- 8898/8899 端口复用了本机既有健康 mock 进程（脚本自动检测，未新起/未杀进程）。
+- 语义化按钮变体（`.btn.primary`/`.btn.danger`）边界使用各自语义色令牌，未纳入
+  `--control-border`；其文字/底色对比度已实测达标。
+
+### 6. 状态
+
+**待体验**——真实浏览器体验确认后才记「已验收」。
+
+## 2026-09-18 v0.5.0 发布前 review 与修复
+
+本轮基于 `main@60e55b4` 及当前未提交工作区，按服务端、Web/Flutter、管理端三路只读审查，
+主 agent 集成修复与验证。原始已跟踪补丁与未跟踪文件已备份至本机临时归档，未覆盖用户改动。
+
+### 本轮关闭的问题
+
+- Web：appId 改变导致实际服务器变化时，旧 Bearer、提交与草稿必须完整失效；补跨服务回归。
+- Flutter：保存/恢复服务器期间宿主身份变化、关闭重开设置、同槽位写入乱序的迟到结果；
+  捕获身份/操作序号/偏好键，同键串行落盘，并在宿主 appId/apiBase 变化时立即取消旧截图。
+- 管理端：迟到详情覆盖当前记录；分类失败误报成功并清掉幂等键；轮询窗口移动时丢失分页尾项。
+- Assist：彻底删除后 outbox 仍留正文；请求及正文读取没有超时、停止时无法取消；非 2xx 慢流未释放；
+  损坏 outbox JSON 阻止无关反馈 purge。补事务清理、取消与故障回归。
+- 发布：正式版本必须有对应 CHANGELOG；构建前校验、draft 写入日志、公开前核对远端正文。
+  修正发布检查脚本过时的 CI 结构断言；管理端浏览器契约 pending 现在使检查失败。
+- 浏览器隔离：mock 端口可由 `E2E_KANEO_PORT` / `E2E_AI_PORT` 配置，未停止本机既有预览。
+  生命周期脚本切换到当前菜单的 ARIA role 选择器，保留原业务断言。
+
+### 本轮实际验证（历史结果不计入）
+
+| 检查 | 结果 |
+|---|---|
+| pnpm 11.23.0 / Node 22.23.2 frozen-lockfile 离线安装 | 通过 |
+| workspace build / typecheck / lint | 通过；服务端 40 条既有 lint warning，无 error |
+| server / updater / web 单元测试 | 349 / 75 / 180 全通过；admin 使用下列浏览器检查 |
+| Flutter 组件 analyze / test | analyze 无问题，153 项通过 |
+| Flutter 示例 analyze / test | analyze 无问题，37 项通过 |
+| flutter_secure_storage 9.2.2 / 10.3.1 / 11.0.0 | 三档 pub get、analyze、test、版本约束检查全部通过 |
+| Chromium Web 全量（滚动/DPR遮罩、手动截图、双服务地址/令牌隔离） | 354/354 |
+| Chromium 管理端主题/响应式/业务综合 | 77/77，0 pending；2 条无主按钮测量警告 |
+| Chromium 管理端故障/并发专项（真实迟到响应、关闭、幂等重试、空尾页） | 8/8 |
+| Chromium 生命周期（本地归档/回收站/恢复/永久删除） | 58/58 |
+| Chromium 软件删除与重新发现 | 53/53 |
+| 发布工作流静态/隔离脚本测试 | 48/48；更新日志提取 2 项测试通过 |
+| 独立宿主安装实际 0.5.0 tarball | 离线安装成功；浏览器 ESM 加载、注册、390px 打开面板成功，0 JS error；安装资产 hash 与验证过的构建一致 |
+
+产物分发沿用 GitHub Release `.tgz` / dist zip 与 GHCR 镜像，不代表 npm registry 已发布。
+Web 入口按既有契约只在浏览器加载，直接在 Node 导入会因 `HTMLElement` 缺失报错；独立消费验证使用浏览器。
+
+### 发布与验收边界
+
+准备版本为 **0.5.0**（root/server/admin/web/Flutter），updater 保持 **0.1.0**。
+数据库 schema v9，升级前备份；回退时配套恢复升级前数据。CHANGELOG 已注明本地删除不撤回远端数据、
+HTTP 410 与管理员列表默认收件箱的兼容性变化。
+
+真实 AI、Kaneo、Assist、原生设备、Docker 镜像发布、GitHub Actions 本版本实际运行与生产升级
+不属于上述本地实测结果；本次未部署、未推送、未打发布标签。状态 **待体验**，不替代用户验收。

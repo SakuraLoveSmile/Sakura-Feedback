@@ -36,6 +36,9 @@ import http from "node:http";
 import { createHash } from "node:crypto";
 
 /** 参与故障注入/计数的远端写入阶段（顺序即归档流水线顺序）。 */
+const AI_PORT = Number(process.env.E2E_AI_PORT || 8899);
+const KANEO_PORT = Number(process.env.E2E_KANEO_PORT || 8898);
+
 const STAGES = ["task", "presign", "put", "finalize", "comment"];
 
 function emptyCalls() {
@@ -136,7 +139,7 @@ function hasImagePart(content) {
  * （测试用 `POST /__mock/state {"publicBase": ...}` 设置，或用环境变量
  *  `E2E_KANEO_PUBLIC_BASE` 在启动时指定）。
  */
-let kaneoBase = process.env.E2E_KANEO_PUBLIC_BASE || "http://127.0.0.1:8898";
+let kaneoBase = process.env.E2E_KANEO_PUBLIC_BASE || `http://127.0.0.1:${KANEO_PORT}`;
 
 // ---------- 故障注入辅助 ----------
 
@@ -252,7 +255,7 @@ http
     if (url.pathname === "/__health") return json(res, 200, { ok: true });
     json(res, 404, { error: "not found" });
   })
-  .listen(8899, "127.0.0.1", () => console.log("[mock-ai] :8899"));
+  .listen(AI_PORT, "127.0.0.1", () => console.log(`[mock-ai] :${AI_PORT}`));
 
 // ---------- Kaneo mock ----------
 http
@@ -681,4 +684,4 @@ http
     }
     json(res, 404, { error: "not found" });
   })
-  .listen(8898, "127.0.0.1", () => console.log("[mock-kaneo] :8898"));
+  .listen(KANEO_PORT, "127.0.0.1", () => console.log(`[mock-kaneo] :${KANEO_PORT}`));

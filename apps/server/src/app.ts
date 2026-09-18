@@ -3,6 +3,9 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { type Context, Hono } from "hono";
+import { bindAssistRuntime } from "./assist/outbox.ts";
+import { assistRoutes } from "./assist/routes.ts";
+import { type AssistWorker, createAssistWorker } from "./assist/worker.ts";
 import { createRateLimiter } from "./auth/ratelimit.ts";
 import { decryptSecret } from "./crypto/secret.ts";
 import { type Db, openDb } from "./db/db.ts";
@@ -43,6 +46,8 @@ export interface AppDeps {
   updaterClient?: UpdaterClient;
   /** 测试注入：控制目录读取缓存时长（毫秒）；0 表示每次读盘。 */
   controlTtlMs?: number;
+  /** 测试注入：Assist 投递 worker 的 fetch 实现（默认全局 fetch）。 */
+  assistFetch?: typeof fetch;
 }
 
 export interface FeedbackApp {
@@ -52,6 +57,8 @@ export interface FeedbackApp {
   worker: Worker;
   /** U1-4：系统更新聚合（检查/更新代理/暂停状态）。 */
   system: SystemUpdateService;
+  /** Assist 投递 worker（未配置 FEEDBACK_ASSIST_HUB_URL 时为 null）。 */
+  assist: AssistWorker | null;
   /** 释放后台定时器（不影响数据库连接的生命周期）。 */
   close: () => void;
 }
@@ -107,6 +114,26 @@ export function createApp(config: ServerConfig, deps: AppDeps = {}): FeedbackApp
     ...(deps.clearTimer ? { clearTimer: deps.clearTimer } : {}),
     ...(deps.scanBatch !== undefined ? { scanBatch: deps.scanBatch } : {}),
   });
+
+  // Assist 接入（contracts/feedback-integration）：未配置 FEEDBACK_ASSIST_HUB_URL = 整体关闭
+  // （不绑定运行时 → 全部 enqueue no-op，不建投递 worker，不挂只读路由，业务零变化）。
+  let assist: AssistWorker | null = null;
+  if (config.assistHubUrl) {
+    bindAssistRuntime(db, { queueMax: config.assistQueueMax ?? 1000 });
+    if (!config.assistSourceKey) {
+      console.warn(
+        "[assist] 已配置 FEEDBACK_ASSIST_HUB_URL 但缺少 FEEDBACK_ASSIST_SOURCE_KEY：事件照常入队但会一直 401 停发",
+      );
+    }
+    assist = createAssistWorker({
+      db,
+      hubUrl: config.assistHubUrl,
+      sourceKey: config.assistSourceKey ?? "",
+      flushMs: config.assistFlushMs ?? 2000,
+      ...(deps.assistFetch ? { fetchImpl: deps.assistFetch } : {}),
+      ...(deps.now ? { now: deps.now } : {}),
+    });
+  }
 
   const app = new Hono();
 
@@ -192,6 +219,11 @@ export function createApp(config: ServerConfig, deps: AppDeps = {}): FeedbackApp
   app.route("/api/admin", adminRoutes({ db, masterKey: config.masterKey, config, kaneo, ai, worker }));
   // U1-4：系统更新接口（同样是 /api/admin 下的管理员守卫路由）。
   app.route("/api/admin/system", systemUpdateRoutes({ db, config, system }));
+  // Assist 只读回连路由：接入开启且存在可用密钥才挂载（READ_KEY 缺省回退 SOURCE_KEY）。
+  const assistReadKey = config.assistHubUrl ? (config.assistReadKey ?? config.assistSourceKey) : null;
+  if (assistReadKey) {
+    app.route("/api/assist", assistRoutes({ db, readKey: assistReadKey }));
+  }
 
   app.notFound((c) => c.json({ error: { code: "not_found", message: "接口不存在" } }, 404));
   app.onError((e, c) => {
@@ -224,9 +256,11 @@ export function createApp(config: ServerConfig, deps: AppDeps = {}): FeedbackApp
     config,
     worker,
     system,
+    assist,
     // T3：先停调度与定时器（此后不再有任何回调访问数据库），再释放系统更新定时器。
     close: () => {
       worker.stop();
+      assist?.stop();
       system.close();
     },
   };

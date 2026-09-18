@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { assistRuntimeFor, enqueueFeedbackCreatedInTx, enqueueStatusTransitionInTx } from "../assist/outbox.ts";
 import type { Db } from "./db.ts";
 
 export type { Db };
@@ -119,6 +120,8 @@ export interface AppRow {
   auto_operation_id: string | null;
   first_seen_at: string | null;
   last_seen_at: string | null;
+  /** ---- v8：软删除标记；非空表示已从管理面删除（历史数据保留）。 ---- */
+  deleted_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -210,9 +213,35 @@ export interface FeedbackRow {
   attempt_count: number;
   last_error: string | null;
   error_summary: string | null;
+  /** ---- v9：本地管理生命周期（与处理状态 status 完全分离）---- */
+  /** 管理区域：inbox=收件箱（默认）/ archived=已归档（本地整理）/ trash=回收站。 */
+  mgmt_state: MgmtState;
+  mgmt_archived_at: string | null;
+  mgmt_archived_by: string | null;
+  mgmt_trashed_at: string | null;
+  mgmt_trashed_by: string | null;
+  /** 生命周期乐观版本：管理动作逐项携带期望值，与附件恢复 revision 互不混用。 */
+  lifecycle_version: number;
+  /** 恢复后暂停标记（0/1）：回收站恢复出的未完成记录保持暂停，显式恢复处理后才继续。 */
+  resume_paused: number;
   created_at: string;
   updated_at: string;
 }
+
+/** 本地管理区域（v9）。`view=all` 是查询口径（inbox+archived），不是存储值。 */
+export type MgmtState = "inbox" | "archived" | "trash";
+
+/** 管理生命周期动作（单条与批量共用同一业务入口）。 */
+export type LifecycleAction = "archive" | "unarchive" | "trash" | "restore" | "resume_processing" | "purge";
+
+export const LIFECYCLE_ACTIONS: LifecycleAction[] = [
+  "archive",
+  "unarchive",
+  "trash",
+  "restore",
+  "resume_processing",
+  "purge",
+];
 
 /** 详情/列表用的人工分类视图。 */
 export interface ClassificationView {
@@ -535,8 +564,9 @@ export function revokeSessionsByIds(db: Db, ids: string[]): number {
 
 // ---------- apps ----------
 
+/** 管理面软件列表：只展示活跃记录（软删除的软件不出现在软件管理列表）。 */
 export function listApps(db: Db): AppRow[] {
-  return db.prepare("SELECT * FROM apps ORDER BY created_at").all() as unknown as AppRow[];
+  return db.prepare("SELECT * FROM apps WHERE deleted_at IS NULL ORDER BY created_at").all() as unknown as AppRow[];
 }
 
 export interface AppStats {
@@ -567,7 +597,7 @@ export function listAppsWithStats(db: Db): Map<string, AppStats> {
   const waitingRows = db
     .prepare(
       `SELECT app_row_id, COUNT(*) AS n FROM feedbacks
-       WHERE archive_authorized_at IS NULL AND kaneo_task_id IS NULL
+       WHERE archive_authorized_at IS NULL AND kaneo_task_id IS NULL AND mgmt_state = 'inbox'
        GROUP BY app_row_id`,
     )
     .all() as { app_row_id: string; n: number }[];
@@ -577,8 +607,14 @@ export function listAppsWithStats(db: Db): Map<string, AppStats> {
   return stats;
 }
 
+/**
+ * 按外部 appId 查**活跃**软件：软删除记录不再用于提交自动发现、
+ * 登录握手目标校验或后台重复登记检查；历史反馈仍按内部 id 经 `getApp` 读取。
+ */
 export function getAppByAppId(db: Db, appId: string): AppRow | null {
-  return (db.prepare("SELECT * FROM apps WHERE app_id = ?").get(appId) as unknown as AppRow) ?? null;
+  return (
+    (db.prepare("SELECT * FROM apps WHERE app_id = ? AND deleted_at IS NULL").get(appId) as unknown as AppRow) ?? null
+  );
 }
 
 export function getApp(db: Db, id: string): AppRow | null {
@@ -625,6 +661,7 @@ export function insertApp(
     auto_operation_id: null,
     first_seen_at: now,
     last_seen_at: now,
+    deleted_at: null,
     created_at: now,
     updated_at: now,
   };
@@ -693,7 +730,8 @@ export function updateApp(
   expectedRuleVersion: number | null = null,
 ): AppSaveOutcome {
   const existing = getApp(db, id);
-  if (!existing) return { kind: "not_found" };
+  // 已软删除的记录拒绝配置修改（路由层同样按不存在处理）。
+  if (!existing || existing.deleted_at) return { kind: "not_found" };
   if (expectedRuleVersion !== null && existing.rule_version !== expectedRuleVersion) {
     return { kind: "version_conflict", ruleVersion: existing.rule_version };
   }
@@ -725,8 +763,38 @@ export function updateApp(
   return { kind: "saved", app: getApp(db, id)!, targetChanged };
 }
 
-export function deleteApp(db: Db, id: string): boolean {
-  return Number(db.prepare("DELETE FROM apps WHERE id = ?").run(id).changes) > 0;
+export type AppDeleteOutcome = "deleted" | "already_deleted" | "not_found";
+
+/**
+ * 软删除软件（T4）：事务内写 `deleted_at`、退回人工归档模式、清空自动归档操作键并推进规则版本。
+ * 只标记配置本体：历史反馈、截图、日志与审计全部保留（feedbacks.app_row_id 外键仍指向本行），
+ * 已授权的归档任务保留固定快照与恢复信息继续执行。删除后该记录不再参与登录握手、
+ * 来源放行或任何新的自动归档授权；同 appId 的后续有效提交会创建全新的内部记录。
+ * 重复删除幂等：已删除 → already_deleted（路由层同样返回 204）。
+ */
+export function softDeleteAppInTx(db: Db, id: string): AppDeleteOutcome {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const app = getApp(db, id);
+    if (!app) {
+      db.exec("ROLLBACK");
+      return "not_found";
+    }
+    if (app.deleted_at) {
+      db.exec("ROLLBACK");
+      return "already_deleted";
+    }
+    const at = nowIso();
+    db.prepare(
+      `UPDATE apps SET deleted_at = ?, archive_mode = 'manual', auto_operation_id = NULL,
+         rule_version = rule_version + 1, updated_at = ? WHERE id = ?`,
+    ).run(at, at, id);
+    db.exec("COMMIT");
+    return "deleted";
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
 }
 
 // ---------- 软件的来源（T2：待确认 / 已确认） ----------
@@ -827,7 +895,8 @@ export function confirmAppSourceInTx(
   try {
     const source = getAppSource(db, appRowId, origin);
     const app = getApp(db, appRowId);
-    if (!source || !app) {
+    // 已软删除的软件拒绝一切配置修改（含来源确认）。
+    if (!source || !app || app.deleted_at) {
       db.exec("ROLLBACK");
       return { kind: "not_found" };
     }
@@ -918,7 +987,7 @@ export function enableAutoArchiveInTx(
   db.exec("BEGIN IMMEDIATE");
   try {
     const app = getApp(db, appRowId);
-    if (!app) {
+    if (!app || app.deleted_at) {
       db.exec("ROLLBACK");
       return { kind: "not_found" };
     }
@@ -956,7 +1025,7 @@ export function disableAutoArchiveInTx(
   db.exec("BEGIN IMMEDIATE");
   try {
     const app = getApp(db, appRowId);
-    if (!app) {
+    if (!app || app.deleted_at) {
       db.exec("ROLLBACK");
       return { kind: "not_found" };
     }
@@ -1055,6 +1124,13 @@ export function insertFeedbackWithScreenshot(
     attempt_count: 0,
     last_error: null,
     error_summary: null,
+    mgmt_state: "inbox",
+    mgmt_archived_at: null,
+    mgmt_archived_by: null,
+    mgmt_trashed_at: null,
+    mgmt_trashed_by: null,
+    lifecycle_version: 0,
+    resume_paused: 0,
     created_at: now,
     updated_at: now,
   };
@@ -1062,9 +1138,16 @@ export function insertFeedbackWithScreenshot(
   db.exec("BEGIN");
   try {
     insertFeedbackRow(db, row, screenshot ?? null, now);
-    if (logs && logs.length > 0) {
-      insertFeedbackLogs(db, row.id, logs, now);
-    }
+    const insertedLogs = logs && logs.length > 0 ? insertFeedbackLogs(db, row.id, logs, now) : [];
+    // Assist：反馈首次落库事件与业务写入同事务（未接入时为 no-op）。
+    enqueueFeedbackCreatedInTx(db, {
+      id: row.id,
+      appId: row.app_id,
+      text: row.text,
+      occurredAt: now,
+      screenshot: screenshot ? { byteSize: screenshot.byteSize, sha256: screenshot.sha256 } : null,
+      logs: insertedLogs,
+    });
     db.exec("COMMIT");
     return row;
   } catch (err) {
@@ -1073,16 +1156,25 @@ export function insertFeedbackWithScreenshot(
   }
 }
 
-/** 事务内插入日志附件（供原子提交函数复用）。 */
-function insertFeedbackLogs(db: Db, feedbackId: string, logs: LogInput[], now: string): void {
+/** 事务内插入日志附件（供原子提交函数复用）；返回实际落库的日志描述（含生成的 id）。 */
+function insertFeedbackLogs(
+  db: Db,
+  feedbackId: string,
+  logs: LogInput[],
+  now: string,
+): { id: string; filename: string; source: "auto" | "manual"; byteSize: number; sha256: string }[] {
   const stmt = db.prepare(
     `INSERT INTO feedback_logs (id, feedback_id, sort_order, filename, source, bytes, byte_size, sha256, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
+  const inserted: { id: string; filename: string; source: "auto" | "manual"; byteSize: number; sha256: string }[] = [];
   for (let i = 0; i < logs.length; i++) {
     const l = logs[i]!;
-    stmt.run(l.id ?? randomUUID(), feedbackId, i, l.filename, l.source, l.bytes, l.byteSize, l.sha256, now);
+    const id = l.id ?? randomUUID();
+    stmt.run(id, feedbackId, i, l.filename, l.source, l.bytes, l.byteSize, l.sha256, now);
+    inserted.push({ id, filename: l.filename, source: l.source, byteSize: l.byteSize, sha256: l.sha256 });
   }
+  return inserted;
 }
 
 /** 事务内插入反馈与截图（不含 BEGIN/COMMIT，供原子提交函数复用）。 */
@@ -1135,23 +1227,26 @@ function insertFeedbackRow(
   }
 }
 
-/** 原子提交结果（区分「已创建」「幂等重放」「冲突」「账号失效」「额度用尽」）。 */
+/** 原子提交结果（区分「已创建」「幂等重放」「冲突」「账号失效」「额度用尽」「已彻底删除」）。 */
 export type SubmitOutcome =
   | { kind: "created"; row: FeedbackRow; quota: Quota }
   | { kind: "replayed"; row: FeedbackRow; quota: Quota }
   | { kind: "conflict" }
   | { kind: "account_invalid" }
-  | { kind: "quota_exceeded"; quota: Quota };
+  | { kind: "quota_exceeded"; quota: Quota }
+  | { kind: "purged" };
 
 /**
  * 首次有效提交时自动发现软件（T1）：
- * - 软件不存在则在本事务内**创建一条待配置软件**（默认人工模式、零归档规则）；
- * - 已存在则只刷新最后出现时间，并在名称仍由客户端提供时允许用 `appName` 补全；
+ * - 无**活跃**记录则在本事务内创建一条待配置软件（默认人工模式、零归档规则、来源待确认）；
+ *   已软删除的同 appId 历史记录不算命中——重新发现产生全新内部 id，旧反馈仍关联原记录，
+ *   新记录不继承旧配置/规则/来源授权（避免新配置误处理旧积压）；
+ * - 已存在活跃记录则只刷新最后出现时间，并在名称仍由客户端提供时允许用 `appName` 补全；
  *   管理员设置过的名称、规则与来源确认一律不被覆盖；
  * - 无论新旧都登记本次观察到的来源（新建默认待确认）。
  *
- * 并发提交同一 appId：外层事务为 BEGIN IMMEDIATE（写锁串行）+ app_id 唯一约束，
- * 因此只会产生一条软件记录。
+ * 并发提交同一 appId：外层事务为 BEGIN IMMEDIATE（写锁串行）+ 活跃 appId 部分唯一索引，
+ * 因此只会产生一条**活跃**软件记录；与软删除行不冲突（部分索引不覆盖它们）。
  */
 function ensureAppForSubmissionInTx(
   db: Db,
@@ -1167,7 +1262,7 @@ function ensureAppForSubmissionInTx(
          kaneo_assignee_id, kaneo_assignee_name, auto_enabled_at, auto_enabled_by, auto_operation_id,
          first_seen_at, last_seen_at, created_at, updated_at)
        VALUES (?, ?, ?, '[]', '', '', 'client', 'pending', 'manual', 0, '', '[]', NULL, NULL, NULL, NULL, NULL, ?, ?, ?, ?)
-       ON CONFLICT(app_id) DO UPDATE SET last_seen_at = excluded.last_seen_at`,
+       ON CONFLICT(app_id) WHERE deleted_at IS NULL DO UPDATE SET last_seen_at = excluded.last_seen_at`,
     ).run(randomUUID(), input.appId, name, now, now, now, now);
     app = getAppByAppId(db, input.appId);
     if (!app) throw new Error("自动发现软件失败");
@@ -1243,6 +1338,14 @@ export function submitFeedbackAtomic(
       return { kind: "replayed", row: existing, quota };
     }
 
+    // 2.5 彻底删除凭据（v9）：提交键已被一条已彻底删除的反馈占用 → 键永久作废。
+    // 所属用户得到明确的 purged（路由映射 410）；其他用户统一 conflict，不透露记录存在过。
+    const receipt = getDeletionReceiptByKeyHash(db, hashToken(input.idempotencyKey));
+    if (receipt) {
+      db.exec("ROLLBACK");
+      return receipt.user_id === input.userId ? { kind: "purged" } : { kind: "conflict" };
+    }
+
     // 3. 当日额度（日期与 resetAt 均由服务端时钟产生）
     const at = clock();
     const day = beijingDay(at);
@@ -1301,19 +1404,34 @@ export function submitFeedbackAtomic(
       attempt_count: 0,
       last_error: null,
       error_summary: null,
+      mgmt_state: "inbox",
+      mgmt_archived_at: null,
+      mgmt_archived_by: null,
+      mgmt_trashed_at: null,
+      mgmt_trashed_by: null,
+      lifecycle_version: 0,
+      resume_paused: 0,
       created_at: now,
       updated_at: now,
     };
     insertFeedbackRow(db, row, screenshot ?? null, now);
-    if (logs && logs.length > 0) {
-      insertFeedbackLogs(db, row.id, logs, now);
-    }
+    const insertedLogs = logs && logs.length > 0 ? insertFeedbackLogs(db, row.id, logs, now) : [];
 
     // 6. 增加用量（同日 upsert）
     db.prepare(
       `INSERT INTO daily_usage (user_id, day, used, reset_at) VALUES (?, ?, 1, ?)
        ON CONFLICT(user_id, day) DO UPDATE SET used = used + 1`,
     ).run(user.id, day, quota.resetAt);
+
+    // Assist：反馈首次落库事件与业务写入同事务（未接入时为 no-op）。
+    enqueueFeedbackCreatedInTx(db, {
+      id: row.id,
+      appId: row.app_id,
+      text: row.text,
+      occurredAt: now,
+      screenshot: screenshot ? { byteSize: screenshot.byteSize, sha256: screenshot.sha256 } : null,
+      logs: insertedLogs,
+    });
 
     db.exec("COMMIT");
     return { kind: "created", row, quota: makeQuota(user.daily_limit, quota.used + 1, quota.resetAt) };
@@ -1447,6 +1565,7 @@ export function updateFeedback(
       | "attempt_count"
       | "last_error"
       | "error_summary"
+      | "resume_paused"
     >
   >,
 ): void {
@@ -1454,7 +1573,33 @@ export function updateFeedback(
   if (keys.length === 0) return;
   const sets = keys.map((k) => `${k} = ?`).join(", ");
   const values = keys.map((k) => (patch as Record<string, unknown>)[k]) as import("node:sqlite").SQLInputValue[];
-  db.prepare(`UPDATE feedbacks SET ${sets}, updated_at = ? WHERE id = ?`).run(...values, nowIso(), id);
+  // Assist：status / error 字段变化可能对应故障开启·恶化·恢复事件。
+  // 事件与业务更新同事务落库；未接入时走原有单语句路径，行为零变化。
+  const tracked = patch.status !== undefined || patch.error_summary !== undefined || patch.last_error !== undefined;
+  const rt = tracked ? assistRuntimeFor(db) : null;
+  if (!rt) {
+    db.prepare(`UPDATE feedbacks SET ${sets}, updated_at = ? WHERE id = ?`).run(...values, nowIso(), id);
+    return;
+  }
+  const write = () => {
+    const prev = getFeedback(db, id);
+    db.prepare(`UPDATE feedbacks SET ${sets}, updated_at = ? WHERE id = ?`).run(...values, nowIso(), id);
+    const after = getFeedback(db, id);
+    if (prev && after) enqueueStatusTransitionInTx(db, prev.status, after);
+  };
+  // 已在业务事务内（分类保存/归档授权等）则追加到当前事务；否则自包事务保证「读前值+更新+事件」原子。
+  if (db.isTransaction) {
+    write();
+    return;
+  }
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    write();
+    db.exec("COMMIT");
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
 }
 
 // ---------- 人工分类 / 归档授权 / 操作审计（T1-T3） ----------
@@ -1559,6 +1704,7 @@ export function isManuallyHandled(row: {
 export type ClassificationSaveOutcome =
   | { kind: "saved"; classification: ClassificationView; status: FeedbackStatus }
   | { kind: "not_found" }
+  | { kind: "in_trash" }
   | { kind: "locked"; status: FeedbackStatus }
   | { kind: "version_conflict"; version: number };
 
@@ -1583,6 +1729,11 @@ export function saveClassificationInTx(
     if (!row) {
       db.exec("ROLLBACK");
       return { kind: "not_found" };
+    }
+    // 回收站记录为只读：分类保存不产生任何写入（与生命周期动作的竞争窗口在这里兜底）。
+    if (row.mgmt_state === "trash") {
+      db.exec("ROLLBACK");
+      return { kind: "in_trash" };
     }
     if (classificationLocked(row)) {
       db.exec("ROLLBACK");
@@ -1659,6 +1810,7 @@ export type ArchiveAuthorizeOutcome =
       replayed: boolean;
     }
   | { kind: "not_found" }
+  | { kind: "in_trash" }
   | { kind: "locked"; status: FeedbackStatus }
   | { kind: "version_conflict"; version: number }
   | { kind: "operation_conflict"; operationId: string }
@@ -1699,6 +1851,11 @@ export function authorizeArchiveInTx(
       db.exec("ROLLBACK");
       return { kind: "not_found" };
     }
+    // 回收站记录为只读：绝不产生归档授权（也不参与自动授权）。
+    if (row.mgmt_state === "trash") {
+      db.exec("ROLLBACK");
+      return { kind: "in_trash" };
+    }
     if (row.archive_authorized_at) {
       // 同一操作标识重放：幂等返回，不产生第二次远端写入。
       // 关闭自动归档只阻止**新的**授权，因此重放检查必须早于自动护栏。
@@ -1719,9 +1876,10 @@ export function authorizeArchiveInTx(
     if (input.autoGuard) {
       const guard = input.autoGuard;
       const app = getApp(db, guard.appRowId);
-      if (!app) {
+      // 软删除记录在扫描取候选到事务授权之间的窗口内同样拒绝授权。
+      if (!app || app.deleted_at) {
         db.exec("ROLLBACK");
-        return { kind: "rule_changed", reason: "软件配置不存在" };
+        return { kind: "rule_changed", reason: "软件配置不存在或已删除" };
       }
       if (app.archive_mode !== "automatic") {
         db.exec("ROLLBACK");
@@ -1780,6 +1938,8 @@ export function authorizeArchiveInTx(
       auto_blocked_reason: null,
       status: "ready_to_archive",
       error_summary: null,
+      // 显式“保存并同步到 Kaneo”本身就是恢复处理：解除恢复后暂停标记。
+      resume_paused: 0,
     });
     insertFeedbackAuditInTx(db, {
       feedbackId: id,
@@ -1847,15 +2007,45 @@ export function listFeedbackAudit(db: Db, feedbackId: string, limit = 100): Feed
     .all(feedbackId, limit) as unknown as FeedbackAuditRow[];
 }
 
-export function listFeedbacks(
-  db: Db,
-  filter: { status?: FeedbackStatus; appId?: string; cursor?: string; limit: number },
+/** 管理列表筛选（v9）：view=管理区域，q=关键词（标题/原文/反馈 ID），from/to=创建时间 UTC 半开区间。 */
+export interface FeedbackListFilter {
+  /** 管理区域：默认 inbox；all 表示 inbox+archived（兼容旧查询，**不含回收站**）。 */
+  view?: MgmtState | "all";
+  status?: FeedbackStatus;
+  appId?: string;
+  q?: string;
+  /** ISO-8601 UTC；created_at >= from（含边界）。 */
+  from?: string;
+  /** ISO-8601 UTC；created_at < to（不含边界，调用方传入本地日期末端的下一刻）。 */
+  to?: string;
+  cursor?: string;
+  limit: number;
+}
+
+/** LIKE 通配符按字面处理：搜索词中的 % _ \ 一律转义，绝不当作模式字符。 */
+function escapeLikeLiteral(s: string): string {
+  return s.replace(/[\\%_]/g, (m) => `\\${m}`);
+}
+
+/** 列表与区域计数共用的过滤条件。`skipView` 用于跨区域计数（不按管理区域过滤）。 */
+function feedbackFilterWhere(
+  filter: Omit<FeedbackListFilter, "cursor" | "limit">,
+  opts: { skipView?: boolean } = {},
 ): {
-  items: AdminFeedbackRow[];
-  nextCursor: string | null;
+  where: string[];
+  params: (string | number)[];
 } {
   const where: string[] = [];
   const params: (string | number)[] = [];
+  if (!opts.skipView) {
+    const view = filter.view ?? "inbox";
+    if (view === "all") {
+      where.push("f.mgmt_state IN ('inbox','archived')");
+    } else {
+      where.push("f.mgmt_state = ?");
+      params.push(view);
+    }
+  }
   if (filter.status) {
     where.push("f.status = ?");
     params.push(filter.status);
@@ -1864,6 +2054,30 @@ export function listFeedbacks(
     where.push("f.app_id = ?");
     params.push(filter.appId);
   }
+  if (filter.q) {
+    const pat = `%${escapeLikeLiteral(filter.q)}%`;
+    where.push("(f.title LIKE ? ESCAPE '\\' OR f.text LIKE ? ESCAPE '\\' OR f.id LIKE ? ESCAPE '\\')");
+    params.push(pat, pat, pat);
+  }
+  if (filter.from) {
+    where.push("f.created_at >= ?");
+    params.push(filter.from);
+  }
+  if (filter.to) {
+    where.push("f.created_at < ?");
+    params.push(filter.to);
+  }
+  return { where, params };
+}
+
+export function listFeedbacks(
+  db: Db,
+  filter: FeedbackListFilter,
+): {
+  items: AdminFeedbackRow[];
+  nextCursor: string | null;
+} {
+  const { where, params } = feedbackFilterWhere(filter);
   if (filter.cursor) {
     const [createdAt, id] = filter.cursor.split("|");
     if (createdAt && id) {
@@ -1878,8 +2092,11 @@ export function listFeedbacks(
   const rows = db
     .prepare(
       `SELECT f.*, u.username AS username,
+              a.name AS app_name,
               a.config_status AS app_config_status, a.archive_mode AS app_archive_mode,
+              a.deleted_at AS app_deleted_at,
               s.status AS source_status,
+              SUBSTR(f.text, 1, 240) AS text_preview,
               (SELECT 1 FROM feedback_screenshots sc WHERE sc.feedback_id = f.id) AS has_screenshot,
               (SELECT COUNT(*) FROM feedback_logs l WHERE l.feedback_id = f.id) AS log_count
        FROM feedbacks f
@@ -1896,15 +2113,56 @@ export function listFeedbacks(
   return { items, nextCursor: hasMore && last ? `${last.created_at}|${last.id}` : null };
 }
 
+/** 三个管理区域的数量（共用当前搜索与筛选条件；回收站永远单独计数）。 */
+export function countFeedbacksByMgmt(
+  db: Db,
+  filter: Omit<FeedbackListFilter, "cursor" | "limit" | "view">,
+): { inbox: number; archived: number; trash: number } {
+  const { where, params } = feedbackFilterWhere(filter, { skipView: true });
+  const counts = { inbox: 0, archived: 0, trash: 0 };
+  const rows = db
+    .prepare(
+      `SELECT f.mgmt_state AS mgmt, COUNT(*) AS n FROM feedbacks f
+       ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+       GROUP BY f.mgmt_state`,
+    )
+    .all(...params) as { mgmt: string; n: number }[];
+  for (const r of rows) {
+    if (r.mgmt === "inbox") counts.inbox = Number(r.n);
+    else if (r.mgmt === "archived") counts.archived = Number(r.n);
+    else if (r.mgmt === "trash") counts.trash = Number(r.n);
+  }
+  return counts;
+}
+
+/**
+ * 反馈筛选用的软件选项：按 app_id 聚合（含已删除软件的历史反馈）。
+ * 同 appId 有多行（软删除 + 重新发现）时取最新一条反馈对应软件的名称。
+ */
+export function listFeedbackAppOptions(db: Db): { appId: string; name: string; deleted: boolean }[] {
+  const rows = db
+    .prepare(
+      `SELECT f.app_id AS app_id, a.name AS name, a.deleted_at AS deleted_at, MAX(f.created_at) AS latest
+       FROM feedbacks f LEFT JOIN apps a ON a.id = f.app_row_id
+       GROUP BY f.app_id ORDER BY latest DESC`,
+    )
+    .all() as { app_id: string; name: string | null; deleted_at: string | null; latest: string }[];
+  return rows.map((r) => ({ appId: r.app_id, name: r.name ?? r.app_id, deleted: r.deleted_at != null }));
+}
+
 /** 崩溃恢复：需要重新入队的记录。received/processing 只做 AI 整理（零远端写入）；
- *  ready_to_archive 仅在**已持久化人工归档授权**时重新入队；archiving 视为结果不确定。 */
+ *  ready_to_archive 仅在**已持久化人工归档授权**时重新入队；archiving 视为结果不确定。
+ *  v9：回收站与恢复后暂停的记录一律不重新入队（mgmt_state/resume_paused 过滤）；
+ *  `archiving → needs_review` 只是本地状态修正（不产生任何远端写入），不受区域过滤。 */
 export function findResumable(db: Db): {
   requeue: FeedbackRow[];
   uncertain: FeedbackRow[];
   authorized: FeedbackRow[];
 } {
   const requeue = db
-    .prepare("SELECT * FROM feedbacks WHERE status IN ('received','processing') ORDER BY created_at")
+    .prepare(
+      "SELECT * FROM feedbacks WHERE status IN ('received','processing') AND mgmt_state = 'inbox' AND resume_paused = 0 ORDER BY created_at",
+    )
     .all() as unknown as FeedbackRow[];
   const uncertain = db
     .prepare("SELECT * FROM feedbacks WHERE status = 'archiving' ORDER BY created_at")
@@ -1916,10 +2174,25 @@ export function findResumable(db: Db): {
        WHERE status = 'ready_to_archive'
          AND archive_authorized_at IS NOT NULL
          AND archive_operation_id IS NOT NULL
+         AND mgmt_state = 'inbox'
+         AND resume_paused = 0
        ORDER BY created_at`,
     )
     .all() as unknown as FeedbackRow[];
   return { requeue, uncertain, authorized };
+}
+
+/** 当前行可用的生命周期动作（服务端口径；worker 持锁的瞬态竞争由动作接口另行返回 busy）。 */
+export function lifecycleAvailableActions(
+  r: Pick<FeedbackRow, "status" | "mgmt_state" | "resume_paused">,
+): LifecycleAction[] {
+  if (r.mgmt_state === "trash") return ["restore", "purge"];
+  if (r.mgmt_state === "archived") return ["unarchive", "trash"];
+  const actions: LifecycleAction[] = [];
+  if (r.status === "archived") actions.push("archive"); // 只有完整同步到 Kaneo 的反馈可本地归档
+  if (r.resume_paused) actions.push("resume_processing");
+  actions.push("trash");
+  return actions;
 }
 
 /** 管理列表用的轻量字段。 */
@@ -1928,11 +2201,13 @@ export function toAdminListItem(r: AdminFeedbackRow) {
   return {
     id: r.id,
     appId: r.app_id,
+    appName: r.app_name ?? null,
     username: r.username ?? null,
     status: r.status,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
     title: r.title,
+    textPreview: r.text_preview ?? null,
     kaneoUrl: r.kaneo_task_url,
     errorSummary: r.error_summary,
     archiveStage: r.archive_stage,
@@ -1941,6 +2216,8 @@ export function toAdminListItem(r: AdminFeedbackRow) {
     classification,
     archiveAuthorized: Boolean(r.archive_authorized_at),
     classificationLocked: classificationLocked(r),
+    /** 所属软件是否已被软删除（历史反馈仍保留，供列表/详情标记）。 */
+    appDeleted: r.app_deleted_at != null,
     /** ---- v7：来源、自动归档进度与阻塞原因 ---- */
     sourceOrigin: r.source_origin,
     collectionState: collectionStateOf(r),
@@ -1950,6 +2227,13 @@ export function toAdminListItem(r: AdminFeedbackRow) {
     autoBlockedReason: r.auto_blocked_reason,
     autoAttempts: r.auto_attempts,
     autoNextAttemptAt: r.auto_next_attempt_at,
+    /** ---- v9：本地管理生命周期 ---- */
+    mgmtState: r.mgmt_state,
+    lifecycleVersion: r.lifecycle_version,
+    resumePaused: Boolean(r.resume_paused),
+    archivedAt: r.mgmt_archived_at,
+    trashedAt: r.mgmt_trashed_at,
+    availableActions: lifecycleAvailableActions(r),
   };
 }
 
@@ -1958,8 +2242,11 @@ export type AdminFeedbackRow = FeedbackRow & {
   has_screenshot?: number;
   username?: string | null;
   log_count?: number;
+  app_name?: string | null;
+  text_preview?: string | null;
   app_config_status?: string | null;
   app_archive_mode?: string | null;
+  app_deleted_at?: string | null;
   source_status?: string | null;
 };
 
@@ -2040,6 +2327,7 @@ export function findAutoArchiveCandidates(db: Db, at: Date | number = Date.now()
        JOIN app_sources s ON s.app_row_id = a.id AND s.origin = f.source_origin
        WHERE a.archive_mode = 'automatic'
          AND a.config_status = 'configured'
+         AND a.deleted_at IS NULL
          AND s.status = 'confirmed'
          AND f.status = 'needs_info'
          AND f.archive_authorized_at IS NULL
@@ -2048,6 +2336,8 @@ export function findAutoArchiveCandidates(db: Db, at: Date | number = Date.now()
          AND f.classify_version = 0
          AND f.classify_updated_at IS NULL
          AND f.classify_updated_by IS NULL
+         AND f.mgmt_state = 'inbox'
+         AND f.resume_paused = 0
          AND (f.auto_blocked_kind IS NULL OR f.auto_blocked_kind = 'retryable')
          AND (f.auto_next_attempt_at IS NULL OR f.auto_next_attempt_at <= ?)
        ORDER BY f.created_at ASC, f.id ASC
@@ -2069,6 +2359,7 @@ export function findNextAutoRetryAt(db: Db): number | null {
        JOIN app_sources s ON s.app_row_id = a.id AND s.origin = f.source_origin
        WHERE a.archive_mode = 'automatic'
          AND a.config_status = 'configured'
+         AND a.deleted_at IS NULL
          AND s.status = 'confirmed'
          AND f.status = 'needs_info'
          AND f.archive_authorized_at IS NULL
@@ -2077,6 +2368,8 @@ export function findNextAutoRetryAt(db: Db): number | null {
          AND f.classify_version = 0
          AND f.classify_updated_at IS NULL
          AND f.classify_updated_by IS NULL
+         AND f.mgmt_state = 'inbox'
+         AND f.resume_paused = 0
          AND f.auto_blocked_kind = 'retryable'
          AND f.auto_next_attempt_at IS NOT NULL`,
     )
@@ -2087,10 +2380,12 @@ export function findNextAutoRetryAt(db: Db): number | null {
   return Number.isFinite(ms) ? ms : null;
 }
 
-/** 尚未完成 AI 整理的记录（AI 完成同样触发可恢复扫描）。 */
+/** 尚未完成 AI 整理的记录（AI 完成同样触发可恢复扫描）。回收站与暂停记录不参与。 */
 export function findAiPendingCandidates(db: Db, limit = 50): FeedbackRow[] {
   return db
-    .prepare("SELECT * FROM feedbacks WHERE status IN ('received','processing') ORDER BY created_at ASC LIMIT ?")
+    .prepare(
+      "SELECT * FROM feedbacks WHERE status IN ('received','processing') AND mgmt_state = 'inbox' AND resume_paused = 0 ORDER BY created_at ASC LIMIT ?",
+    )
     .all(limit) as unknown as FeedbackRow[];
 }
 
@@ -2146,4 +2441,196 @@ export function markAutoBlocked(
     new Date(at).toISOString(),
     feedbackId,
   );
+}
+
+// ---------- v9：彻底删除凭据与本地管理生命周期 ----------
+
+/**
+ * 彻底删除凭据：只保留防重放所需的最小信息（提交键摘要 + 内容摘要 + 所属用户 + 原反馈 ID + 删除时间）。
+ * 不含正文、附件内容、远端 URL——已彻底删除的内容无法通过该表还原。
+ */
+export interface DeletionReceiptRow {
+  id: string;
+  feedback_id: string;
+  idempotency_key_hash: string;
+  content_hash: string;
+  user_id: string;
+  deleted_at: string;
+}
+
+/** 按原反馈 ID 查删除凭据（410 判定：所属用户/管理员可见，其他用户不泄露存在性）。 */
+export function getDeletionReceiptByFeedbackId(db: Db, feedbackId: string): DeletionReceiptRow | null {
+  return (
+    (db
+      .prepare("SELECT * FROM feedback_deletion_receipts WHERE feedback_id = ?")
+      .get(feedbackId) as unknown as DeletionReceiptRow) ?? null
+  );
+}
+
+/** 按提交键摘要查删除凭据（提交防重放：同一键再次出现不得新建反馈）。 */
+export function getDeletionReceiptByKeyHash(db: Db, keyHash: string): DeletionReceiptRow | null {
+  return (
+    (db
+      .prepare("SELECT * FROM feedback_deletion_receipts WHERE idempotency_key_hash = ?")
+      .get(keyHash) as unknown as DeletionReceiptRow) ?? null
+  );
+}
+
+export type LifecycleOutcome =
+  | {
+      kind: "ok";
+      mgmtState: MgmtState;
+      lifecycleVersion: number;
+      /** resume_processing 成功后由调用方在锁外入队（避免与队列处理争锁）。 */
+      enqueue: boolean;
+    }
+  | { kind: "purged" }
+  /** 反馈行已不存在且删除凭据已存在：重复彻底删除按成功幂等处理。 */
+  | { kind: "already_purged" }
+  | { kind: "not_found" }
+  | { kind: "version_conflict"; lifecycleVersion: number }
+  | { kind: "invalid_state"; reason: string };
+
+/**
+ * 本地管理生命周期动作的事务入口（v9）。单条与批量共用：
+ * 调用方逐条调用本函数，每项自带预期生命周期版本（lifecycle_version），
+ * 版本不一致 → version_conflict（不写任何内容）。
+ *
+ * 固定规则：
+ * - archive 仅允许 status='archived'（完整同步到 Kaneo）；仅存在任务 ID 不够；
+ * - trash 可从 inbox/archived 进入；非终态记录同时置 resume_paused（停止自动处理）；
+ * - restore 统一返回 inbox；未完成记录保持 resume_paused（不自动重发）；
+ * - resume_processing 只清除暂停标记（由调用方在锁外入队，按既有状态与授权规则继续）；
+ * - purge 仅限回收站记录：事务内写最小删除凭据并删除反馈及关联 BLOB/审计；
+ *   不返还额度、不触碰 Kaneo、不做远端删除调用。
+ *
+ * 调用方负责在进入本函数前持有反馈级互斥锁（与 worker 同一套），
+ * 保证“正在执行的反馈”不会被删除/移动打断。
+ */
+export function applyLifecycleInTx(
+  db: Db,
+  id: string,
+  input: { action: LifecycleAction; expectedVersion: number; actor: { id: string; username: string } },
+): LifecycleOutcome {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const row = getFeedback(db, id);
+    if (!row) {
+      const receipt = getDeletionReceiptByFeedbackId(db, id);
+      db.exec("ROLLBACK");
+      // 重复彻底删除幂等成功；其他动作对不存在/已清除记录按 not_found 处理。
+      if (receipt) return input.action === "purge" ? { kind: "already_purged" } : { kind: "not_found" };
+      return { kind: "not_found" };
+    }
+    if (row.lifecycle_version !== input.expectedVersion) {
+      db.exec("ROLLBACK");
+      return { kind: "version_conflict", lifecycleVersion: row.lifecycle_version };
+    }
+    const at = nowIso();
+    const nextVersion = row.lifecycle_version + 1;
+    const failState = (reason: string): LifecycleOutcome => {
+      db.exec("ROLLBACK");
+      return { kind: "invalid_state", reason };
+    };
+    const ok = (mgmtState: MgmtState, enqueue = false): LifecycleOutcome => ({
+      kind: "ok",
+      mgmtState,
+      lifecycleVersion: nextVersion,
+      enqueue,
+    });
+    const audit = (action: string, detail?: Record<string, unknown>): void => {
+      insertFeedbackAuditInTx(db, {
+        feedbackId: id,
+        actor: input.actor,
+        action,
+        detail: { expectedVersion: input.expectedVersion, lifecycleVersion: nextVersion, ...detail },
+      });
+    };
+
+    switch (input.action) {
+      case "archive": {
+        if (row.mgmt_state !== "inbox") return failState("仅收件箱中的记录可归档");
+        if (row.status !== "archived") return failState("只有完整同步到 Kaneo 的反馈才能归档");
+        db.prepare(
+          `UPDATE feedbacks SET mgmt_state = 'archived', mgmt_archived_at = ?, mgmt_archived_by = ?,
+             resume_paused = 0, lifecycle_version = ?, updated_at = ? WHERE id = ?`,
+        ).run(at, input.actor.id, nextVersion, at, id);
+        audit("mgmt_archive");
+        db.exec("COMMIT");
+        return ok("archived");
+      }
+      case "unarchive": {
+        if (row.mgmt_state !== "archived") return failState("仅已归档区域的记录可恢复到收件箱");
+        db.prepare(
+          `UPDATE feedbacks SET mgmt_state = 'inbox', mgmt_archived_at = NULL, mgmt_archived_by = NULL,
+             lifecycle_version = ?, updated_at = ? WHERE id = ?`,
+        ).run(nextVersion, at, id);
+        audit("mgmt_unarchive");
+        db.exec("COMMIT");
+        return ok("inbox");
+      }
+      case "trash": {
+        if (row.mgmt_state === "trash") return failState("该记录已在回收站");
+        // 未完成记录移入回收站即暂停：不进入任何扫描与队列处理（恢复后仍保持暂停，需显式恢复）。
+        const paused = row.status === "archived" ? 0 : 1;
+        db.prepare(
+          `UPDATE feedbacks SET mgmt_state = 'trash', mgmt_trashed_at = ?, mgmt_trashed_by = ?,
+             mgmt_archived_at = NULL, mgmt_archived_by = NULL,
+             resume_paused = ?, lifecycle_version = ?, updated_at = ? WHERE id = ?`,
+        ).run(at, input.actor.id, paused, nextVersion, at, id);
+        audit("mgmt_trash", { paused });
+        db.exec("COMMIT");
+        return ok("trash");
+      }
+      case "restore": {
+        if (row.mgmt_state !== "trash") return failState("仅回收站中的记录可恢复");
+        // 统一返回收件箱；未完成记录保持暂停，不自动发送。
+        const paused = row.status === "archived" ? 0 : 1;
+        db.prepare(
+          `UPDATE feedbacks SET mgmt_state = 'inbox', mgmt_trashed_at = NULL, mgmt_trashed_by = NULL,
+             mgmt_archived_at = NULL, mgmt_archived_by = NULL,
+             resume_paused = ?, lifecycle_version = ?, updated_at = ? WHERE id = ?`,
+        ).run(paused, nextVersion, at, id);
+        audit("mgmt_restore", { paused });
+        db.exec("COMMIT");
+        return ok("inbox");
+      }
+      case "resume_processing": {
+        if (row.mgmt_state !== "inbox") return failState("仅收件箱中的记录可恢复处理");
+        if (row.resume_paused !== 1) return failState("该记录未处于暂停状态");
+        db.prepare("UPDATE feedbacks SET resume_paused = 0, lifecycle_version = ?, updated_at = ? WHERE id = ?").run(
+          nextVersion,
+          at,
+          id,
+        );
+        audit("mgmt_resume");
+        db.exec("COMMIT");
+        return ok("inbox", true);
+      }
+      case "purge": {
+        if (row.mgmt_state !== "trash") return failState("仅回收站中的记录可彻底删除");
+        // 事务内：最小防重放凭据 + 反馈与关联 BLOB/审计一并清除。
+        // 截图/日志/审计带 ON DELETE CASCADE，这里仍显式删除（不依赖外键开关状态）。
+        db.prepare(
+          `INSERT INTO feedback_deletion_receipts
+             (id, feedback_id, idempotency_key_hash, content_hash, user_id, deleted_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        ).run(randomUUID(), row.id, hashToken(row.idempotency_key), row.content_hash, row.user_id, at);
+        db.prepare("DELETE FROM feedback_screenshots WHERE feedback_id = ?").run(id);
+        db.prepare("DELETE FROM feedback_logs WHERE feedback_id = ?").run(id);
+        db.prepare("DELETE FROM feedback_audit WHERE feedback_id = ?").run(id);
+        // 删除本地 outbox 中该反馈的正文副本；已发出的事件仅删除本地记录，
+        // 不尝试撤回中枢已收到的事件。
+        db.prepare(
+          "DELETE FROM assist_outbox WHERE json_valid(payload_json) AND json_extract(payload_json, '$.ref.feedbackId') = ?",
+        ).run(id);
+        db.prepare("DELETE FROM feedbacks WHERE id = ?").run(id);
+        db.exec("COMMIT");
+        return { kind: "purged" };
+      }
+    }
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
 }

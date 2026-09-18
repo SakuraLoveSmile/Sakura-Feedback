@@ -162,11 +162,34 @@ export function createState(over: Partial<FakeRenderState> = {}): FakeRenderStat
   return { paint: true, tainted: false, toBlobCalls: 0, renderCalls: 0, ...over };
 }
 
+/** 2D 仿射变换矩阵（DOMMatrix 的 a..f）：x' = a·x + c·y + e，y' = b·x + d·y + f。 */
+export interface TxMatrix {
+  a: number;
+  b: number;
+  c: number;
+  d: number;
+  e: number;
+  f: number;
+}
+
+const TX_IDENTITY: TxMatrix = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+
+/** save()/restore() 保存的完整绘制状态（变换 + 样式）。 */
+interface CtxSavedState {
+  tx: TxMatrix;
+  fillStyle: Rgba;
+  styleRaw: string;
+  globalAlpha: number;
+  globalCompositeOperation: string;
+}
+
 class FakeCtx {
   globalAlpha = 1;
   globalCompositeOperation = 'source-over';
   private _fillStyle: Rgba = [0, 0, 0, 0];
   private _styleRaw = '';
+  private _tx: TxMatrix = { ...TX_IDENTITY };
+  private _stack: CtxSavedState[] = [];
 
   constructor(private readonly canvas: FakeCanvas) {}
 
@@ -178,12 +201,97 @@ class FakeCtx {
     this._fillStyle = parseCssColor(v);
   }
 
-  save(): void {}
-  restore(): void {}
+  /** 画布尺寸被重新设置时清空绘制状态（真实 canvas 行为）。 */
+  resetState(): void {
+    this._tx = { ...TX_IDENTITY };
+    this._stack = [];
+    this.globalAlpha = 1;
+    this.globalCompositeOperation = 'source-over';
+    this._fillStyle = [0, 0, 0, 0];
+    this._styleRaw = '';
+  }
+
+  save(): void {
+    this._stack.push({
+      tx: { ...this._tx },
+      fillStyle: [...this._fillStyle] as Rgba,
+      styleRaw: this._styleRaw,
+      globalAlpha: this.globalAlpha,
+      globalCompositeOperation: this.globalCompositeOperation,
+    });
+  }
+
+  restore(): void {
+    const s = this._stack.pop();
+    if (!s) return;
+    this._tx = s.tx;
+    this._fillStyle = s.fillStyle;
+    this._styleRaw = s.styleRaw;
+    this.globalAlpha = s.globalAlpha;
+    this.globalCompositeOperation = s.globalCompositeOperation;
+  }
+
+  setTransform(a?: unknown, b?: number, c?: number, d?: number, e?: number, f?: number): void {
+    if (typeof a === 'object' && a !== null) {
+      const m = a as Partial<TxMatrix>;
+      this._tx = {
+        a: m.a ?? 1,
+        b: m.b ?? 0,
+        c: m.c ?? 0,
+        d: m.d ?? 1,
+        e: m.e ?? 0,
+        f: m.f ?? 0,
+      };
+      return;
+    }
+    this._tx = {
+      a: (a as number) ?? 1,
+      b: b ?? 0,
+      c: c ?? 0,
+      d: d ?? 1,
+      e: e ?? 0,
+      f: f ?? 0,
+    };
+  }
+
+  getTransform(): TxMatrix {
+    return { ...this._tx };
+  }
+
+  /** 当前变换右乘 scale 矩阵（与 CanvasRenderingContext2D.scale 一致）。 */
+  scale(x: number, y: number): void {
+    const t = this._tx;
+    this._tx = { a: t.a * x, b: t.b * x, c: t.c * y, d: t.d * y, e: t.e, f: t.f };
+  }
+
+  /** 当前变换右乘平移矩阵（与 CanvasRenderingContext2D.translate 一致）。 */
+  translate(x: number, y: number): void {
+    const t = this._tx;
+    this._tx = {
+      a: t.a,
+      b: t.b,
+      c: t.c,
+      d: t.d,
+      e: t.e + t.a * x + t.c * y,
+      f: t.f + t.b * x + t.d * y,
+    };
+  }
+
+  private _applyTx(x: number, y: number): { x: number; y: number } {
+    const t = this._tx;
+    return { x: t.a * x + t.c * y + t.e, y: t.b * x + t.d * y + t.f };
+  }
 
   fillRect(x: number, y: number, w: number, h: number): void {
     if (this.canvas.state.paint === false) return;
-    this.canvas.fillRectPixels(x, y, w, h, this._fillStyle);
+    // 变换后的四角取轴对齐包围盒：夹具只模拟缩放/平移（轴对齐），此时即精确
+    // 矩形；若混入旋转则按包围盒多遮，符合"允许多遮不允许少遮"的保守方向。
+    const p = [this._applyTx(x, y), this._applyTx(x + w, y), this._applyTx(x, y + h), this._applyTx(x + w, y + h)];
+    const x0 = Math.floor(Math.min(p[0]!.x, p[1]!.x, p[2]!.x, p[3]!.x));
+    const y0 = Math.floor(Math.min(p[0]!.y, p[1]!.y, p[2]!.y, p[3]!.y));
+    const x1 = Math.ceil(Math.max(p[0]!.x, p[1]!.x, p[2]!.x, p[3]!.x));
+    const y1 = Math.ceil(Math.max(p[0]!.y, p[1]!.y, p[2]!.y, p[3]!.y));
+    this.canvas.fillRectPixels(x0, y0, x1 - x0, y1 - y0, this._fillStyle);
   }
 
   getImageData(x: number, y: number, w: number, h: number): { data: Uint8ClampedArray; width: number; height: number } {
@@ -231,8 +339,8 @@ export class FakeCanvas {
   readonly ctx: FakeCtx;
 
   constructor(readonly state: FakeRenderState) {
-    this.alloc();
     this.ctx = new FakeCtx(this);
+    this.alloc();
   }
 
   get width(): number {
@@ -287,6 +395,8 @@ export class FakeCanvas {
   private alloc(): void {
     this.data = new Uint8ClampedArray(this._w * this._h * 4);
     this.data.fill(255); // 白色背景
+    // 真实 canvas：重新设置宽高会重置整个 2D 上下文状态（含变换矩阵）。
+    this.ctx.resetState();
   }
 }
 
@@ -296,6 +406,8 @@ interface RenderOptions {
   width: number;
   height: number;
   scale: number;
+  x?: number;
+  y?: number;
   onclone: (doc: Document, el: HTMLElement) => void | Promise<void>;
   ignoreElements?: (el: Element) => boolean;
 }
@@ -305,27 +417,25 @@ export function createFakeRenderer(state: FakeRenderState) {
     const o = options as unknown as RenderOptions;
     state.renderCalls++;
     const canvas = new FakeCanvas(state);
-    canvas.width = Math.round(o.width * o.scale);
-    canvas.height = Math.round(o.height * o.scale);
+    canvas.width = Math.floor(o.width * o.scale);
+    canvas.height = Math.floor(o.height * o.scale);
     // 真实 html2canvas 在渲染内容前调用 onclone；onclone 抛错必须使整次捕获失败
     await o.onclone(document, el);
-    // 泄漏模式：无视克隆里的 visibility，把带 data-fake-rect 的节点画上去。
-    // 最终 PNG 的敏感区若未覆盖，将呈现红色（LEAK）。
+    // 与真实 CanvasRenderer 一致：画布尺寸设置（已重置上下文）之后施加
+    // scale + translate 且**不恢复**——返回画布的上下文带着残余变换。
+    // 任何不重置变换就绘制的后续调用方都会把坐标再变换一次。
+    const ctx = canvas.ctx;
+    ctx.scale(o.scale, o.scale);
+    ctx.translate(-(o.x ?? 0), -(o.y ?? 0));
+    // 泄漏模式：无视克隆里的 visibility，把带 data-fake-rect 的节点按**文档坐标**
+    // 画上去（经残余变换落到设备像素）。最终 PNG 的敏感区若未覆盖，将呈现红色。
     for (const node of Array.from(document.querySelectorAll('[data-fake-rect]'))) {
       if (state.honorVisibility && (node as HTMLElement).style?.visibility === 'hidden') continue;
       const attrs = node.getAttribute('data-fake-rect')!.split(',').map(Number);
-      const color = node.getAttribute('data-fake-color')
-        ? parseCssColor(node.getAttribute('data-fake-color')!)
-        : ([LEAK.r, LEAK.g, LEAK.b, 255] as Rgba);
+      const color = node.getAttribute('data-fake-color') ?? `rgb(${LEAK.r},${LEAK.g},${LEAK.b})`;
       const [x, y, w, h] = attrs as [number, number, number, number];
-      const sx = canvas.width / (o.width * 1);
-      canvas.fillRectPixels(
-        Math.floor(x * sx),
-        Math.floor(y * sx),
-        Math.ceil(w * sx),
-        Math.ceil(h * sx),
-        color,
-      );
+      ctx.fillStyle = color;
+      ctx.fillRect(x, y, w, h);
     }
     return canvas as unknown as HTMLCanvasElement;
   };
@@ -341,6 +451,20 @@ export function stubCreateElementCanvas(state: FakeRenderState): void {
 }
 
 // ---------- 布局几何打桩（happy-dom 无布局） ----------
+
+/**
+ * 文档滚动量：`data-fake-rect` 的语义是**文档坐标**；
+ * `getClientRects` 返回视口坐标（文档坐标 − 滚动量），与真实浏览器一致。
+ * `installGeometryPatch` 每次安装时复位为 0。
+ */
+let docScrollX = 0;
+let docScrollY = 0;
+
+/** 设置当前文档滚动量（供 getClientRects 打桩与测试用例对齐）。 */
+export function setDocumentScroll(x: number, y: number): void {
+  docScrollX = x;
+  docScrollY = y;
+}
 
 function fakeRect(x: number, y: number, w: number, h: number): DOMRect {
   return {
@@ -364,6 +488,8 @@ function fakeRect(x: number, y: number, w: number, h: number): DOMRect {
 export function installGeometryPatch(): () => void {
   const origRects = Element.prototype.getClientRects;
   const origGcs = window.getComputedStyle.bind(window);
+  docScrollX = 0;
+  docScrollY = 0;
 
   Element.prototype.getClientRects = function (this: Element): DOMRectList {
     const attr = this.getAttribute?.('data-fake-rect');
@@ -372,7 +498,8 @@ export function installGeometryPatch(): () => void {
       return [] as unknown as DOMRectList;
     }
     const [x, y, w, h] = attr.split(',').map(Number) as [number, number, number, number];
-    return [fakeRect(x, y, w, h)] as unknown as DOMRectList;
+    // 文档坐标 → 视口坐标（减去当前文档滚动量，与真实浏览器一致）
+    return [fakeRect(x - docScrollX, y - docScrollY, w, h)] as unknown as DOMRectList;
   };
 
   (window as unknown as { getComputedStyle: typeof window.getComputedStyle }).getComputedStyle =

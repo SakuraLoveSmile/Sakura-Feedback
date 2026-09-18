@@ -277,6 +277,7 @@ updater 在执行「②暂停并停服」前会向控制目录写入 `paused` �
 - `200 { "feedbackId", "status", "replayed": true, "user", "quota", "collectionState" }`（同 key 同内容，幂等重放；**不扣次数**，额度已满也允许）
 - `409 "idempotency_conflict"`（同 key 不同内容；或同 key 被**其他账号**占用 —— 统一通用冲突，不透露原记录）
 - `429 "daily_quota_exceeded"`（当日额度用尽，明确**未接收**；响应携带同结构 `quota`，**不创建软件、不扣费**）
+- `410 "gone"`（该 `idempotencyKey` 曾对应的反馈已被管理员**彻底删除**；命中最小删除凭据，不新建、不扣次）
 - `401` / `400 "invalid_request"` / `400 "origin_not_allowed"` / `413 "too_large"` / `429 "rate_limited"`
 
 **先接收、后配置（自动发现软件）**：`appId` 不再要求事先在后台登记。
@@ -342,6 +343,7 @@ POST 提交与 `GET /api/feedback/:id` 响应都会带上该字段（`GET` 按�
 `200 { "id", "status", "createdAt", "updatedAt", "errorSummary"?: string|null, "kaneoUrl"?: string|null,
 "collectionState"?: string }`
 **归属隔离**：普通账号只能读取自己的反馈状态与截图，他人记录统一 `404 "not_found"`（不透露存在性）；管理员可读全量。面板轮询此端点（建议 2s 退避至 5s）；收到等待态时停止轮询、保留手动刷新。
+**已彻底删除**：记录被管理员永久删除后，所属账号查询返回 `410 "gone"`；其他账号仍返回 `404`（不泄露存在性）。截图/日志端点同理。
 
 ### GET /api/admin/feedback/options?projectId=&lt;id&gt; （仅管理员 Cookie 会话）
 从 Kaneo **实时**读取分类所需的有效选项。
@@ -459,6 +461,49 @@ Body 可选 `{ "expectedRevision": number }`。`202 { "ok": true, "status": ...,
 管理页只渲染 `allowedActions` 中的按钮并在标题注明动作目标与风险；`retry_comment` 必须附带上述重复风险提示。放行条件：
 - `failed` → `retry`；
 - `needs_review` → `recheck` 恒可用；已有 task ID **且** 资产已知 → `retry_comment`；已有 task ID **且** 有截图（`hasScreenshot`）→ `replace_upload`（**上传地址过期/被拒绝时的唯一出路，不要求资产已知**）；仅当任务创建结果未知且无任何已知 task/附件状态 → `force-create`。
+
+### 生命周期管理（仅管理员 Cookie 会话；迁移 v9 起）
+
+每条反馈带独立于处理状态的**管理状态** `mgmtState`：`inbox` / `archived` / `trash`（回收站）。
+处理状态 `status=archived` 仍表示「已同步到 Kaneo」；本地 `archived` 区域只是管理归档，
+不产生任何远端请求。历史记录一律 `inbox`。
+
+- `GET /api/admin/feedback?view=&q=&from=&to=` — 列表扩展：`view` ∈ `inbox|archived|trash|all`
+  （缺省 `inbox`；`all` = 收件箱+已归档，不含回收站）；`q` 按标题/原文/反馈 ID 字面匹配
+  （≤200 字符，通配符按字面处理，不搜日志 BLOB）；`from`/`to` 为 RFC3339 半开区间。
+  保留 `status`/`appId`/`cursor`/`limit`（≤100）。列表项额外返回 `mgmtState`、
+  `lifecycleVersion`、`resumePaused`、`archivedAt`、`trashedAt`、`appName`、
+  `hasScreenshot`、`logCount`、`availableActions`（服务端口径的可用动作）。
+- `GET /api/admin/feedback/counts?view=&q=&from=&to=&status=&appId=` — 三个区域计数，
+  按与列表相同的搜索/筛选条件计算（`view` 不计入）：`{ inbox, archived, trash }`。
+- `GET /api/admin/feedback/app-options` — 有历史反馈的软件选项（含已删除软件）：
+  `{ items: [{ appId, name, deleted }] }`。
+- `POST /api/admin/feedback/lifecycle` — 生命周期动作，单条与批量同一入口：
+  ```jsonc
+  { "action": "archive"|"unarchive"|"trash"|"restore"|"resume_processing"|"purge",
+    "items": [{ "id": "…", "expectedVersion": 3 }, …] }   // 1..100 项；expectedVersion 必填非负整数
+  ```
+  成功 `200 { "ok": true, "action", "results": [{ "id", "ok", "code"?, "message"?,
+  "mgmtState"?, "lifecycleVersion"?, "purged"?, "alreadyPurged"? }] }`；
+  业务部分失败不回滚已成功项。**仅一项且该项失败**时直接返回对应 HTTP 错误
+  （与既有错误格式一致，如 `409 "invalid_state"`）。
+  `GET /api/admin/feedback/:id` 详情对回收站记录返回 `readOnly: true`。
+
+动作语义：
+
+| 动作 | 条件 | 结果 |
+|---|---|---|
+| `archive` | `mgmtState=inbox` 且 `status=archived`（完整同步；仅存在远端任务 ID 不够） | 进入已归档区域；零远端请求 |
+| `unarchive` | `mgmtState=archived` | 回到收件箱 |
+| `trash` | `mgmtState` ∈ `inbox|archived` | 进回收站；正文/截图/日志/分类/远端关联全部保留，停止一切自动处理（**不触碰远端任务**） |
+| `restore` | `mgmtState=trash` | 回收件箱；未完成记录 `resumePaused=true`（不自动重发） |
+| `resume_processing` | `resumePaused=true` 且不在回收站 | 清除暂停标记，按现有状态继续处理 |
+| `purge` | `mgmtState=trash` | 事务内删除反馈+附件 BLOB+审计，写最小删除凭据；不可恢复 |
+
+错误：`404 "not_found"`；`409 "version_conflict"`（`expectedVersion` 过期，刷新后重试）；
+`409 "busy"`（该反馈正被其他操作持锁处理）；`409 "invalid_state"`（不满足动作条件，
+如未同步记录归档、非回收站记录 purge）；`400 "invalid_request"`（未知动作/超限）。
+正在处理中的记录返回 busy，不强行中断在途外部请求。
 
 ### 旧记录兼容（4.5）
 - 旧文字反馈原路径；旧 `archived` 记录为终态不重开；不批量改写现有数据库。

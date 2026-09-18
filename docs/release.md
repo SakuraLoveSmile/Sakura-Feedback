@@ -3,10 +3,9 @@
 一个 `v*` 标签推上去之后发生什么、`release-manifest.json` 里必须有什么、以及为什么 GitHub Release
 在全部产物齐全之前一直是 draft。实现见 [`.github/workflows/release.yml`](../.github/workflows/release.yml)。
 
-> **验证状态（重要）**：本文档描述的行为**尚未在真实 GitHub Actions 上运行过**。
-> 本机没有 GitHub 运行环境，本轮只做了 YAML 解析、`bash -n` 语法检查、以及把工作流里将要执行的脚本
-> 抽出来在沙箱里跑（含失败路径）的静态/脚本级验证——见第 6 节。job 依赖、artifact 跨 job 下载、
-> `gh release` 网络调用等 Actions 运行时语义**未经验证**。第一次真机发布前请按第 5 节逐步核对。
+> **验证状态**：v0.4.0 的 GitHub Release 与发布流水线已成功运行（2026-09-16）。下文第 6 节是早期静态验证记录，不代表当前版本本次实测；当前版本的审查与验证以 `VERIFICATION.md` 为准。
+
+> **更新日志**：正式标签发布前必须在 `CHANGELOG.md` 添加唯一的对应版本段落。流水线通过 `tools/release-notes.py` 提取该段落，使用 `--notes-file` 写入 Release；缺失、重复或空白更新日志会阻止公开。草稿重跑也使用相同标签源码中的日志。
 
 ## 1. 触发方式与渠道
 
@@ -63,7 +62,7 @@
 | `services.feedback.image` / `.digest` | string | `ghcr.io/sakuralovesmile/sakura-feedback` + `sha256:<64 位小写十六进制>` |
 | `services.updater.image` / `.digest` | string | `ghcr.io/sakuralovesmile/sakura-feedback-updater` + digest（必填，不接受 `null`） |
 | `platform` | string | 固定 `linux/amd64` |
-| `dbSchemaVersion` | number | 服务端 `PRAGMA user_version` 的当前值（现为 `5`），见下 |
+| `dbSchemaVersion` | number | 服务端 `PRAGMA user_version` 的当前值（现为 `9`），见下 |
 | `requiredUpdaterProtocol` | number | 更新执行器协议版本，现为 `1` |
 | `publishedAt` | string | 生成清单的时刻（UTC，`YYYY-MM-DDTHH:MM:SSZ`） |
 
@@ -96,7 +95,7 @@
 要点：
 
 - **`dbSchemaVersion` 读自源码**：生成脚本解析 `apps/server/src/db/db.ts` 里所有 `PRAGMA user_version = N`，
-  取最大值（现为 `5`）。不是硬编码，也不是猜的；读不到就失败退出。
+  取最大值（现为 `9`）。不是硬编码，也不是猜的；读不到就失败退出。
 - **两个镜像 digest 都必须存在且非空**：`publish` job 任一 digest 为空或格式非法就失败退出，
   后续 `manifest` job 根本不会运行；`manifest` job 还会把 digest 与记录文件、job output 交叉核对。
 - **清单必须被执行器接受**：生成后立刻用 `apps/updater` 的**真实解析器**（`parseManifest`）验收，
@@ -149,7 +148,8 @@ git push origin v0.3.0
 gh run watch
 
 # 4) 核对 Release（公开前是 draft；公开后 isDraft=false、isLatest=true）
-gh release view v0.3.0 --json isDraft,isLatest,url,assets
+gh release view v0.3.0 --json isDraft,url,assets
+gh release list --limit 10 --json tagName,isLatest
 
 # 5) 取清单核对字段与 digest
 gh release download v0.3.0 -p release-manifest.json -O -
