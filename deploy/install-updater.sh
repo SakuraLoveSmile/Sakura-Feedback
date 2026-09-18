@@ -49,8 +49,10 @@ usage() {
 
 选项：
   --deploy-dir <路径>     部署目录（默认 /opt/1panel/docker/compose/feedback）
-  --compose-file <路径>   现有 compose 文件（默认 <deploy-dir>/compose.yml；文件名必须是 compose.yml）
-  --env-file <路径>       现有环境文件（默认 <deploy-dir>/.env.prod）
+  --compose-file <路径>   现有 compose 文件（默认 <deploy-dir>/compose.yml；允许
+                          compose.yml / compose.yaml / docker-compose.yml / docker-compose.yaml，
+                          必须是部署目录内的绝对路径；实际值会登记为 UPDATER_COMPOSE_FILE）
+  --env-file <路径>       现有环境文件（必须是 <deploy-dir>/.env.prod；受管 compose 与 updater 固定读它）
   --project <名字>        compose 项目名（默认 feedback）
   --service <名字>        受管服务名（默认 feedback）
   --template <路径>       受管 compose 模板（默认本脚本同目录的 compose.prod.yml）
@@ -209,13 +211,26 @@ preflight() {
   require_cmd docker "需要 docker CLI"
   docker compose version >/dev/null 2>&1 || die "需要 docker compose 插件"
   [ -d "${DEPLOY_DIR}" ] || die "部署目录不存在：${DEPLOY_DIR}"
+  case "${DEPLOY_DIR}" in
+    /*) ;;
+    *) die "部署目录必须是绝对路径（宿主与容器内同一绝对路径）：${DEPLOY_DIR}" ;;
+  esac
+  case "${COMPOSE_FILE}" in
+    /*) ;;
+    *) die "--compose-file 必须是绝对路径：${COMPOSE_FILE}" ;;
+  esac
   [ -f "${COMPOSE_FILE}" ] || die "compose 文件不存在：${COMPOSE_FILE}（既有部署必须已经能 up 起来）"
+  case "${COMPOSE_FILE}" in
+    "${DEPLOY_DIR}/"*) ;;
+    *) die "受管 compose 必须位于部署目录 ${DEPLOY_DIR} 内（updater 只挂载该目录）：${COMPOSE_FILE}" ;;
+  esac
+  case "$(basename "${COMPOSE_FILE}")" in
+    compose.yml|compose.yaml|docker-compose.yml|docker-compose.yaml) ;;
+    *) die "受管 compose 文件名只接受 compose.yml / compose.yaml / docker-compose.yml / docker-compose.yaml，当前是 $(basename "${COMPOSE_FILE}")" ;;
+  esac
+  [ "${ENV_FILE}" = "${DEPLOY_DIR}/.env.prod" ] || die "环境文件必须是 ${DEPLOY_DIR}/.env.prod（受管 compose 与 updater 都固定读这个路径），当前是 ${ENV_FILE}"
   [ -f "${ENV_FILE}" ] || die "环境文件不存在：${ENV_FILE}（请先 cp deploy/.env.prod.example ${ENV_FILE} 并填写）"
   [ -f "${TEMPLATE}" ] || die "受管 compose 模板不存在：${TEMPLATE}"
-  case "$(basename "${COMPOSE_FILE}")" in
-    compose.yml) ;;
-    *) die "受管 compose 文件名必须是 compose.yml（updater 的 UPDATER_COMPOSE_FILE 指向 <deploy-dir>/compose.yml），当前是 $(basename "${COMPOSE_FILE}")" ;;
-  esac
   info "部署目录：${DEPLOY_DIR}"
   info "compose：${COMPOSE_FILE}（项目 ${PROJECT}，服务 ${SERVICE}）"
 
@@ -384,6 +399,14 @@ collect_env_pairs() {
   local control_dir="${DEPLOY_DIR}/${CONTROL_NAME}"
   ENV_PAIRS+=("FEEDBACK_DATA_VOLUME=${VOLUME}")
   ENV_PAIRS+=("UPDATER_DEPLOY_DIR=${DEPLOY_DIR}")
+
+  local env_compose_file
+  env_compose_file="$(env_get "${ENV_FILE}" UPDATER_COMPOSE_FILE)"
+  if [ -n "${env_compose_file}" ] && [ "${env_compose_file}" != "${COMPOSE_FILE}" ]; then
+    die "环境文件里 UPDATER_COMPOSE_FILE=${env_compose_file}，与实际受管文件 ${COMPOSE_FILE} 不一致：请人工确认（拒绝静默改管理目标）"
+  fi
+  ENV_PAIRS+=("UPDATER_COMPOSE_FILE=${COMPOSE_FILE}")
+
   ENV_PAIRS+=("FEEDBACK_UPDATE_CONTROL_DIR=${control_dir}")
 
   local env_bind
@@ -496,8 +519,8 @@ backup_before_write() {
   fi
   mkdir -p "${dir}"
   chmod 700 "${dir}"
-  cp -p "${COMPOSE_FILE}" "${dir}/compose.yml"
-  chmod 600 "${dir}/compose.yml"
+  cp -p "${COMPOSE_FILE}" "${dir}/$(basename "${COMPOSE_FILE}")"
+  chmod 600 "${dir}/$(basename "${COMPOSE_FILE}")"
   cp -p "${ENV_FILE}" "${dir}/.env.prod"
   chmod 600 "${dir}/.env.prod"
   {
@@ -505,13 +528,14 @@ backup_before_write() {
     printf 'deploy_dir=%s\n' "${DEPLOY_DIR}"
     printf 'project=%s\n' "${PROJECT}"
     printf 'service=%s\n' "${SERVICE}"
+    printf 'compose_file=%s\n' "${COMPOSE_FILE}"
     printf 'detected_volume=%s\n' "${VOLUME}"
     printf 'detected_image=%s\n' "${IMAGE_REF}"
     printf 'detected_bind=%s\n' "${HOST_BIND}"
     printf 'compose_sha256=%s\n' "$(sha256_of "${COMPOSE_FILE}")"
     printf 'env_sha256=%s\n' "$(sha256_of "${ENV_FILE}")"
   } | atomic_write_stream "${dir}/manifest.txt" 600
-  ok "备份完成：${dir}（compose.yml / .env.prod / manifest.txt，均 600）"
+  ok "备份完成：${dir}（$(basename "${COMPOSE_FILE}") / .env.prod / manifest.txt，均 600）"
 }
 
 commit_changes() {
@@ -538,7 +562,7 @@ summarize() {
   ok "数据卷登记：FEEDBACK_DATA_VOLUME=${VOLUME}（external，原地登记，未新建卷）"
   ok "端口登记：FEEDBACK_BIND=${HOST_BIND}（回环）"
   ok "令牌：${control_dir}/updater-token 与 ${control_dir}/feedback-token（600，${TOKEN_STATE}）"
-  ok "变更：compose.yml=$([ "${COMPOSE_CHANGED}" = 1 ] && echo 重写 || echo 未变)，.env.prod=$([ "${ENV_CHANGED}" = 1 ] && echo "更新(${ENV_KEYS_CHANGED})" || echo 未变)"
+  ok "变更：$(basename "${COMPOSE_FILE}")=$([ "${COMPOSE_CHANGED}" = 1 ] && echo 重写 || echo 未变)，.env.prod=$([ "${ENV_CHANGED}" = 1 ] && echo "更新(${ENV_KEYS_CHANGED})" || echo 未变)"
   if [ "${DRY_RUN}" = "1" ]; then
     return
   fi
@@ -566,9 +590,12 @@ self_test_mode() {
   root="$(mktemp -d "${share_root}/install-updater-selftest.XXXXXX")"
   project_main="feedback-selftest-$(od -An -N2 -tx1 </dev/urandom | tr -d ' \n')"
   project_alt="feedback-selftest-alt-$(od -An -N2 -tx1 </dev/urandom | tr -d ' \n')"
+  project_alt2="feedback-selftest-alt2-$(od -An -N2 -tx1 </dev/urandom | tr -d ' \n')"
   volume_main="${project_main}_feedback-data"
   volume_alt="${project_alt}_feedback-data"
+  volume_alt2="${project_alt2}_feedback-data"
   bind_port=$((20000 + RANDOM % 20000))
+  bind_port2=$((bind_port + 1))
   checks=0
   failures=0
 
@@ -579,9 +606,11 @@ self_test_mode() {
       || warn "自测清理：主夹具 down 失败（请手动检查 ${project_main}）"
     docker compose -f "${root}/alt/compose.yml" --env-file "${root}/alt/.env.prod" -p "${project_alt}" down -v --remove-orphans >/dev/null 2>&1 \
       || warn "自测清理：对照夹具 down 失败（请手动检查 ${project_alt}）"
-    docker rm -f "${project_main}-feedback-1" "${project_alt}-feedback-1" >/dev/null 2>&1
-    docker volume rm -f "${volume_main}" "${volume_alt}" >/dev/null 2>&1
-    docker network rm "${project_main}_default" "${project_alt}_default" >/dev/null 2>&1
+    docker compose -f "${root}/alt2/docker-compose.yml" --env-file "${root}/alt2/.env.prod" -p "${project_alt2}" down -v --remove-orphans >/dev/null 2>&1 \
+      || warn "自测清理：docker-compose 夹具 down 失败（请手动检查 ${project_alt2}）"
+    docker rm -f "${project_main}-feedback-1" "${project_alt}-feedback-1" "${project_alt2}-feedback-1" >/dev/null 2>&1
+    docker volume rm -f "${volume_main}" "${volume_alt}" "${volume_alt2}" >/dev/null 2>&1
+    docker network rm "${project_main}_default" "${project_alt}_default" "${project_alt2}_default" >/dev/null 2>&1
     rm -rf "${root}"
     return 0
   }
@@ -654,13 +683,42 @@ services:
 volumes:
   feedback-data:
 EOF
+  mkdir -p "${root}/alt2" "${root}/outside"
+  cat > "${root}/alt2/.env.prod" <<EOF
+FEEDBACK_MASTER_KEY=selftest-master-key-0123456789
+FEEDBACK_PUBLIC_URL=https://selftest.example.com
+FEEDBACK_IMAGE=alpine:3.20
+EOF
+  cat > "${root}/alt2/docker-compose.yml" <<EOF
+services:
+  feedback:
+    image: alpine:3.20
+    command: ["sleep", "900"]
+    ports:
+      - "127.0.0.1:${bind_port2}:8787"
+    environment:
+      FEEDBACK_DATA_DIR: /data
+    env_file:
+      - .env.prod
+    volumes:
+      - feedback-data:/data
+    restart: "no"
+volumes:
+  feedback-data:
+EOF
+  # 部署目录外的 compose：只为触发「必须在部署目录内」拒绝路径，不需要能 up
+  cat > "${root}/outside/docker-compose.yml" <<EOF
+services: {}
+EOF
 
-  log "自测夹具：启动两个独立 compose 项目"
+  log "自测夹具：启动三个独立 compose 项目"
   docker compose -f "${root}/main/compose.yml" -p "${project_main}" up -d >/dev/null
   docker compose -f "${root}/alt/compose.yml" -p "${project_alt}" up -d >/dev/null
+  docker compose -f "${root}/alt2/docker-compose.yml" -p "${project_alt2}" up -d >/dev/null
   sleep 2
   info "主夹具：${project_main} / 卷 ${volume_main} / 端口 127.0.0.1:${bind_port}"
   info "对照夹具：${project_alt} / 卷 ${volume_alt} / 数据目录 /data-other"
+  info "docker-compose 夹具：${project_alt2} / 卷 ${volume_alt2} / 端口 127.0.0.1:${bind_port2}"
 
   local out ok_env="${root}/main/.env.prod" main_compose="${root}/main/compose.yml" token_main="${root}/main/update-control/updater-token"
 
@@ -677,6 +735,7 @@ EOF
   check "既有数据卷已登记" "${volume_main}" "$(env_get "${ok_env}" FEEDBACK_DATA_VOLUME)"
   check "端口绑定已登记" "127.0.0.1:${bind_port}" "$(env_get "${ok_env}" FEEDBACK_BIND)"
   check "部署目录已登记" "${root}/main" "$(env_get "${ok_env}" UPDATER_DEPLOY_DIR)"
+  check "受管 compose 路径已登记" "${root}/main/compose.yml" "$(env_get "${ok_env}" UPDATER_COMPOSE_FILE)"
   check "受管镜像名已推导" "alpine" "$(env_get "${ok_env}" UPDATER_IMAGE_NAME)"
   check "updater 镜像已写入" "alpine:3.20" "$(env_get "${ok_env}" UPDATER_IMAGE)"
   check "主密钥等其它字段保留" "selftest-master-key-0123456789" "$(env_get "${ok_env}" FEEDBACK_MASTER_KEY)"
@@ -745,6 +804,46 @@ EOF
   fi
   check "dry-run 未改动 compose" "${dry_guard}" "$(sha256_of "${main_compose}")"
 
+  log "自测 5：docker-compose.yml 文件名接入与新拒绝路径"
+  if out="$(run_install "${root}/alt2" "${project_alt2}" --compose-file "${root}/alt2/docker-compose.yml" 2>&1)"; then
+    check "docker-compose.yml 接入退出码" "0" "0"
+  else
+    check "docker-compose.yml 接入退出码" "0" "非零"
+    printf '%s\n' "${out}" | tail -25
+  fi
+  check "UPDATER_COMPOSE_FILE 登记为实际文件" "${root}/alt2/docker-compose.yml" "$(env_get "${root}/alt2/.env.prod" UPDATER_COMPOSE_FILE)"
+  check_true "受管 docker-compose.yml 含 updater 服务" "$(grep -q '^  updater:' "${root}/alt2/docker-compose.yml" && echo 0 || echo 1)"
+  local backup_dir2
+  backup_dir2="$(find "${root}/alt2/.install-backups" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | head -1)"
+  check_true "备份保留原文件名" "$([ -f "${backup_dir2}/docker-compose.yml" ] && echo 0 || echo 1)"
+
+  if run_install "${root}/main" "${project_main}" --compose-file "${root}/outside/docker-compose.yml" >/dev/null 2>&1; then
+    check "部署目录外 compose 拒绝" "非零" "0"
+  else
+    check "部署目录外 compose 拒绝" "非零" "非零"
+  fi
+  if run_install "${root}/main" "${project_main}" --compose-file "main/docker-compose.yml" >/dev/null 2>&1; then
+    check "相对路径 compose 拒绝" "非零" "0"
+  else
+    check "相对路径 compose 拒绝" "非零" "非零"
+  fi
+  if run_install "${root}/main" "${project_main}" --env-file "${root}/main/.env" >/dev/null 2>&1; then
+    check "非 .env.prod 环境文件拒绝" "非零" "0"
+  else
+    check "非 .env.prod 环境文件拒绝" "非零" "非零"
+  fi
+  cp "${ok_env}" "${root}/env.guard"
+  {
+    grep -v '^UPDATER_COMPOSE_FILE=' "${root}/env.guard"
+    printf 'UPDATER_COMPOSE_FILE=%s\n' "${root}/main/other-compose.yml"
+  } > "${ok_env}"
+  if run_install "${root}/main" "${project_main}" >/dev/null 2>&1; then
+    check "UPDATER_COMPOSE_FILE 冲突拒绝" "非零" "0"
+  else
+    check "UPDATER_COMPOSE_FILE 冲突拒绝" "非零" "非零"
+  fi
+  mv "${root}/env.guard" "${ok_env}"
+
   printf '\n=== 自测结果：%s 项断言，%s 项失败\n' "${checks}" "${failures}"
   [ "${failures}" = "0" ] || die "自测断言失败，见上方 ✗"
   ok "自测通过（临时目录 ${root}，项目 ${project_main}）"
@@ -757,6 +856,7 @@ main() {
     self_test_mode
     return
   fi
+  DEPLOY_DIR="${DEPLOY_DIR%/}"
   COMPOSE_FILE="${COMPOSE_FILE:-${DEPLOY_DIR}/compose.yml}"
   ENV_FILE="${ENV_FILE:-${DEPLOY_DIR}/.env.prod}"
   BACKUP_ROOT="${BACKUP_ROOT:-${DEPLOY_DIR}/.install-backups}"

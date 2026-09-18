@@ -72,8 +72,9 @@ docker compose --env-file .env.prod -f docker-compose.yml up -d
   只是后台「系统更新」页会连不上执行器（正常——简易模式的更新入口是 `update.sh`）。
 - `update.sh` 自动探测 `docker-compose.yml` / `docker-compose.yaml` / `compose.yml` / `compose.yaml`
   （按此顺序取第一个），并自动对准 `FEEDBACK_DATA_VOLUME` 指定的卷。
-- 注意：**完整模式**（`install-updater.sh` + updater）仍要求文件名叫 `compose.yml`
-  （`UPDATER_COMPOSE_FILE` 契约），两种模式的文件名约定不同。
+- 注意：**完整模式**的受管文件名允许 `compose.yml` / `compose.yaml` / `docker-compose.yml` /
+  `docker-compose.yaml`（必须是部署目录内的绝对路径），实际路径登记为 `UPDATER_COMPOSE_FILE`；
+  既有 1Panel 部署可直接沿用 `docker-compose.yml`，无需改名。
 
 ---
 
@@ -83,7 +84,8 @@ docker compose --env-file .env.prod -f docker-compose.yml up -d
 
 ```
 /opt/1panel/docker/compose/feedback/          # 部署目录：宿主与容器内同一绝对路径
-├── compose.yml                               # 受管 compose（由 install-updater.sh 写入，含 updater 服务）
+├── compose.yml                               # 受管 compose（由 install-updater.sh 写入，含 updater 服务；
+│                                             #   也可沿用既有 docker-compose.yml，路径见 UPDATER_COMPOSE_FILE）
 ├── .env.prod                                 # 600：主密钥、公网地址、镜像 digest、数据卷名、updater 变量
 ├── update-control/                           # 700：更新控制目录（feedback 以 :ro 挂载）
 │   ├── updater-token                         # 600：updater 校验 x-updater-token
@@ -117,7 +119,8 @@ docker compose --env-file .env.prod ps
 
 脚本在**任何写入之前**依次核对，任一不符即带原因中止（非零退出，不改任何文件）：
 
-1. `docker` / `docker compose` 可用；部署目录、compose 文件（必须叫 `compose.yml`）、`.env.prod` 存在。
+1. `docker` / `docker compose` 可用；部署目录、compose 文件（`compose.yml`/`compose.yaml`/
+   `docker-compose.yml`/`docker-compose.yaml`，部署目录内绝对路径）、`<deploy>/.env.prod` 存在。
 2. 现有 compose 能通过 `docker compose config -q`；服务集合只含 `feedback`（重跑时允许已含受管 `updater`）。
 3. 项目名与服务名对应的容器存在且**正在运行**，容器标签里的项目/服务与 `--project` / `--service` 一致。
 4. 容器内数据目录必须是 `/data`（本模板固定），且该位置挂的是**命名卷**（不是绑定目录/匿名卷）；卷必须真实存在。
@@ -134,7 +137,7 @@ docker compose --env-file .env.prod ps
 | 选项 | 说明 |
 | --- | --- |
 | `--deploy-dir <路径>` | 部署目录（默认 `/opt/1panel/docker/compose/feedback`） |
-| `--compose-file` / `--env-file` / `--project` / `--service` | 覆盖默认的 `compose.yml` / `.env.prod` / `feedback` / `feedback` |
+| `--compose-file` / `--env-file` / `--project` / `--service` | 覆盖默认值：`compose.yml`（也可 `docker-compose.yml` 等约定名，实际路径写入 `UPDATER_COMPOSE_FILE`）/ `.env.prod`（必须是 `<deploy>/.env.prod`）/ `feedback` / `feedback` |
 | `--template <路径>` | 受管 compose 模板（默认脚本同目录的 `compose.prod.yml`） |
 | `--updater-image <引用>` | `.env.prod` 里没有 `UPDATER_IMAGE` 时用它写入 |
 | `--backup-root <路径>` | 备份根目录（默认 `<deploy-dir>/.install-backups`） |
