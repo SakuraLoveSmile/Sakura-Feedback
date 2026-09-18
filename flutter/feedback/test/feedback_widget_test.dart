@@ -53,6 +53,7 @@ void main() {
         ),
         controller: controller,
         tokenStore: store,
+        serverPrefStore: MemoryServerPrefStore(),
         httpClient: client,
         child: hostChild ?? const Placeholder(),
       ),

@@ -44,6 +44,19 @@ export interface ServerConfig {
   updateControlDir?: string | null;
   /** U1-4：自动检查间隔（毫秒）；0 表示只允许手动检查。 */
   updateCheckIntervalMs?: number;
+  /**
+   * Assist 接入（contracts/feedback-integration.md §1，全部可选）。
+   * `assistHubUrl` 缺省 = 整体关闭接入（零行为变化：不写 outbox、不建投递 worker、不挂只读路由）。
+   */
+  assistHubUrl?: string | null;
+  /** 中枢签发的来源密钥 `ask_…`（事件上报 Bearer）。 */
+  assistSourceKey?: string | null;
+  /** 附件只读接口凭证；缺省回退 `assistSourceKey`，两者都未配置则路由组不挂载。 */
+  assistReadKey?: string | null;
+  /** outbox pending 上限，默认 1000。 */
+  assistQueueMax?: number;
+  /** 投递循环空闲休眠毫秒，默认 2000。 */
+  assistFlushMs?: number;
 }
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -65,6 +78,14 @@ function parseCheckInterval(raw: string | undefined): number {
   if (raw === undefined || raw.trim() === "") return DEFAULT_UPDATE_CHECK_INTERVAL_MS;
   const value = Number(raw);
   if (!Number.isSafeInteger(value) || value < 0) return DEFAULT_UPDATE_CHECK_INTERVAL_MS;
+  return value;
+}
+
+/** Assist 接入数值项：正整数；缺省/非法值回退默认（配置笔误不得把服务卡死）。 */
+function parsePositiveInt(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0) return fallback;
   return value;
 }
 
@@ -99,5 +120,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     updateTokenFile: optionalText(env.FEEDBACK_UPDATE_TOKEN_FILE),
     updateControlDir: optionalText(env.FEEDBACK_UPDATE_CONTROL_DIR),
     updateCheckIntervalMs: parseCheckInterval(env.FEEDBACK_UPDATE_CHECK_INTERVAL_MS),
+    // Assist 接入：全部可选；assistHubUrl 缺省 = 整体关闭（零行为变化）。
+    assistHubUrl: optionalText(env.FEEDBACK_ASSIST_HUB_URL),
+    assistSourceKey: optionalText(env.FEEDBACK_ASSIST_SOURCE_KEY),
+    assistReadKey: optionalText(env.FEEDBACK_ASSIST_READ_KEY),
+    assistQueueMax: parsePositiveInt(env.FEEDBACK_ASSIST_QUEUE_MAX, 1000),
+    assistFlushMs: parsePositiveInt(env.FEEDBACK_ASSIST_FLUSH_MS, 2000),
   };
 }

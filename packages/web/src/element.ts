@@ -5,6 +5,7 @@ import {
   collectionWaitingText,
   getFeedback,
   getSession,
+  joinApi,
   login,
   submitFeedback,
   uuid,
@@ -16,6 +17,11 @@ import {
   type FeedbackStatus,
   type Quota,
 } from './api';
+import {
+  normalizeServerBase,
+  serverOverrideStorageKey,
+  writeServerOverride,
+} from './server_pref';
 import { loginErrorMessage, webClientLabel } from './auth';
 import { STYLES } from './styles';
 import {
@@ -247,6 +253,43 @@ function svgCloseIcon(): SVGSVGElement {
   return svg;
 }
 
+/** 设置图标（齿轮）：描边风格与 fb-close 一致。 */
+function svgGearIcon(): SVGSVGElement {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 20 20');
+  svg.setAttribute('width', '14');
+  svg.setAttribute('height', '14');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '1.6');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('aria-hidden', 'true');
+
+  const hub = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  hub.setAttribute('cx', '10');
+  hub.setAttribute('cy', '10');
+  hub.setAttribute('r', '2.4');
+  svg.append(hub);
+  for (const [x1, y1, x2, y2] of [
+    [10, 2.2, 10, 4.4],
+    [10, 15.6, 10, 17.8],
+    [2.2, 10, 4.4, 10],
+    [15.6, 10, 17.8, 10],
+    [4.5, 4.5, 6.1, 6.1],
+    [13.9, 13.9, 15.5, 15.5],
+    [4.5, 15.5, 6.1, 13.9],
+    [13.9, 6.1, 15.5, 4.5],
+  ]) {
+    const spoke = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    spoke.setAttribute('x1', String(x1));
+    spoke.setAttribute('y1', String(y1));
+    spoke.setAttribute('x2', String(x2));
+    spoke.setAttribute('y2', String(y2));
+    svg.append(spoke);
+  }
+  return svg;
+}
+
 export class FeedbackWidget extends HTMLElement {
   /** Shadow DOM 模式：默认 open；注册前可设 FeedbackWidget.shadowMode='closed'。 */
   static shadowMode: 'open' | 'closed' = 'open';
@@ -300,6 +343,23 @@ export class FeedbackWidget extends HTMLElement {
   private loginErrorEl!: HTMLParagraphElement;
   private loginConfirmBtn!: HTMLButtonElement;
   private loginCancelBtn!: HTMLButtonElement;
+
+  /** T6：面板主体（设置视图展开时整体隐藏）。 */
+  private body!: HTMLDivElement;
+  /** T6：服务器设置入口与视图。 */
+  private settingsBtn!: HTMLButtonElement;
+  private settingsView!: HTMLDivElement;
+  private settingsInput!: HTMLInputElement;
+  private settingsCurrent!: HTMLSpanElement;
+  private settingsDefaultRow!: HTMLParagraphElement;
+  private settingsDefaultText!: HTMLSpanElement;
+  private settingsErrorEl!: HTMLParagraphElement;
+  private settingsHintEl!: HTMLParagraphElement;
+  private settingsSaveBtn!: HTMLButtonElement;
+  private settingsRestoreBtn!: HTMLButtonElement;
+  private settingsCancelBtn!: HTMLButtonElement;
+  private settingsConfirmEl!: HTMLDivElement;
+  private settingsConfirmText!: HTMLParagraphElement;
 
   /** 日志附件区 */
   private logsArea!: HTMLDivElement;
@@ -456,6 +516,23 @@ export class FeedbackWidget extends HTMLElement {
     this._captureProvider = p;
   }
 
+  /**
+   * T6：本机选择的自定义服务器覆盖（已规范化地址）；null 表示使用宿主 api-base。
+   * 覆盖偏好按 localStorage 源 + appId + 规范化默认地址逐槽位隔离，
+   * 仅在构造/身份属性变化时加载，不反写宿主配置。
+   */
+  private serverOverride: string | null = null;
+  /** T6：本机偏好是否可写（读取或写入失败置 false，设置视图据此提示「仅本次生效」）。 */
+  private serverPrefWritable = true;
+  /** T6：最近一次加载覆盖所用的偏好键——断开重连 / 重复调用不重复读取，避免吞掉「仅本次生效」的会话内选择。 */
+  private serverOverrideKeyLoaded = '';
+  /** T6：设置视图是否展开（未登录也可进入）。 */
+  private settingsOpen = false;
+  /** T6：设置视图内的「确认切换」块是否展开（有草稿或结果未确认提交时先确认）。 */
+  private settingsConfirmOpen = false;
+  /** T6：等待确认的目标覆盖（null=恢复默认，undefined=无待确认切换）。 */
+  private pendingServerTarget: string | null | undefined = undefined;
+
   /** 令牌仅存组件实例内存；页面刷新后靠重新握手恢复。 */
   private accessToken: string | null = null;
   private tokenExpiresAt = 0;
@@ -484,6 +561,14 @@ export class FeedbackWidget extends HTMLElement {
   }
   set apiBase(v: string | null) {
     this.reflect('api-base', v);
+  }
+
+  /**
+   * T6：当前实际使用的服务器地址（只读）：
+   * 本机覆盖优先于宿主 `api-base`；未设置覆盖时返回宿主默认值。
+   */
+  get effectiveApiBase(): string | null {
+    return this.serverOverride ?? this.apiBase;
   }
 
   get appId(): string | null {
@@ -611,7 +696,10 @@ export class FeedbackWidget extends HTMLElement {
   close(): void {
     // 关闭面板：使尚未完成的登录接续与额度查询失效（已建立的登录态、
     // 草稿与截图不受影响），并取消额度定时查询；同时清除补发意图，
-    // 重新打开时按当前状态重新登记（T1-B）。
+    // 重新打开时按当前状态重新登记（T1-B）。设置视图一并收起。
+    this.settingsOpen = false;
+    this.settingsConfirmOpen = false;
+    this.pendingServerTarget = undefined;
     this.invalidateLogin();
     this.invalidateQuotaRefresh();
     this.quotaRefreshPending = false;
@@ -1023,6 +1111,8 @@ export class FeedbackWidget extends HTMLElement {
     if (!this.hasAttribute('side')) this.setAttribute('side', 'right');
     this.updateLauncherBottomCss();
     this.updateMetaInfo();
+    // T6：键未变则跳过——避免断开重连把「仅本次生效」的会话内选择覆盖回存储值
+    this.loadServerOverride();
 
     // 断开重连：截图字节保留在实例草稿中，重连时重建自己的预览 URL
     if (this.draft.screenshotBlob && !this.draft.screenshotUrl) {
@@ -1086,16 +1176,34 @@ export class FeedbackWidget extends HTMLElement {
 
   attributeChangedCallback(name: string, oldVal: string | null, newVal: string | null): void {
     if (name === 'api-base' && oldVal !== newVal) {
-      // 服务身份切换：先递增世代（在途请求全部作废），再清空属于旧服务的一切
+      // 服务身份切换：先递增世代（在途请求全部作废），再清空属于旧服务的一切。
+      // T6：偏好槽位随「规范化默认地址 + appId」变化——先按新键重读覆盖再统一重置；
+      // 设置视图展示的已是旧身份上下文，一并收起。
+      this.settingsOpen = false;
+      this.settingsConfirmOpen = false;
+      this.pendingServerTarget = undefined;
+      this.loadServerOverride();
       this.identityEpoch++;
       this.quotaRefreshPending = false; // 旧身份的补发意图一并清除（T1-B）
       this.resetForServiceSwitch();
     }
     if (name === 'app-id' && oldVal !== newVal) {
-      // 同一服务内的应用身份变化：令牌保留，草稿 / 捕获 / 结果 / 握手整体作废
+      // appId 槽位可能指向不同的实际服务；先加载新覆盖，再决定是否能保留令牌。
+      const previousEffectiveApiBase = this.effectiveApiBase;
+      this.settingsOpen = false;
+      this.settingsConfirmOpen = false;
+      this.pendingServerTarget = undefined;
+      this.loadServerOverride();
+      const nextEffectiveApiBase = this.effectiveApiBase;
       this.identityEpoch++;
       this.quotaRefreshPending = false;
-      this.resetForAppIdSwitch();
+      if (this.sameNormalizedBase(previousEffectiveApiBase, nextEffectiveApiBase)) {
+        // 同一服务内的应用身份变化：令牌保留，草稿 / 捕获 / 结果 / 握手整体作废
+        this.resetForAppIdSwitch();
+      } else {
+        // 新 appId 指向另一服务时，旧服务令牌必须一并清除。
+        this.resetForServiceSwitch();
+      }
     }
     if (name === 'launcher-bottom') {
       this.updateLauncherBottomCss();
@@ -1323,15 +1431,26 @@ export class FeedbackWidget extends HTMLElement {
     this.metaInfo.hidden = true;
     titleGroup.append(headerIcon, title, this.metaInfo);
 
+    // T6：头部右侧动作组——服务器设置（未登录也可进入）+ 关闭
+    const headerActions = el('div', 'fb-header-actions');
+    this.settingsBtn = el('button', 'fb-icon-btn fb-settings-btn');
+    this.settingsBtn.type = 'button';
+    this.settingsBtn.setAttribute('aria-label', '服务器设置');
+    this.settingsBtn.title = '服务器设置';
+    this.settingsBtn.append(svgGearIcon());
+    this.settingsBtn.addEventListener('click', () => this.openServerSettings());
+
     const closeBtn = el('button', 'fb-close');
     closeBtn.type = 'button';
     closeBtn.setAttribute('aria-label', '关闭反馈面板');
     closeBtn.append(svgCloseIcon());
     closeBtn.addEventListener('click', () => this.close());
-    header.append(titleGroup, closeBtn);
+    headerActions.append(this.settingsBtn, closeBtn);
+    header.append(titleGroup, headerActions);
 
     // 主体
     const body = el('div', 'fb-body');
+    this.body = body;
 
     // 截图区：图片预览与操作区**分开**。
     // 预览只在有截图时出现（无截图时连缩略图一起隐藏，避免空 src 破图占位）；
@@ -1507,7 +1626,7 @@ export class FeedbackWidget extends HTMLElement {
     this.logsArea.append(logsHeader, this.logStatusEl, this.logErrorEl, this.logsList);
 
     body.append(this.shotArea, promptLabel, textareaWrap, this.logsArea, this.statusRegion, this.errorRegion, footer);
-    this.panel.append(header, body);
+    this.panel.append(header, body, this.buildSettingsView());
 
     // 大图预览弹窗 (Zoom Modal)
     this.zoomModal = el('div', 'fb-zoom-modal');
@@ -1559,6 +1678,96 @@ export class FeedbackWidget extends HTMLElement {
 
     // 监听按键（支持 ⌘/Ctrl + Enter 提交）
     this.addEventListener('keydown', (ev: KeyboardEvent) => this.onKeydown(ev));
+  }
+
+  /**
+   * T6：服务器设置视图（面板内、与主体互斥显示；未登录也可进入）。
+   * 提供地址输入、保存、取消、恢复默认与当前有效地址展示；
+   * 地址变化且有草稿 / 未确认提交时先展开内联确认块。
+   */
+  private buildSettingsView(): HTMLDivElement {
+    this.settingsView = el('div', 'fb-settings');
+    this.settingsView.hidden = true;
+    this.settingsView.setAttribute('role', 'group');
+    this.settingsView.setAttribute('aria-label', '服务器设置');
+
+    const title = el('h3', 'fb-settings-title', 'Feedback 服务器');
+
+    const currentRow = el('p', 'fb-settings-line');
+    currentRow.append(el('span', 'fb-settings-label', '当前使用：'));
+    this.settingsCurrent = el('span', 'fb-settings-value');
+    currentRow.append(this.settingsCurrent);
+
+    this.settingsDefaultRow = el('p', 'fb-settings-line');
+    this.settingsDefaultRow.hidden = true;
+    this.settingsDefaultRow.append(el('span', 'fb-settings-label', '宿主默认：'));
+    this.settingsDefaultText = el('span', 'fb-settings-value');
+    this.settingsDefaultRow.append(this.settingsDefaultText);
+
+    const inputLabel = el('label', 'fb-prompt', '服务器地址');
+    inputLabel.setAttribute('for', 'fb-server-input');
+    this.settingsInput = el('input', 'fb-login-input fb-server-input');
+    this.settingsInput.id = 'fb-server-input';
+    this.settingsInput.type = 'url';
+    this.settingsInput.placeholder = 'https://fb.example.com';
+    this.settingsInput.autocomplete = 'off';
+    this.settingsInput.spellcheck = false;
+    this.settingsInput.setAttribute('aria-label', '服务器地址');
+    this.settingsInput.addEventListener('keydown', (ev: KeyboardEvent) => {
+      if (ev.key === 'Enter' && !ev.isComposing && ev.keyCode !== 229) {
+        ev.preventDefault();
+        this.saveServerSettings();
+      }
+    });
+
+    this.settingsErrorEl = el('p', 'fb-settings-error');
+    this.settingsErrorEl.hidden = true;
+    this.settingsHintEl = el('p', 'fb-settings-hint');
+    this.settingsHintEl.hidden = true;
+    this.settingsHintEl.setAttribute('role', 'status');
+
+    const actions = el('div', 'fb-settings-actions');
+    this.settingsSaveBtn = el('button', 'fb-btn-secondary fb-settings-save', '保存');
+    this.settingsSaveBtn.type = 'button';
+    this.settingsRestoreBtn = el('button', 'fb-btn-secondary fb-settings-restore', '恢复默认');
+    this.settingsRestoreBtn.type = 'button';
+    this.settingsCancelBtn = el('button', 'fb-btn-secondary fb-settings-cancel', '返回');
+    this.settingsCancelBtn.type = 'button';
+    actions.append(this.settingsSaveBtn, this.settingsRestoreBtn, this.settingsCancelBtn);
+
+    this.settingsConfirmEl = el('div', 'fb-settings-confirm');
+    this.settingsConfirmEl.hidden = true;
+    this.settingsConfirmText = el('p', 'fb-settings-confirm-text');
+    const confirmActions = el('div', 'fb-settings-actions');
+    const confirmOk = el('button', 'fb-btn-secondary fb-settings-confirm-ok', '清空并切换');
+    confirmOk.type = 'button';
+    const confirmCancel = el('button', 'fb-btn-secondary fb-settings-confirm-cancel', '取消');
+    confirmCancel.type = 'button';
+    confirmActions.append(confirmOk, confirmCancel);
+    this.settingsConfirmEl.append(this.settingsConfirmText, confirmActions);
+
+    const note = el('p', 'fb-footnote', '支持 http(s) 地址，可包含端口与部署路径前缀；仅本机记住选择。');
+
+    this.settingsView.append(
+      title,
+      currentRow,
+      this.settingsDefaultRow,
+      inputLabel,
+      this.settingsInput,
+      this.settingsErrorEl,
+      this.settingsHintEl,
+      actions,
+      this.settingsConfirmEl,
+      note,
+    );
+
+    this.settingsSaveBtn.addEventListener('click', () => this.saveServerSettings());
+    this.settingsRestoreBtn.addEventListener('click', () => this.requestRestoreDefault());
+    this.settingsCancelBtn.addEventListener('click', () => this.closeServerSettings());
+    confirmOk.addEventListener('click', () => this.confirmServerSwitch());
+    confirmCancel.addEventListener('click', () => this.cancelServerSwitch());
+
+    return this.settingsView;
   }
 
   // ---------- 日志附件处理 ----------
@@ -1831,7 +2040,7 @@ export class FeedbackWidget extends HTMLElement {
 
     // 身份世代：提交结果 / 错误只在身份未变时生效（旧服务的响应绝不写入新身份）
     const epoch = this.identityEpoch;
-    const apiBase = this.apiBase;
+    const apiBase = this.effectiveApiBase;
     const appId = this.appId;
     if (!apiBase || !appId) {
       this.failPhase('缺少必填配置：api-base / app-id');
@@ -2046,7 +2255,7 @@ export class FeedbackWidget extends HTMLElement {
     if (!this.polling) return;
     // 身份世代：轮询结果 / 错误只在身份未变时生效
     const epoch = this.identityEpoch;
-    const apiBase = this.apiBase;
+    const apiBase = this.effectiveApiBase;
     if (!apiBase || !this.tokenValid()) {
       this.polling = false;
       if (!this.tokenValid()) {
@@ -2196,7 +2405,7 @@ export class FeedbackWidget extends HTMLElement {
   private async refreshLastRecord(): Promise<void> {
     const id = this.lastFeedbackId;
     if (!id || this.refreshing) return;
-    const apiBase = this.apiBase;
+    const apiBase = this.effectiveApiBase;
     if (!apiBase) {
       this.failPhase('缺少必填配置：api-base / app-id');
       return;
@@ -2288,13 +2497,214 @@ export class FeedbackWidget extends HTMLElement {
     }
   }
 
+  // ---------- 服务器设置（T6） ----------
+
+  /** 按当前（appId, api-base）槽位读取本机覆盖；键未变时跳过，保留会话内未落盘的选择。 */
+  private loadServerOverride(): void {
+    const key = serverOverrideStorageKey(this.appId ?? '', this.apiBase ?? '');
+    if (key === this.serverOverrideKeyLoaded) return;
+    this.serverOverrideKeyLoaded = key;
+    try {
+      const raw = window.localStorage.getItem(key);
+      if (raw === null) {
+        this.serverOverride = null;
+        return;
+      }
+      const normalized = normalizeServerBase(raw);
+      // 所存值非法（旧格式 / 手改）视为无覆盖，绝不静默应用
+      this.serverOverride = normalized.ok ? normalized.base : null;
+    } catch {
+      // 存储不可用（如沙箱 iframe 禁用 localStorage）：按无覆盖处理并标记不可写，
+      // 后续保存会提示「仅本次生效」
+      this.serverOverride = null;
+      this.serverPrefWritable = false;
+    }
+  }
+
+  /** 两个地址规范化后是否相同（不可规范化的按去空白原值比较）。 */
+  private sameNormalizedBase(a: string | null, b: string | null): boolean {
+    if (a === null || b === null) return a === b;
+    const na = normalizeServerBase(a);
+    const nb = normalizeServerBase(b);
+    return (na.ok ? na.base : a.trim()) === (nb.ok ? nb.base : b.trim());
+  }
+
+  private pageIsHttps(): boolean {
+    return (
+      typeof window !== 'undefined' &&
+      typeof window.location !== 'undefined' &&
+      window.location.protocol === 'https:'
+    );
+  }
+
+  private openServerSettings(): void {
+    this.settingsOpen = true;
+    this.settingsConfirmOpen = false;
+    this.pendingServerTarget = undefined;
+    this.settingsInput.value = this.effectiveApiBase ?? '';
+    this.settingsErrorEl.hidden = true;
+    this.settingsErrorEl.textContent = '';
+    this.settingsHintEl.hidden = true;
+    this.settingsHintEl.textContent = '';
+    this.syncUi();
+    this.settingsInput.focus();
+  }
+
+  private closeServerSettings(): void {
+    this.settingsOpen = false;
+    this.settingsConfirmOpen = false;
+    this.pendingServerTarget = undefined;
+    this.syncUi();
+  }
+
+  private setSettingsHint(text: string): void {
+    this.settingsHintEl.textContent = text;
+    this.settingsHintEl.hidden = text === '';
+  }
+
+  /**
+   * 写入 / 清除本机覆盖偏好；返回是否落盘成功（失败时调用方提示「仅本次生效」）。
+   * 偏好只存地址——不持久化草稿、密码或令牌。
+   */
+  private persistServerOverride(value: string | null): boolean {
+    const ok = writeServerOverride(this.appId ?? '', this.apiBase ?? '', value);
+    if (!ok) this.serverPrefWritable = false;
+    return ok;
+  }
+
+  /**
+   * 保存设置视图输入：校验 → 与当前有效地址相同仅落盘（不触发身份重置）→
+   * 不同且有草稿 / 未确认提交时先展开确认块 → 确认后切换。
+   */
+  private saveServerSettings(): void {
+    const res = normalizeServerBase(this.settingsInput.value, { pageIsHttps: this.pageIsHttps() });
+    if (!res.ok) {
+      this.settingsErrorEl.textContent = res.reason;
+      this.settingsErrorEl.hidden = false;
+      this.setSettingsHint('');
+      return;
+    }
+    this.settingsErrorEl.hidden = true;
+    this.settingsErrorEl.textContent = '';
+    // 输入与宿主默认地址相同 → 记为「无覆盖」（与「恢复默认」等价）
+    const next = this.sameNormalizedBase(res.base, this.apiBase) ? null : res.base;
+    const targetEffective = next ?? this.apiBase;
+    if (this.sameNormalizedBase(targetEffective, this.effectiveApiBase)) {
+      const persisted = this.persistServerOverride(next);
+      this.serverOverride = next;
+      this.setSettingsHint(persisted ? '已保存。' : '服务器地址仅本次生效（偏好未能保存到本机）。');
+      this.syncUi();
+      return;
+    }
+    this.requestServerSwitch(next);
+  }
+
+  /** 「恢复默认」：与保存共用确认与提交流程，目标覆盖为 null。 */
+  private requestRestoreDefault(): void {
+    if (this.sameNormalizedBase(this.apiBase, this.effectiveApiBase)) return; // 未覆盖
+    this.requestServerSwitch(null);
+  }
+
+  /** 地址即将变化：有草稿或结果未确认提交时先展开内联确认块，否则直接切换。 */
+  private requestServerSwitch(next: string | null): void {
+    const hasUnconfirmed =
+      this.unconfirmedRequest !== null ||
+      this.submitSnapshot?.unknownOutcome === true ||
+      this.phase === 'submitting';
+    const needConfirm = this.isDraftDirty() || hasUnconfirmed || this.polling;
+    if (needConfirm) {
+      this.settingsConfirmOpen = true;
+      this.pendingServerTarget = next;
+      this.settingsConfirmText.textContent = hasUnconfirmed
+        ? '切换服务器将清空当前草稿（文字、截图与日志）。已有一条提交的结果尚未确认，旧服务器可能已接收——切换不会撤回，也不会自动向新服务器重发。'
+        : '切换服务器将清空当前草稿（文字、截图与日志）。';
+      this.syncUi();
+      return;
+    }
+    this.commitServerSwitch(next);
+  }
+
+  private confirmServerSwitch(): void {
+    if (this.pendingServerTarget === undefined) return;
+    const next = this.pendingServerTarget;
+    this.pendingServerTarget = undefined;
+    this.commitServerSwitch(next);
+  }
+
+  private cancelServerSwitch(): void {
+    this.settingsConfirmOpen = false;
+    this.pendingServerTarget = undefined;
+    this.syncUi();
+  }
+
+  /**
+   * 应用覆盖并切换身份：相同规范化地址不触发重置由调用方保证；
+   * 这里落盘偏好 → epoch 递增作废旧服务在途请求 → 完整服务切换重置 → 探测连通性。
+   */
+  private commitServerSwitch(next: string | null): void {
+    const persisted = this.persistServerOverride(next);
+    this.settingsConfirmOpen = false;
+    this.pendingServerTarget = undefined;
+    this.serverOverride = next;
+    // 与 attributeChangedCallback('api-base') 同一条完整重置路径：令牌 / 草稿 /
+    // 截图 / 日志 / 快照 / 幂等键 / 轮询 / 握手全部作废，旧服务迟到响应由 epoch 丢弃。
+    this.identityEpoch++;
+    this.quotaRefreshPending = false;
+    this.resetForServiceSwitch();
+    // 切换完成后停留在设置视图展示结果与连通性提示
+    this.settingsOpen = true;
+    this.setSettingsHint(
+      persisted ? '已保存。' : '服务器地址已切换，但仅本次生效（偏好未能保存到本机）。',
+    );
+    this.syncUi();
+    void this.probeServer(this.effectiveApiBase);
+  }
+
+  /**
+   * 保存后探测新地址连通性（GET /healthz，不带凭据）：
+   * 失败只提示，不回切——连接失败不自动换回其他服务器（T6）。
+   */
+  private async probeServer(base: string | null): Promise<void> {
+    if (!base) return;
+    const epoch = this.identityEpoch;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    try {
+      await fetch(joinApi(base, '/healthz'), {
+        method: 'GET',
+        signal: controller.signal,
+        credentials: 'omit',
+      });
+    } catch {
+      if (epoch === this.identityEpoch && this.settingsOpen) {
+        this.setSettingsHint('已保存，但暂时无法连接该服务器，请确认地址可用（不会自动切回）。');
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** 设置视图的只读展示同步（当前有效地址 / 宿主默认 / 确认块可见性）。 */
+  private syncSettingsUi(): void {
+    if (!this.settingsView) return;
+    this.settingsView.hidden = !this.settingsOpen;
+    if (this.body) this.body.hidden = this.settingsOpen;
+    this.settingsCurrent.textContent = this.effectiveApiBase ?? '—';
+    const def = this.apiBase;
+    const overridden = this.serverOverride !== null;
+    this.settingsDefaultRow.hidden = !overridden || def === null;
+    this.settingsDefaultText.textContent = overridden ? (def ?? '') : '';
+    this.settingsRestoreBtn.disabled = !overridden;
+    this.settingsConfirmEl.hidden = !this.settingsConfirmOpen;
+  }
+
   // ---------- 面板内登录 ----------
 
   private pendingSubmit = false;
 
   /** 展开面板内账号密码表单（不打开新窗口）；pendingSubmit=true 时登录成功后只提交一次。 */
   private beginLogin(pendingSubmit: boolean): void {
-    const apiBase = this.apiBase;
+    const apiBase = this.effectiveApiBase;
     const appId = this.appId;
     if (!apiBase || !appId) {
       this.failPhase('缺少必填配置：api-base / app-id');
@@ -2339,7 +2749,7 @@ export class FeedbackWidget extends HTMLElement {
 
   private async doLogin(): Promise<void> {
     if (this.loginBusy) return;
-    const apiBase = this.apiBase;
+    const apiBase = this.effectiveApiBase;
     const appId = this.appId;
     if (!apiBase || !appId) {
       this.failPhase('缺少必填配置：api-base / app-id');
@@ -2453,7 +2863,7 @@ export class FeedbackWidget extends HTMLElement {
    * 被旧查询 / 登录忙碌挡下时登记「待立即刷新」，结束后立即补发（T1-B）。
    */
   private async refreshQuota(): Promise<void> {
-    const apiBase = this.apiBase;
+    const apiBase = this.effectiveApiBase;
     if (!apiBase || !this.tokenValid() || this.loginBusy || this.quotaInFlight) {
       // T1-B：打开面板 / 回到前台的刷新被旧查询或登录忙碌挡下时登记意图，
       // 不得丢弃；未登录 / 面板未打开 / 不在可见页时不登记（相应事件会重新登记）。
@@ -2615,6 +3025,9 @@ export class FeedbackWidget extends HTMLElement {
 
     // 日志区同步：列表 / 数量 / 按钮状态
     this.syncLogsUi();
+
+    // T6：设置视图与主体互斥显示
+    this.syncSettingsUi();
 
     // 禁用态
     this.textarea.disabled = this.phase === 'submitting';
@@ -2810,7 +3223,7 @@ export class FeedbackWidget extends HTMLElement {
       }
     }
 
-    // Esc 关闭：先关闭日志文本预览，再关闭全屏截图预览，最后关闭反馈面板
+    // Esc 关闭：先关日志文本预览，再关全屏截图预览，再收设置视图，最后关闭反馈面板
     if (ev.key === 'Escape') {
       if (this.logPreviewModal && this.logPreviewModal.classList.contains('is-open')) {
         ev.preventDefault();
@@ -2820,6 +3233,11 @@ export class FeedbackWidget extends HTMLElement {
       if (this.zoomModal && this.zoomModal.classList.contains('is-open')) {
         ev.preventDefault();
         this.closeZoomModal();
+        return;
+      }
+      if (this.settingsOpen) {
+        ev.preventDefault();
+        this.closeServerSettings();
         return;
       }
       if (this.openState) {
@@ -2859,7 +3277,7 @@ export class FeedbackWidget extends HTMLElement {
 
   private focusables(): HTMLElement[] {
     const nodes = this.panel.querySelectorAll<HTMLElement>(
-      'button:not([disabled]), textarea:not([disabled]), a[href], [tabindex="0"]',
+      'button:not([disabled]), textarea:not([disabled]), input:not([disabled]), a[href], [tabindex="0"]',
     );
     // `[hidden]` 只是 display:none（见 styles.ts 的兜底规则），元素仍会被选择器选中：
     // 不排除隐藏节点，窄屏焦点锁会把焦点交给不可见元素（表现为焦点凭空消失）。

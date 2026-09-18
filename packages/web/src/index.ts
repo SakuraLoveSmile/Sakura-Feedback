@@ -20,6 +20,8 @@ export type {
   LoginResponse,
   SessionResponse,
 } from './api';
+export { normalizeServerBase } from './server_pref';
+export type { NormalizeServerBaseResult } from './server_pref';
 
 /** 元素标签名。 */
 export const FEEDBACK_ELEMENT_TAG = 'feedback-widget';

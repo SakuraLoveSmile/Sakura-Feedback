@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, api, type SessionUser } from "../api.ts";
+import { Field, InlineError } from "../ui.tsx";
 
 /**
  * T2-A「管理员设置」：修改当前登录管理员自己的用户名与密码。
@@ -59,56 +60,65 @@ export default function SettingsView({ onCredentialsUpdated }: { onCredentialsUp
 
   return (
     <div>
-      {error && <p className="err">{error}</p>}
-      <p className="muted" style={{ marginTop: 0 }}>
-        这里只能修改当前登录管理员自己的用户名与密码。保存成功后该账号全部会话（含当前）立即失效，需要重新登录。
-      </p>
+      <div className="page-header">
+        <div>
+          <h1>管理员设置</h1>
+          <div className="sub">
+            这里只能修改当前登录管理员自己的用户名与密码。保存成功后该账号全部会话（含当前）立即失效，需要重新登录。
+          </div>
+        </div>
+      </div>
+      {error && <InlineError message={error} />}
       <form className="card" style={{ maxWidth: 420 }} onSubmit={submit}>
-        <div className="field">
-          <label htmlFor="me-username">用户名</label>
-          <input
-            id="me-username"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            autoComplete="username"
-            required
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="me-current">当前密码</label>
-          <input
-            id="me-current"
-            type="password"
-            value={currentPassword}
-            onChange={(e) => setCurrentPassword(e.target.value)}
-            autoComplete="current-password"
-            required
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="me-new">新密码（留空表示只改用户名）</label>
-          <input
-            id="me-new"
-            type="password"
-            value={newPassword}
-            onChange={(e) => setNewPassword(e.target.value)}
-            autoComplete="new-password"
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="me-confirm">确认新密码</label>
-          <input
-            id="me-confirm"
-            type="password"
-            value={confirmPassword}
-            onChange={(e) => setConfirmPassword(e.target.value)}
-            autoComplete="new-password"
-          />
-        </div>
+        <Field id="me-username" label="用户名">
+          {(ctl) => (
+            <input
+              {...ctl}
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              autoComplete="username"
+              required
+            />
+          )}
+        </Field>
+        <Field id="me-current" label="当前密码">
+          {(ctl) => (
+            <input
+              {...ctl}
+              type="password"
+              value={currentPassword}
+              onChange={(e) => setCurrentPassword(e.target.value)}
+              autoComplete="current-password"
+              required
+            />
+          )}
+        </Field>
+        <Field id="me-new" label="新密码（留空表示只改用户名）">
+          {(ctl) => (
+            <input
+              {...ctl}
+              type="password"
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              autoComplete="new-password"
+            />
+          )}
+        </Field>
+        <Field id="me-confirm" label="确认新密码">
+          {(ctl) => (
+            <input
+              {...ctl}
+              type="password"
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              autoComplete="new-password"
+            />
+          )}
+        </Field>
         <p className="muted" style={{ marginTop: 0 }}>
           新密码 8..200 字符，首尾空格也算字符；用户名 1..100 字符。
         </p>
-        <button className="primary" type="submit" disabled={saving}>
+        <button className="btn primary" type="submit" disabled={saving}>
           {saving ? "保存中…" : "保存"}
         </button>
       </form>

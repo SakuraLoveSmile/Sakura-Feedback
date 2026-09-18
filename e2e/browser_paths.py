@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import re
 import time
@@ -344,7 +345,7 @@ def probe(label, arr, rect, expect, inset, deps, prefix="px"):
 
 
 def ai_call_for(deps, needle):
-    calls = deps["plain_get"]("http://127.0.0.1:8899/__mock/ai-calls")
+    calls = deps["plain_get"](f"http://127.0.0.1:{os.environ.get('E2E_AI_PORT', '8899')}/__mock/ai-calls")
     return [c for c in calls.get("calls", []) if needle in (c.get("userText") or "")]
 
 
@@ -432,7 +433,7 @@ def p1_orb_drag(deps):
     check("P1 截图里没有组件 UI 的强调色像素", accent == 0, f"count={accent}")
 
     # 关闭面板 → 灵感球必须重新出现在原位置（回位可观测）
-    page.locator(".fb-close").click()
+    page.locator('.fb-panel .fb-close[aria-label="关闭反馈面板"]').click()
     page.locator(".fb-panel").wait_for(state="hidden", timeout=8000)
     restored = orb_rect(page)
     png_probe.dump("P1 面板关闭后的灵感球状态", restored)
@@ -483,7 +484,7 @@ def p1_orb_drag(deps):
     visible_probe("P1 服务端 PNG landmark", srv_arr, landmark, RED_RGBA, deps, "P1srv")
     probe("P1 服务端 PNG 灵感球原位区域", srv_arr, original_orb_rect, WHITE_RGBA, 2, deps, "P1srv")
 
-    kstate = deps["plain_get"]("http://127.0.0.1:8898/__mock/state")
+    kstate = deps["plain_get"](f"http://127.0.0.1:{os.environ.get('E2E_KANEO_PORT', '8898')}/__mock/state")
     png_probe.dump("P1 Kaneo 图文归档状态",
                    {"assetKeys": kstate.get("assetKeys"), "commentTasks": list((kstate.get("comments") or {}).keys()),
                     "uploadAuthLeaks": kstate.get("uploadAuthLeaks")})
@@ -918,7 +919,7 @@ def p5_login_close_reopen(deps):
         page.locator(".fb-login-confirm").click()
 
     # 登录请求已在途（被延迟）：立刻用真实点击关闭面板。
-    page.locator(".fb-close").click()
+    page.locator('.fb-panel .fb-close[aria-label="关闭反馈面板"]').click()
     page.locator(".fb-panel").wait_for(state="hidden", timeout=5000)
     page.wait_for_timeout(3200)  # 等迟到的登录响应真正回来
 
@@ -961,7 +962,7 @@ def p5_login_close_reopen(deps):
     check("P5 已登录面板显示今日剩余次数", bool(quota_text) and "今日剩余" in quota_text, str(quota_text))
 
     closed_mark = rec.mark()
-    page.locator(".fb-close").click()
+    page.locator('.fb-panel .fb-close[aria-label="关闭反馈面板"]').click()
     page.locator(".fb-panel").wait_for(state="hidden", timeout=5000)
     page.wait_for_timeout(1500)
     check("P5 关闭面板后不再查询额度", _session_calls(rec, closed_mark) == 0,
@@ -1027,14 +1028,14 @@ def p8_slow_session_close_reopen(deps):
     # 关闭 → 重开：发出慢会话查询 A（页面侧挂起，延迟 2.5s 后才真正出网）。
     # 注意：页面侧延迟期间网络记录器看不到该请求，断言全部围绕
     # 「A 出网时刻（重开 #1 后约 2.5s）」编排。
-    page.locator(".fb-close").click()
+    page.locator('.fb-panel .fb-close[aria-label="关闭反馈面板"]').click()
     page.locator(".fb-panel").wait_for(state="hidden", timeout=5000)
     page.locator(launcher).click()
     page.locator(".fb-panel").wait_for(state="visible", timeout=30000)
     page.wait_for_timeout(300)  # A 的 fetch 已在页面侧挂起（尚未出网）
 
     # A 在途时再次关闭 → 重开：不得并发，只能登记"待立即刷新"。
-    page.locator(".fb-close").click()
+    page.locator('.fb-panel .fb-close[aria-label="关闭反馈面板"]').click()
     page.locator(".fb-panel").wait_for(state="hidden", timeout=5000)
     mark_reopen = rec.mark()
     page.locator(launcher).click()
@@ -1402,6 +1403,342 @@ def p7_manual_capture_narrow_keyboard(deps):
     page.close()
 
 
+# ---------------- P9：多 DPR / 视口 / 滚动遮罩矩阵（T3 真实浏览器验证） ----------------
+#
+# 宿主页：e2e/pages/mask-dpr.html（视口自适应：密码框、遮罩块、贴边与角落敏感区）、
+#         e2e/pages/mask-scroll.html（300vh 可滚动文档：跨上下边缘的密码框、文档底部贴边）。
+# 每个组合用独立 browser context（device_scale_factor 是 context 级选项），
+# 截图产物直接解码成 RGBA 数组做像素断言：敏感区必须全部为不透明 #6E6E73，
+# 敏感原色（品红/青）一个像素都不剩，周围正常内容与组件强调色按规则校验。
+
+
+def _capture_scale(w: int, h: int, dpr: float) -> float:
+    """与 packages/web/src/capture.ts computeCaptureScale 同一公式。"""
+    return min(dpr, 2.0, 2048 / max(w, h), math.sqrt(4_000_000 / (w * h)))
+
+
+def _expect_output(w: int, h: int, dpr: float) -> tuple[int, int]:
+    """html2canvas-pro: canvas.width = Math.floor(width * scale)（dist:10549）。"""
+    s = _capture_scale(w, h, dpr)
+    return math.floor(w * s), math.floor(h * s)
+
+
+def _srect(rect: dict, sx: float, sy: float) -> dict:
+    """CSS 视口坐标 → 输出像素坐标（缩放比 = 输出尺寸 / 逻辑视口）。"""
+    return {"x": rect["x"] * sx, "y": rect["y"] * sy,
+            "width": rect["width"] * sx, "height": rect["height"] * sy}
+
+
+def _retake_after_scroll(page, deps, scroll_y: int) -> tuple[bytes, object, dict]:
+    """滚动到指定位置 → 点「重新截图」→ 等新的预览 blob → 返回解码 PNG 与最新视口矩形。"""
+    prev = page.evaluate("() => window.__fbE2E.thumbSrc()")
+    page.evaluate("(y) => window.scrollTo(0, y)", scroll_y)
+    page.wait_for_timeout(200)  # 让真实布局/滚动事件稳定（getBoundingClientRect 反映新位置）
+    page.locator(".fb-btn-retake").click()
+    page.wait_for_function(
+        "(prev) => { const s = window.__fbE2E.thumbSrc(); return !!s && s !== prev; }",
+        arg=prev,
+        timeout=60000,
+    )
+    page.wait_for_timeout(400)
+    raw, arr = client_png(page, deps)
+    rects = page.evaluate("() => window.__fbE2E.rects()")
+    return raw, arr, rects
+
+
+def _assert_masked_page(deps, page, arr, rects, tag, mask_ids, decoy_ids, inset=3):
+    """对一张已解码截图做整组像素断言：遮罩区全覆盖、敏感原色清零、正常内容保留。"""
+    w, h = png_probe.size(arr)
+    vp = page.evaluate("() => ({w: innerWidth, h: innerHeight})")
+    sx, sy = w / vp["w"], h / vp["h"]
+    inset_px = max(inset, int(math.ceil(inset * sx)))
+    for mid in mask_ids:
+        probe(f"{tag} 遮罩[{mid}]", arr, _srect(rects[mid], sx, sy), MASK_RGBA, inset_px, deps, tag)
+    for did, color in decoy_ids:
+        visible_probe(f"{tag} 正常内容[{did}]", arr, _srect(rects[did], sx, sy), color, deps, tag)
+    mag = png_probe.color_count(arr, MAGENTA_RGBA)
+    cyan = png_probe.color_count(arr, CYAN_RGBA)
+    png_probe.dump(f"{tag} 敏感原色像素数", {"magenta_ff00ff": mag, "cyan_00ffff": cyan})
+    deps["check"](f"{tag} 敏感原色一个像素都不剩", mag == 0 and cyan == 0,
+                  f"magenta={mag} cyan={cyan}")
+    accent = png_probe.color_count(arr, ACCENT_RGBA)
+    deps["check"](f"{tag} 截图不含组件 UI（强调色像素为 0）", accent == 0, f"count={accent}")
+
+
+def p9_masking_dpr(deps):
+    step, check = deps["step"], deps["check"]
+    step("P9 遮罩矩阵：1440x900@dpr1/2、390x844@dpr1/3、2560x1440@dpr1 + 滚动/贴边/无敏感区")
+    combos = [(1440, 900, 1), (1440, 900, 2), (390, 844, 1), (390, 844, 3), (2560, 1440, 1)]
+
+    for w, h, dpr in combos:
+        tag = f"P9-{w}x{h}@d{dpr}"
+        ctx = deps["browser"].new_context(
+            viewport={"width": w, "height": h}, device_scale_factor=dpr
+        )
+        rec = NetRecorder(ctx)
+        deps["rec"] = rec
+        try:
+            page = ctx.new_page()
+            page.goto(f"{deps['pages']}/mask-dpr.html", wait_until="networkidle")
+            vp = page.evaluate(
+                "() => ({w: innerWidth, h: innerHeight, dpr: devicePixelRatio, sy: scrollY})"
+            )
+            check(f"{tag} 视口/DPR 符合预期且未滚动",
+                  vp == {"w": w, "h": h, "dpr": dpr, "sy": 0}, str(vp))
+
+            drag_orb(page)
+            page.locator(".fb-screenshot-wrap").wait_for(state="visible", timeout=30000)
+            raw, arr = client_png(page, deps)
+            ow, oh = png_probe.size(arr)
+            ew, eh = _expect_output(w, h, dpr)
+            png_probe.dump(
+                f"{tag} 客户端 PNG",
+                {"bytes": len(raw), "sha256": png_probe.sha256(raw),
+                 "size": [ow, oh], "scale": round(_capture_scale(w, h, dpr), 6)},
+            )
+            check(f"{tag} 输出尺寸 == floor(视口×captureScale) = {ew}x{eh}",
+                  (ow, oh) == (ew, eh), f"{ow}x{oh} != {ew}x{eh}")
+            png_probe.save(arr, None, os.path.join(deps["shots_dir"], f"{tag}-client.png"))
+            png_probe.dump(f"{tag} 客户端 PNG 颜色直方图", png_probe.histogram(arr, 8))
+
+            rects = page.evaluate("() => window.__fbE2E.rects()")
+            png_probe.dump(f"{tag} 宿主元素视口矩形", rects)
+            _assert_masked_page(
+                deps, page, arr, rects, tag,
+                mask_ids=["pw-top", "secret-card", "pw-bottom", "secret-edge"],
+                decoy_ids=[("decoy-green", GREEN_RGBA), ("decoy-blue", BLUE_RGBA)],
+            )
+
+            # 高 DPR（dpr3 → scale=2 输出 780x1688）：提交后核对服务端落库 PNG
+            if dpr == 3:
+                page.locator(".fb-textarea").fill("高 DPR 遮罩验证：服务端落库图必须与预览一致")
+                res = submit_with_login(page, deps, rec=rec)
+                fid = res["fid"]
+                check(f"{tag} 服务端返回 feedbackId", bool(fid), str(fid))
+                srv_bytes = deps["api_bytes"](f"/api/admin/feedback/{fid}/screenshot")
+                srv_arr = png_probe.decode(srv_bytes)
+                png_probe.dump(
+                    f"{tag} 服务端落库 PNG",
+                    {"bytes": len(srv_bytes), "sha256": png_probe.sha256(srv_bytes),
+                     "size": list(png_probe.size(srv_arr))},
+                )
+                check(f"{tag} 服务端落库 PNG 与本地预览逐像素一致",
+                      same_pixels(srv_arr, arr), pixel_sha(srv_arr) + " vs " + pixel_sha(arr))
+                png_probe.save(srv_arr, None, os.path.join(deps["shots_dir"], f"{tag}-server.png"))
+                srv_rects = page.evaluate("() => window.__fbE2E.rects()")
+                _assert_masked_page(
+                    deps, page, srv_arr, srv_rects, f"{tag}srv",
+                    mask_ids=["pw-top", "secret-card", "pw-bottom", "secret-edge"],
+                    decoy_ids=[("decoy-green", GREEN_RGBA), ("decoy-blue", BLUE_RGBA)],
+                )
+            page.close()
+
+            # 无敏感区页面（dpr=2 组合顺带验证）：截图有效、零遮罩色、内容完整
+            if (w, h, dpr) == (1440, 900, 2):
+                off = ctx.new_page()
+                off.goto(f"{deps['pages']}/off.html", wait_until="networkidle")
+                off.locator(".fb-fab").click()
+                off.locator(".fb-panel").wait_for(state="visible", timeout=60000)
+                off.locator(".fb-textarea").fill("无敏感区占位文字")
+                off.locator(".fb-btn-capture").click()
+                off.locator(".fb-screenshot-wrap").wait_for(state="visible", timeout=60000)
+                off.wait_for_timeout(400)
+                raw_n, arr_n = client_png(off, deps)
+                nw, nh = png_probe.size(arr_n)
+                check("P9-无敏感区 输出尺寸 2048x1280（dpr2 受 2048 边长限制）",
+                      (nw, nh) == (2048, 1280), f"{nw}x{nh}")
+                mask_px = png_probe.color_count(arr_n, MASK_RGBA)
+                png_probe.dump("P9-无敏感区 遮罩色像素数", {"count": mask_px})
+                check("P9-无敏感区 整图没有一个遮罩色像素（无敏感区不误遮）",
+                      mask_px == 0, f"count={mask_px}")
+                check("P9-无敏感区 截图是有效非空 PNG", len(raw_n) > 1024, f"{len(raw_n)}B")
+                png_probe.save(arr_n, None, os.path.join(deps["shots_dir"], "P9-nosensitive.png"))
+                off.close()
+
+            # 滚动 + 上下边缘（dpr=2 组合顺带验证）：跨边缘密码框与文档底部贴边
+            if (w, h, dpr) == (1440, 900, 2):
+                spage = ctx.new_page()
+                spage.goto(f"{deps['pages']}/mask-scroll.html", wait_until="networkidle")
+                drag_orb(spage)
+                spage.locator(".fb-screenshot-wrap").wait_for(state="visible", timeout=30000)
+
+                # scroll=0：密码框在视口底缘只露出 22px（部分可见 → 可见部分必须遮）
+                raw0, arr0 = client_png(spage, deps)
+                rects0 = spage.evaluate("() => window.__fbE2E.rects()")
+                png_probe.dump("P9-滚动(scroll=0) 视口矩形", rects0)
+                check("P9-滚动(scroll=0) 输出尺寸 2048x1280", png_probe.size(arr0) == (2048, 1280),
+                      str(png_probe.size(arr0)))
+                _assert_masked_page(
+                    deps, spage, arr0, rects0, "P9-滚动(scroll=0)",
+                    mask_ids=["pw-straddle"],
+                    decoy_ids=[("decoy-top", GREEN_RGBA)],
+                )
+                png_probe.save(arr0, None, os.path.join(deps["shots_dir"], "P9-scroll-0.png"))
+
+                # scroll=100vh：密码框跨视口顶缘（y<0 被裁）、mid 遮罩块可见
+                raw1, arr1, rects1 = _retake_after_scroll(spage, deps, h)
+                png_probe.dump("P9-滚动(scroll=100vh) 视口矩形", rects1)
+                check("P9-滚动(scroll=100vh) 输出尺寸 2048x1280",
+                      png_probe.size(arr1) == (2048, 1280), str(png_probe.size(arr1)))
+                _assert_masked_page(
+                    deps, spage, arr1, rects1, "P9-滚动(scroll=100vh)",
+                    mask_ids=["pw-straddle", "secret-mid"],
+                    decoy_ids=[("decoy-green", GREEN_RGBA)],
+                )
+                png_probe.save(arr1, None, os.path.join(deps["shots_dir"], "P9-scroll-100vh.png"))
+
+                # scroll=max（文档底部）：右下贴边遮罩块 + 底部密码框 + 左下正常块
+                max_scroll = spage.evaluate("() => document.body.scrollHeight - innerHeight")
+                raw2, arr2, rects2 = _retake_after_scroll(spage, deps, max_scroll)
+                png_probe.dump("P9-滚动(scroll=max) 视口矩形", rects2)
+                check("P9-滚动(scroll=max) 输出尺寸 2048x1280",
+                      png_probe.size(arr2) == (2048, 1280), str(png_probe.size(arr2)))
+                _assert_masked_page(
+                    deps, spage, arr2, rects2, "P9-滚动(scroll=max)",
+                    mask_ids=["secret-doc-bottom", "pw-doc-bottom"],
+                    decoy_ids=[("decoy-blue", BLUE_RGBA)],
+                )
+                png_probe.save(arr2, None, os.path.join(deps["shots_dir"], "P9-scroll-max.png"))
+                spage.close()
+        finally:
+            ctx.close()
+
+
+# ---------------- P10：自定义服务器覆盖（面板内设置，双服务 A→B→A） ----------------
+#
+# T6/T7：用户在设置视图覆盖 Feedback 服务器地址——规范化、草稿确认、
+# 同址不重置、本机持久化、按身份隔离令牌、恢复默认，全部在真实浏览器 +
+# 两个隔离服务上验证。
+
+
+def p10_server_override(deps):
+    step, check = deps["step"], deps["check"]
+    step("P10 设置视图自定义服务器：A→B→A、规范化、确认、持久化、令牌隔离")
+    eff = "() => document.querySelector('feedback-widget').effectiveApiBase"
+
+    # 专用账号：A→B→A 需要 3 次登录，避免与主链路共享登录限流计数。
+    saved_user, saved_pass = deps["panel_user"], deps["panel_pass"]
+    deps["panel_user"], deps["panel_pass"] = deps["panel_user3"], deps["panel_pass3"]
+
+    ctx, rec, page = _fresh_login_context(deps, "P10")
+    deps["rec"] = rec
+    try:
+        # ---- 先在 A(8787) 登录并提交，拿到 A 的令牌 ----
+        page.locator(".fb-textarea").fill("A 服务的首次提交")
+        first = submit_with_login(page, deps, rec=rec)
+        check("P10 A 服务提交被接收", bool(first["fid"]), str(first["fid"]))
+        token_a = first["token"]
+        check("P10 A 服务签发令牌", bool(token_a), str(token_a))
+
+        # ---- 未关闭面板即可进入设置；异址 + 草稿 → 确认块 ----
+        page.locator(".fb-textarea").fill("切服前的草稿")
+        page.locator(".fb-settings-btn").click()
+        page.locator(".fb-settings").wait_for(state="visible", timeout=15000)
+        check("P10 设置视图展示当前有效地址",
+              deps["service"] in page.locator(".fb-settings-value").first.inner_text(),
+              page.locator(".fb-settings-value").first.inner_text())
+
+        # 带空白 + 末尾斜杠的输入必须被规范化
+        page.locator(".fb-server-input").fill(f"  {deps['service2']}/  ")
+        page.locator(".fb-settings-save").click()
+        page.locator(".fb-settings-confirm").wait_for(state="visible", timeout=15000)
+        check("P10 有草稿时切换需要确认", True)
+
+        # 取消：草稿与有效地址原样保留
+        page.locator(".fb-settings-confirm-cancel").click()
+        page.locator(".fb-settings-cancel").click()
+        check("P10 取消切换后草稿保留",
+              page.locator(".fb-textarea").input_value() == "切服前的草稿",
+              page.locator(".fb-textarea").input_value())
+        check("P10 取消后有效地址未变", page.evaluate(eff) == deps["service"],
+              page.evaluate(eff))
+
+        # 确认切换：草稿清空、有效地址变为规范化后的 B
+        page.locator(".fb-settings-btn").click()
+        page.locator(".fb-server-input").fill(f"{deps['service2']}/")
+        page.locator(".fb-settings-save").click()
+        page.locator(".fb-settings-confirm").wait_for(state="visible", timeout=15000)
+        page.locator(".fb-settings-confirm-ok").click()
+        page.wait_for_function(
+            f"() => document.querySelector('feedback-widget').effectiveApiBase === '{deps['service2']}'",
+            timeout=15000)
+        page.locator(".fb-settings-cancel").click()
+        check("P10 确认后有效地址为规范化 B", page.evaluate(eff) == deps["service2"],
+              page.evaluate(eff))
+        check("P10 确认后草稿被清空", page.locator(".fb-textarea").input_value() == "")
+        healthz_b = [e for e in rec.to_base(deps["service2"]) if e["url"].endswith("/healthz")]
+        check("P10 保存后对新服务发起 healthz 连通性探测", bool(healthz_b), str(healthz_b))
+
+        # ---- B(8788)：提交走新服务，A 的令牌绝不出现 ----
+        page.locator(".fb-textarea").fill("B 服务的提交")
+        second = submit_with_login(page, deps, rec=rec)
+        check("P10 B 服务提交被接收", bool(second["fid"]), str(second["fid"]))
+        posts_b = [p for p in rec.feedback_posts() if p["url"].startswith(deps["service2"])]
+        check("P10 提交打到了 B", bool(posts_b), str(posts_b[:1])[:200])
+        token_b = second["token"]
+        check("P10 B 服务令牌与 A 不同", bool(token_b) and token_b != token_a,
+              f"A={token_a} B={token_b}")
+        a_on_b = [e for e in rec.bearer(token_a) if e["url"].startswith(deps["service2"])]
+        check("P10 全流程扫描：A 令牌从未发往 B", not a_on_b, str(a_on_b)[:200])
+        # 切到 B 之后不再有发往 A 的凭据请求
+        b_on_a = [e for e in rec.bearer(token_b) if e["url"].startswith(deps["service"])]
+        check("P10 B 令牌从未发往 A", not b_on_a, str(b_on_a)[:200])
+
+        # ---- 刷新页面：覆盖持久化 ----
+        page.reload(wait_until="networkidle")
+        mode = page.evaluate(
+            "() => document.querySelector('feedback-widget')?.getAttribute('launcher-mode')")
+        page.locator(".fb-orb" if mode == "orb" else ".fb-fab").click()
+        page.locator(".fb-panel").wait_for(state="visible", timeout=30000)
+        check("P10 刷新后有效地址仍为 B（本机持久化）",
+              page.evaluate(eff) == deps["service2"], page.evaluate(eff))
+
+        # ---- 同址保存（不同写法）不触发重置 ----
+        page.locator(".fb-textarea").fill("同址保存不重置的草稿")
+        page.locator(".fb-settings-btn").click()
+        page.locator(".fb-settings").wait_for(state="visible", timeout=15000)
+        page.locator(".fb-server-input").fill(f"{deps['service2']}/")
+        page.locator(".fb-settings-save").click()
+        time.sleep(0.3)
+        check("P10 同址保存不弹确认块",
+              page.locator(".fb-settings-confirm").is_hidden())
+        page.locator(".fb-settings-cancel").click()
+        check("P10 同址保存后草稿保留",
+              page.locator(".fb-textarea").input_value() == "同址保存不重置的草稿",
+              page.locator(".fb-textarea").input_value())
+
+        # ---- 恢复默认 → 回 A：草稿确认 → 重新登录 → 提交回 8787 ----
+        page.locator(".fb-settings-btn").click()
+        page.locator(".fb-settings").wait_for(state="visible", timeout=15000)
+        page.locator(".fb-settings-restore").click()
+        page.locator(".fb-settings-confirm").wait_for(state="visible", timeout=15000)
+        page.locator(".fb-settings-confirm-ok").click()
+        page.wait_for_function(
+            f"() => document.querySelector('feedback-widget').effectiveApiBase === '{deps['service']}'",
+            timeout=15000)
+        page.locator(".fb-settings-cancel").click()
+        check("P10 恢复默认后有效地址回 A", page.evaluate(eff) == deps["service"],
+              page.evaluate(eff))
+        check("P10 恢复默认后草稿已清空", page.locator(".fb-textarea").input_value() == "")
+
+        page.locator(".fb-textarea").fill("回 A 的提交")
+        third = submit_with_login(page, deps, rec=rec)
+        check("P10 回 A 提交被接收", bool(third["fid"]), str(third["fid"]))
+        posts_a = [p for p in rec.feedback_posts()
+                   if p["url"].startswith(deps["service"] + "/")]
+        check("P10 回 A 的提交落在 8787", bool(posts_a), str(posts_a[:1])[:200])
+        token_a2 = third["token"]
+        check("P10 回 A 需重新登录（内存令牌已随身份切换作废）",
+              bool(token_a2), str(token_a2))
+        b_on_a2 = [e for e in rec.bearer(token_b)
+                   if e["url"].startswith(deps["service"] + "/")]
+        check("P10 全流程扫描：B 令牌从未发往 A", not b_on_a2, str(b_on_a2)[:200])
+    finally:
+        deps["panel_user"], deps["panel_pass"] = saved_user, saved_pass
+        page.close()
+        ctx.close()
+
+
 # ---------------- 入口 ----------------
 
 
@@ -1416,7 +1753,15 @@ def run(deps):
         ("P8 慢会话关闭/重开补发路径", p8_slow_session_close_reopen),
         ("P6 默认 off 模式手动截图路径", p6_manual_capture),
         ("P7 窄屏 + 键盘手动截图路径", p7_manual_capture_narrow_keyboard),
+        ("P9 多 DPR/视口/滚动遮罩矩阵路径", p9_masking_dpr),
+        ("P10 自定义服务器覆盖路径", p10_server_override),
     ]
+    # E2E_PATHS="P2,P9" 只跑指定路径（按名称前缀匹配），便于调试单条路径。
+    only = os.environ.get("E2E_PATHS")
+    if only:
+        want = [s.strip() for s in only.split(",") if s.strip()]
+        paths = [p for p in paths if any(p[0].startswith(w) for w in want)]
+        print(f"[INFO] E2E_PATHS={only}：只跑 {[p[0] for p in paths]}", flush=True)
     for name, fn in paths:
         try:
             fn(deps)

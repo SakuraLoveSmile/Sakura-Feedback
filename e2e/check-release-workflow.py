@@ -110,13 +110,15 @@ def check_ci_gate_preserved():
     record(
         "ci.yml 保留 node-checks（build→typecheck→lint→test 顺序）",
         "node-checks" in ci["jobs"]
-        and [s.get("name") for s in ci["jobs"]["node-checks"]["steps"]][-4:]
-        == ["build（先产出 workspace 包的 dist 与类型声明）", "typecheck", "lint", "test"],
+        and [s.get("name") for s in ci["jobs"]["node-checks"]["steps"]][-7:]
+        == ["build（先产出 workspace 包的 dist 与类型声明）", "typecheck", "lint",
+            "test admin", "test server", "test updater", "test web"],
     )
     record("ci.yml 保留 flutter-checks", "flutter-checks" in ci["jobs"])
     record("release.yml 仍以 workflow_call 复用 ci.yml", WF["jobs"]["checks"].get("uses") == "./.github/workflows/ci.yml")
-    diff = run_cmd("git diff --stat -- .github/workflows/ci.yml", ROOT)
-    record("ci.yml 未被修改（未降低门禁）", diff.stdout.strip() == "", diff.stdout.strip())
+    matrix = ci["jobs"].get("flutter-storage-matrix", {})
+    record("ci.yml 保留三档安全存储矩阵", matrix.get("strategy", {}).get("matrix", {}).get("storage") == ["9.2.2", "10.3.1", "11.0.0"])
+    record("ci.yml 校验 Release 更新日志", any(s.get("run") == "python3 e2e/check-release-notes.py" for s in ci["jobs"]["node-checks"]["steps"]))
 
 
 def check_manifest_generation():

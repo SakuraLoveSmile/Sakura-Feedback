@@ -1,6 +1,6 @@
 {
   "name": "@feedback/web",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "框架无关的反馈组件（Custom Element + Shadow DOM）；唯一运行时依赖 html2canvas-pro 仅用于内置视口截图，ESM 下懒加载",
   "type": "module",
   "license": "MIT",

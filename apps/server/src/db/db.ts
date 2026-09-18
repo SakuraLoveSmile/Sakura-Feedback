@@ -6,8 +6,45 @@ import { DatabaseSync } from "node:sqlite";
 /**
  * feedbacks 表 DDL 生成器：全新库（SCHEMA）与迁移重建（feedbacks_v6）共用同一份定义，
  * 避免新库与升级库结构漂移。分类字段与归档授权字段在 v6 引入；
- * 观察到来源、自动授权与自动归档阻塞/退避字段在 v7 引入。
+ * 观察到来源、自动授权与自动归档阻塞/退避字段在 v7 引入；
+ * 本地管理生命周期字段（收件箱/已归档/回收站）在 v9 引入。
  */
+/**
+ * apps 表 DDL 生成器：全新库（SCHEMA）与迁移重建（apps_v8）共用同一份定义，
+ * 避免新库与升级库结构漂移。
+ * v8 起 `app_id` 不再使用列级 UNIQUE：唯一性由「仅活跃记录」部分唯一索引
+ * `idx_apps_active_appid` 承担，软删除行可与同名 appId 的新活跃记录共存。
+ */
+function appsTableDdl(table: string): string {
+  return `
+CREATE TABLE IF NOT EXISTS ${table} (
+  id                TEXT PRIMARY KEY,
+  app_id            TEXT NOT NULL,
+  name              TEXT NOT NULL,
+  allowed_origins   TEXT NOT NULL DEFAULT '[]',
+  kaneo_project_id  TEXT NOT NULL DEFAULT '',
+  kaneo_column_slug TEXT NOT NULL DEFAULT '',
+  -- ---- v7：先接收后配置（自动发现软件 / 自动归档规则） ----
+  name_source       TEXT NOT NULL DEFAULT 'client' CHECK (name_source IN ('client','admin')),
+  config_status     TEXT NOT NULL DEFAULT 'pending' CHECK (config_status IN ('pending','configured')),
+  archive_mode      TEXT NOT NULL DEFAULT 'manual' CHECK (archive_mode IN ('manual','automatic')),
+  rule_version      INTEGER NOT NULL DEFAULT 0,
+  kaneo_column_id   TEXT NOT NULL DEFAULT '',
+  kaneo_label_ids   TEXT NOT NULL DEFAULT '[]',
+  kaneo_assignee_id   TEXT,
+  kaneo_assignee_name TEXT,
+  auto_enabled_at   TEXT,
+  auto_enabled_by   TEXT,
+  auto_operation_id TEXT,
+  first_seen_at     TEXT,
+  last_seen_at      TEXT,
+  -- ---- v8：软删除（历史反馈/截图/日志全部保留，活跃 appId 才可重新发现） ----
+  deleted_at        TEXT,
+  created_at        TEXT NOT NULL,
+  updated_at        TEXT NOT NULL
+);`;
+}
+
 function feedbacksTableDdl(table: string): string {
   return `
 CREATE TABLE IF NOT EXISTS ${table} (
@@ -49,6 +86,14 @@ CREATE TABLE IF NOT EXISTS ${table} (
   attempt_count    INTEGER NOT NULL DEFAULT 0,
   last_error       TEXT,
   error_summary    TEXT,
+  -- ---- v9：本地管理生命周期（收件箱/已归档/回收站），与处理状态 status 完全分离 ----
+  mgmt_state         TEXT NOT NULL DEFAULT 'inbox' CHECK (mgmt_state IN ('inbox','archived','trash')),
+  mgmt_archived_at   TEXT,
+  mgmt_archived_by   TEXT,
+  mgmt_trashed_at    TEXT,
+  mgmt_trashed_by    TEXT,
+  lifecycle_version  INTEGER NOT NULL DEFAULT 0,
+  resume_paused      INTEGER NOT NULL DEFAULT 0,
   created_at       TEXT NOT NULL,
   updated_at       TEXT NOT NULL
 );`;
@@ -66,6 +111,45 @@ CREATE TABLE IF NOT EXISTS feedback_audit (
   detail_json     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_feedback_audit_feedback ON feedback_audit(feedback_id, at);
+`;
+
+/**
+ * 彻底删除凭据（v9）：反馈被手动彻底删除后保留的最小防重放信息。
+ * 只含提交键摘要（非原文）、内容摘要、所属用户、原反馈 ID 与删除时间；
+ * 不含正文、附件内容或远端 URL。同一提交键摘要再次出现不得新建反馈。
+ */
+const FEEDBACK_DELETION_RECEIPTS_DDL = `
+CREATE TABLE IF NOT EXISTS feedback_deletion_receipts (
+  id                   TEXT PRIMARY KEY,
+  feedback_id          TEXT NOT NULL,
+  idempotency_key_hash TEXT NOT NULL,
+  content_hash         TEXT NOT NULL,
+  user_id              TEXT NOT NULL,
+  deleted_at           TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_fdr_key ON feedback_deletion_receipts(idempotency_key_hash);
+CREATE INDEX IF NOT EXISTS idx_fdr_feedback ON feedback_deletion_receipts(feedback_id);
+`;
+
+/**
+ * Assist 接入 outbox（v10，contracts/feedback-integration.md §2）：
+ * 业务事务内追加的事件行，由独立投递 worker 按 seq 升序可靠上报中枢。
+ * seq 由 assist_outbox_seq 单行计数器在同事务内分配（写事务串行，无并发问题）。
+ */
+const ASSIST_OUTBOX_DDL = `
+CREATE TABLE IF NOT EXISTS assist_outbox (
+  id           TEXT PRIMARY KEY,
+  seq          INTEGER NOT NULL,
+  kind         TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  state        TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','sent','dead')),
+  attempts     INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TEXT,
+  created_at   TEXT NOT NULL,
+  sent_at      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_assist_outbox_pending ON assist_outbox(state, next_attempt_at);
+CREATE TABLE IF NOT EXISTS assist_outbox_seq (id INTEGER PRIMARY KEY CHECK (id = 1), value INTEGER NOT NULL);
 `;
 
 const SCHEMA = `
@@ -93,30 +177,9 @@ CREATE TABLE IF NOT EXISTS sessions (
   revoked_at    TEXT
 );
 
-CREATE TABLE IF NOT EXISTS apps (
-  id                TEXT PRIMARY KEY,
-  app_id            TEXT NOT NULL UNIQUE,
-  name              TEXT NOT NULL,
-  allowed_origins   TEXT NOT NULL DEFAULT '[]',
-  kaneo_project_id  TEXT NOT NULL DEFAULT '',
-  kaneo_column_slug TEXT NOT NULL DEFAULT '',
-  -- ---- v7：先接收后配置（自动发现软件 / 自动归档规则） ----
-  name_source       TEXT NOT NULL DEFAULT 'client' CHECK (name_source IN ('client','admin')),
-  config_status     TEXT NOT NULL DEFAULT 'pending' CHECK (config_status IN ('pending','configured')),
-  archive_mode      TEXT NOT NULL DEFAULT 'manual' CHECK (archive_mode IN ('manual','automatic')),
-  rule_version      INTEGER NOT NULL DEFAULT 0,
-  kaneo_column_id   TEXT NOT NULL DEFAULT '',
-  kaneo_label_ids   TEXT NOT NULL DEFAULT '[]',
-  kaneo_assignee_id   TEXT,
-  kaneo_assignee_name TEXT,
-  auto_enabled_at   TEXT,
-  auto_enabled_by   TEXT,
-  auto_operation_id TEXT,
-  first_seen_at     TEXT,
-  last_seen_at      TEXT,
-  created_at        TEXT NOT NULL,
-  updated_at        TEXT NOT NULL
-);
+${appsTableDdl("apps")}
+-- 活跃唯一索引 idx_apps_active_appid 由迁移 v8 统一创建（新库与升级库同一入口），
+-- 不能在此建：老库的 apps 尚无 deleted_at 列，SCHEMA 在每次启动都会执行。
 
 -- 软件来源：浏览器按请求 Origin 逐条记录，无 Origin 的原生客户端单独一条。
 -- 待确认来源不会获得自动归档授权；确认后由扫描补处理。
@@ -178,6 +241,9 @@ CREATE TABLE IF NOT EXISTS feedback_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_feedback_logs_feedback ON feedback_logs(feedback_id, sort_order);
 
+${FEEDBACK_DELETION_RECEIPTS_DDL}
+
+${ASSIST_OUTBOX_DDL}
 `;
 
 function columns(db: DatabaseSync, table: string): string[] {
@@ -529,6 +595,126 @@ export function migrate(db: DatabaseSync): void {
       if (migratedSources > 0) {
         console.info(`[migration_v7] 已将 ${migratedSources} 条既有允许来源迁为已确认来源（旧软件保持人工模式）`);
       }
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
+  }
+
+  if (v < 8) {
+    // 迁移 8（软件软删除 / 同 appId 重新发现）：
+    // - apps 增加 deleted_at；app_id 由列级 UNIQUE 改为「仅活跃记录唯一」的部分唯一索引；
+    // - 列级 UNIQUE 无法 ALTER 移除，必须重建 apps：全部内部 id 与既有行原样搬运；
+    // - 历史反馈 / 截图 / 日志 / 审计不做任何改动，app_row_id 外键继续指向原行；
+    // - 与 v6 同理：重建期间关闭外键（feedbacks / app_sources 引用 apps(id)，
+    //   且 app_sources 带 ON DELETE CASCADE，外键开启时 DROP 会连带删除），事务内执行、
+    //   任一步失败整体回滚、版本号不前进，重启后按幂等步骤重试。
+    const fkWasOn =
+      ((db.prepare("PRAGMA foreign_keys").get() as { foreign_keys?: number } | undefined)?.foreign_keys ?? 0) === 1;
+    if (fkWasOn) db.exec("PRAGMA foreign_keys = OFF");
+    db.exec("BEGIN");
+    try {
+      const appCols = columns(db, "apps");
+      if (appCols.length === 0) {
+        // 极端情况：库内没有 apps 表（正常路径下 SCHEMA 已建），按最新结构补齐。
+        db.exec(appsTableDdl("apps"));
+      } else if (!appCols.includes("deleted_at")) {
+        db.exec(appsTableDdl("apps_v8"));
+        db.exec(`
+          INSERT INTO apps_v8 (
+            id, app_id, name, allowed_origins, kaneo_project_id, kaneo_column_slug,
+            name_source, config_status, archive_mode, rule_version, kaneo_column_id, kaneo_label_ids,
+            kaneo_assignee_id, kaneo_assignee_name, auto_enabled_at, auto_enabled_by, auto_operation_id,
+            first_seen_at, last_seen_at, created_at, updated_at
+          )
+          SELECT
+            id, app_id, name, allowed_origins, kaneo_project_id, kaneo_column_slug,
+            name_source, config_status, archive_mode, rule_version, kaneo_column_id, kaneo_label_ids,
+            kaneo_assignee_id, kaneo_assignee_name, auto_enabled_at, auto_enabled_by, auto_operation_id,
+            first_seen_at, last_seen_at, created_at, updated_at
+          FROM apps;
+        `);
+        // 搬运完整性自检：行数不一致（如残留同构 apps_v8 混入历史行）立即失败回滚。
+        const before = db.prepare("SELECT COUNT(*) AS n FROM apps").get() as { n: number };
+        const after = db.prepare("SELECT COUNT(*) AS n FROM apps_v8").get() as { n: number };
+        if (Number(after.n) !== Number(before.n)) {
+          throw new Error(`apps_v8 行数 ${after.n} 与 apps ${before.n} 不一致，放弃迁移`);
+        }
+        db.exec("DROP TABLE apps;");
+        db.exec("ALTER TABLE apps_v8 RENAME TO apps;");
+      }
+      // 活跃唯一索引：不用 IF NOT EXISTS——同名但定义不符的对象必须让迁移失败回滚，
+      // 而不是被静默沿用（v8 的库内不应存在任何名为 idx_apps_active_appid 的对象）。
+      db.exec("CREATE UNIQUE INDEX idx_apps_active_appid ON apps(app_id) WHERE deleted_at IS NULL");
+      db.exec("PRAGMA user_version = 8;");
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    } finally {
+      if (fkWasOn) db.exec("PRAGMA foreign_keys = ON");
+    }
+  }
+
+  if (v < 9) {
+    // 迁移 9（反馈本地管理生命周期：收件箱 / 已归档 / 回收站 + 彻底删除凭据）：
+    // - feedbacks 增加 mgmt_state（与处理状态 status 分离）、归档/删除时间与操作者、
+    //   乐观生命周期版本 lifecycle_version 与恢复后暂停标记 resume_paused；
+    // - 历史记录一律落 inbox（列默认值），不自动迁入已归档，不改变既有处理状态、
+    //   远端关联、附件与恢复证据，不触发 worker 重发；
+    // - 新建 feedback_deletion_receipts：彻底删除后仅保留提交键摘要、内容摘要、
+    //   所属用户、原反馈 ID 与删除时间，用于防旧提交重放与重复删除；
+    // - 纯加列/加表（经 feedbacks_v6 重建路径升级的库已带新列，列守卫自动跳过），
+    //   事务内执行、任一步失败回滚、版本号不前进。
+    db.exec("BEGIN");
+    try {
+      const fbCols = columns(db, "feedbacks");
+      if (!fbCols.includes("mgmt_state")) {
+        db.exec(
+          "ALTER TABLE feedbacks ADD COLUMN mgmt_state TEXT NOT NULL DEFAULT 'inbox' CHECK (mgmt_state IN ('inbox','archived','trash'))",
+        );
+      }
+      if (!fbCols.includes("mgmt_archived_at")) {
+        db.exec("ALTER TABLE feedbacks ADD COLUMN mgmt_archived_at TEXT");
+      }
+      if (!fbCols.includes("mgmt_archived_by")) {
+        db.exec("ALTER TABLE feedbacks ADD COLUMN mgmt_archived_by TEXT");
+      }
+      if (!fbCols.includes("mgmt_trashed_at")) {
+        db.exec("ALTER TABLE feedbacks ADD COLUMN mgmt_trashed_at TEXT");
+      }
+      if (!fbCols.includes("mgmt_trashed_by")) {
+        db.exec("ALTER TABLE feedbacks ADD COLUMN mgmt_trashed_by TEXT");
+      }
+      if (!fbCols.includes("lifecycle_version")) {
+        db.exec("ALTER TABLE feedbacks ADD COLUMN lifecycle_version INTEGER NOT NULL DEFAULT 0");
+      }
+      if (!fbCols.includes("resume_paused")) {
+        db.exec("ALTER TABLE feedbacks ADD COLUMN resume_paused INTEGER NOT NULL DEFAULT 0");
+      }
+      // 区域列表索引：不能在 SCHEMA 建（老库尚无 mgmt_state 列，SCHEMA 每次启动都会执行）。
+      db.exec("CREATE INDEX IF NOT EXISTS idx_feedbacks_mgmt ON feedbacks(mgmt_state, created_at)");
+      db.exec(FEEDBACK_DELETION_RECEIPTS_DDL);
+      db.exec("PRAGMA user_version = 9;");
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
+  }
+
+  if (v < 10) {
+    // 迁移 10（Assist 接入 outbox）：
+    // - 新增 assist_outbox（pending/sent 事件行，payload_json 为契约单事件结构）
+    //   与 assist_outbox_seq（单行事件序号计数器）；
+    // - 纯加表（SCHEMA 已含同构定义，IF NOT EXISTS 幂等），不改任何既有表与状态机；
+    // - 事务内执行、任一步失败回滚、版本号不前进。
+    db.exec("BEGIN");
+    try {
+      db.exec(ASSIST_OUTBOX_DDL);
+      db.exec("PRAGMA user_version = 10;");
+      db.exec("COMMIT");
+      console.info("[migration_v10] 已创建 Assist 接入 outbox 表");
     } catch (err) {
       db.exec("ROLLBACK");
       throw err;

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert' show jsonEncode, utf8;
+import 'dart:math' as math;
 
 import 'package:file_selector/file_selector.dart' as fs;
 import 'package:flutter/foundation.dart';
@@ -12,6 +13,7 @@ import 'api_client.dart';
 import 'config.dart';
 import 'idempotency.dart';
 import 'platform.dart';
+import 'server_pref.dart';
 import 'token_coordination.dart';
 import 'token_store.dart';
 
@@ -105,7 +107,8 @@ class _FrozenSubmit {
   bool sameAs(_FrozenSubmit other) {
     if (text != other.text) return false;
     if (!listEquals(screenshotBytes, other.screenshotBytes)) return false;
-    if (_captureSignature(captureInfo) != _captureSignature(other.captureInfo)) {
+    if (_captureSignature(captureInfo) !=
+        _captureSignature(other.captureInfo)) {
       return false;
     }
     if (logs.length != other.logs.length) return false;
@@ -161,6 +164,9 @@ class FeedbackPanel extends StatefulWidget {
     this.filePicker,
     this.httpClient,
     this.tokenStore,
+    this.tokenStoreFactory,
+    this.serverPrefStore,
+    this.onEffectiveApiBaseChange,
     this.visible,
   });
 
@@ -183,7 +189,23 @@ class FeedbackPanel extends StatefulWidget {
   final http.Client? httpClient;
 
   /// 注入的令牌仓库（主要面向测试）。
+  ///
+  /// 固定仓库在所有服务身份间共享——切换服务器后读到的是同一份凭据。
+  /// 需要按身份隔离（不同服务器各自的令牌槽位）时请注入
+  /// [tokenStoreFactory]；缺省使用平台默认（按有效地址 + appId 派生键）。
   final FeedbackTokenStore? tokenStore;
+
+  /// 注入的令牌仓库工厂（主要面向测试）：按有效配置派生仓库，
+  /// 使不同服务身份读到各自独立的凭据槽位。[tokenStore] 优先。
+  final FeedbackTokenStore Function(FeedbackConfig config)? tokenStoreFactory;
+
+  /// T6：注入的服务器覆盖偏好仓库（主要面向测试）；
+  /// 缺省用平台默认（原生安全存储 / Web localStorage）。
+  final FeedbackServerPrefStore? serverPrefStore;
+
+  /// T6：实际使用地址变化回调（覆盖保存 / 恢复默认 / 偏好加载完成后触发）；
+  /// 宿主（[FeedbackWidget]）据此更新控制器的 `effectiveApiBase`。
+  final void Function(String apiBase)? onEffectiveApiBaseChange;
 
   /// 面板当前是否由用户打开（内部协作接口，不是公开配置）。
   ///
@@ -201,15 +223,49 @@ class FeedbackPanel extends StatefulWidget {
 }
 
 /// 面板状态（暴露为 public 仅供测试驱动内部状态机）。
-class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserver {
-  late final FeedbackTokenStore _tokenStore;
-  late final ApiClient _api;
+class FeedbackPanelState extends State<FeedbackPanel>
+    with WidgetsBindingObserver {
+  late FeedbackTokenStore _tokenStore;
+  late ApiClient _api;
+  bool _clientReady = false;
+
+  /// T6：本机保存的服务器覆盖（规范化地址）；null = 使用宿主默认 apiBase。
+  String? _serverOverride;
+
+  /// T6：覆盖偏好是否已完成加载——加载完成前不启动任何依赖服务器的请求。
+  bool _serverPrefsReady = false;
+  FeedbackServerPrefStore? _defaultPrefStore;
+
+  /// T6：身份世代——每次服务身份（有效地址或 appId）切换递增；
+  /// 提交 / 轮询 / 刷新 / 会话恢复在发起时捕获，恢复时校验，
+  /// 旧身份的迟到结果一律丢弃。
+  int _identitySeq = 0;
+
+  /// T6：设置视图状态。
+  final TextEditingController _serverInput = TextEditingController();
+  bool _settingsOpen = false;
+  bool _settingsBusy = false;
+  int _settingsOpSeq = 0;
+  final Map<String, Future<void>> _prefWriteTails = <String, Future<void>>{};
+  String? _serverError;
+  String? _serverHint;
 
   final TextEditingController _draft = TextEditingController();
   final FocusNode _draftFocus = FocusNode();
   final TextEditingController _username = TextEditingController();
   final TextEditingController _password = TextEditingController();
   final FocusNode _usernameFocus = FocusNode();
+  final FocusNode _passwordFocus = FocusNode();
+  final FocusNode _serverInputFocus = FocusNode();
+
+  /// T9：参与键盘避让滚动管理的焦点节点（焦点切换或键盘尺寸变化后，
+  /// 在布局完成时把聚焦字段滚回可见区域）。
+  late final List<FocusNode> _managedFocusNodes = <FocusNode>[
+    _draftFocus,
+    _usernameFocus,
+    _passwordFocus,
+    _serverInputFocus,
+  ];
 
   Uint8List? _screenshotBytes;
   FeedbackCaptureInfo? _captureInfo;
@@ -322,6 +378,7 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
 
   /// 面板内登录表单是否展开（点击「登录并提交」展开，不打开任何窗口）。
   bool _showLoginForm = false;
+
   /// 登录成功后是否自动提交（点击「登录并提交」触发）。
   bool _submitAfterLogin = false;
 
@@ -373,34 +430,170 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
   /// 面板当前是否由用户打开（[FeedbackPanel.visible] 为 null 时视为可见）。
   bool get _panelVisible => widget.visible ?? true;
 
+  /// T6：当前实际使用的服务器地址——本机覆盖优先于宿主默认 apiBase。
+  String get effectiveApiBase => _serverOverride ?? widget.config.apiBase;
+
+  /// T6：按有效地址派生的配置（覆盖存在时复制 config 替换 apiBase）。
+  FeedbackConfig get _effectiveConfig => _serverOverride == null
+      ? widget.config
+      : widget.config.copyWith(apiBase: _serverOverride);
+
+  FeedbackServerPrefStore get _prefStore =>
+      widget.serverPrefStore ??
+      (_defaultPrefStore ??= createDefaultServerPrefStore());
+
   /// 当前令牌仓库（测试可见）。
   FeedbackTokenStore get tokenStore => _tokenStore;
 
   /// 当前面板阶段（测试可见）。
   FeedbackStage get stage => _stage;
 
+  /// 当前服务器覆盖（规范化地址；测试可见，null = 未覆盖）。
+  String? get serverOverride => _serverOverride;
+
+  /// 覆盖偏好是否已加载完成（测试可见）。
+  bool get serverPrefsReady => _serverPrefsReady;
+
+  /// 设置视图是否展开（测试可见）。
+  bool get settingsOpen => _settingsOpen;
+
+  /// 各输入框焦点状态（测试可见）。
+  bool get draftFocused => _draftFocus.hasFocus;
+  bool get usernameFocused => _usernameFocus.hasFocus;
+  bool get passwordFocused => _passwordFocus.hasFocus;
+  bool get serverInputFocused => _serverInputFocus.hasFocus;
+
+  /// 重建 API 客户端与令牌仓库：按当前有效身份派生（T6/T7）。
+  ///
+  /// 令牌仓库键由「有效地址 + appId」派生——切换后读到的是目标身份自己的
+  /// 令牌槽位，旧身份令牌绝不发往新地址。旧客户端的 401 回调被钳制：
+  /// 仅当该客户端仍是当前客户端时才允许清除凭据 / 改写登录界面。
+  void _rebuildClient() {
+    if (_clientReady) _api.dispose();
+    _clientReady = true;
+    final FeedbackConfig effective = _effectiveConfig;
+    _tokenStore = CoordinatedTokenStore.of(
+      widget.tokenStore ??
+          (widget.tokenStoreFactory ?? createDefaultTokenStore)(effective),
+    );
+    final ApiClient api = ApiClient(
+      config: effective,
+      tokenStore: _tokenStore,
+      httpClient: widget.httpClient,
+    );
+    api.onUnauthorized = () {
+      if (identical(_api, api)) _onUnauthorized();
+    };
+    _api = api;
+  }
+
+  /// 服务身份切换的统一收口（T7）：身份世代递增使在途操作全部失效，
+  /// 清空属于旧身份的草稿 / 截图 / 日志 / 任务态 / 额度 / 幂等键 / 快照，
+  /// 并标记偏好重新加载中。调用方随后触发 [_loadServerOverride] 或直接
+  /// [_finishIdentitySwitch] 完成重建与会话恢复。
+  void _beginIdentitySwitch() {
+    _identitySeq++;
+    _settingsOpSeq++;
+    _pollTimer?.cancel();
+    _pollTimer = null;
+    _pollInFlight = false;
+    _invalidateLogin();
+    _invalidateQuotaRefresh();
+    _quotaRefreshPending = false;
+    ++_logsSeq;
+    _logsCollecting = false;
+    _logsCollected = false;
+    _logs = <FeedbackLogFile>[];
+    _logError = null;
+    _screenshotBytes = null;
+    _captureInfo = null;
+    _lastCaptureSeq = null;
+    _draft.clear();
+    _username.clear();
+    _ticketId = null;
+    _idempotencyKey = null;
+    _pendingSubmit = null;
+    _lastSubmittedText = null;
+    _kaneoUrl = null;
+    _errorSummary = null;
+    _composeError = null;
+    _failedNotice = null;
+    _waitingNotice = null;
+    _signedIn = false;
+    _authReady = false;
+    _busy = false;
+    _loginInFlight = false;
+    _stage = FeedbackStage.compose;
+    _showLoginForm = false;
+    _submitAfterLogin = false;
+    _loginError = null;
+    _user = null;
+    _quota = null;
+    _quotaRefreshFailed = false;
+    _quotaInFlight = false;
+    _settingsBusy = false;
+    _serverError = null;
+    _serverHint = null;
+    _serverPrefsReady = false;
+  }
+
+  /// 身份就绪收口：重建客户端 → 上报有效地址 → 恢复目标身份会话 → 采集日志。
+  void _finishIdentitySwitch() {
+    _serverPrefsReady = true;
+    _rebuildClient();
+    _reportEffectiveApiBase();
+    if (_settingsOpen) _serverInput.text = _serverOverride ?? '';
+    setState(() {});
+    unawaited(_restoreSession());
+    if (_panelVisible) unawaited(_collectLogs());
+  }
+
+  void _reportEffectiveApiBase() {
+    widget.onEffectiveApiBaseChange?.call(effectiveApiBase);
+  }
+
+  /// 读取本机覆盖偏好（按当前 appId + 规范化默认地址槽位）。
+  /// 加载完成前 [_serverPrefsReady] 为 false，不启动依赖服务器的请求。
+  Future<void> _loadServerOverride() async {
+    final int idSeq = _identitySeq;
+    final String key = serverOverrideStorageKey(
+      appId: widget.config.appId,
+      defaultApiBase: widget.config.apiBase,
+    );
+    String? value;
+    try {
+      // 超时兜底：插件未注册等环境可能挂起，不可用按无覆盖处理。
+      final String? raw =
+          await _prefStore.read(key).timeout(const Duration(seconds: 2));
+      if (raw != null) {
+        final ServerBaseNormalization norm = normalizeServerBase(raw);
+        // 所存值非法（旧格式 / 手改）视为无覆盖，绝不静默应用
+        value = norm.ok ? norm.base : null;
+      }
+    } catch (_) {
+      value = null;
+    }
+    if (!mounted || idSeq != _identitySeq) return;
+    _serverOverride = value;
+    _finishIdentitySwitch();
+  }
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    // 包一层协调器（幂等）：登录写入（[_login]）与 ApiClient 的 401 条件
-    // 清除共享同一操作队列与认证世代（T1-A）；默认安全存储按服务身份共享。
-    _tokenStore = CoordinatedTokenStore.of(
-      widget.tokenStore ?? createDefaultTokenStore(widget.config),
-    );
-    _api = ApiClient(
-      config: widget.config,
-      tokenStore: _tokenStore,
-      httpClient: widget.httpClient,
-      onUnauthorized: _onUnauthorized,
-    );
+    // 先构建默认身份客户端（本地操作，不发请求）；
+    // 覆盖偏好加载完成后才恢复会话 / 采集日志（[_loadServerOverride] 收口）。
+    _rebuildClient();
     _draft.addListener(_onDraftChanged);
+    for (final FocusNode node in _managedFocusNodes) {
+      node.addListener(() {
+        if (node.hasFocus) _scrollFocusedFieldIntoView();
+      });
+    }
     final AppLifecycleState? lifecycle = WidgetsBinding.instance.lifecycleState;
     _foreground = lifecycle == null || lifecycle == AppLifecycleState.resumed;
-    unawaited(_restoreSession());
-    if (_panelVisible) {
-      unawaited(_collectLogs());
-    }
+    unawaited(_loadServerOverride());
   }
 
   @override
@@ -408,12 +601,10 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
     super.didUpdateWidget(oldWidget);
     if (oldWidget.config.appId != widget.config.appId ||
         oldWidget.config.apiBase != widget.config.apiBase) {
-      // 身份切换：使在途日志采集全部失效，清空旧身份日志
-      ++_logsSeq;
-      _logsCollecting = false;
-      _logsCollected = false;
-      _logs = <FeedbackLogFile>[];
-      _logError = null;
+      // 身份源变化（宿主默认地址或 appId）：覆盖槽位随之变化——
+      // 先整体作废旧身份状态，再按新键重读覆盖并重建客户端。
+      _beginIdentitySwitch();
+      unawaited(_loadServerOverride());
     }
     final bool wasVisible = oldWidget.visible ?? true;
     final bool nowVisible = widget.visible ?? true;
@@ -441,6 +632,34 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
     }
   }
 
+  /// T9：字段获得焦点或键盘尺寸变化后，在布局完成时把聚焦字段
+  /// 滚动到可见区域（输入框、账号、密码、服务器地址共用）。
+  void _scrollFocusedFieldIntoView() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      for (final FocusNode node in _managedFocusNodes) {
+        final BuildContext? ctx = node.context;
+        if (node.hasFocus && ctx != null) {
+          Scrollable.ensureVisible(
+            ctx,
+            duration: const Duration(milliseconds: 160),
+            curve: Curves.easeOut,
+            alignment: 0.08,
+          );
+          break;
+        }
+      }
+    });
+  }
+
+  @override
+  void didChangeMetrics() {
+    // T9：键盘展开 / 收起 / 旋转改变可用高度；布局完成后重校聚焦字段。
+    if (_managedFocusNodes.any((FocusNode n) => n.hasFocus)) {
+      _scrollFocusedFieldIntoView();
+    }
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     // 应用恢复前台时刷新额度（跨过 resetAt 后由服务端给出新额度）；
@@ -457,6 +676,9 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
   }
 
   Future<void> _restoreSession() async {
+    // T7：捕获身份世代——只恢复目标身份自己槽位的令牌；
+    // 切换后迟到的读取结果不得改写新身份的登录态。
+    final int idSeq = _identitySeq;
     String? token;
     try {
       // 超时兜底：个别平台实现可能挂起（如插件未注册的测试环境），
@@ -465,7 +687,7 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
     } catch (_) {
       token = null;
     }
-    if (!mounted) return;
+    if (!mounted || idSeq != _identitySeq) return;
     setState(() {
       _signedIn = token != null && token.isNotEmpty;
       _authReady = true;
@@ -509,6 +731,9 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
     _username.dispose();
     _password.dispose();
     _usernameFocus.dispose();
+    _passwordFocus.dispose();
+    _serverInputFocus.dispose();
+    _serverInput.dispose();
     super.dispose();
   }
 
@@ -551,7 +776,8 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
 
   /// 登录回调是否仍然有效：序号未变（面板自登录发起以来没有被关闭、
   /// 也没有被取消 / 销毁 / 换身份）且面板仍然可见。
-  bool _loginStillValid(int seq) => mounted && seq == _loginSeq && _panelVisible;
+  bool _loginStillValid(int seq) =>
+      mounted && seq == _loginSeq && _panelVisible;
 
   // ---------------------------------------------------------------- 额度
 
@@ -587,9 +813,10 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
       if (q == null) return;
       final Duration? until = q.resetAt?.difference(DateTime.now());
       if (q.remaining <= 0) {
-        delay = (until != null && until > Duration.zero && until < _quotaRetryDelay)
-            ? until
-            : _quotaRetryDelay;
+        delay =
+            (until != null && until > Duration.zero && until < _quotaRetryDelay)
+                ? until
+                : _quotaRetryDelay;
       } else if (until != null && until > Duration.zero) {
         delay = until;
       } else {
@@ -768,7 +995,9 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
   /// 草稿是否满足提交条件（与登录状态无关）。
   bool get _draftValid {
     final int runes = _draft.text.runes.length;
-    return runes > 0 && runes <= kFeedbackMaxTextRunes && _draft.text.trim().isNotEmpty;
+    return runes > 0 &&
+        runes <= kFeedbackMaxTextRunes &&
+        _draft.text.trim().isNotEmpty;
   }
 
   /// 结果未知的同键重试（服务端可能已接收）：额度用尽也允许，避免丢失已接收结果。
@@ -790,6 +1019,8 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
   }
 
   Future<void> _submit() async {
+    // T6：覆盖偏好加载完成前不启动依赖服务器的请求。
+    if (!_serverPrefsReady) return;
     if (_quotaBlocked) {
       setState(() {
         _composeError = '今日提交次数已用完，请在额度刷新后重试。您的输入已保留';
@@ -800,6 +1031,8 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
     // 防御：Class B（服务端已接收、后台处理失败）绝不重新 POST——重发只会
     // 产生重复工单；该视图只提供刷新状态 / 复制反馈 ID / 返回编辑开新反馈。
     if (_stage == FeedbackStage.failed) return;
+    // T7：捕获身份世代——服务切换后迟到的提交结果一律丢弃。
+    final int idSeq = _identitySeq;
     final String text = _draft.text;
     // 冻结本次提交的完整快照（正文 + 截图字节 + 元数据）：既要保证请求发出
     // 后草稿变化不影响本次字节，也要作为"能否复用旧幂等键"的比较依据。
@@ -831,7 +1064,9 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
         screenshotBytes: _screenshotBytes,
         logs: snapshot.logs.isEmpty ? null : snapshot.logs,
       );
-      if (!mounted) return;
+      // T7：身份切换后到达的旧提交结果丢弃——不进入任务态、不清新草稿、
+      // 不启动轮询（该提交可能已被旧服务器接收，由用户在新服务上自行重发）。
+      if (!mounted || idSeq != _identitySeq) return;
       // 成功接收后才清空草稿与截图；保留 _lastSubmittedText 供失败重试。
       _lastSubmittedText = text;
       _draft.clear();
@@ -859,7 +1094,7 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
       _consumeQuotaRefreshIntent(); // 提交忙碌结束：补发被挡下的刷新
       if (_waitingNotice == null) _schedulePollingIfNeeded();
     } on ApiException catch (e) {
-      if (!mounted) return;
+      if (!mounted || idSeq != _identitySeq) return;
       if (e.statusCode == 401) {
         // 当前世代 401 已由 onUnauthorized 回登录视图；期间换了新登录的
         // 过期请求不触发回调——这里只退出提交忙碌态，不改写登录界面。
@@ -900,7 +1135,7 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
       });
       _consumeQuotaRefreshIntent();
     } catch (_) {
-      if (!mounted) return;
+      if (!mounted || idSeq != _identitySeq) return;
       setState(() {
         _busy = false;
         // Class A：服务端从未收到该请求（未拿到任何 HTTP 响应）。进入
@@ -919,7 +1154,8 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
   /// ——重发只会产生重复工单。
   Future<void> _refreshTicketStatus() async {
     final String? id = _ticketId;
-    if (id == null || _busy) return;
+    if (id == null || _busy || !_serverPrefsReady) return;
+    final int idSeq = _identitySeq;
     setState(() {
       _busy = true;
       _failedNotice = null;
@@ -937,7 +1173,7 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
     } catch (_) {
       failure = '网络异常，无法刷新状态，请稍后重试';
     }
-    if (!mounted) return;
+    if (!mounted || idSeq != _identitySeq) return;
     if (record == null) {
       setState(() {
         _busy = false;
@@ -977,9 +1213,7 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
     }
     if (!mounted) return;
     setState(() {
-      _failedNotice = copied
-          ? '反馈 ID 已复制到剪贴板'
-          : '剪贴板不可用，请手动记录反馈 ID：$id';
+      _failedNotice = copied ? '反馈 ID 已复制到剪贴板' : '剪贴板不可用，请手动记录反馈 ID：$id';
     });
   }
 
@@ -1044,7 +1278,8 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
 
   Future<void> _pollOnce() async {
     final String? id = _ticketId;
-    if (id == null || !mounted || _pollInFlight) return;
+    if (id == null || !mounted || _pollInFlight || !_serverPrefsReady) return;
+    final int idSeq = _identitySeq;
     _pollInFlight = true;
     FeedbackRecord? record;
     try {
@@ -1059,7 +1294,7 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
       // 网络抖动：保持退避重试。
     }
     _pollInFlight = false;
-    if (!mounted || _ticketId != id) return;
+    if (!mounted || _ticketId != id || idSeq != _identitySeq) return;
     if (record != null) {
       final FeedbackRecord rec = record;
       final FeedbackStage stage = _stageForStatus(rec.status);
@@ -1139,6 +1374,263 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
     }
   }
 
+  // ---------------------------------------------------------------- 服务器设置（T6/T7）
+
+  /// 规范化后的宿主默认地址（比较用；config 本身只做去空白/斜杠）。
+  String get _defaultBaseNorm =>
+      normalizeServerBase(widget.config.apiBase).base ?? widget.config.apiBase;
+
+  /// 规范化后的当前有效地址。
+  String get _effectiveBaseNorm =>
+      normalizeServerBase(effectiveApiBase).base ?? effectiveApiBase;
+
+  /// 地址变化时是否存在需要确认的内容：
+  /// 草稿文本 / 截图 / 日志 / 在途或未确认的提交。
+  bool get _needsSwitchConfirm =>
+      _draft.text.trim().isNotEmpty ||
+      _screenshotBytes != null ||
+      _logs.isNotEmpty ||
+      _ticketId != null ||
+      _pendingSubmit != null ||
+      _busy;
+
+  /// 打开设置视图（未登录也可进入）。
+  void _openSettings() {
+    setState(() {
+      _settingsOpen = true;
+      _serverError = null;
+      _serverHint = null;
+      _serverInput.text = _serverOverride ?? '';
+    });
+  }
+
+  /// 关闭设置视图返回主视图；不清除任何已保存状态。
+  void _closeSettings() {
+    _settingsOpSeq++;
+    setState(() {
+      _settingsOpen = false;
+      _serverError = null;
+      _serverHint = null;
+      _settingsBusy = false;
+    });
+  }
+
+  String _serverPrefKey() => serverOverrideStorageKey(
+        appId: widget.config.appId,
+        defaultApiBase: widget.config.apiBase,
+      );
+
+  bool _settingsOperationStillValid(
+    int opSeq,
+    int identitySeq,
+    String prefKey,
+  ) {
+    return mounted &&
+        opSeq == _settingsOpSeq &&
+        identitySeq == _identitySeq &&
+        prefKey == _serverPrefKey();
+  }
+
+  /// 持久化覆盖记录（value 为 null 时删除键 = 恢复默认）。
+  /// 返回是否写入成功；失败时调用方仍应用本次会话并提示「仅本次生效」。
+  Future<bool> _persistOverride(
+    String? value,
+    String key, {
+    bool Function()? shouldWrite,
+  }) async {
+    final Future<void> previous = _prefWriteTails[key] ?? Future<void>.value();
+    final Completer<void> current = Completer<void>();
+    _prefWriteTails[key] = current.future;
+    try {
+      try {
+        await previous;
+      } catch (_) {
+        // A failed older write must not block the newest value.
+      }
+      if (shouldWrite != null && !shouldWrite()) return false;
+      if (value == null) {
+        await _prefStore.delete(key);
+      } else {
+        await _prefStore.write(key, value);
+      }
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      current.complete();
+      if (identical(_prefWriteTails[key], current.future)) {
+        _prefWriteTails.remove(key);
+      }
+    }
+  }
+
+  /// 切换确认对话框：草稿 / 截图 / 日志会被清空；
+  /// 存在结果未确认的提交时明确说明旧服务器可能已接收。
+  Future<bool?> _confirmServerSwitch() {
+    final bool uncertain =
+        _busy || _pendingSubmit != null || _stage == FeedbackStage.notSent;
+    return showDialog<bool>(
+      context: context,
+      builder: (BuildContext ctx) => AlertDialog(
+        key: const Key('feedback-server-confirm'),
+        title: const Text('切换 Feedback 服务器？'),
+        content: Text(
+          '切换后将清空当前草稿、截图与日志，并在新服务器上重新登录。'
+          '${uncertain ? '\n\n上一次提交的结果尚未确认，旧服务器可能已接收该反馈；切换不会撤回，也不会自动向新服务器重发。' : ''}',
+        ),
+        actions: <Widget>[
+          TextButton(
+            key: const Key('feedback-server-confirm-cancel'),
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            key: const Key('feedback-server-confirm-ok'),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('清空并切换'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 保存按钮：校验 → 同址仅持久化 / 异址确认后完整切换。
+  Future<void> _saveServerSetting() async {
+    if (_settingsBusy) return;
+    final ServerBaseNormalization norm = normalizeServerBase(
+      _serverInput.text,
+      pageIsHttps: kIsWeb && Uri.base.scheme == 'https',
+    );
+    if (!norm.ok) {
+      setState(() {
+        _serverError = norm.reason;
+        _serverHint = null;
+      });
+      return;
+    }
+    final String target = norm.base!;
+    // 输入等于默认地址时按「恢复默认」处理：删除覆盖而非保存同值覆盖。
+    final String? newOverride = target == _defaultBaseNorm ? null : target;
+    final int opSeq = ++_settingsOpSeq;
+    final int identitySeq = _identitySeq;
+    final String prefKey = _serverPrefKey();
+    setState(() {
+      _settingsBusy = true;
+      _serverError = null;
+      _serverHint = null;
+    });
+    try {
+      if (target == _effectiveBaseNorm) {
+        // 相同规范化地址：只持久化，不触发任何身份重置。
+        final bool persisted = await _persistOverride(
+          newOverride,
+          prefKey,
+          shouldWrite: () =>
+              _settingsOperationStillValid(opSeq, identitySeq, prefKey),
+        );
+        if (!_settingsOperationStillValid(opSeq, identitySeq, prefKey)) return;
+        setState(() {
+          _serverHint = persisted ? '已保存' : '已应用（仅本次生效：本机偏好写入失败）';
+        });
+        unawaited(_probeServerHealth(persisted));
+        return;
+      }
+      if (_needsSwitchConfirm) {
+        final bool? ok = await _confirmServerSwitch();
+        if (ok != true ||
+            !_settingsOperationStillValid(opSeq, identitySeq, prefKey)) {
+          return;
+        }
+      }
+      await _applyServerOverride(
+        newOverride,
+        opSeq: opSeq,
+        identitySeq: identitySeq,
+        prefKey: prefKey,
+      );
+    } finally {
+      if (_settingsOperationStillValid(opSeq, identitySeq, prefKey)) {
+        setState(() => _settingsBusy = false);
+      }
+    }
+  }
+
+  /// 恢复默认：删除覆盖记录；当前未覆盖时直接提示。
+  Future<void> _restoreDefaultServer() async {
+    if (_settingsBusy) return;
+    if (_serverOverride == null) {
+      setState(() {
+        _serverError = null;
+        _serverHint = '当前已是默认地址';
+      });
+      return;
+    }
+    final int opSeq = ++_settingsOpSeq;
+    final int identitySeq = _identitySeq;
+    final String prefKey = _serverPrefKey();
+    setState(() {
+      _settingsBusy = true;
+      _serverError = null;
+      _serverHint = null;
+    });
+    try {
+      if (_needsSwitchConfirm) {
+        final bool? ok = await _confirmServerSwitch();
+        if (ok != true ||
+            !_settingsOperationStillValid(opSeq, identitySeq, prefKey)) {
+          return;
+        }
+      }
+      await _applyServerOverride(
+        null,
+        opSeq: opSeq,
+        identitySeq: identitySeq,
+        prefKey: prefKey,
+      );
+    } finally {
+      if (_settingsOperationStillValid(opSeq, identitySeq, prefKey)) {
+        setState(() => _settingsBusy = false);
+      }
+    }
+  }
+
+  /// 应用覆盖并完整重建服务身份（T7）：先持久化 → 作废旧身份全部状态 →
+  /// 重建客户端 / 令牌仓库 → 恢复目标身份自身会话 → 探测连通性。
+  /// 持久化失败不影响本次会话应用，仅追加「仅本次生效」提示。
+  Future<void> _applyServerOverride(
+    String? override, {
+    required int opSeq,
+    required int identitySeq,
+    required String prefKey,
+  }) async {
+    final bool persisted = await _persistOverride(
+      override,
+      prefKey,
+      shouldWrite: () =>
+          _settingsOperationStillValid(opSeq, identitySeq, prefKey),
+    );
+    if (!_settingsOperationStillValid(opSeq, identitySeq, prefKey)) return;
+    _beginIdentitySwitch();
+    _serverOverride = override;
+    _serverInput.text = override ?? '';
+    _finishIdentitySwitch();
+    setState(() {
+      _serverHint = persisted ? '已保存' : '已应用（仅本次生效：本机偏好写入失败）';
+    });
+    unawaited(_probeServerHealth(persisted));
+  }
+
+  /// 探测当前有效服务的 `/healthz` 并追加连通性提示；不静默回切。
+  Future<void> _probeServerHealth(bool persisted) async {
+    final int idSeq = _identitySeq;
+    final bool ok = await _api.probeHealth();
+    if (!mounted || idSeq != _identitySeq || !_settingsOpen) return;
+    final String prefix = persisted ? '已保存' : '已应用（仅本次生效）';
+    setState(() {
+      _serverHint = ok ? '$prefix，服务连接正常' : '$prefix，但暂时无法连接该服务（仍可稍后重试）';
+    });
+  }
+
   // ---------------------------------------------------------------- UI
 
   @override
@@ -1172,6 +1664,13 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
               style: Theme.of(context).textTheme.titleMedium,
             ),
           ),
+          // T6：服务器设置入口（未登录也可进入；设置视图自带返回）。
+          IconButton(
+            key: const Key('feedback-settings'),
+            tooltip: '服务器设置',
+            onPressed: _settingsOpen ? null : _openSettings,
+            icon: const Icon(Icons.settings_outlined),
+          ),
           IconButton(
             key: const Key('feedback-close'),
             tooltip: '关闭',
@@ -1184,14 +1683,17 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
   }
 
   Widget _buildBody(BuildContext context) {
-    if (!_authReady) {
+    // T6：设置视图独立于登录态（未登录也可进入）。
+    if (_settingsOpen) return _buildSettingsView(context);
+    // T6：覆盖偏好加载完成 + 会话恢复完成前不渲染可操作内容，
+    // 保证不启动任何依赖服务器的请求。
+    if (!_serverPrefsReady || !_authReady) {
       return const Center(child: CircularProgressIndicator());
     }
     // 未登录也可继续编辑：登录表单在撰写视图底部按需展开（不打开任何窗口）。
     if (!_signedIn) return _buildComposeView(context);
     if (_busy &&
-        (_stage == FeedbackStage.compose ||
-            _stage == FeedbackStage.notSent)) {
+        (_stage == FeedbackStage.compose || _stage == FeedbackStage.notSent)) {
       return _buildStatusNotice(
         title: '提交中…',
         icon: const SizedBox.square(
@@ -1213,7 +1715,8 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
           return _buildStatusNotice(
             title: '已保存',
             subtitle: '$_waitingNotice\n无需重复提交；管理员处理后点「刷新状态」即可查看结果。',
-            icon: _statusIcon(Icons.mark_email_read_outlined, Icons.check_circle_outline),
+            icon: _statusIcon(
+                Icons.mark_email_read_outlined, Icons.check_circle_outline),
             extra: <Widget>[
               OutlinedButton.icon(
                 key: const Key('feedback-refresh-status'),
@@ -1277,6 +1780,90 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
           ],
         );
     }
+  }
+
+  /// T6：服务器设置视图——地址输入 / 保存 / 恢复默认 / 当前有效地址 /
+  /// 连通性提示；覆盖仅保存于本机，不回写宿主默认配置。
+  Widget _buildSettingsView(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    return SingleChildScrollView(
+      key: const Key('feedback-settings-view'),
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Text('Feedback 服务器', style: theme.textTheme.titleSmall),
+          const SizedBox(height: 4),
+          Text(
+            '自定义地址仅保存在本机；恢复默认后使用应用内置地址。',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            key: const Key('feedback-server-input'),
+            controller: _serverInput,
+            focusNode: _serverInputFocus,
+            enabled: !_settingsBusy,
+            keyboardType: TextInputType.url,
+            autocorrect: false,
+            textInputAction: TextInputAction.done,
+            onSubmitted: (_) => _saveServerSetting(),
+            decoration: InputDecoration(
+              labelText: '服务器地址',
+              hintText: widget.config.apiBase,
+              border: const OutlineInputBorder(),
+              isDense: true,
+              errorText: _serverError,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            '当前有效地址：$effectiveApiBase',
+            key: const Key('feedback-server-effective'),
+            style: theme.textTheme.bodySmall,
+          ),
+          if (_serverHint != null) ...<Widget>[
+            const SizedBox(height: 8),
+            Text(
+              _serverHint!,
+              key: const Key('feedback-server-hint'),
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.primary,
+              ),
+            ),
+          ],
+          const SizedBox(height: 12),
+          Row(
+            children: <Widget>[
+              FilledButton(
+                key: const Key('feedback-server-save'),
+                onPressed: _settingsBusy ? null : _saveServerSetting,
+                child: _settingsBusy
+                    ? const SizedBox.square(
+                        dimension: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Text('保存'),
+              ),
+              const SizedBox(width: 8),
+              TextButton(
+                key: const Key('feedback-server-default'),
+                onPressed: _settingsBusy ? null : _restoreDefaultServer,
+                child: const Text('恢复默认'),
+              ),
+              const Spacer(),
+              TextButton(
+                key: const Key('feedback-settings-back'),
+                onPressed: _closeSettings,
+                child: const Text('返回'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _statusIcon(IconData active, IconData idle) {
@@ -1431,8 +2018,7 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
-          Text('登录后即可提交（账号由管理员分发）',
-              style: theme.textTheme.bodySmall),
+          Text('登录后即可提交（账号由管理员分发）', style: theme.textTheme.bodySmall),
           const SizedBox(height: 8),
           TextField(
             key: const Key('feedback-login-username'),
@@ -1440,6 +2026,8 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
             focusNode: _usernameFocus,
             enabled: !_busy,
             autofillHints: const <String>[AutofillHints.username],
+            // T9：账号「下一步」进入密码框（焦点顺序由树序保证）。
+            textInputAction: TextInputAction.next,
             decoration: const InputDecoration(
               labelText: '用户名',
               border: OutlineInputBorder(),
@@ -1450,9 +2038,12 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
           TextField(
             key: const Key('feedback-login-password'),
             controller: _password,
+            focusNode: _passwordFocus,
             enabled: !_busy,
             obscureText: true,
             autofillHints: const <String>[AutofillHints.password],
+            // T9：密码「完成」沿用登录流程。
+            textInputAction: TextInputAction.done,
             onSubmitted: (_) => _login(),
             decoration: const InputDecoration(
               labelText: '密码',
@@ -1500,189 +2091,213 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
     final ThemeData theme = Theme.of(context);
     final int runes = _draft.text.runes.length;
     final bool nearLimit = runes >= kFeedbackMaxTextRunes;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: <Widget>[
-          if (_composeError != null) ...<Widget>[
-            Container(
-              key: const Key('feedback-compose-error'),
-              margin: const EdgeInsets.only(bottom: 12),
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: theme.colorScheme.errorContainer,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Row(
+    // T9：有界可滚动布局——高度充足时主输入区照旧占满剩余空间；
+    // 高度不足（键盘展开 / 小屏 / 放大字体 / 截图+日志+登录表单）时
+    // 整体可滚动，底部计数与操作按钮始终可达，不再溢出裁剪。
+    return LayoutBuilder(
+      builder: (BuildContext context, BoxConstraints constraints) {
+        final double minHeight = constraints.maxHeight.isFinite
+            ? math.max(0.0, constraints.maxHeight - 28)
+            : 0.0;
+        return SingleChildScrollView(
+          key: const Key('feedback-compose-scroll'),
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minHeight: minHeight),
+            child: IntrinsicHeight(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: <Widget>[
-                  Icon(Icons.warning_amber_rounded,
-                      size: 18, color: theme.colorScheme.onErrorContainer),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      _composeError!,
-                      style:
-                          TextStyle(color: theme.colorScheme.onErrorContainer),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-          if (_screenshotBytes != null) ...<Widget>[
-            Container(
-              key: const Key('feedback-screenshot-wrap'),
-              height: 120,
-              margin: const EdgeInsets.only(bottom: 12),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: theme.colorScheme.outlineVariant),
-              ),
-              clipBehavior: Clip.antiAlias,
-              child: Stack(
-                fit: StackFit.expand,
-                children: <Widget>[
-                  GestureDetector(
-                    key: const Key('feedback-screenshot-thumb'),
-                    onTap: () => _openZoomDialog(context),
-                    child: Image.memory(
-                      _screenshotBytes!,
-                      fit: BoxFit.cover,
-                    ),
-                  ),
-                  Positioned(
-                    top: 6,
-                    left: 6,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 6, vertical: 2),
+                  if (_composeError != null) ...<Widget>[
+                    Container(
+                      key: const Key('feedback-compose-error'),
+                      margin: const EdgeInsets.only(bottom: 12),
+                      padding: const EdgeInsets.all(10),
                       decoration: BoxDecoration(
-                        color: Colors.black54,
-                        borderRadius: BorderRadius.circular(4),
+                        color: theme.colorScheme.errorContainer,
+                        borderRadius: BorderRadius.circular(8),
                       ),
-                      child: const Text(
-                        '当前截图 (点击放大)',
-                        style: TextStyle(color: Colors.white, fontSize: 10),
+                      child: Row(
+                        children: <Widget>[
+                          Icon(Icons.warning_amber_rounded,
+                              size: 18,
+                              color: theme.colorScheme.onErrorContainer),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              _composeError!,
+                              style: TextStyle(
+                                  color: theme.colorScheme.onErrorContainer),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                  if (_screenshotBytes != null) ...<Widget>[
+                    Container(
+                      key: const Key('feedback-screenshot-wrap'),
+                      height: 120,
+                      margin: const EdgeInsets.only(bottom: 12),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(8),
+                        border:
+                            Border.all(color: theme.colorScheme.outlineVariant),
+                      ),
+                      clipBehavior: Clip.antiAlias,
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: <Widget>[
+                          GestureDetector(
+                            key: const Key('feedback-screenshot-thumb'),
+                            onTap: () => _openZoomDialog(context),
+                            child: Image.memory(
+                              _screenshotBytes!,
+                              fit: BoxFit.cover,
+                            ),
+                          ),
+                          Positioned(
+                            top: 6,
+                            left: 6,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: Colors.black54,
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: const Text(
+                                '当前截图 (点击放大)',
+                                style: TextStyle(
+                                    color: Colors.white, fontSize: 10),
+                              ),
+                            ),
+                          ),
+                          Positioned(
+                            bottom: 6,
+                            right: 6,
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: <Widget>[
+                                if (widget.onRetakeScreenshot != null)
+                                  IconButton.filledTonal(
+                                    key: const Key('feedback-retake-btn'),
+                                    visualDensity: VisualDensity.compact,
+                                    tooltip: '重新截图',
+                                    icon: const Icon(Icons.refresh, size: 16),
+                                    onPressed: widget.onRetakeScreenshot,
+                                  ),
+                                const SizedBox(width: 4),
+                                IconButton.filledTonal(
+                                  key: const Key(
+                                      'feedback-remove-screenshot-btn'),
+                                  visualDensity: VisualDensity.compact,
+                                  tooltip: '移除截图',
+                                  icon: const Icon(Icons.delete_outline,
+                                      size: 16),
+                                  onPressed: () {
+                                    setState(() {
+                                      _screenshotBytes = null;
+                                      _captureInfo = null;
+                                    });
+                                  },
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                  _buildLogsArea(context),
+                  const SizedBox(height: 8),
+                  Expanded(
+                    child: TextField(
+                      key: const Key('feedback-input'),
+                      controller: _draft,
+                      focusNode: _draftFocus,
+                      expands: true,
+                      maxLines: null,
+                      minLines: null,
+                      textAlignVertical: TextAlignVertical.top,
+                      keyboardType: TextInputType.multiline,
+                      inputFormatters: <TextInputFormatter>[
+                        const _RuneLimitFormatter(kFeedbackMaxTextRunes),
+                      ],
+                      decoration: const InputDecoration(
+                        hintText: '刚才哪里不顺手？你希望它怎样改进？',
+                        border: OutlineInputBorder(),
+                        isDense: true,
                       ),
                     ),
                   ),
-                  Positioned(
-                    bottom: 6,
-                    right: 6,
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: <Widget>[
-                        if (widget.onRetakeScreenshot != null)
-                          IconButton.filledTonal(
-                            key: const Key('feedback-retake-btn'),
-                            visualDensity: VisualDensity.compact,
-                            tooltip: '重新截图',
-                            icon: const Icon(Icons.refresh, size: 16),
-                            onPressed: widget.onRetakeScreenshot,
-                          ),
-                        const SizedBox(width: 4),
-                        IconButton.filledTonal(
-                          key: const Key('feedback-remove-screenshot-btn'),
-                          visualDensity: VisualDensity.compact,
-                          tooltip: '移除截图',
-                          icon: const Icon(Icons.delete_outline, size: 16),
-                          onPressed: () {
-                            setState(() {
-                              _screenshotBytes = null;
-                              _captureInfo = null;
-                            });
-                          },
-                        ),
-                      ],
+                  const SizedBox(height: 10),
+                  if (!_signedIn && _showLoginForm)
+                    _buildInlineLoginForm(context),
+                  if (_signedIn && _quotaBlocked)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: Text(
+                        '今日提交次数已用完，额度刷新后可继续提交',
+                        key: const Key('feedback-quota-blocked'),
+                        style: theme.textTheme.bodySmall
+                            ?.copyWith(color: theme.colorScheme.error),
+                      ),
                     ),
+                  Row(
+                    children: <Widget>[
+                      Text(
+                        '$runes / $kFeedbackMaxTextRunes',
+                        key: const Key('feedback-counter'),
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: nearLimit
+                              ? theme.colorScheme.error
+                              : theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                      if (_signedIn && _quota != null) ...<Widget>[
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            '${_user?.username ?? ''} · 今日剩余 ${_quota!.remaining} 次',
+                            key: const Key('feedback-quota'),
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.bodySmall?.copyWith(
+                                color: theme.colorScheme.onSurfaceVariant),
+                          ),
+                        ),
+                      ] else
+                        const Spacer(),
+                      FilledButton.icon(
+                        key: const Key('feedback-submit'),
+                        // 未登录：点击在当前面板展开登录表单（成功后自动提交一次）。
+                        onPressed: _signedIn
+                            ? (_canSubmit ? _submit : null)
+                            : (_draftValid && !_busy
+                                ? () => _openLoginForm(thenSubmit: true)
+                                : null),
+                        icon: Icon(
+                          _signedIn ? Icons.send_outlined : Icons.login,
+                          size: 18,
+                        ),
+                        // Class A（未送达）时按钮语义是重试：同 key 同字节重发，
+                        // 快照变化（改文案 / 换图 / 移图）则自动换新 key。
+                        label: Text(
+                          _signedIn
+                              ? (_stage == FeedbackStage.notSent
+                                  ? '重试提交'
+                                  : '提交')
+                              : '登录并提交',
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),
             ),
-          ],
-          _buildLogsArea(context),
-          const SizedBox(height: 8),
-          Expanded(
-            child: TextField(
-              key: const Key('feedback-input'),
-              controller: _draft,
-              focusNode: _draftFocus,
-              expands: true,
-              maxLines: null,
-              minLines: null,
-              textAlignVertical: TextAlignVertical.top,
-              keyboardType: TextInputType.multiline,
-              inputFormatters: <TextInputFormatter>[
-                const _RuneLimitFormatter(kFeedbackMaxTextRunes),
-              ],
-              decoration: const InputDecoration(
-                hintText: '刚才哪里不顺手？你希望它怎样改进？',
-                border: OutlineInputBorder(),
-                isDense: true,
-              ),
-            ),
           ),
-          const SizedBox(height: 10),
-          if (!_signedIn && _showLoginForm) _buildInlineLoginForm(context),
-          if (_signedIn && _quotaBlocked)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Text(
-                '今日提交次数已用完，额度刷新后可继续提交',
-                key: const Key('feedback-quota-blocked'),
-                style: theme.textTheme.bodySmall
-                    ?.copyWith(color: theme.colorScheme.error),
-              ),
-            ),
-          Row(
-            children: <Widget>[
-              Text(
-                '$runes / $kFeedbackMaxTextRunes',
-                key: const Key('feedback-counter'),
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: nearLimit
-                      ? theme.colorScheme.error
-                      : theme.colorScheme.onSurfaceVariant,
-                ),
-              ),
-              if (_signedIn && _quota != null) ...<Widget>[
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    '${_user?.username ?? ''} · 今日剩余 ${_quota!.remaining} 次',
-                    key: const Key('feedback-quota'),
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.bodySmall
-                        ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
-                  ),
-                ),
-              ] else
-                const Spacer(),
-              FilledButton.icon(
-                key: const Key('feedback-submit'),
-                // 未登录：点击在当前面板展开登录表单（成功后自动提交一次）。
-                onPressed: _signedIn
-                    ? (_canSubmit ? _submit : null)
-                    : (_draftValid && !_busy
-                        ? () => _openLoginForm(thenSubmit: true)
-                        : null),
-                icon: Icon(
-                  _signedIn ? Icons.send_outlined : Icons.login,
-                  size: 18,
-                ),
-                // Class A（未送达）时按钮语义是重试：同 key 同字节重发，
-                // 快照变化（改文案 / 换图 / 移图）则自动换新 key。
-                label: Text(
-                  _signedIn
-                      ? (_stage == FeedbackStage.notSent ? '重试提交' : '提交')
-                      : '登录并提交',
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 
@@ -1769,6 +2384,9 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
                 label: const Text('添加日志', style: TextStyle(fontSize: 12)),
                 style: TextButton.styleFrom(
                   visualDensity: VisualDensity.compact,
+                  // 触屏目标不小于 48dp（Material 无障碍下限）；
+                  // 紧凑视觉样式只影响绘制，不影响命中区域。
+                  tapTargetSize: MaterialTapTargetSize.padded,
                   padding:
                       const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 ),
@@ -1866,7 +2484,7 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
             tooltip: '预览',
             visualDensity: VisualDensity.compact,
             padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
             onPressed: () => _openLogPreview(context, log),
           ),
           IconButton(
@@ -1875,7 +2493,7 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
             tooltip: '移除',
             visualDensity: VisualDensity.compact,
             padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
             onPressed: _busy ? null : () => removeLog(index),
           ),
         ],
@@ -1934,7 +2552,9 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
           await Future<List<FeedbackLogFile>?>.value(
         provider(),
       ).timeout(const Duration(seconds: 3));
-      if (!mounted || seq != _logsSeq || widget.config.appId != currentAppId) return;
+      if (!mounted || seq != _logsSeq || widget.config.appId != currentAppId) {
+        return;
+      }
       _logsCollected = true;
       if (result != null && result.isNotEmpty) {
         final List<FeedbackLogFile> valid = <FeedbackLogFile>[];
@@ -1955,14 +2575,18 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
         });
       }
     } on TimeoutException {
-      if (!mounted || seq != _logsSeq || widget.config.appId != currentAppId) return;
+      if (!mounted || seq != _logsSeq || widget.config.appId != currentAppId) {
+        return;
+      }
       _logsCollected = true;
       setState(() {
         _logsCollecting = false;
         _logError = '日志采集超时，可重试或手动添加';
       });
     } catch (_) {
-      if (!mounted || seq != _logsSeq || widget.config.appId != currentAppId) return;
+      if (!mounted || seq != _logsSeq || widget.config.appId != currentAppId) {
+        return;
+      }
       _logsCollected = true;
       setState(() {
         _logsCollecting = false;
@@ -1981,10 +2605,18 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
     });
     try {
       final List<FeedbackLogFile>? files = await picker();
-      if (!mounted || seq != _logsSeq || widget.config.appId != currentAppId || files == null || files.isEmpty) return;
+      if (!mounted ||
+          seq != _logsSeq ||
+          widget.config.appId != currentAppId ||
+          files == null ||
+          files.isEmpty) {
+        return;
+      }
       _addManualLogs(files);
     } catch (err) {
-      if (!mounted || seq != _logsSeq || widget.config.appId != currentAppId) return;
+      if (!mounted || seq != _logsSeq || widget.config.appId != currentAppId) {
+        return;
+      }
       setState(() {
         _logError = err is FormatException ? err.message : '选择日志文件失败';
       });
@@ -1996,8 +2628,8 @@ class FeedbackPanelState extends State<FeedbackPanel> with WidgetsBindingObserve
       label: 'logs',
       extensions: <String>['log', 'txt', 'json', 'jsonl'],
     );
-    final List<fs.XFile> files =
-        await fs.openFiles(acceptedTypeGroups: const <fs.XTypeGroup>[typeGroup]);
+    final List<fs.XFile> files = await fs
+        .openFiles(acceptedTypeGroups: const <fs.XTypeGroup>[typeGroup]);
     if (files.isEmpty) return null;
     final List<FeedbackLogFile> result = <FeedbackLogFile>[];
     for (final fs.XFile file in files) {

@@ -7,6 +7,7 @@ import {
   type UpdateOperationView,
   type UpdatePauseState,
 } from "../api.ts";
+import { InlineError, SkeletonRows } from "../ui.tsx";
 
 /** 保留最近一次提交的任务 ID（刷新页面或重开标签后仍能恢复进度展示）。 */
 const OPERATION_KEY = "feedback.systemUpdate.operationId";
@@ -181,11 +182,31 @@ export default function SystemUpdateView() {
   const running = operation !== null && !isTerminal(operation);
   const canUpdate = Boolean(checkView?.latest?.digest) && checkView?.compatible === true && !running && !submitting;
 
-  if (!status) return <p className="muted">加载中…</p>;
+  if (!status) {
+    return (
+      <div>
+        <div className="page-header">
+          <div>
+            <h1>系统更新</h1>
+            <div className="sub">当前版本、检查更新与更新任务进度。</div>
+          </div>
+        </div>
+        <div className="card">
+          <SkeletonRows rows={3} />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div>
-      {error && <p className="err">{error}</p>}
+      <div className="page-header">
+        <div>
+          <h1>系统更新</h1>
+          <div className="sub">只提交版本与摘要信息；更新执行器负责下载、校验与切换。</div>
+        </div>
+      </div>
+      {error && <InlineError message={error} onRetry={() => void loadStatus().catch(() => undefined)} />}
       {notice && <p className="ok-text">{notice}</p>}
       {status.pause.paused && <PauseBanner pause={status.pause} />}
 
@@ -200,7 +221,7 @@ export default function SystemUpdateView() {
           <span>
             {status.config.updateConfigured ? (
               <>
-                已接入 <code>{status.config.updaterBaseUrl}</code>
+                已接入 <code className="wrap-anywhere">{status.config.updaterBaseUrl}</code>
                 <span className="muted">（{status.config.controlDir ? "控制目录已挂载" : "未挂载控制目录"}）</span>
               </>
             ) : (
@@ -217,13 +238,13 @@ export default function SystemUpdateView() {
       </div>
 
       <div className="card">
-        <div className="row spread" style={{ marginBottom: 12 }}>
-          <h2 style={{ margin: 0, fontSize: 15 }}>版本状态</h2>
-          <div className="row">
-            <button type="button" onClick={check} disabled={checking || submitting}>
+        <div className="row row-wrap spread" style={{ marginBottom: 12 }}>
+          <h2 style={{ margin: 0 }}>版本状态</h2>
+          <div className="btn-row">
+            <button type="button" className="btn" onClick={check} disabled={checking || submitting}>
               {checking ? "检查中…" : "检查更新"}
             </button>
-            <button className="primary" type="button" onClick={startUpdate} disabled={!canUpdate}>
+            <button className="btn primary" type="button" onClick={startUpdate} disabled={!canUpdate}>
               {submitting ? "提交中…" : running ? "更新进行中…" : "更新到最新稳定版"}
             </button>
           </div>
@@ -321,7 +342,7 @@ function CheckSummary({ check }: { check: SystemUpdateStatus["check"] | undefine
           <div className="muted" style={{ marginBottom: 4 }}>
             发布说明
           </div>
-          <blockquote>{latest.notes}</blockquote>
+          <blockquote className="quote">{latest.notes}</blockquote>
         </div>
       ) : (
         <p className="muted">该版本清单未包含发布说明。</p>
@@ -344,13 +365,13 @@ function OperationPanel({
   return (
     <div className="card">
       <div className="row spread" style={{ marginBottom: 12 }}>
-        <h2 style={{ margin: 0, fontSize: 15 }}>更新任务</h2>
-        <button type="button" onClick={onForget}>
+        <h2 style={{ margin: 0 }}>更新任务</h2>
+        <button type="button" className="btn sm" onClick={onForget}>
           停止跟踪
         </button>
       </div>
       <p className="muted" style={{ marginTop: 0 }}>
-        任务 ID <code>{operationId}</code>（刷新页面或关闭标签都不会取消任务）
+        任务 ID <code className="wrap-anywhere">{operationId}</code>（刷新页面或关闭标签都不会取消任务）
       </p>
       {operation && <OperationProgress operation={operation} />}
       {connectionState === "recovering" && (
@@ -417,7 +438,7 @@ function OperationProgress({ operation }: { operation: UpdateOperationView }) {
       {operation.evidence.length > 0 && (
         <details style={{ marginTop: 10 }}>
           <summary className="muted">任务证据（{operation.evidence.length} 条）</summary>
-          <div className="card" style={{ padding: 0, overflow: "hidden", marginTop: 8 }}>
+          <div className="table-wrap" style={{ marginTop: 8 }}>
             <table>
               <thead>
                 <tr>
@@ -460,7 +481,7 @@ function OperationProgress({ operation }: { operation: UpdateOperationView }) {
 function RecentOperations({ operations }: { operations: UpdateOperationView[] }) {
   if (operations.length === 0) return null;
   return (
-    <div className="card" style={{ padding: 0, overflow: "hidden" }}>
+    <div className="table-wrap">
       <table>
         <thead>
           <tr>
@@ -475,7 +496,7 @@ function RecentOperations({ operations }: { operations: UpdateOperationView[] })
           {operations.map((op) => (
             <tr key={op.operationId}>
               <td>
-                <code>{op.operationId}</code>
+                <code className="wrap-anywhere">{op.operationId}</code>
               </td>
               <td>{op.version ?? "—"}</td>
               <td className={op.outcome === "needs_attention" ? "err" : undefined}>

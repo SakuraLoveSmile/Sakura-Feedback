@@ -15,6 +15,7 @@ import 'capture_mask.dart';
 import 'config.dart';
 import 'controller.dart';
 import 'panel.dart';
+import 'server_pref.dart';
 import 'token_store.dart';
 
 /// 宽屏断点：>= 此宽度时面板以侧边抽屉展开，否则全屏页面式。
@@ -93,6 +94,8 @@ class FeedbackWidget extends StatefulWidget {
     this.filePicker,
     @visibleForTesting this.httpClient,
     @visibleForTesting this.tokenStore,
+    @visibleForTesting this.tokenStoreFactory,
+    @visibleForTesting this.serverPrefStore,
   });
 
   /// 被包裹的宿主内容。
@@ -117,6 +120,14 @@ class FeedbackWidget extends StatefulWidget {
   /// 测试注入的令牌仓库。
   @visibleForTesting
   final FeedbackTokenStore? tokenStore;
+
+  /// 测试注入的令牌仓库工厂（按有效配置派生，服务身份间隔离）。
+  @visibleForTesting
+  final FeedbackTokenStore Function(FeedbackConfig config)? tokenStoreFactory;
+
+  /// 测试注入的服务器覆盖偏好仓库。
+  @visibleForTesting
+  final FeedbackServerPrefStore? serverPrefStore;
 
   @override
   State<FeedbackWidget> createState() => _FeedbackWidgetState();
@@ -156,6 +167,15 @@ class _FeedbackWidgetState extends State<FeedbackWidget> {
   @override
   void didUpdateWidget(FeedbackWidget oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.config.appId != widget.config.appId ||
+        oldWidget.config.apiBase != widget.config.apiBase) {
+      // 宿主身份变化时，面板的偏好读取可能仍在等待；先使截图会话失效，
+      // 防止旧身份的编码结果迟到后交付给新身份。
+      _invalidateCaptureSession();
+      if (mounted && _temporarilyHideForCapture) {
+        setState(() => _temporarilyHideForCapture = false);
+      }
+    }
     if (oldWidget.controller != widget.controller) {
       // 控制器替换：旧会话立即失效，旧请求不得再影响新控制器的 UI。
       _invalidateCaptureSession();
@@ -229,6 +249,25 @@ class _FeedbackWidgetState extends State<FeedbackWidget> {
     _unbindController(_controller);
     _internalController?.dispose();
     super.dispose();
+  }
+
+  /// 最近一次由面板上报的有效地址：仅在实际变化时使外层截图会话失效
+  /// （初始上报与重复上报不中断进行中的捕获）。
+  String? _lastReportedApiBase;
+
+  void _onEffectiveApiBaseChange(String base) {
+    final bool changed =
+        _lastReportedApiBase != null && _lastReportedApiBase != base;
+    _lastReportedApiBase = base;
+    _controller.setEffectiveApiBase(base);
+    if (changed) {
+      // T7：服务身份切换——进行中的截图会话作废，隐藏覆盖层复位，
+      // 旧会话的迟到交付不得写入新身份面板。
+      _invalidateCaptureSession();
+      if (_temporarilyHideForCapture) {
+        setState(() => _temporarilyHideForCapture = false);
+      }
+    }
   }
 
   void _open() => _controller.open();
@@ -631,6 +670,9 @@ class _FeedbackWidgetState extends State<FeedbackWidget> {
 
         final double bottom =
             config.position?.dy ?? _parseBottom(config.launcherBottom, height);
+        // T9：面板底部抬升键盘实际重叠量（未避让部分），避免输入框与
+        // 操作按钮被软键盘覆盖；宿主已避让时为 0，不产生双重留白。
+        final double keyboardOverlap = _keyboardOverlap(context);
         final double? left = isLeft ? (config.position?.dx ?? 20.0) : null;
         final double? right = isLeft ? null : (config.position?.dx ?? 20.0);
 
@@ -665,15 +707,18 @@ class _FeedbackWidgetState extends State<FeedbackWidget> {
                 width: panelWidth,
                 left: isLeft ? 0 : null,
                 right: isLeft ? null : 0,
-                child: !_everOpened
-                    ? const SizedBox.shrink()
-                    : Visibility(
-                        visible: open && !_temporarilyHideForCapture,
-                        maintainState: true,
-                        // 传真实开关状态（用户是否打开面板）：截图期间暂时
-                        // 隐藏不算关闭，不得据此取消登录接续或清除状态。
-                        child: _buildPanel(config, visible: open),
-                      ),
+                child: Padding(
+                  padding: EdgeInsets.only(bottom: keyboardOverlap),
+                  child: !_everOpened
+                      ? const SizedBox.shrink()
+                      : Visibility(
+                          visible: open && !_temporarilyHideForCapture,
+                          maintainState: true,
+                          // 传真实开关状态（用户是否打开面板）：截图期间暂时
+                          // 隐藏不算关闭，不得据此取消登录接续或清除状态。
+                          child: _buildPanel(config, visible: open),
+                        ),
+                ),
               ),
               if (!open && config.showLauncher)
                 Positioned(
@@ -689,6 +734,21 @@ class _FeedbackWidgetState extends State<FeedbackWidget> {
         );
       },
     );
+  }
+
+  /// T9：面板与键盘区域的实际重叠量——只扣除尚未被宿主布局避让的部分。
+  /// 宿主已随键盘收缩组件（如 Scaffold resizeToAvoidBottomInset，此时
+  /// viewInsets 通常也被消费归零）或面板底边已在键盘上沿之上时返回 0，
+  /// 避免双重留白；宿主未避让（根部挂载）时返回键盘遮挡的高度。
+  double _keyboardOverlap(BuildContext context) {
+    final double inset = MediaQuery.viewInsetsOf(context).bottom;
+    if (inset <= 0) return 0;
+    final RenderObject? ro = context.findRenderObject();
+    if (ro is! RenderBox || !ro.attached || !ro.hasSize) return inset;
+    final double keyboardTop = MediaQuery.sizeOf(context).height - inset;
+    final double bottom = ro.localToGlobal(Offset.zero).dy + ro.size.height;
+    final double overlap = bottom - keyboardTop;
+    return overlap > 0 ? overlap : 0.0;
   }
 
   Widget _buildFab(BuildContext context, FeedbackConfig config) {
@@ -832,6 +892,11 @@ class _FeedbackWidgetState extends State<FeedbackWidget> {
           filePicker: widget.filePicker,
           httpClient: widget.httpClient,
           tokenStore: widget.tokenStore,
+          tokenStoreFactory: widget.tokenStoreFactory,
+          serverPrefStore: widget.serverPrefStore,
+          // T6/T7：向控制器上报实际使用地址；地址变化时使外层截图会话
+          // 失效（旧会话的迟到交付不得写入新身份的草稿）。
+          onEffectiveApiBaseChange: _onEffectiveApiBaseChange,
         ),
       ),
     );

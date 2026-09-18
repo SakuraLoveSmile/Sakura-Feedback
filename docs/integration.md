@@ -177,14 +177,14 @@ Shadow DOM 查询节点或覆盖内部样式）；`test/` 下的测试辅助文�
 
 ### 2.1 Web：通过构建出的 npm tarball 安装（打包器宿主推荐）
 
-包名 `@feedback/web`，当前版本 `0.4.0`，因此 tarball 文件名为 **`feedback-web-0.4.0.tgz`**（版本变了文件名跟着变）。
+包名 `@feedback/web`，当前版本 `0.5.0`，因此 tarball 文件名为 **`feedback-web-0.5.0.tgz`**（版本变了文件名跟着变）。
 
 ```bash
 # ① 在仓库根构建组件包
 pnpm install
 pnpm --filter @feedback/web build
 
-# ② 打成 tarball（真实产物：/tmp/fbpack/feedback-web-0.4.0.tgz）
+# ② 打成 tarball（真实产物：/tmp/fbpack/feedback-web-0.5.0.tgz）
 mkdir -p /tmp/fbpack
 pnpm --filter @feedback/web pack --pack-destination /tmp/fbpack
 ```
@@ -193,8 +193,8 @@ tarball 内含 `dist/` 全部产物（含 ESM 懒加载分块）、`package.json
 
 ```bash
 # ③ 在你的宿主项目里安装这个 tgz
-pnpm add /tmp/fbpack/feedback-web-0.4.0.tgz
-# 等价写法：npm install /tmp/fbpack/feedback-web-0.4.0.tgz
+pnpm add /tmp/fbpack/feedback-web-0.5.0.tgz
+# 等价写法：npm install /tmp/fbpack/feedback-web-0.5.0.tgz
 ```
 
 ```ts
@@ -758,6 +758,7 @@ MaterialApp(
 | `launcher-bottom` | `launcherBottom` | CSS 长度字符串（百分比或像素，如 `25%` / `80px`） | `25%` | 入口距底部的垂直位置 | 纯展示 |
 | `launcher-mode` | `launcherMode` | `tab`（贴边标签） \| `orb`（**灵感球**，可拖拽指出位置并截图） | **`tab`** | 入口形态 | 纯展示；切到 `orb` 时标签隐藏、切到 `tab` 时灵感球隐藏。**不影响草稿与截图开关** |
 | `capture-mode` | `captureMode` | `off` \| `viewport` | **`off`** | 呼出时是否**自动**截取当前应用视口 | 只改下一次呼出的行为；**不清空草稿**。`off` 只关闭**自动**截图：面板里始终有手动的「截取当前页面」 |
+| — | `effectiveApiBase` | string \| null（只读 property） | — | 当前实际使用的服务地址：用户本机覆盖优先于 `api-base`，未覆盖时等于 `api-base` | 用户通过面板内「服务器设置」改变；语义见 5.3.1 |
 | — | `logProvider` | `FeedbackLogProvider?`（即 `() => Promise<FeedbackLogFile[]> \| FeedbackLogFile[]`） | `undefined` | 自动日志采集提供者；呼出面板时调用（3秒超时容错），至多采集 3 份附件，单文件 ≤1MiB | 仅 property，替换后下一次呼出面板生效；**不清空草稿** |
 
 **明确结论（易踩坑）**：
@@ -794,9 +795,14 @@ MaterialApp(
 - 距停靠边的水平内缩：`position.dx`，未传时默认 **20 逻辑像素**。
 - `side` 决定"停靠边"是哪一边（`left` → 左内缩，`right` → 右内缩）。
 
-运行中改变**服务身份**（`apiBase` / `appId`）：Flutter 端**未定义也未验证**热切换语义——
-`FeedbackConfig` 是构造参数，包内未导出运行时替换配置的入口。要换服务或换软件，请**重建 `FeedbackWidget` 实例**。
-（Web 端有明确的身份切换语义，见 4.1 与 5.3。）
+运行中改变**服务身份**（宿主重建 `FeedbackWidget` 并传入新 `apiBase` / `appId`）：
+面板按**完整身份切换**处理——取消在途捕获 / 提交 / 轮询 / 登录接续，清空草稿、
+截图、日志、任务态与幂等键，按新身份重建 API 客户端与令牌仓库并重新读取本机
+服务器覆盖偏好；旧身份的迟到响应一律丢弃。**用户侧的运行时换服**走面板内
+「服务器设置」（5.3.1），与宿主配置热更新走同一套身份切换收口。
+
+`FeedbackController.effectiveApiBase`（只读）：当前实际使用的服务地址——
+本机覆盖优先于 `config.apiBase`；偏好加载完成前先返回 `config.apiBase`。
 
 ### 4.3 方法
 
@@ -897,7 +903,39 @@ widget.open();     // ← 只有这一句
 | `api-base` 变化 | 捕获会话、提交快照与幂等键、登录握手、轮询 | 访问令牌、任务态（feedbackId / 最近记录 / 错误摘要 / 降级链接）、草稿（含 textarea） | —（相位复位 `idle`） | **是**。切换后未重新登录时组件不会发出任何请求 |
 | `app-id` 变化 | 草稿、捕获、旧提交结果、轮询、绑定旧 `appId` 的握手 | 同上（相位复位 `idle`） | **访问令牌**（服务未变） | 否 |
 
-Flutter 端：见 4.2 末尾（未定义热切换语义，请重建组件实例）。
+Flutter 端：宿主传入新 `apiBase` / `appId` 重建 `FeedbackWidget` 时走同一套
+身份切换收口（见 4.2 末尾），用户侧换服见下节。
+
+#### 5.3.1 用户自定义服务器（本机覆盖，两端一致）
+
+两端面板头部都有「服务器设置」入口（未登录也可进入）：地址输入、保存、
+恢复默认、当前有效地址展示，保存后探测 `GET /healthz` 给出连通性提示
+（**不静默回切**——连接失败只是提示，仍可稍后重试提交）。
+
+- **持久化与本机隔离**：覆盖只保存在本机——Web 用 `localStorage`（按页面源），
+  Flutter 原生用 `flutter_secure_storage`、Flutter Web 用 `localStorage`；
+  存储键按「规范化默认地址 + `appId`」派生（`server-override.<base64url(...)>` /
+  `feedback_widget.server_override.<base64url(...)>`），不同默认配置或不同
+  `appId` 读到不同槽位。恢复默认只删除覆盖键，**不回写宿主 `api-base`**。
+- **地址规范化**（两端同一套规则）：去首尾空白、仅允许 `http(s)`、主机必须
+  非空、拒绝内嵌凭据 / 查询参数 / `#` 片段、去末尾斜杠、去默认端口
+  （`http:80` / `https:443`）、保留部署路径前缀；**HTTPS 页面拒绝 HTTP 地址**
+  （浏览器混合内容拦截，提前在校验层报错）。
+- **同址不重置**：规范化后与当前有效地址相同的保存只写偏好，不触发任何
+  身份重置（草稿原样保留）。
+- **异址切换需确认**：有草稿文本 / 截图 / 日志 / 在途或未确认的提交时先弹确认
+  （清空并切换）；存在结果未确认的提交时，确认框明确说明「旧服务器可能已接收
+  该反馈，切换不会撤回，也不会自动向新服务器重发」。取消则一切保留。
+- **身份隔离**：确认后按新身份重建——令牌仓库（Flutter 按有效地址 + `appId`
+  派生键，旧令牌绝不发往新地址）、任务态、额度、轮询、幂等键、截图会话、
+  日志采集全部作废重来；旧身份迟到响应（提交 / 轮询 / 会话 / 401 回调）一律
+  由身份世代守卫丢弃。
+- **写入失败降级**：偏好写入失败时本次会话仍生效，提示「仅本次生效」。
+- **加载门控**：覆盖偏好加载完成前不启动任何依赖服务器的请求
+  （会话恢复 / 额度 / 提交 / 轮询 / 日志采集都在门后）。
+- **可观察**：Web 读 `element.effectiveApiBase`；Flutter 读
+  `controller.effectiveApiBase`（`FeedbackController` 是 `ChangeNotifier`，
+  变化会触发监听通知）。
 
 ### 5.4 交互约定
 
@@ -917,6 +955,10 @@ Flutter：
 - **入口可见性**：面板打开时入口不渲染（`if (!open && config.showLauncher)`），关闭后恢复。
 - 灵感球：单击 = 按 `captureMode` 决定是否截图；拖拽（位移 > 8 逻辑像素）释放 = **总是**带落点截图并打开
   （例外：面板已持有草稿 / 截图时不重拍，直接恢复草稿，见 4.3）。
+- **键盘避让（Android / 小屏，T9）**：面板底部只抬升「未被宿主避让的实际重叠」——
+  宿主已收缩（含 Scaffold 消费 `viewInsets`）或已避开时不再额外留白；撰写 / 登录 /
+  设置内容有界可滚，底部按钮始终可达；账号「下一步」→ 密码、「完成」→ 登录，
+  聚焦字段在布局完成后滚回可见区域；开合 / 旋转不清草稿、不重复提交。
 
 ---
 
@@ -1303,3 +1345,29 @@ Blog 的反馈入口建议显式声明：`launcher-mode="orb"` + `capture-mode="
 | [`examples/ssr/README.md`](../examples/ssr/README.md) | SSR：为什么只能在客户端动态加载 |
 | [`examples/flutter/README.md`](../examples/flutter/README.md) | Flutter 示例：`MaterialApp.builder` 挂载、第二路由与宿主对话框、构建备注 |
 | [`VERIFICATION.md`](../VERIFICATION.md) | 验证记录与**未验证 / BLOCKED** 清单 |
+
+## 可选 Assist 事件接入（0.5.0）
+
+默认关闭。需要接入时，给服务进程显式注入以下环境变量（使用 Docker Compose 时还需在
+服务的 `environment` 中传入，单写宿主 `.env` 不会自动传入容器）：
+
+| 环境变量 | 用途与默认值 |
+|---|---|
+| `FEEDBACK_ASSIST_HUB_URL` | Assist 中枢基地址；未设置时不入队、不投递、不开放只读接口 |
+| `FEEDBACK_ASSIST_SOURCE_KEY` | 中枢签发的上报 Bearer 密钥；启用时应同时配置 |
+| `FEEDBACK_ASSIST_READ_KEY` | 中枢拉取本服务反馈/附件的独立密钥；缺省回退到来源密钥 |
+| `FEEDBACK_ASSIST_QUEUE_MAX` | pending 队列容量，默认 1000 |
+| `FEEDBACK_ASSIST_FLUSH_MS` | 空闲轮询间隔，默认 2000 毫秒 |
+
+事件与反馈在同一数据库事务入队，发送至中枢 `POST /api/v1/ingest/events`，包含反馈正文、
+状态及附件元数据；附件字节由中枢经只读接口另行拉取。网络失败持久化退避重试，401 暂停后
+定期探测。队列超限会丢弃最旧待发送项并记录溢出汇总，不能将本地队列视为永久审计存档。
+
+中枢使用 `Authorization: Bearer <READ_KEY>` 访问：
+
+- `GET /api/assist/feedback/:id`：反馈详情和附件元数据。
+- `GET /api/assist/feedback/:id/attachments/screenshot`：PNG 截图。
+- `GET /api/assist/feedback/:id/attachments/logs/:logId`：日志下载。
+
+只读凭证可读取全部反馈，请仅交给受信中枢，通过 HTTPS 传输并保存在服务端。
+本地彻底删除会清除关联事件副本及附件；已经发出的请求和中枢已保存的数据不能由本地删除撤回。

@@ -40,6 +40,13 @@ export 'src/controller.dart' show FeedbackController;
 export 'src/idempotency.dart' show generateFeedbackIdempotencyKey;
 export 'src/panel.dart'
     show FeedbackPanel, FeedbackPanelState, FeedbackStage, kFeedbackMaxTextRunes;
+export 'src/server_pref.dart'
+    show
+        FeedbackServerPrefStore,
+        MemoryServerPrefStore,
+        ServerBaseNormalization,
+        normalizeServerBase,
+        serverOverrideStorageKey;
 export 'src/token_store.dart'
     show FeedbackTokenStore, MemoryTokenStore, feedbackTokenStorageKey;
 export 'src/widget.dart'

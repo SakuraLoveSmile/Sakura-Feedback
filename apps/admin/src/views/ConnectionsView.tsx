@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { ApiError, api, type KaneoTestResult } from "../api.ts";
+import { Field, SkeletonRows } from "../ui.tsx";
 
 interface KaneoGet {
   baseUrl: string | null;
@@ -64,147 +65,182 @@ export default function ConnectionsView() {
     }
   }
 
-  if (!k || !a) return <p className="muted">加载中…</p>;
-
-  return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(320px,1fr))", gap: 16 }}>
-      {msg && (
-        <p className={msg.kind === "ok" ? "ok-text" : "err"} style={{ gridColumn: "1/-1" }}>
-          {msg.text}
-        </p>
-      )}
-
-      <div className="card">
-        <h1>Kaneo 连接</h1>
-        <div className="field">
-          <label htmlFor="kb">API 地址（含或不含 /api 后缀）</label>
-          <input
-            id="kb"
-            value={kBaseUrl}
-            onChange={(e) => setKBaseUrl(e.target.value)}
-            placeholder="http://kaneo.local:1337"
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="kc">Web 地址（任务链接基址，可留空=同 API 地址）</label>
-          <input
-            id="kc"
-            value={kClientUrl}
-            onChange={(e) => setKClientUrl(e.target.value)}
-            placeholder="https://kaneo.example.com"
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="kk">API Key {k.apiKeySet && <span className="ok-text">（已保存，留空则不修改）</span>}</label>
-          <input
-            id="kk"
-            type="password"
-            value={kApiKey}
-            onChange={(e) => setKApiKey(e.target.value)}
-            placeholder={k.apiKeySet ? "••••••••" : "sk_…"}
-          />
-        </div>
-        <div className="row">
-          <button
-            type="button"
-            className="primary"
-            disabled={busy}
-            onClick={() =>
-              run(async () => {
-                const r = await api.put("/api/admin/connection/kaneo", {
-                  baseUrl: kBaseUrl,
-                  clientUrl: kClientUrl || undefined,
-                  ...(kApiKey ? { apiKey: kApiKey } : {}),
-                });
-                setKApiKey("");
-                const kk = await api.get<KaneoGet>("/api/admin/connection/kaneo");
-                setK(kk);
-                return r;
-              }, "Kaneo 配置已保存")
-            }
-          >
-            保存
-          </button>
-        </div>
-        <hr style={{ margin: "16px 0", border: "none", borderTop: "1px solid #e5e7eb" }} />
-        <div className="row">
-          <div className="field" style={{ flex: 1, marginBottom: 0 }}>
-            <label htmlFor="tp">测试用项目 id</label>
-            <input id="tp" value={testProjectId} onChange={(e) => setTestProjectId(e.target.value)} />
+  if (!k || !a) {
+    return (
+      <div>
+        <div className="page-header">
+          <div>
+            <h1>连接配置</h1>
+            <div className="sub">Kaneo 同步目标与 AI 整理服务。</div>
           </div>
-          <button
-            type="button"
-            disabled={busy || !testProjectId}
-            onClick={() =>
-              run(() => api.post("/api/admin/connection/kaneo/test", { projectId: testProjectId }), "连通正常")
-            }
-            style={{ marginTop: 22 }}
-          >
-            连接测试
-          </button>
+        </div>
+        <div className="card">
+          <SkeletonRows rows={4} />
         </div>
       </div>
+    );
+  }
 
-      <div className="card">
-        <h1>AI（OpenAI 兼容）</h1>
-        <div className="field">
-          <label htmlFor="ab">接口地址（Chat Completions 的基址）</label>
-          <input
-            id="ab"
-            value={aBaseUrl}
-            onChange={(e) => setABaseUrl(e.target.value)}
-            placeholder="https://api.openai.com/v1"
-          />
+  return (
+    <div>
+      <div className="page-header">
+        <div>
+          <h1>连接配置</h1>
+          <div className="sub">Kaneo 同步目标与 AI 整理服务；密钥只写服务器，不回显。</div>
         </div>
-        <div className="field">
-          <label htmlFor="am">模型</label>
-          <input id="am" value={aModel} onChange={(e) => setAModel(e.target.value)} placeholder="gpt-4o-mini" />
+      </div>
+      <div className="cards-2col">
+        {msg && (
+          <p className={msg.kind === "ok" ? "ok-text" : "err"} style={{ gridColumn: "1/-1" }}>
+            {msg.text}
+          </p>
+        )}
+
+        <div className="card">
+          <h2>Kaneo 连接</h2>
+          <Field id="kb" label="API 地址（含或不含 /api 后缀）">
+            {(ctl) => (
+              <input
+                {...ctl}
+                value={kBaseUrl}
+                onChange={(e) => setKBaseUrl(e.target.value)}
+                placeholder="http://kaneo.local:1337"
+              />
+            )}
+          </Field>
+          <Field id="kc" label="Web 地址（任务链接基址，可留空=同 API 地址）">
+            {(ctl) => (
+              <input
+                {...ctl}
+                value={kClientUrl}
+                onChange={(e) => setKClientUrl(e.target.value)}
+                placeholder="https://kaneo.example.com"
+              />
+            )}
+          </Field>
+          <Field
+            id="kk"
+            label={<>API Key {k.apiKeySet && <span className="ok-text">（已保存，留空则不修改）</span>}</>}
+          >
+            {(ctl) => (
+              <input
+                {...ctl}
+                type="password"
+                value={kApiKey}
+                onChange={(e) => setKApiKey(e.target.value)}
+                placeholder={k.apiKeySet ? "••••••••" : "sk_…"}
+              />
+            )}
+          </Field>
+          <div className="btn-row">
+            <button
+              type="button"
+              className="btn primary"
+              disabled={busy}
+              onClick={() =>
+                run(async () => {
+                  const r = await api.put("/api/admin/connection/kaneo", {
+                    baseUrl: kBaseUrl,
+                    clientUrl: kClientUrl || undefined,
+                    ...(kApiKey ? { apiKey: kApiKey } : {}),
+                  });
+                  setKApiKey("");
+                  const kk = await api.get<KaneoGet>("/api/admin/connection/kaneo");
+                  setK(kk);
+                  return r;
+                }, "Kaneo 配置已保存")
+              }
+            >
+              保存
+            </button>
+          </div>
+          <hr className="sep" />
+          <div className="row" style={{ alignItems: "flex-start" }}>
+            <div style={{ flex: 1 }}>
+              <Field id="tp" label="测试用项目 id">
+                {(ctl) => <input {...ctl} value={testProjectId} onChange={(e) => setTestProjectId(e.target.value)} />}
+              </Field>
+            </div>
+            <button
+              type="button"
+              className="btn"
+              disabled={busy || !testProjectId}
+              onClick={() =>
+                run(() => api.post("/api/admin/connection/kaneo/test", { projectId: testProjectId }), "连通正常")
+              }
+              style={{ marginTop: 22 }}
+            >
+              连接测试
+            </button>
+          </div>
         </div>
-        <div className="field">
-          <label htmlFor="ak">密钥 {a.apiKeySet && <span className="ok-text">（已保存，留空则不修改）</span>}</label>
-          <input
-            id="ak"
-            type="password"
-            value={aApiKey}
-            onChange={(e) => setAApiKey(e.target.value)}
-            placeholder={a.apiKeySet ? "••••••••" : "sk-…"}
-          />
-        </div>
-        <div className="row">
-          <button
-            type="button"
-            className="primary"
-            disabled={busy}
-            onClick={() =>
-              run(async () => {
-                const r = await api.put("/api/admin/connection/ai", {
-                  baseUrl: aBaseUrl,
-                  model: aModel,
-                  ...(aApiKey ? { apiKey: aApiKey } : {}),
-                });
-                setAApiKey("");
-                const aa = await api.get<AiGet>("/api/admin/connection/ai");
-                setA(aa);
-                return r;
-              }, "AI 配置已保存")
-            }
-          >
-            保存
-          </button>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => run(() => api.post("/api/admin/connection/ai/test"), "AI 连通正常")}
-          >
-            连接测试
-          </button>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => run(() => api.post("/api/admin/connection/ai/test-vision"), "AI 图像识别测试正常")}
-          >
-            测试图像识别 (Vision)
-          </button>
+
+        <div className="card">
+          <h2>AI（OpenAI 兼容）</h2>
+          <Field id="ab" label="接口地址（Chat Completions 的基址）">
+            {(ctl) => (
+              <input
+                {...ctl}
+                value={aBaseUrl}
+                onChange={(e) => setABaseUrl(e.target.value)}
+                placeholder="https://api.openai.com/v1"
+              />
+            )}
+          </Field>
+          <Field id="am" label="模型">
+            {(ctl) => (
+              <input {...ctl} value={aModel} onChange={(e) => setAModel(e.target.value)} placeholder="gpt-4o-mini" />
+            )}
+          </Field>
+          <Field id="ak" label={<>密钥 {a.apiKeySet && <span className="ok-text">（已保存，留空则不修改）</span>}</>}>
+            {(ctl) => (
+              <input
+                {...ctl}
+                type="password"
+                value={aApiKey}
+                onChange={(e) => setAApiKey(e.target.value)}
+                placeholder={a.apiKeySet ? "••••••••" : "sk-…"}
+              />
+            )}
+          </Field>
+          <div className="btn-row">
+            <button
+              type="button"
+              className="btn primary"
+              disabled={busy}
+              onClick={() =>
+                run(async () => {
+                  const r = await api.put("/api/admin/connection/ai", {
+                    baseUrl: aBaseUrl,
+                    model: aModel,
+                    ...(aApiKey ? { apiKey: aApiKey } : {}),
+                  });
+                  setAApiKey("");
+                  const aa = await api.get<AiGet>("/api/admin/connection/ai");
+                  setA(aa);
+                  return r;
+                }, "AI 配置已保存")
+              }
+            >
+              保存
+            </button>
+            <button
+              type="button"
+              className="btn"
+              disabled={busy}
+              onClick={() => run(() => api.post("/api/admin/connection/ai/test"), "AI 连通正常")}
+            >
+              连接测试
+            </button>
+            <button
+              type="button"
+              className="btn"
+              disabled={busy}
+              onClick={() => run(() => api.post("/api/admin/connection/ai/test-vision"), "AI 图像识别测试正常")}
+            >
+              测试图像识别 (Vision)
+            </button>
+          </div>
         </div>
       </div>
     </div>

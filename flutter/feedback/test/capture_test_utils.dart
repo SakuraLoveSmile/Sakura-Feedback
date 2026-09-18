@@ -32,6 +32,7 @@ Widget captureHost({
       ),
       controller: controller,
       tokenStore: MemoryTokenStore('tok'),
+      serverPrefStore: MemoryServerPrefStore(),
       httpClient: httpClient ?? captureMockClient(),
       child: child,
     ),

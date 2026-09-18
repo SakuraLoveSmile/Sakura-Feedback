@@ -65,6 +65,7 @@ Future<void> _pumpPanel(
           FeedbackConfig('https://svc.test', 'com.example.app',
               appVersion: '9.9.9', pageLabel: 'home'),
       tokenStore: tokenStore,
+      serverPrefStore: MemoryServerPrefStore(),
       httpClient: server.client,
     ),
   ));

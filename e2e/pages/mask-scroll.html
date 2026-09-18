@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>E2E 宿主页 · 滚动位置遮罩</title>
+    <!--
+      e2e 专用宿主页（不是产品代码）：300vh 可滚动文档，覆盖
+      「滚动位置 + 上下边缘敏感区」的真实浏览器像素断言。
+
+      版面（vh 相对视口，配合 scrollY 断言）：
+        #decoy-top         文档顶部正常块     纯绿      scroll=0 时可见
+        #pw-straddle       top:100vh-22px    纯青      scroll=0 底部露头 / scroll=100vh 顶部露头（边缘）
+        #decoy-green       top:100vh+10px    纯绿      scroll=100vh 右上可见
+        #secret-mid        top:100vh+140px   纯品红    scroll=100vh 中部可见
+        #secret-doc-bottom bottom:0 right:0  纯品红    scroll=max 右下角贴边
+        #pw-doc-bottom     bottom:14px       纯青      scroll=max 底部密码框
+        #decoy-blue        bottom:0 left:0   纯蓝      scroll=max 左下可见
+    -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: #ffffff;
+      }
+      body {
+        position: relative;
+        width: 100vw;
+        height: 300vh;
+        font-family: system-ui, -apple-system, sans-serif;
+      }
+      .block {
+        position: absolute;
+        color: #000000;
+        font-size: 18px;
+        padding: 8px;
+        box-sizing: border-box;
+      }
+      #decoy-top {
+        left: 6%;
+        top: 20px;
+        width: 34%;
+        height: 10%;
+        background: #00ff00;
+      }
+      #pw-straddle {
+        position: absolute;
+        left: 6%;
+        top: calc(100vh - 22px);
+        width: 42%;
+        height: 44px;
+        background: #00ffff;
+        border: 0;
+        font-size: 18px;
+        padding: 0 8px;
+        box-sizing: border-box;
+      }
+      #decoy-green {
+        right: 0;
+        top: calc(100vh + 10px);
+        width: 16%;
+        height: 8%;
+        background: #00ff00;
+      }
+      #secret-mid {
+        left: 30%;
+        top: calc(100vh + 140px);
+        width: 40%;
+        height: 160px;
+        background: #ff00ff;
+        color: #ffff00;
+      }
+      #secret-doc-bottom {
+        right: 0;
+        bottom: 0;
+        width: 24%;
+        height: 130px;
+        background: #ff00ff;
+      }
+      #pw-doc-bottom {
+        position: absolute;
+        right: 6%;
+        bottom: 14px;
+        width: 36%;
+        height: 44px;
+        background: #00ffff;
+        border: 0;
+        font-size: 18px;
+        padding: 0 8px;
+        box-sizing: border-box;
+      }
+      #decoy-blue {
+        left: 0;
+        bottom: 0;
+        width: 22%;
+        height: 60px;
+        background: #0000ff;
+        color: #ffffff;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- decoy 块不放文字：窄视口下文字/抗锯齿像素占比过高会拉低原色占比断言 -->
+    <div id="decoy-top" class="block"></div>
+    <input id="pw-straddle" type="password" value="pw-canary-scroll-1" />
+    <div id="decoy-green" class="block"></div>
+    <div id="secret-mid" class="block" data-feedback-capture-mask>
+      SECRET-CANARY-TOKEN-scroll-mid
+    </div>
+    <div id="secret-doc-bottom" class="block" data-feedback-capture-mask>BOTTOM-EDGE</div>
+    <input id="pw-doc-bottom" type="password" value="pw-canary-scroll-2" />
+    <div id="decoy-blue" class="block"></div>
+
+    <script>
+      // 测试脚手架（仅 e2e）：与 mask.html 同一套读取入口。
+      window.__fbE2E = {
+        widget: () => document.querySelector('feedback-widget'),
+        rects() {
+          const r = {};
+          for (const id of ['decoy-top', 'pw-straddle', 'decoy-green', 'secret-mid',
+                            'secret-doc-bottom', 'pw-doc-bottom', 'decoy-blue']) {
+            const b = document.getElementById(id).getBoundingClientRect();
+            r[id] = { x: b.x, y: b.y, width: b.width, height: b.height };
+          }
+          return r;
+        },
+        thumbSrc() {
+          const img = this.widget().shadowRoot.querySelector('.fb-screenshot-thumb');
+          return img ? img.getAttribute('src') : null;
+        },
+        statusText() {
+          const el = this.widget().shadowRoot.querySelector('.fb-status');
+          return el ? el.textContent : '';
+        },
+        async blobBase64() {
+          const img = this.widget().shadowRoot.querySelector('.fb-screenshot-thumb');
+          if (!img || !img.getAttribute('src')) return null;
+          const res = await fetch(img.getAttribute('src'));
+          const bytes = new Uint8Array(await res.arrayBuffer());
+          let s = '';
+          const chunk = 0x8000;
+          for (let i = 0; i < bytes.length; i += chunk) {
+            s += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+          }
+          return btoa(s);
+        },
+      };
+    </script>
+
+    <script src="/sdk/feedback-web.umd.js"></script>
+    <feedback-widget
+      id="widget"
+      api-base="http://localhost:8787"
+      app-id="com.example.demo-e2e"
+      app-version="3.1.4"
+      page-label="e2e-mask-scroll"
+      side="right"
+      launcher-mode="orb"
+      capture-mode="viewport"
+    ></feedback-widget>
+  </body>
+</html>

@@ -1,6 +1,6 @@
 name: feedback_widget
 description: 个人反馈组件——将反馈悬浮按钮与面板嵌入 Flutter 应用，对接 Feedback 服务。
-version: 0.4.0
+version: 0.5.0
 publish_to: none
 
 environment:

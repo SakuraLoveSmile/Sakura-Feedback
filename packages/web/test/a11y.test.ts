@@ -87,9 +87,13 @@ describe('无障碍与键盘', () => {
     m.fab.click();
     setTextarea(m, '移动端内容');
     const { panel, root } = m;
+    // 与组件 focusables() 同一口径：含 input 与 tabindex=0，排除 [hidden] 祖先内的节点
+    // （设置视图隐藏时其子元素不得进入焦点序列）。
     const focusables = Array.from(
-      panel.querySelectorAll<HTMLElement>('button:not([disabled]), textarea:not([disabled]), a[href]'),
-    );
+      panel.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), textarea:not([disabled]), input:not([disabled]), a[href], [tabindex="0"]',
+      ),
+    ).filter((n) => n.closest('[hidden]') === null);
     const first = focusables[0] as HTMLElement;
     const last = focusables[focusables.length - 1] as HTMLElement;
 

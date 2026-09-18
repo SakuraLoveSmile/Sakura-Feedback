@@ -32,8 +32,10 @@ import {
   installGeometryPatch,
   isCoverPixel,
   pixelColor,
+  setDocumentScroll,
   stubCreateElementCanvas,
   type FakeRenderState,
+  type PngImage,
 } from './pixel-fixture';
 
 let teardownGeometry: (() => void) | null = null;
@@ -176,6 +178,140 @@ describe('像素级遮挡场景', () => {
     expect(pixelColor(png, 10, 10)).toEqual([LEAK.r, LEAK.g, LEAK.b, 255]);
     // 视口外节点：画布上根本没有它的像素
     expect(pixelColor(png, 399, 15)).toEqual([255, 255, 255, 255]);
+  });
+});
+
+/**
+ * T1 回归：真实渲染器（html2canvas-pro CanvasRenderer）在返回画布时会把
+ * `scale(scale)·translate(-x,-y)` 变换留在 2D 上下文上。遮挡矩形必须以
+ * 输出像素坐标绘制——不受残余变换影响；本组断言最终 PNG 像素。
+ */
+describe('渲染器残余变换与 DPR 缩放（T1 回归）', () => {
+  /** 断言遮挡矩形覆盖完整（网格 + 右缘 + 底缘）。 */
+  function assertCoveredRect(png: PngImage, r: { x: number; y: number; width: number; height: number }) {
+    const stepX = Math.max(1, Math.floor(r.width / 8));
+    const stepY = Math.max(1, Math.floor(r.height / 8));
+    for (let y = r.y; y < r.y + r.height; y += stepY) {
+      for (let x = r.x; x < r.x + r.width; x += stepX) {
+        expect(isCoverPixel(png, x, y), `(${x},${y}) 应被覆盖`).toBe(true);
+      }
+      expect(isCoverPixel(png, r.x + r.width - 1, y), `右缘 (${r.x + r.width - 1},${y})`).toBe(true);
+    }
+    expect(isCoverPixel(png, r.x, r.y + r.height - 1), '底缘左').toBe(true);
+    expect(isCoverPixel(png, r.x + r.width - 1, r.y + r.height - 1), '右下角').toBe(true);
+  }
+
+  /** 全图扫描敏感泄漏像素（红色），一个都不允许残留。 */
+  function leakPixels(png: PngImage): Array<readonly [number, number]> {
+    const out: Array<readonly [number, number]> = [];
+    for (let y = 0; y < png.height; y++) {
+      for (let x = 0; x < png.width; x++) {
+        const c = pixelColor(png, x, y);
+        if (c[0] === LEAK.r && c[1] === LEAK.g && c[2] === LEAK.b) out.push([x, y] as const);
+      }
+    }
+    return out;
+  }
+
+  it('夹具契约：假渲染器在画布上下文留下 scale·translate 残余变换', async () => {
+    const render = createFakeRenderer(state);
+    const canvas = (await render(document.body, {
+      width: 400,
+      height: 300,
+      scale: 1.5,
+      x: 30,
+      y: 50,
+      onclone: () => {},
+    })) as unknown as FakeCanvas;
+    const tx = canvas.ctx.getTransform();
+    // scale(1.5)·translate(-30,-50)：e = 1.5·(-30) = -45，f = 1.5·(-50) = -75
+    expect(tx).toEqual({ a: 1.5, b: 0, c: 0, d: 1.5, e: -45, f: -75 });
+  });
+
+  it('scale=1 无滚动：残余变换为恒等（基线，不应回归）', async () => {
+    addNode('<input type="password" value="hunter2">', '100,100,120,24');
+    const { result, png } = await runBuiltin(1);
+    expect(result.maskedRegions).toEqual([{ x: 99, y: 99, width: 122, height: 26 }]);
+    assertCoveredRect(png, result.maskedRegions[0]!);
+    expect(leakPixels(png)).toEqual([]);
+  });
+
+  it('scale=2（DPR 2）：遮挡按输出像素绘制，无泄漏、无误伤', async () => {
+    addNode('<div></div>', '280,200,60,40', { color: [DECOY.r, DECOY.g, DECOY.b, 255] });
+    addNode('<input type="password" value="hunter2">', '100,100,120,24');
+
+    const { result, png } = await runBuiltin(1, { ...VP400x300, dpr: 2 });
+    // 400x300 @2x → 800x600；ratio 2 → (100,100,120,24) → x 199..440, y 199..250
+    expect(result.outputWidth).toBe(800);
+    expect(result.outputHeight).toBe(600);
+    expect(result.maskedRegions).toEqual([{ x: 199, y: 199, width: 242, height: 50 }]);
+    assertCoveredRect(png, result.maskedRegions[0]!);
+    expect(pixelColor(png, 198, 199)).not.toEqual([COVER.r, COVER.g, COVER.b, 255]); // 仅外扩 1 输出像素
+    expect(pixelColor(png, 600, 440)).toEqual([DECOY.r, DECOY.g, DECOY.b, 255]); // 装饰节点未误伤
+    expect(leakPixels(png)).toEqual([]);
+  });
+
+  it('scale=1.5（非整数）：遮挡按输出像素绘制', async () => {
+    addNode('<div></div>', '280,200,60,40', { color: [DECOY.r, DECOY.g, DECOY.b, 255] });
+    addNode('<input type="password" value="hunter2">', '100,100,120,24');
+
+    const { result, png } = await runBuiltin(1, { ...VP400x300, dpr: 1.5 });
+    // 400x300 @1.5 → 600x450；x0=floor(150)-1=149，x1=ceil(330)+1=331 → w=182；
+    // y0=149，y1=ceil(186)+1=187 → h=38
+    expect(result.outputWidth).toBe(600);
+    expect(result.maskedRegions).toEqual([{ x: 149, y: 149, width: 182, height: 38 }]);
+    assertCoveredRect(png, result.maskedRegions[0]!);
+    expect(pixelColor(png, 460, 330)).toEqual([DECOY.r, DECOY.g, DECOY.b, 255]);
+    expect(leakPixels(png)).toEqual([]);
+  });
+
+  it('scale<1（DPR 1 下大视口缩小到 2048 上限）：边缘敏感区完整覆盖', async () => {
+    addNode('<div></div>', '100,100,50,50', { color: [DECOY.r, DECOY.g, DECOY.b, 255] });
+    addNode('<input type="password" value="hunter2">', '2500,1360,60,40');
+
+    const { result, png } = await runBuiltin(1, { width: 2560, height: 1440, scrollX: 0, scrollY: 0, dpr: 1 });
+    // scale = 2048/2560 = 0.8 → 2048x1152；x0=floor(2000)-1=1999，x1=min(2048,2049)=2048 → w=49；
+    // y0=1087，y1=min(1152,1121)=1121 → h=34
+    expect(result.outputWidth).toBe(2048);
+    expect(result.outputHeight).toBe(1152);
+    expect(result.maskedRegions).toEqual([{ x: 1999, y: 1087, width: 49, height: 34 }]);
+    assertCoveredRect(png, result.maskedRegions[0]!);
+    expect(pixelColor(png, 90, 90)).toEqual([DECOY.r, DECOY.g, DECOY.b, 255]);
+    expect(leakPixels(png)).toEqual([]);
+  });
+
+  it('滚动视口（scrollY=200, DPR 2）：残余平移不得二次作用', async () => {
+    setDocumentScroll(0, 200);
+    addNode('<div></div>', '280,420,60,40', { color: [DECOY.r, DECOY.g, DECOY.b, 255] });
+    addNode('<input type="password" value="hunter2">', '100,320,120,24'); // 文档坐标 → 视口 y=120
+
+    const { result, png } = await runBuiltin(1, { width: 400, height: 300, scrollX: 0, scrollY: 200, dpr: 2 });
+    // ratio 2：x 199..440，y0=floor(240)-1=239，y1=ceil(288)+1=289 → h=50
+    expect(result.maskedRegions).toEqual([{ x: 199, y: 239, width: 242, height: 50 }]);
+    assertCoveredRect(png, result.maskedRegions[0]!);
+    expect(pixelColor(png, 600, 470)).toEqual([DECOY.r, DECOY.g, DECOY.b, 255]);
+    expect(leakPixels(png)).toEqual([]);
+  });
+
+  it('无敏感区 + 残余变换：正常产出 PNG，内容不被误遮', async () => {
+    addNode('<div></div>', '280,200,60,40', { color: [DECOY.r, DECOY.g, DECOY.b, 255] });
+    const { result, png } = await runBuiltin(0, { ...VP400x300, dpr: 2 });
+    expect(result.maskedRegions).toEqual([]);
+    expect(pixelColor(png, 600, 440)).toEqual([DECOY.r, DECOY.g, DECOY.b, 255]);
+  });
+
+  it('缩小重编码与首轮共用修复：DPR 2 下重编码后遮挡仍与最终 PNG 一致', async () => {
+    state.blobSizes = [MAX_PNG_BYTES + 1]; // 第 2 次（重编码后）返回真实小 PNG
+    addNode('<input type="password" value="hunter2">', '100,100,120,24');
+
+    const { result, png } = await runBuiltin(1, { ...VP400x300, dpr: 2 });
+    expect(state.toBlobCalls).toBe(2);
+    // 800x600 → ×0.8 → 640x480；ratio 1.6 → x 159..352，y 159..199
+    expect(result.outputWidth).toBe(640);
+    expect(result.outputHeight).toBe(480);
+    expect(result.maskedRegions).toEqual([{ x: 159, y: 159, width: 194, height: 41 }]);
+    assertCoveredRect(png, result.maskedRegions[0]!);
+    expect(leakPixels(png)).toEqual([]);
   });
 });
 

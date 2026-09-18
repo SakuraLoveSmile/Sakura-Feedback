@@ -42,23 +42,74 @@ export const api = {
 
 // ---------- 类型 ----------
 
+/** 本地管理区域（与处理状态 status 完全分离）。 */
+export type MgmtView = "inbox" | "archived" | "trash";
+/** 生命周期动作（服务端同一入口处理单条与批量）。 */
+export type LifecycleAction = "archive" | "unarchive" | "trash" | "restore" | "resume_processing" | "purge";
+
 export interface FeedbackListItem {
   id: string;
   appId: string;
+  /** 软件显示名（已删除软件仍返回名称）。 */
+  appName?: string | null;
+  /** 该反馈关联的软件记录已被删除（历史数据仍保留，仅配置失效）。 */
+  appDeleted?: boolean;
   username?: string | null;
   status: string;
   createdAt: string;
   updatedAt: string;
   title?: string | null;
+  /** 正文摘要（标题缺失时的回退展示，不含错误信息）。 */
+  textPreview?: string | null;
   kaneoUrl?: string | null;
   errorSummary?: string | null;
-  /** 该反馈当前卡在哪一步（等待配置 / 等待来源确认 / 等待人工归档 / 已排队）。 */
+  hasScreenshot?: boolean;
+  logCount?: number;
+  /** 该反馈当前卡在哪一步（等待配置 / 等待来源确认 / 等待人工分类 / 已排队）。 */
   collectionState?: CollectionState;
   sourceOrigin?: string;
+  archiveAuthorized?: boolean;
   archiveAuthorizedKind?: "manual" | "auto" | null;
   autoBlockedKind?: "retryable" | "config" | null;
   autoBlockedReason?: string | null;
   autoNextAttemptAt?: string | null;
+  /** ---- 本地管理生命周期 ---- */
+  mgmtState: MgmtView;
+  lifecycleVersion: number;
+  resumePaused?: boolean;
+  archivedAt?: string | null;
+  trashedAt?: string | null;
+  /** 当前可用的生命周期动作（服务端口径）。 */
+  availableActions?: LifecycleAction[];
+}
+
+export interface LifecycleItemResult {
+  id: string;
+  ok: boolean;
+  code?: string;
+  message?: string;
+  mgmtState?: MgmtView;
+  lifecycleVersion?: number;
+  purged?: boolean;
+  alreadyPurged?: boolean;
+}
+
+export interface LifecycleBatchResponse {
+  ok: boolean;
+  action: LifecycleAction;
+  results: LifecycleItemResult[];
+}
+
+export interface FeedbackCounts {
+  inbox: number;
+  archived: number;
+  trash: number;
+}
+
+export interface FeedbackAppOption {
+  appId: string;
+  name: string;
+  deleted: boolean;
 }
 
 export interface FeedbackScreenshotMeta {
@@ -155,6 +206,8 @@ export interface FeedbackDetail extends FeedbackListItem {
   archiveAuthorized?: boolean;
   archiveAuthorizedAt?: string | null;
   archiveOperationId?: string | null;
+  /** 回收站记录为只读（禁止分类、同步、重试与附件重传）。 */
+  readOnly?: boolean;
   audit?: FeedbackAuditEntry[] | null;
   /** 该反馈的收集状态（等待配置 / 等待来源确认 / 等待人工归档 / 已排队）。 */
   collectionState?: CollectionState;
@@ -174,6 +227,8 @@ export interface FeedbackDetail extends FeedbackListItem {
     configStatus: "pending" | "configured";
     archiveMode: "manual" | "automatic";
     ruleVersion: number;
+    /** 非空表示关联的软件记录已软删除（配置失效，历史数据保留）。 */
+    deletedAt?: string | null;
   } | null;
 }
 
@@ -360,23 +415,36 @@ export type UpdateOperationResult =
 export const STATUS_LABELS: Record<string, string> = {
   received: "已接收",
   processing: "处理中",
-  needs_info: "需要补充信息",
-  ready_to_archive: "待归档",
-  archiving: "归档中",
-  needs_review: "结果待核对",
-  archived: "已归档",
+  needs_info: "待人工分类",
+  ready_to_archive: "待同步",
+  archiving: "同步中",
+  needs_review: "待核对",
+  archived: "已同步",
   failed: "失败",
+};
+
+/** 管理区域文案（与处理状态分离：归档指本地整理动作）。 */
+export const VIEW_LABELS: Record<MgmtView, string> = {
+  inbox: "收件箱",
+  archived: "已归档",
+  trash: "回收站",
 };
 
 /** 审计动作文案（详情页展示）。 */
 export const AUDIT_LABELS: Record<string, string> = {
   classify_save: "保存分类",
-  archive_authorize: "归档授权",
-  archive_enqueued: "入队归档",
+  archive_authorize: "同步授权",
+  archive_enqueued: "入队同步",
   retry: "重试处理",
   recheck: "重新核对",
   force_create: "确认缺失后再次创建",
   retry_comment: "重试截图评论",
   replace_upload: "替换截图上传",
   retry_log: "重试日志上传",
+  mgmt_archive: "归档",
+  mgmt_unarchive: "恢复到收件箱",
+  mgmt_trash: "移入回收站",
+  mgmt_restore: "从回收站恢复",
+  mgmt_resume: "恢复处理",
+  mgmt_purge: "彻底删除",
 };

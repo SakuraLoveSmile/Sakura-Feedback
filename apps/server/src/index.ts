@@ -35,6 +35,9 @@ async function shutdown(signal: string): Promise<void> {
   // T3：先停调度与定时器（不再安排新工作、不再有定时器回调碰数据库），再排空已有队列。
   feedbackApp.worker.stop();
   await feedbackApp.worker.idle();
+  // Assist：停投递调度 → 完成在途批次 → 之后才能关库（worker 退出前不得再碰 db）。
+  feedbackApp.assist?.stop();
+  await feedbackApp.assist?.idle();
   try {
     feedbackApp.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
     feedbackApp.db.close();

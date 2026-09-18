@@ -1,5 +1,6 @@
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { type AccountItem, ApiError, api } from "../api.ts";
+import { EmptyState, Field, InlineError, PromptDialog, useToast } from "../ui.tsx";
 
 interface Draft {
   username: string;
@@ -10,12 +11,13 @@ interface Draft {
 const empty: Draft = { username: "", password: "", dailyLimit: "" };
 
 export default function AccountsView() {
-  const [accounts, setAccounts] = useState<AccountItem[]>([]);
+  const toast = useToast();
+  const [accounts, setAccounts] = useState<AccountItem[] | null>(null);
   const [draft, setDraft] = useState<Draft>(empty);
   const [limitEdits, setLimitEdits] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [pwTarget, setPwTarget] = useState<AccountItem | null>(null);
 
   const load = useCallback(async () => {
     const r = await api.get<{ users: AccountItem[] }>("/api/admin/users");
@@ -29,11 +31,10 @@ export default function AccountsView() {
   async function run(fn: () => Promise<unknown>, okMsg: string) {
     setBusy(true);
     setError(null);
-    setNotice(null);
     try {
       await fn();
       await load();
-      setNotice(okMsg);
+      toast("ok", okMsg);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "操作失败");
     } finally {
@@ -71,9 +72,7 @@ export default function AccountsView() {
     await run(() => api.patch(`/api/admin/users/${a.id}`, { dailyLimit: value }), "每日上限已更新");
   }
 
-  async function resetPassword(a: AccountItem) {
-    const password = window.prompt(`为「${a.username}」设置新密码（不会显示在列表中）：`);
-    if (password === null) return;
+  async function resetPassword(a: AccountItem, password: string) {
     if (password === "") {
       setError("新密码不能为空");
       return;
@@ -86,100 +85,123 @@ export default function AccountsView() {
 
   return (
     <div>
-      {error && <p className="err">{error}</p>}
-      {notice && <p className="ok-text">{notice}</p>}
-      <p className="muted" style={{ marginTop: 0 }}>
-        账号由后台创建并分发，不开放注册。所有接入项目与设备共用同一每日额度，按北京时间每天零点刷新。
-      </p>
-      <div className="card" style={{ padding: 0, overflow: "hidden" }}>
-        <table>
-          <thead>
-            <tr>
-              <th>用户名</th>
-              <th>状态</th>
-              <th>每日上限</th>
-              <th>今日已用</th>
-              <th>剩余次数</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {accounts.map((a) => (
-              <tr key={a.id}>
-                <td>
-                  <code>{a.username}</code>
-                </td>
-                <td>{statusTag(a.enabled)}</td>
-                <td>
-                  <input
-                    aria-label={`${a.username} 每日上限`}
-                    style={{ width: 80 }}
-                    value={limitEdits[a.id] ?? String(a.dailyLimit)}
-                    onChange={(e) => setLimitEdits((m) => ({ ...m, [a.id]: e.target.value }))}
-                  />
-                  <button type="button" disabled={busy} onClick={() => saveLimit(a)} style={{ marginLeft: 6 }}>
-                    保存
-                  </button>
-                </td>
-                <td className="muted">{a.used}</td>
-                <td>
-                  <b>{a.remaining}</b>
-                  <span className="muted" style={{ marginLeft: 6, fontSize: 12 }}>
-                    （{resetLabel(a.resetAt)}刷新）
-                  </span>
-                </td>
-                <td className="row">
-                  <button type="button" disabled={busy} onClick={() => toggleEnabled(a)}>
-                    {a.enabled ? "禁用" : "启用"}
-                  </button>
-                  <button type="button" disabled={busy} onClick={() => resetPassword(a)}>
-                    重置密码
-                  </button>
-                </td>
-              </tr>
-            ))}
-            {accounts.length === 0 && (
+      <div className="page-header">
+        <div>
+          <h1>账号</h1>
+          <div className="sub">
+            账号由后台创建并分发，不开放注册。所有接入项目与设备共用同一每日额度，按北京时间每天零点刷新。
+          </div>
+        </div>
+      </div>
+      {error && <InlineError message={error} />}
+
+      <div className="table-wrap">
+        {accounts === null ? (
+          <p className="muted" style={{ padding: "var(--sp-4)" }}>
+            加载中…
+          </p>
+        ) : accounts.length === 0 ? (
+          <EmptyState title="还没有普通账号" hint="使用下方表单创建第一个账号。" />
+        ) : (
+          <table>
+            <thead>
               <tr>
-                <td colSpan={6} className="muted" style={{ padding: 16 }}>
-                  还没有普通账号，用下方表单创建
-                </td>
+                <th>用户名</th>
+                <th>状态</th>
+                <th>每日上限</th>
+                <th>今日已用</th>
+                <th>剩余次数</th>
+                <th>操作</th>
               </tr>
-            )}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {accounts.map((a) => (
+                <tr key={a.id}>
+                  <td>
+                    <code>{a.username}</code>
+                  </td>
+                  <td>{statusTag(a.enabled)}</td>
+                  <td>
+                    <div className="row" style={{ gap: "var(--sp-2)" }}>
+                      <input
+                        aria-label={`${a.username} 每日上限`}
+                        style={{ width: 80 }}
+                        value={limitEdits[a.id] ?? String(a.dailyLimit)}
+                        onChange={(e) => setLimitEdits((m) => ({ ...m, [a.id]: e.target.value }))}
+                      />
+                      <button type="button" className="btn sm" disabled={busy} onClick={() => saveLimit(a)}>
+                        保存
+                      </button>
+                    </div>
+                  </td>
+                  <td className="muted">{a.used}</td>
+                  <td>
+                    <b>{a.remaining}</b>
+                    <span className="muted small" style={{ marginLeft: 6 }}>
+                      （{resetLabel(a.resetAt)}刷新）
+                    </span>
+                  </td>
+                  <td>
+                    <div className="row" style={{ gap: "var(--sp-2)" }}>
+                      <button type="button" className="btn sm" disabled={busy} onClick={() => toggleEnabled(a)}>
+                        {a.enabled ? "禁用" : "启用"}
+                      </button>
+                      <button type="button" className="btn sm" disabled={busy} onClick={() => setPwTarget(a)}>
+                        重置密码
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </div>
 
       <div className="card">
-        <h1>新建账号</h1>
-        <div className="row" style={{ alignItems: "flex-start" }}>
-          <div className="field" style={{ flex: 1 }}>
-            <label htmlFor="un">用户名</label>
-            <input id="un" value={draft.username} onChange={(e) => setDraft({ ...draft, username: e.target.value })} />
+        <h2>新建账号</h2>
+        <div className="row row-wrap" style={{ alignItems: "flex-start" }}>
+          <div style={{ flex: 1 }}>
+            <Field id="un" label="用户名">
+              {(ctl) => (
+                <input
+                  {...ctl}
+                  value={draft.username}
+                  onChange={(e) => setDraft({ ...draft, username: e.target.value })}
+                />
+              )}
+            </Field>
           </div>
-          <div className="field" style={{ flex: 1 }}>
-            <label htmlFor="up">密码</label>
-            <input
-              id="up"
-              type="password"
-              autoComplete="new-password"
-              value={draft.password}
-              onChange={(e) => setDraft({ ...draft, password: e.target.value })}
-            />
+          <div style={{ flex: 1 }}>
+            <Field id="up" label="密码">
+              {(ctl) => (
+                <input
+                  {...ctl}
+                  type="password"
+                  autoComplete="new-password"
+                  value={draft.password}
+                  onChange={(e) => setDraft({ ...draft, password: e.target.value })}
+                />
+              )}
+            </Field>
           </div>
-          <div className="field" style={{ flex: 1 }}>
-            <label htmlFor="ul">每日上限（留空默认 3）</label>
-            <input
-              id="ul"
-              inputMode="numeric"
-              value={draft.dailyLimit}
-              onChange={(e) => setDraft({ ...draft, dailyLimit: e.target.value })}
-            />
+          <div style={{ flex: 1 }}>
+            <Field id="ul" label="每日上限（留空默认 3）">
+              {(ctl) => (
+                <input
+                  {...ctl}
+                  inputMode="numeric"
+                  value={draft.dailyLimit}
+                  onChange={(e) => setDraft({ ...draft, dailyLimit: e.target.value })}
+                />
+              )}
+            </Field>
           </div>
         </div>
-        <div className="row">
+        <div className="btn-row">
           <button
             type="button"
-            className="primary"
+            className="btn primary"
             disabled={busy || !draft.username.trim() || !draft.password}
             onClick={create}
           >
@@ -187,6 +209,21 @@ export default function AccountsView() {
           </button>
         </div>
       </div>
+
+      {pwTarget && (
+        <PromptDialog
+          title={`重置「${pwTarget.username}」的密码`}
+          body={<p>新密码不会显示在列表中；重置后该账号的旧会话将全部撤销。</p>}
+          label="新密码"
+          confirmLabel="重置密码"
+          onClose={() => setPwTarget(null)}
+          onSubmit={(v) => {
+            const t = pwTarget;
+            setPwTarget(null);
+            void resetPassword(t, v);
+          }}
+        />
+      )}
     </div>
   );
 }

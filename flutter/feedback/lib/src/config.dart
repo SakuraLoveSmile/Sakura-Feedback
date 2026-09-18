@@ -117,6 +117,30 @@ class FeedbackConfig {
   /// 手动日志文件选择器（可选）。
   final FeedbackFilePicker? filePicker;
 
+  /// T6：派生新配置（用于按「有效地址」重建 API 客户端 / 令牌仓库；
+  /// 仅覆盖可变的身份字段，其余展示与采集配置原样保留）。
+  FeedbackConfig copyWith({
+    String? apiBase,
+    String? appId,
+  }) {
+    return FeedbackConfig(
+      apiBase ?? this.apiBase,
+      appId ?? this.appId,
+      appName: appName,
+      appVersion: appVersion,
+      pageLabel: pageLabel,
+      side: side,
+      position: position,
+      theme: theme,
+      showLauncher: showLauncher,
+      launcherBottom: launcherBottom,
+      launcherMode: launcherMode,
+      captureMode: captureMode,
+      logProvider: logProvider,
+      filePicker: filePicker,
+    );
+  }
+
   static String _normalize(String base) {
     var b = base.trim();
     while (b.endsWith('/')) {

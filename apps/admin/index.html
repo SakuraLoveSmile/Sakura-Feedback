@@ -3,6 +3,30 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      // 首屏绘制前解析主题，与 src/theme.tsx 同一套规则：
+      // 读 localStorage → 缺失/非法/读取失败一律按 "system" → system 时用系统偏好解析 →
+      // dataset.theme 与 style.colorScheme 只写解析后的 "light" | "dark"（绝不写 "system"）。
+      try {
+        var themePref = "system";
+        try {
+          var stored = window.localStorage.getItem("feedback.admin.theme");
+          if (stored === "system" || stored === "light" || stored === "dark") themePref = stored;
+        } catch (e) {
+          /* localStorage 不可用时按 system 解析 */
+        }
+        var resolved =
+          themePref === "system"
+            ? window.matchMedia("(prefers-color-scheme: dark)").matches
+              ? "dark"
+              : "light"
+            : themePref;
+        document.documentElement.dataset.theme = resolved;
+        document.documentElement.style.colorScheme = resolved;
+      } catch (e) {
+        /* 兜底：解析失败不阻塞渲染 */
+      }
+    </script>
     <title>Feedback 管理</title>
   </head>
   <body>

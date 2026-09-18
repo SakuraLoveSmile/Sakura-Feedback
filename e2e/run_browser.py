@@ -60,6 +60,8 @@ import browser_paths  # noqa: E402
 import png_probe  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+KANEO_PORT = int(os.environ.get("E2E_KANEO_PORT", "8898"))
+AI_PORT = int(os.environ.get("E2E_AI_PORT", "8899"))
 SERVER = "http://localhost:8787"
 SERVER2 = "http://localhost:8788"
 ADMIN_USER, ADMIN_PASS = "admin", "e2e-browser-pass-1"
@@ -68,6 +70,9 @@ E2E_USER, E2E_PASS = "e2e-user", "e2e-browser-user-pw"
 # 登录生命周期路径（P5）的专用账号：登录限流按「IP|用户名」计数，
 # 单独开号可避免给主链路额外消耗登录次数预算。
 E2E_USER2, E2E_PASS2 = "e2e-user-2", "e2e-browser-user2-pw"
+# 自定义服务器路径（P10）的专用账号：双服务 A→B→A 需要多次登录，
+# 单独开号避免与主链路共享登录限流计数。
+E2E_USER3, E2E_PASS3 = "e2e-user-3", "e2e-browser-user3-pw"
 REACT_ORIGIN = "http://localhost:5187"
 VUE_ORIGIN = "http://localhost:5188"
 PAGES_ORIGIN = "http://localhost:5189"
@@ -222,22 +227,38 @@ def configure_service(base, app_ids):
     login_status, _ = api("POST", "/api/auth/login", {"username": ADMIN_USER, "password": ADMIN_PASS}, base=base)
     if login_status != 200:
         return login_status
-    s, _ = api("PUT", "/api/admin/connection/kaneo", {"baseUrl": "http://127.0.0.1:8898", "apiKey": "k-e2e"}, base=base)
+    s, _ = api("PUT", "/api/admin/connection/kaneo", {"baseUrl": f"http://127.0.0.1:{KANEO_PORT}", "apiKey": "k-e2e"}, base=base)
     assert s == 200, s
     s, _ = api("PUT", "/api/admin/connection/ai",
-               {"baseUrl": "http://127.0.0.1:8899/v1", "model": "mock", "apiKey": "a-e2e"}, base=base)
+               {"baseUrl": f"http://127.0.0.1:{AI_PORT}/v1", "model": "mock", "apiKey": "a-e2e"}, base=base)
     assert s == 200, s
     for app_id, name, origins in app_ids:
-        s, _ = api("POST", "/api/admin/apps",
-                   {"appId": app_id, "name": name, "allowedOrigins": origins,
-                    "kaneoProjectId": "p-e2e", "kaneoColumnSlug": "triage"}, base=base)
+        s, app = api("POST", "/api/admin/apps",
+                     {"appId": app_id, "name": name, "allowedOrigins": origins,
+                      "kaneoProjectId": "p-e2e", "kaneoColumnSlug": "triage"}, base=base)
         assert s == 201, s
+        # v6/v7 归档模型：任务只在「规则完整 + 自动归档已启用 + 来源已确认」时创建。
+        # PUT 写全默认目标（列 id + 工作区标签），同时把允许来源登记为已确认；
+        # 随后按规则版本显式启用自动归档（幂等键固定，重复跑不重复触发）。
+        s, _ = api("PUT", f"/api/admin/apps/{app['id']}",
+                   {"name": name, "allowedOrigins": origins,
+                    "kaneoProjectId": "p-e2e", "kaneoColumnSlug": "triage",
+                    "kaneoColumnId": "col-1", "kaneoLabelIds": ["label-bug"],
+                    "expectedRuleVersion": app["ruleVersion"]}, base=base)
+        assert s == 200, s
+        s, en = api("POST", f"/api/admin/apps/{app['id']}/auto-archive/enable",
+                    {"expectedRuleVersion": app["ruleVersion"] + 1,
+                     "operationId": f"e2e-enable-{app_id}"}, base=base)
+        assert s == 200, en
     # 组件在面板内用账号密码登录（Bearer），需要一个额度足够高的普通账号。
     s, _ = api("POST", "/api/admin/users",
                {"username": E2E_USER, "password": E2E_PASS, "dailyLimit": 200}, base=base)
     assert s in (201, 409), s
     s, _ = api("POST", "/api/admin/users",
                {"username": E2E_USER2, "password": E2E_PASS2, "dailyLimit": 200}, base=base)
+    assert s in (201, 409), s
+    s, _ = api("POST", "/api/admin/users",
+               {"username": E2E_USER3, "password": E2E_PASS3, "dailyLimit": 200}, base=base)
     assert s in (201, 409), s
     return login_status
 
@@ -266,13 +287,11 @@ def main():
     # 预检端口：上一次运行被强杀会留下孤儿进程继续占着 8787/5189 等端口。
     # 若不预检，新服务会 EADDRINUSE 启动失败，请求落到旧实例上，
     # 表现为 configure_service 返回 409（appId 已存在）——看起来像测试失败，实为环境残留。
-    busy = [p for p in (8787, 8788, 5187, 5188, 5189, 8898, 8899) if _port_busy(p)]
+    busy = [p for p in (8787, 8788, 5187, 5188, 5189, KANEO_PORT, AI_PORT) if _port_busy(p)]
     if busy:
         print(
             f"[FATAL] 以下端口已被占用，多半是上次运行残留的进程：{busy}\n"
-            "        先清理再跑（按端口占用者精确杀，避免误杀无关进程）：\n"
-            "        for p in 8787 8788 5187 5188 5189 8898 8899; do "
-            'pid=$(lsof -nP -iTCP:$p -sTCP:LISTEN -t); [ -n "$pid" ] && kill -9 $pid; done',
+            "        请先识别占用者；不要自动终止已有预览。mock 端口可用 E2E_KANEO_PORT/E2E_AI_PORT 隔离。",
             flush=True,
         )
         sys.exit(2)
@@ -298,7 +317,7 @@ def main():
     try:
         step("启动 mock 外部服务 (AI :8899 / Kaneo :8898)")
         start(procs, ["node", "e2e/mock-external.mjs"], log=open("/tmp/fb-e2e-mock.log", "w"))
-        assert wait_http("http://127.0.0.1:8899/__health") and wait_http("http://127.0.0.1:8898/__health")
+        assert wait_http(f"http://127.0.0.1:{AI_PORT}/__health") and wait_http(f"http://127.0.0.1:{KANEO_PORT}/__health")
 
         step("启动反馈服务 (:8787)")
         start(procs, ["npx", "tsx", "src/index.ts"], cwd=os.path.join(ROOT, "apps/server"),
@@ -519,12 +538,12 @@ def scenarios(page, ctx, shot, browser, shots):
     # 预签名上传地址 / 资产地址的基址：本套件的服务端跑在宿主 → 必须是 127.0.0.1。
     # run_docker.py（服务端在容器内）会把 mock 切到 http://host.docker.internal:8898，
     # 这里显式切回来，避免两个套件互相污染（mock 是共享的长驻进程）。
-    post_json("http://127.0.0.1:8898/__mock/state", {"publicBase": "http://127.0.0.1:8898"})
+    post_json(f"http://127.0.0.1:{KANEO_PORT}/__mock/state", {"publicBase": f"http://127.0.0.1:{KANEO_PORT}"})
     # 调试用：E2E_ONLY_PATHS=1 只跑新增路径（默认完整跑 T1–T10 + P1–P4）
     if os.environ.get("E2E_ONLY_PATHS") == "1":
         print("[INFO] E2E_ONLY_PATHS=1：跳过 T1–T10（仅调试用）", flush=True)
     else:
-        check_kaneo_reset = plain_get("http://127.0.0.1:8898/__mock/tasks")
+        check_kaneo_reset = plain_get(f"http://127.0.0.1:{KANEO_PORT}/__mock/tasks")
         assert check_kaneo_reset == {"tasks": []}
         posts = FeedbackPosts(ctx)
 
@@ -609,7 +628,7 @@ def scenarios(page, ctx, shot, browser, shots):
         shot(page, "T5-archived")
 
         step("T6 Kaneo mock 收到的任务契约")
-        tasks = plain_get("http://127.0.0.1:8898/__mock/tasks")["tasks"]
+        tasks = plain_get(f"http://127.0.0.1:{KANEO_PORT}/__mock/tasks")["tasks"]
         check("收到 1 个任务", len(tasks) == 1, str(len(tasks)))
         t = tasks[0]
         check("列=triage", t.get("status") == "triage", str(t.get("status")))
@@ -620,40 +639,34 @@ def scenarios(page, ctx, shot, browser, shots):
         check("描述含来源", "E2E React" in (t.get("description") or "") and "com.example.demo-react" in t["description"])
         check("标题为 AI 整理结果", (t.get("title") or "").startswith("E2E整理"), str(t.get("title")))
 
-        step("T7a 服务端 AI 整理失败：原话已保存、绝不重复提交（文档化分支）")
-        # 原脚本用 mock AI 500 注入失败，但断言的是 .fb-error-summary/.fb-retry ——
-        # 那是「提交未到达服务」的客户端分支（element.ts:1704 分支 4）。
-        # 服务端已接收但后台处理失败走的是分支 2（element.ts:1659）：
-        # 卡片「原话已保存，后台整理未完成…请勿重复提交」+ 刷新状态/复制标识，
-        # 且绝不再次 POST（packages/web/README.md §提交流程、docs/api.md）。见报告。
-        post_json("http://127.0.0.1:8899/__mock/state", {"aiFail": True})
+        step("T7a 服务端 AI 整理失败：原文回退后照常归档、绝不重复提交（v6/v7 语义）")
+        # v6/v7 起 AI 失败不再判 failed：worker 用原文标题/描述回退并继续归档
+        # （worker.ts:802「AI 失败不再把记录判为 failed…等待人工分类」；
+        #  自动归档已启用时同一次处理内完成授权并写远端）。
+        # 组件轮询到 archived 与旧语义一致：任务链接出现、描述保留用户原话，
+        # 只是标题是原文首行而不是 AI 整理结果。
+        post_json(f"http://127.0.0.1:{AI_PORT}/__mock/state", {"aiFail": True})
         text_ai = "同步功能经常失败，请排查网络重试逻辑"
         page.locator(".fb-textarea").fill(text_ai)
         posts_before_ai = posts.count()
         page.locator(".fb-submit").click()
-        # 注意：tracking 阶段（分支 5）的卡片也是 is-warn，必须等分支 2 的独特文案
-        page.wait_for_function(
-            "() => { const sr = document.querySelector('feedback-widget').shadowRoot;"
-            " const c = sr.querySelector('.fb-status-card');"
-            " return !!c && c.textContent.includes('原话已保存，后台整理未完成'); }",
-            timeout=120000,
-        )
-        card_text = page.locator(".fb-status-card").inner_text()
-        check("服务端整理失败时提示原话已保存", "原话已保存" in card_text, card_text[:200])
-        check("失败卡片给出反馈标识（可在管理页找回）", "反馈标识" in card_text, card_text[:200])
-        check("失败卡片带真实错误详情", "详情：" in card_text, card_text[:200])
-        check("服务端失败分支提供「刷新状态」", page.locator(".fb-refresh-btn").count() == 1)
-        check("服务端失败分支提供「复制标识」", page.locator(".fb-copy-id-btn").count() == 1)
-        check("服务端失败分支不提供「重试提交」（绝不重复提交）", page.locator(".fb-retry").count() == 0)
-        check("失败时服务端已收到 1 次提交", posts.count() - posts_before_ai == 1, str(posts.count() - posts_before_ai))
-        page.wait_for_timeout(3000)
-        check("失败分支不会自动重发（3 秒内无新增提交）", posts.count() - posts_before_ai == 1,
+        page.wait_for_selector(".fb-task-link", timeout=120000)
+        check("AI 失败仍归档：任务链接出现", page.locator(".fb-task-link").is_visible())
+        check("AI 失败分支只提交 1 次（绝不重发）", posts.count() - posts_before_ai == 1,
               str(posts.count() - posts_before_ai))
-        shot(page, "T7a-server-failed")
-        post_json("http://127.0.0.1:8899/__mock/state", {"aiFail": False})
+        tasks = plain_get(f"http://127.0.0.1:{KANEO_PORT}/__mock/tasks")["tasks"]
+        check("AI 失败回退后 Kaneo 收到第 2 个任务", len(tasks) == 2, str(len(tasks)))
+        check("AI 失败时任务标题回退为原文首行（非「E2E整理」前缀）",
+              tasks[-1].get("title") == text_ai[:80], str(tasks[-1].get("title")))
+        check("AI 失败时任务描述仍含用户原话", text_ai in (tasks[-1].get("description") or ""))
+        page.wait_for_timeout(3000)
+        check("归档后不会自动重发（3 秒内无新增提交）", posts.count() - posts_before_ai == 1,
+              str(posts.count() - posts_before_ai))
+        shot(page, "T7a-ai-fallback-archived")
+        post_json(f"http://127.0.0.1:{AI_PORT}/__mock/state", {"aiFail": False})
 
         step("T7b 提交未到达服务 → 保留草稿 → 修复网络后重试 → 归档（同 key 同字节）")
-        page.locator(".fb-status-card.is-warn .fb-card-actions button").last.click()  # 再记一条
+        page.locator(".fb-status-card .fb-card-actions button").last.click()  # 再记一条
         page.keyboard.press("Escape")
         page.locator(".fb-panel").wait_for(state="hidden", timeout=5000)
         open_panel(page)  # capture-mode=viewport：呼出时重新截图，让重试带截图字节
@@ -693,8 +706,8 @@ def scenarios(page, ctx, shot, browser, shots):
         posts_before_retry = posts.count()
         page.locator(".fb-retry").click()
         page.wait_for_selector(".fb-task-link", timeout=120000)
-        check("重试后归档（共 2 任务）", len(plain_get("http://127.0.0.1:8898/__mock/tasks")["tasks"]) == 2,
-              str(len(plain_get("http://127.0.0.1:8898/__mock/tasks")["tasks"])))
+        check("重试后归档（共 3 任务）", len(plain_get(f"http://127.0.0.1:{KANEO_PORT}/__mock/tasks")["tasks"]) == 3,
+              str(len(plain_get(f"http://127.0.0.1:{KANEO_PORT}/__mock/tasks")["tasks"])))
         retry = posts.last()
         png_probe.dump("T7b 重试提交（浏览器请求体）",
                        {"url": retry["url"], "ct": retry["ct"], "bodyBytes": len(retry["body"] or b"")})
@@ -719,8 +732,8 @@ def scenarios(page, ctx, shot, browser, shots):
         check("刷新后需在面板内重新登录（不打开窗口）", page.locator(".fb-login-password").count() == 1)
         login_in_panel(page)
         page.wait_for_selector(".fb-task-link", timeout=60000)
-        tasks = plain_get("http://127.0.0.1:8898/__mock/tasks")["tasks"]
-        check("恢复后提交成功（共 3 任务）", len(tasks) == 3, str(len(tasks)))
+        tasks = plain_get(f"http://127.0.0.1:{KANEO_PORT}/__mock/tasks")["tasks"]
+        check("恢复后提交成功（共 4 任务）", len(tasks) == 4, str(len(tasks)))
 
         step("T9 窄屏全屏布局")
         # T8 结束时面板仍开着（归档态），先关闭避免入口变成 toggle。
@@ -752,8 +765,8 @@ def scenarios(page, ctx, shot, browser, shots):
         check("Vue 侧同样在面板内登录（不打开窗口）", vpage.locator(".fb-login-password").count() == 1)
         login_in_panel(vpage)
         vpage.wait_for_selector(".fb-task-link", timeout=60000)
-        tasks = plain_get("http://127.0.0.1:8898/__mock/tasks")["tasks"]
-        check("Vue 链路归档（共 4 任务）", len(tasks) == 4, str(len(tasks)))
+        tasks = plain_get(f"http://127.0.0.1:{KANEO_PORT}/__mock/tasks")["tasks"]
+        check("Vue 链路归档（共 5 任务）", len(tasks) == 5, str(len(tasks)))
         vpage.close()
 
         # ---------------- P5 截图区可见性（只有真实浏览器能验证） ----------------
@@ -869,6 +882,8 @@ def scenarios(page, ctx, shot, browser, shots):
         "panel_pass": E2E_PASS,
         "panel_user2": E2E_USER2,
         "panel_pass2": E2E_PASS2,
+        "panel_user3": E2E_USER3,
+        "panel_pass3": E2E_PASS3,
         "shots_dir": shots,
         "pages_dir": PAGES_DIR,
         "pixel_results": [],

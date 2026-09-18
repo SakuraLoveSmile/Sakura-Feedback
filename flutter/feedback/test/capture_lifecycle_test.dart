@@ -216,6 +216,7 @@ void main() {
         key: key,
         config: FeedbackConfig('https://svc.test', 'com.example.test'),
         tokenStore: MemoryTokenStore('tok'),
+        serverPrefStore: MemoryServerPrefStore(),
         httpClient: mockClient(),
       ),
     ));

@@ -7,14 +7,15 @@ import {
   type AdminFeedbackRow,
   type AppRow,
   type AppSourceRow,
+  applyLifecycleInTx,
   authorizeArchiveInTx,
   type ClassificationPatch,
   classificationLocked,
   clearAppConfigBlocks,
   confirmAppSourceInTx,
+  countFeedbacksByMgmt,
   createUser,
   type Db,
-  deleteApp,
   disableAutoArchiveInTx,
   enableAutoArchiveInTx,
   FEEDBACK_STATUSES,
@@ -23,6 +24,7 @@ import {
   getApp,
   getAppByAppId,
   getAppSource,
+  getDeletionReceiptByFeedbackId,
   getFeedback,
   getFeedbackLog,
   getFeedbackLogsMeta,
@@ -35,12 +37,16 @@ import {
   insertApp,
   insertFeedbackAudit,
   isAppRuleComplete,
+  LIFECYCLE_ACTIONS,
+  type LifecycleAction,
   listAppSources,
   listApps,
   listAppsWithStats,
+  listFeedbackAppOptions,
   listFeedbackAudit,
   listFeedbacks,
   listOrdinaryUsers,
+  type MgmtState,
   parseAppLabelIds,
   parseClassification,
   registerConfirmedSources,
@@ -48,6 +54,7 @@ import {
   saveClassificationInTx,
   setSetting,
   setUserPassword,
+  softDeleteAppInTx,
   toAdminListItem,
   toAppSourceView,
   type UserRow,
@@ -209,6 +216,61 @@ export function adminRoutes(deps: AdminDeps): Hono {
     } catch {
       /* 扫描失败不影响本次管理动作：下次触发或重启会重新扫描 */
     }
+  }
+
+  interface LifecycleItemResult {
+    id: string;
+    ok: boolean;
+    code?: string;
+    httpStatus?: number;
+    message?: string;
+    mgmtState?: MgmtState;
+    lifecycleVersion?: number;
+    purged?: boolean;
+    alreadyPurged?: boolean;
+  }
+
+  /**
+   * 执行一条生命周期动作：与 worker 共用同一反馈级互斥锁。
+   * 正在处理中的记录返回“busy”，不强行中断外部请求。
+   */
+  function runLifecycleItem(
+    action: LifecycleAction,
+    item: { id: string; expectedVersion: number },
+    actor: { id: string; username: string },
+  ): LifecycleItemResult {
+    const locked = deps.worker.withFeedbackLock(item.id, () =>
+      applyLifecycleInTx(db, item.id, { action, expectedVersion: item.expectedVersion, actor }),
+    );
+    if (!locked.ok) {
+      return { id: item.id, ok: false, code: "busy", httpStatus: 409, message: "该记录正在处理中，请稍后重试" };
+    }
+    const o = locked.value;
+    if (o.kind === "ok") {
+      // 锁已释放后才入队：resume_processing 显式恢复处理。
+      if (o.enqueue) deps.worker.enqueue(item.id);
+      return { id: item.id, ok: true, mgmtState: o.mgmtState, lifecycleVersion: o.lifecycleVersion };
+    }
+    if (o.kind === "purged") {
+      return { id: item.id, ok: true, purged: true };
+    }
+    if (o.kind === "already_purged") {
+      return { id: item.id, ok: true, purged: true, alreadyPurged: true };
+    }
+    if (o.kind === "not_found") {
+      return { id: item.id, ok: false, code: "not_found", httpStatus: 404, message: "反馈不存在" };
+    }
+    if (o.kind === "version_conflict") {
+      return {
+        id: item.id,
+        ok: false,
+        code: "version_conflict",
+        httpStatus: 409,
+        message: `记录已被其他操作修改（当前生命周期版本 ${o.lifecycleVersion}），请刷新后重试`,
+        lifecycleVersion: o.lifecycleVersion,
+      };
+    }
+    return { id: item.id, ok: false, code: "invalid_state", httpStatus: 409, message: o.reason };
   }
 
   // ---------- 管理员设置（T2-A：只能改当前会话账号自己的用户名与密码） ----------
@@ -394,7 +456,8 @@ export function adminRoutes(deps: AdminDeps): Hono {
   /** 软件详情：配置 + 逐条来源 + 待处理数量（T2 后台需要看到“待配置/待确认来源”）。 */
   routes.get("/apps/:id", (c) => {
     const app = getApp(db, c.req.param("id"));
-    if (!app) return fail(c, err("not_found", "软件配置不存在", 404));
+    // 已软删除的软件在管理面一律按不存在处理（历史反馈仍可通过反馈详情查看）。
+    if (!app || app.deleted_at) return fail(c, err("not_found", "软件配置不存在", 404));
     const stats = listAppsWithStats(db).get(app.id);
     return c.json({
       app: publicApp(app, stats),
@@ -410,7 +473,7 @@ export function adminRoutes(deps: AdminDeps): Hono {
    */
   routes.put("/apps/:id", async (c) => {
     const existing = getApp(db, c.req.param("id"));
-    if (!existing) return fail(c, err("not_found", "软件配置不存在", 404));
+    if (!existing || existing.deleted_at) return fail(c, err("not_found", "软件配置不存在", 404));
     const body = await readJson<Record<string, unknown>>(c);
     if (isErr(body)) return fail(c, body);
     const expectedRuleVersion = parseExpectedRuleVersion(body.expectedRuleVersion);
@@ -447,10 +510,15 @@ export function adminRoutes(deps: AdminDeps): Hono {
     return c.json(publicApp(updated, listAppsWithStats(db).get(updated.id)));
   });
 
+  /**
+   * 软删除软件（T4）：只标记 `deleted_at` 并退回人工归档模式、推进规则版本。
+   * 历史反馈 / 截图 / 日志 / 审计全部保留；已授权归档任务按固定快照继续执行。
+   * 删除后同 appId 的下一次有效提交会重新发现为全新内部记录。
+   * 幂等：成功与重复删除都返回 204；记录从未存在返回 404。
+   */
   routes.delete("/apps/:id", (c) => {
-    const id = c.req.param("id");
-    if (!listApps(db).some((a) => a.id === id)) return fail(c, err("not_found", "软件配置不存在", 404));
-    deleteApp(db, id); // 历史反馈保留
+    const outcome = softDeleteAppInTx(db, c.req.param("id"));
+    if (outcome === "not_found") return fail(c, err("not_found", "软件配置不存在", 404));
     return c.body(null, 204);
   });
 
@@ -466,7 +534,7 @@ export function adminRoutes(deps: AdminDeps): Hono {
    */
   routes.post("/apps/:id/sources/confirm", async (c) => {
     const app = getApp(db, c.req.param("id"));
-    if (!app) return fail(c, err("not_found", "软件配置不存在", 404));
+    if (!app || app.deleted_at) return fail(c, err("not_found", "软件配置不存在", 404));
     const actor = adminActor(db, c);
     if (actor instanceof Response) return actor;
     const body = await readJson<{ origin?: unknown; operationId?: unknown; expectedRuleVersion?: unknown }>(c);
@@ -524,7 +592,7 @@ export function adminRoutes(deps: AdminDeps): Hono {
    */
   routes.post("/apps/:id/auto-archive/enable", async (c) => {
     const app = getApp(db, c.req.param("id"));
-    if (!app) return fail(c, err("not_found", "软件配置不存在", 404));
+    if (!app || app.deleted_at) return fail(c, err("not_found", "软件配置不存在", 404));
     const actor = adminActor(db, c);
     if (actor instanceof Response) return actor;
     const body = await readJson<{ operationId?: unknown; expectedRuleVersion?: unknown }>(c);
@@ -563,7 +631,7 @@ export function adminRoutes(deps: AdminDeps): Hono {
    */
   routes.post("/apps/:id/auto-archive/disable", async (c) => {
     const app = getApp(db, c.req.param("id"));
-    if (!app) return fail(c, err("not_found", "软件配置不存在", 404));
+    if (!app || app.deleted_at) return fail(c, err("not_found", "软件配置不存在", 404));
     const actor = adminActor(db, c);
     if (actor instanceof Response) return actor;
     const body = await readJson<{ operationId?: unknown; expectedRuleVersion?: unknown }>(c);
@@ -730,6 +798,10 @@ export function adminRoutes(deps: AdminDeps): Hono {
 
     const row = getFeedback(db, id);
     if (!row) return fail(c, err("not_found", "反馈不存在", 404));
+    // 回收站记录为只读：分类保存与归档授权一律拒绝（事务内还有兜底检查）。
+    if (row.mgmt_state === "trash") {
+      return fail(c, err("feedback_in_trash", "回收站中的记录为只读，请先恢复到收件箱", 409));
+    }
 
     if (parsed.action === "save") {
       const outcome = saveClassificationInTx(db, id, {
@@ -814,6 +886,9 @@ export function adminRoutes(deps: AdminDeps): Hono {
     }
 
     if (outcome.kind === "not_found") return fail(c, err("not_found", "反馈不存在", 404));
+    if (outcome.kind === "in_trash") {
+      return fail(c, err("feedback_in_trash", "回收站中的记录为只读，请先恢复到收件箱", 409));
+    }
     if (outcome.kind === "locked") {
       return fail(c, err("classification_locked", "该记录已进入归档流程或已归档，分类已锁定", 409));
     }
@@ -863,19 +938,117 @@ export function adminRoutes(deps: AdminDeps): Hono {
   // ---------- 反馈列表与详情 ----------
   routes.get("/feedback", (c) => {
     const statusQ = c.req.query("status");
-    const limit = Math.min(200, Math.max(1, Number(c.req.query("limit") ?? 50) || 50));
+    const status = (STATUSES as string[]).includes(statusQ ?? "") ? (statusQ as FeedbackStatus) : undefined;
+    if (status === undefined && statusQ) {
+      return fail(c, err("invalid_request", "status 参数非法", 400));
+    }
+    const view = parseViewParam(c.req.query("view"));
+    if (view === null) {
+      return fail(c, err("invalid_request", "view 参数非法，必须是 inbox / archived / trash / all", 400));
+    }
+    const q = c.req.query("q") || undefined;
+    if (q !== undefined && q.length > 200) {
+      return fail(c, err("invalid_request", "q 不能超过 200 字符", 400));
+    }
+    const from = parseDateBoundary(c.req.query("from"), "from");
+    if ("code" in from) return fail(c, from);
+    const to = parseDateBoundary(c.req.query("to"), "to");
+    if ("code" in to) return fail(c, to);
+    const limit = Math.min(100, Math.max(1, Number(c.req.query("limit") ?? 50) || 50));
     const r = listFeedbacks(db, {
-      status: (STATUSES as string[]).includes(statusQ ?? "") ? (statusQ as FeedbackStatus) : undefined,
+      status,
       appId: c.req.query("appId") || undefined,
       cursor: c.req.query("cursor") || undefined,
       limit,
+      view,
+      q,
+      from: from.value,
+      to: to.value,
     });
     return c.json({ items: r.items.map(toAdminListItem), nextCursor: r.nextCursor });
   });
 
+  // 区域计数：与列表同一套搜索/筛选条件（view 不计入，三个区域各算一份）。
+  routes.get("/feedback/counts", (c) => {
+    const statusQ = c.req.query("status");
+    const status = (STATUSES as string[]).includes(statusQ ?? "") ? (statusQ as FeedbackStatus) : undefined;
+    if (status === undefined && statusQ) {
+      return fail(c, err("invalid_request", "status 参数非法", 400));
+    }
+    const q = c.req.query("q") || undefined;
+    if (q !== undefined && q.length > 200) {
+      return fail(c, err("invalid_request", "q 不能超过 200 字符", 400));
+    }
+    const from = parseDateBoundary(c.req.query("from"), "from");
+    if ("code" in from) return fail(c, from);
+    const to = parseDateBoundary(c.req.query("to"), "to");
+    if ("code" in to) return fail(c, to);
+    return c.json(
+      countFeedbacksByMgmt(db, {
+        status,
+        appId: c.req.query("appId") || undefined,
+        q,
+        from: from.value,
+        to: to.value,
+      }),
+    );
+  });
+
+  // 软件筛选下拉：含历史反馈的已删除软件。
+  routes.get("/feedback/app-options", (c) => c.json({ items: listFeedbackAppOptions(db) }));
+
+  // 生命周期动作：单条与批量共用同一入口。每项 {id, expectedVersion}；业务部分失败不回滚已成功项。
+  routes.post("/feedback/lifecycle", async (c) => {
+    const actor = adminActor(db, c);
+    if (actor instanceof Response) return actor;
+    const body = await readJson<Record<string, unknown>>(c);
+    if (isErr(body)) return fail(c, body);
+    const action = parseLifecycleAction(body.action);
+    if (!action) {
+      return fail(
+        c,
+        err(
+          "invalid_request",
+          "action 必须是 archive / unarchive / trash / restore / resume_processing / purge 之一",
+          400,
+        ),
+      );
+    }
+    if (!Array.isArray(body.items) || body.items.length === 0 || body.items.length > 100) {
+      return fail(c, err("invalid_request", "items 必须是 1..100 条 {id, expectedVersion}", 400));
+    }
+    const items: { id: string; expectedVersion: number }[] = [];
+    for (const raw of body.items) {
+      if (typeof raw !== "object" || raw === null) {
+        return fail(c, err("invalid_request", "items 含非法条目", 400));
+      }
+      const id = (raw as Record<string, unknown>).id;
+      const ev = (raw as Record<string, unknown>).expectedVersion;
+      if (typeof id !== "string" || id === "" || id.length > 100) {
+        return fail(c, err("invalid_request", "items[].id 非法", 400));
+      }
+      if (typeof ev !== "number" || !Number.isInteger(ev) || ev < 0) {
+        return fail(c, err("invalid_request", "items[].expectedVersion 必须是非负整数", 400));
+      }
+      items.push({ id, expectedVersion: ev });
+    }
+    const results = items.map((it) => runLifecycleItem(action, it, actor));
+    // 单条操作失败时直接以对应 HTTP 状态返回（与既有错误格式一致）。
+    if (items.length === 1 && !results[0]!.ok) {
+      const r0 = results[0]!;
+      return fail(c, err(r0.code ?? "invalid_state", r0.message ?? "操作失败", r0.httpStatus ?? 409));
+    }
+    return c.json({ ok: true, action, results });
+  });
+
   routes.get("/feedback/:id", (c) => {
     const row = getFeedback(db, c.req.param("id"));
-    if (!row) return fail(c, err("not_found", "反馈不存在", 404));
+    if (!row) {
+      // 已彻底删除的记录：凭据保留原反馈 ID，管理端返回明确 410 而非普通 404。
+      const receipt = getDeletionReceiptByFeedbackId(db, c.req.param("id"));
+      if (receipt) return fail(c, err("feedback_purged", "该反馈已被彻底删除", 410));
+      return fail(c, err("not_found", "反馈不存在", 404));
+    }
     let processed = null;
     if (row.processed_json) {
       try {
@@ -913,6 +1086,8 @@ export function adminRoutes(deps: AdminDeps): Hono {
       archiveAuthorizedAt: row.archive_authorized_at,
       archiveOperationId: row.archive_operation_id,
       collectionState: listItem.collectionState,
+      readOnly: row.mgmt_state === "trash",
+      resumePaused: row.resume_paused === 1,
       app: app
         ? {
             id: app.id,
@@ -921,6 +1096,7 @@ export function adminRoutes(deps: AdminDeps): Hono {
             configStatus: app.config_status,
             archiveMode: app.archive_mode,
             ruleVersion: app.rule_version,
+            deletedAt: app.deleted_at,
           }
         : null,
       audit: listFeedbackAudit(db, row.id).map((a) => ({
@@ -1118,11 +1294,35 @@ function adminRowWithApp(db: Db, row: FeedbackRow): AdminFeedbackRow {
     ...row,
     app_config_status: app?.config_status ?? null,
     app_archive_mode: app?.archive_mode ?? null,
+    app_deleted_at: app?.deleted_at ?? null,
     source_status: source?.status ?? null,
+    app_name: app?.name ?? null,
+    text_preview: row.title ?? (row.text ? row.text.slice(0, 240) : null),
   };
 }
 
 const STATUSES: string[] = FEEDBACK_STATUSES;
+
+/** 管理视图参数：缺省收件箱；`all` 为兼容查询（收件箱 + 已归档，不含回收站）。 */
+function parseViewParam(raw: string | undefined): MgmtState | "all" | undefined | null {
+  if (raw === undefined || raw === "") return undefined;
+  if (raw === "inbox" || raw === "archived" || raw === "trash" || raw === "all") return raw;
+  return null;
+}
+
+/** 日期边界：ISO 字符串 → 合法值；非法返回可直接下发的错误。 */
+function parseDateBoundary(raw: string | undefined, name: string): { value?: string } | Err {
+  if (raw === undefined || raw === "") return { value: undefined };
+  const t = Date.parse(raw);
+  if (Number.isNaN(t) || raw.length > 64) {
+    return err("invalid_request", `${name} 参数非法，必须是 ISO 日期时间`, 400);
+  }
+  return { value: new Date(t).toISOString() };
+}
+
+function parseLifecycleAction(raw: unknown): LifecycleAction | null {
+  return typeof raw === "string" && (LIFECYCLE_ACTIONS as string[]).includes(raw) ? (raw as LifecycleAction) : null;
+}
 
 /** 可选字符串字段：undefined/null/空串 → null；非字符串或超长 → null 并标记非法。 */
 function optionalText(v: unknown, max: number): { ok: true; value: string | null } | { ok: false } {
@@ -1196,6 +1396,9 @@ function classifySaveResponse(
   outcome: ReturnType<typeof saveClassificationInTx>,
 ): Response {
   if (outcome.kind === "not_found") return fail(c, err("not_found", "反馈不存在", 404));
+  if (outcome.kind === "in_trash") {
+    return fail(c, err("feedback_in_trash", "回收站中的记录为只读，请先恢复到收件箱", 409));
+  }
   if (outcome.kind === "locked") {
     return fail(c, err("classification_locked", "该记录已进入归档流程或已归档，分类已锁定", 409));
   }

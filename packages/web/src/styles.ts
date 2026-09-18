@@ -1065,6 +1065,124 @@ export const STYLES = /* css */ `
   background: rgba(255, 255, 255, 0.3);
 }
 
+/* ---- 头部右侧动作组与服务器设置视图（T6） ---- */
+.fb-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.fb-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  color: var(--fb-text-secondary);
+  border-radius: 50%;
+  cursor: pointer;
+  padding: 0;
+  transition: background 0.15s, color 0.15s;
+}
+
+.fb-icon-btn:hover {
+  background: var(--fb-bg-subtle-hover);
+  color: var(--fb-text);
+}
+
+.fb-icon-btn:focus-visible {
+  outline: 2px solid var(--fb-accent);
+  outline-offset: 2px;
+}
+
+.fb-settings {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  padding: 16px 18px 18px;
+  gap: 10px;
+}
+
+.fb-settings-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fb-text);
+}
+
+.fb-settings-line {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fb-text-secondary);
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+}
+
+.fb-settings-label {
+  flex-shrink: 0;
+}
+
+.fb-settings-value {
+  color: var(--fb-text);
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+.fb-server-input {
+  width: 100%;
+}
+
+.fb-settings-error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fb-status-error-text);
+  line-height: 1.4;
+}
+
+.fb-settings-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fb-status-warn-text);
+  line-height: 1.4;
+}
+
+.fb-settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.fb-settings-confirm {
+  border: 1px solid var(--fb-status-warn-border);
+  background: var(--fb-status-warn-bg);
+  color: var(--fb-status-warn-text);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.fb-settings-confirm-text {
+  margin: 0;
+  line-height: 1.5;
+}
+
+/* 窄屏（移动端全屏面板）：设置操作按钮给到触屏可点的高度 */
+@media (max-width: 767.98px) {
+  .fb-settings-actions .fb-btn-secondary {
+    padding: 8px 14px;
+    font-size: 13px;
+  }
+}
+
 /* ---- 尊重 prefers-reduced-motion ---- */
 @media (prefers-reduced-motion: reduce) {
   .fb-launcher,

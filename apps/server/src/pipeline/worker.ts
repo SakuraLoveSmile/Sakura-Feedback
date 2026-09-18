@@ -352,6 +352,26 @@ export function createWorker(deps: WorkerDeps) {
     busyFeedbacks.delete(feedbackId);
   }
 
+  /**
+   * v9：管理生命周期动作与 worker 共用同一反馈级互斥。
+   * 管理端在执行归档/回收站/彻底删除等动作前必须先拿到同一把锁：
+   * 锁被 worker 持有时返回 ok=false（界面显示“处理中，稍后重试”，绝不强行中断外部请求）。
+   * fn 为同步函数（SQLite 事务是同步的）。
+   */
+  function withFeedbackLock<T>(feedbackId: string, fn: () => T): { ok: true; value: T } | { ok: false } {
+    if (!tryAcquire(feedbackId)) return { ok: false };
+    try {
+      return { ok: true, value: fn() };
+    } finally {
+      release(feedbackId);
+    }
+  }
+
+  /** 显式人工操作即“恢复处理”：解除恢复后暂停标记（暂停只挡自动扫描与出队，不挡人工动作）。 */
+  function clearResumePause(feedbackId: string, row: FeedbackRow): void {
+    if (row.resume_paused) updateFeedback(deps.db, feedbackId, { resume_paused: 0 });
+  }
+
   /** 当前恢复数据 revision（无归档数据视为 0）。 */
   function currentRevision(feedbackId: string): number {
     const parsed = loadArchiveData(deps.db, feedbackId);
@@ -472,7 +492,9 @@ export function createWorker(deps: WorkerDeps) {
     if (isManuallyHandled(row)) return false;
 
     const app = appOf(row);
-    if (!app) {
+    // 已软删除的软件：历史记录保留可读，但绝不再发起新的自动归档授权
+    // （已授权记录走固定快照继续，不经过这里）。
+    if (!app || app.deleted_at) {
       markAutoBlocked(db, feedbackId, "config", "软件配置不存在或已删除", 0, now());
       return false;
     }
@@ -719,6 +741,9 @@ export function createWorker(deps: WorkerDeps) {
     const db = deps.db;
     let row = getFeedback(db, feedbackId);
     if (!row) return;
+    // v9：开始任何处理前重读管理状态——回收站与恢复后暂停的记录不进入 AI/归档/自动授权。
+    // 排队期间被移入回收站的记录在这里被拦下（持锁期间管理动作不可能并发修改本记录）。
+    if (row.mgmt_state !== "inbox" || row.resume_paused) return;
     const authorized = Boolean(row.archive_authorized_at && row.archive_operation_id);
     // “已开始远端写入”的既有记录（旧版本遗留）允许沿既有恢复入口继续；
     // 从未产生远端写入、也没有人工授权的记录绝不允许归档（必须先人工补齐并确认）。
@@ -1966,12 +1991,16 @@ export function createWorker(deps: WorkerDeps) {
     try {
       const row = getFeedback(deps.db, feedbackId);
       if (!row) return { ok: false, reason: "not_found" };
+      if (row.mgmt_state === "trash") {
+        return { ok: false, reason: "invalid_state", status: row.status, note: "回收站中的记录为只读" };
+      }
       const revFail = checkRevision(feedbackId, expectedRevision);
       if (revFail) return revFail;
       const aiFallbackRetry = row.status === "needs_info" && !row.processed_json;
       if (row.status !== "failed" && !aiFallbackRetry) {
         return { ok: false, reason: "invalid_state", status: row.status };
       }
+      clearResumePause(feedbackId, row);
       const next = row.processed_json ? "archiving" : "processing";
       if (!gateUpdate(feedbackId, "人工重试", { status: "processing", error_summary: null })) {
         return { ok: false, reason: "persist_failed" };
@@ -1998,11 +2027,15 @@ export function createWorker(deps: WorkerDeps) {
     try {
       const row = getFeedback(deps.db, feedbackId);
       if (!row) return { ok: false, reason: "not_found" };
+      if (row.mgmt_state === "trash") {
+        return { ok: false, reason: "invalid_state", status: row.status, note: "回收站中的记录为只读" };
+      }
       const revFail = checkRevision(feedbackId, expectedRevision);
       if (revFail) return revFail;
       if (row.status !== "needs_review") return { ok: false, reason: "invalid_state", status: row.status };
       const app = appOf(row);
       if (!app) return { ok: false, reason: "invalid_state", status: row.status };
+      clearResumePause(feedbackId, row);
 
       const parsed = loadArchiveData(deps.db, feedbackId);
       const saved = parsed.kind === "valid" ? parsed.data : null;
@@ -2232,10 +2265,14 @@ export function createWorker(deps: WorkerDeps) {
     try {
       const row = getFeedback(deps.db, feedbackId);
       if (!row) return { ok: false, reason: "not_found" };
+      if (row.mgmt_state === "trash") {
+        return { ok: false, reason: "invalid_state", status: row.status, note: "回收站中的记录为只读" };
+      }
       const revFail = checkRevision(feedbackId, expectedRevision);
       if (revFail) return revFail;
       if (row.status !== "needs_review") return { ok: false, reason: "invalid_state", status: row.status };
       if (!row.processed_json) return { ok: false, reason: "invalid_state", status: row.status };
+      clearResumePause(feedbackId, row);
       const parsed = loadArchiveData(deps.db, feedbackId);
       const data = parsed.kind === "valid" ? parsed.data : null;
 
@@ -2301,9 +2338,13 @@ export function createWorker(deps: WorkerDeps) {
     try {
       const row = getFeedback(deps.db, feedbackId);
       if (!row) return { ok: false, reason: "not_found" };
+      if (row.mgmt_state === "trash") {
+        return { ok: false, reason: "invalid_state", status: row.status, note: "回收站中的记录为只读" };
+      }
       const revFail = checkRevision(feedbackId, expectedRevision);
       if (revFail) return revFail;
       if (row.status !== "needs_review") return { ok: false, reason: "invalid_state", status: row.status };
+      clearResumePause(feedbackId, row);
       const parsed = loadArchiveData(deps.db, feedbackId);
       if (parsed.kind !== "valid") return { ok: false, reason: "invalid_state", status: row.status };
       const data = parsed.data;
@@ -2450,9 +2491,13 @@ export function createWorker(deps: WorkerDeps) {
     try {
       const row = getFeedback(deps.db, feedbackId);
       if (!row) return { ok: false, reason: "not_found" };
+      if (row.mgmt_state === "trash") {
+        return { ok: false, reason: "invalid_state", status: row.status, note: "回收站中的记录为只读" };
+      }
       const revFail = checkRevision(feedbackId, expectedRevision);
       if (revFail) return revFail;
       if (row.status !== "needs_review") return { ok: false, reason: "invalid_state", status: row.status };
+      clearResumePause(feedbackId, row);
       const parsed = loadArchiveData(deps.db, feedbackId);
       if (parsed.kind !== "valid") return { ok: false, reason: "invalid_state", status: row.status };
       let data = parsed.data;
@@ -2675,9 +2720,13 @@ export function createWorker(deps: WorkerDeps) {
     try {
       const row = getFeedback(deps.db, feedbackId);
       if (!row) return { ok: false, reason: "not_found" };
+      if (row.mgmt_state === "trash") {
+        return { ok: false, reason: "invalid_state", status: row.status, note: "回收站中的记录为只读" };
+      }
       const revFail = checkRevision(feedbackId, expectedRevision);
       if (revFail) return revFail;
       if (row.status !== "needs_review") return { ok: false, reason: "invalid_state", status: row.status };
+      clearResumePause(feedbackId, row);
       const parsed = loadArchiveData(deps.db, feedbackId);
       if (parsed.kind !== "valid") return { ok: false, reason: "invalid_state", status: row.status };
       let data = normalizeToV3(parsed.data);
@@ -2938,6 +2987,7 @@ export function createWorker(deps: WorkerDeps) {
     resume,
     scanAutoArchive: requestScan,
     processOne,
+    withFeedbackLock,
   };
 }
 
