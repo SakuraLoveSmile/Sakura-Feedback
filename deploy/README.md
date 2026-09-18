@@ -2,7 +2,7 @@
 
 | 文件 | 作用 |
 | --- | --- |
-| `compose.simple.yml` | compose：单服务、可变镜像标签、compose 自管理数据卷 |
+| `compose.simple.yml` | compose：单服务、可变镜像标签、命名卷或宿主目录存数据 |
 | `bootstrap.sh` | 首次部署：核对环境 → 生成本地密钥与 `.env.prod`（600）→ 落 compose 文件 → 拉镜像启动 |
 | `update.sh` | 更新：数据卷 tar 备份 → `compose pull` → 重建 → 等待健康 |
 | `nginx/feedback.conf.template` | Nginx TLS 终止模板（公网入口） |
@@ -29,6 +29,31 @@ bash deploy/bootstrap.sh --dry-run                # 只展示将做的事
 公网入口用 `nginx/feedback.conf.template` 做 TLS 终止；compose 默认只把 `8787` 绑在
 `127.0.0.1`，不直连公网。
 
+## 数据存放：命名卷（默认）或宿主目录
+
+数据可以放在 Docker 命名卷，也可以放在宿主目录（bind mount）——同一个
+`compose.simple.yml` 两种形态都支持，区别只在 `.env.prod`：
+
+| 形态 | `.env.prod` 设置 | 数据实际位置 |
+| --- | --- | --- |
+| 命名卷（默认） | `FEEDBACK_DATA_VOLUME=feedback-data`（或不设） | `docker volume inspect` 查得的卷内 |
+| 宿主目录 | `FEEDBACK_DATA_PATH=/opt/feedback/data`（**必须绝对路径**） | 该目录本身，可直接 `ls`/`cp`/`tar` |
+
+- 目录挂载适合想在宿主上直接看到 `feedback.db`、用 1Panel 文件管理或普通备份工具
+  处理数据的部署；容器内文件属主为 root，属正常现象。
+- `FEEDBACK_DATA_PATH`（宿主目录）与 `FEEDBACK_DATA_DIR`（容器内 `/data`，服务端变量）
+  是两个不同变量，别混；也不要与 `FEEDBACK_DATA_VOLUME` 同时设置（`FEEDBACK_DATA_PATH` 优先）。
+- `update.sh` 的备份对两种形态通用（`docker run -v` 对卷名与绝对路径一视同仁）。
+- 从既有**命名卷**迁到**目录**：先停服，再把卷内容拷进目录后切换变量——
+  ```bash
+  cd <部署目录> && mkdir -p data
+  docker run --rm -v <旧卷名>:/src:ro -v "$PWD/data:/dst" \
+    alpine sh -c 'cp -a /src/. /dst/'
+  # .env.prod：删 FEEDBACK_DATA_VOLUME，加 FEEDBACK_DATA_PATH=<部署目录绝对路径>/data
+  docker compose --env-file .env.prod up -d
+  # 后台确认数据完整后，旧卷保留几天再 docker volume rm <旧卷名>
+  ```
+
 ## 更新与回退
 
 ```bash
@@ -38,9 +63,9 @@ bash deploy/update.sh --to v0.5.0        # 切到指定版本标签（回退；�
 ```
 
 - `update.sh` 自动探测 `docker-compose.yml` / `docker-compose.yaml` / `compose.yml` / `compose.yaml`
-  （按此顺序取第一个），并自动对准 `FEEDBACK_DATA_VOLUME` 指定的卷。
+  （按此顺序取第一个），并自动对准 `FEEDBACK_DATA_PATH`（目录）或 `FEEDBACK_DATA_VOLUME`（卷）。
 - 备份落在 `<deploy-dir>/backups/feedback-data-<时间戳>.tgz`（保留最近 10 份）。
-- 恢复备份：`docker run --rm -v <卷名>:/data -v <备份目录>:/backup <镜像> sh -c 'tar xzf /backup/<包>.tgz -C /data'`。
+- 恢复备份：`docker run --rm -v <卷名或目录绝对路径>:/data -v <备份目录>:/backup <镜像> sh -c 'tar xzf /backup/<包>.tgz -C /data'`。
 - 数据库迁移是**单向**的——跨 schema 版本回退必须先恢复 `update.sh` 留下的备份包。
 
 ## 版本检查（后台「系统更新」页）
@@ -73,6 +98,7 @@ docker compose --env-file .env.prod -f docker-compose.yml up -d
 
 - `.env.prod` 里确认有 `FEEDBACK_DATA_VOLUME=<现有卷名>`（完整模式部署本来就有这项，
   `docker volume ls` 可核对）；简易 compose 用它复用原卷，**不会新建空卷**。
+  想改用宿主目录挂载，先按「数据存放」一节把卷内容拷进目录，再换成 `FEEDBACK_DATA_PATH`。
 - 同时把 `FEEDBACK_IMAGE` 从旧的 digest 固定引用改为可变标签（如
   `ghcr.io/sakuralovesmile/sakura-feedback:v0.5.1` 或 `latest`），
   否则 `up -d` 起的仍是旧版本。

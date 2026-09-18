@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# 简易模式更新：备份数据卷（tar 包）→ compose pull → up -d → 等待健康。
-# 对应 compose.simple.yml / bootstrap.sh 的部署形态。
+# 简易模式更新：备份数据（tar 包）→ compose pull → up -d → 等待健康。
+# 对应 compose.simple.yml / bootstrap.sh 的部署形态；数据可以是命名卷或宿主目录。
 #
 # 用法：
 #   bash deploy/update.sh                       # 默认部署目录
@@ -59,8 +59,11 @@ done
 # 用 sed 而非 grep：无匹配时返回 0，避免 pipefail 下静默退出。
 read_env() { sed -n "s/^$1=//p" "$ENV_FILE" | head -1; }
 
-VOLUME="$(read_env FEEDBACK_DATA_VOLUME)"
-VOLUME="${VOLUME:-feedback-data}"
+# 数据位置：命名卷名或宿主目录绝对路径（bind mount；docker run -v 两种都接受）。
+# FEEDBACK_DATA_PATH（目录挂载）优先，其次 FEEDBACK_DATA_VOLUME（命名卷），最后默认卷名。
+DATA_SOURCE="$(read_env FEEDBACK_DATA_PATH)"
+DATA_SOURCE="${DATA_SOURCE:-$(read_env FEEDBACK_DATA_VOLUME)}"
+DATA_SOURCE="${DATA_SOURCE:-feedback-data}"
 CURRENT_IMAGE="$(read_env FEEDBACK_IMAGE)"
 [ -n "$CURRENT_IMAGE" ] || fail ".env.prod 里未找到 FEEDBACK_IMAGE"
 
@@ -71,13 +74,13 @@ if [ "$NO_BACKUP" -ne 1 ]; then
   STAMP="$(date +%Y%m%d-%H%M%S)"
   PLATFORM="$(read_env FEEDBACK_PLATFORM)"
   PLATFORM="${PLATFORM:-linux/amd64}"
-  log "备份数据卷 $VOLUME → $BACKUP_DIR/feedback-data-$STAMP.tgz"
+  log "备份数据 $DATA_SOURCE → $BACKUP_DIR/feedback-data-$STAMP.tgz"
   docker run --rm --platform "$PLATFORM" \
-    -v "$VOLUME:/data:ro" \
+    -v "$DATA_SOURCE:/data:ro" \
     -v "$BACKUP_DIR:/backup" \
     "$CURRENT_IMAGE" \
     sh -c "tar czf \"/backup/feedback-data-$STAMP.tgz\" -C /data ." \
-    || fail "卷备份失败（卷 $VOLUME 存在吗？docker volume ls 核对）"
+    || fail "数据备份失败（卷/目录 $DATA_SOURCE 存在吗？docker volume ls / ls -ld 核对）"
   # 只保留最近 10 份备份
   ls -1t "$BACKUP_DIR"/feedback-data-*.tgz 2>/dev/null | tail -n +11 | while read -r f; do rm -f "$f"; done
 fi
