@@ -21,8 +21,10 @@ COPY apps/server apps/server
 COPY apps/admin apps/admin
 COPY packages packages
 
+# admin 依赖 @feedback/web 的构建产物（exports 指向 dist/），必须先构建 web 包
 RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
-    pnpm --filter @feedback/admin build \
+    pnpm --filter @feedback/web build \
+ && pnpm --filter @feedback/admin build \
  && pnpm --filter @feedback/server build \
  && pnpm deploy --filter=@feedback/server --legacy --prod /server-out
 
