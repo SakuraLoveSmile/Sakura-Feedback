@@ -10,6 +10,9 @@ importers:
 
   apps/admin:
     dependencies:
+      '@feedback/web':
+        specifier: workspace:*
+        version: link:../../packages/web
       react:
         specifier: ^19.1.0
         version: 19.2.8
@@ -66,7 +69,6 @@ importers:
       vitest:
         specifier: ^3.2.0
         version: 3.2.7(@types/node@24.13.3)(happy-dom@18.0.1)(supports-color@7.2.0)(tsx@4.23.13)
-
 
   examples/html: {}
 

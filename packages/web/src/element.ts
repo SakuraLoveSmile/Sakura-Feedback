@@ -2946,6 +2946,54 @@ export class FeedbackWidget extends HTMLElement {
     return '';
   }
 
+  /**
+   * 宿主注入会话：与面板内登录等价，但凭据由宿主提供——例如同源管理后台
+   * 以自身 Cookie 会话调 `POST /api/auth/handshake` 换取的握手令牌。
+   * 令牌同样仅存内存；宿主负责到期前续注（重新调用本方法）或在自身
+   * 会话结束时调用 dropSession()。注入后组件自动拉取会话身份与额度。
+   * 注入非法参数（空令牌 / 不可解析的过期时刻）按 no-op 处理。
+   */
+  adoptSession(session: { accessToken: string; expiresAt: number | string }): void {
+    const token = typeof session?.accessToken === 'string' ? session.accessToken : '';
+    const raw = session?.expiresAt;
+    const exp = typeof raw === 'number' ? raw : Date.parse(typeof raw === 'string' ? raw : '');
+    if (!token || !Number.isFinite(exp)) return;
+    // 新凭据 = 新身份上下文：epoch 递增作废旧令牌的在途结果（额度 / 轮询 /
+    // 提交回执），与 api-base / app-id 切换同一条守卫路径。
+    this.identityEpoch++;
+    this.accessToken = token;
+    this.tokenExpiresAt = exp;
+    this.authRequired = false;
+    this.loginVisible = false;
+    this.loginBusy = false;
+    this.loginError = '';
+    this.quotaRefreshFailed = false;
+    this.renderStatus('已登录。');
+    this.syncUi();
+    // 拉取会话身份与额度（GET /api/auth/session）；迟到 / 失效响应由
+    // seq + epoch + token 三重校验丢弃，401 自动回到需要登录态。
+    void this.refreshQuota();
+  }
+
+  /**
+   * 宿主清除注入的会话（如宿主自身退出登录）：丢弃令牌与身份，回到
+   * 需要登录态；草稿 / 截图 / 日志保留（与令牌被撤销同语义）。
+   */
+  dropSession(): void {
+    if (this.accessToken === null) return;
+    this.identityEpoch++;
+    this.accessToken = null;
+    this.tokenExpiresAt = 0;
+    this.authUser = null;
+    this.quota = null;
+    this.quotaRefreshFailed = false;
+    this.quotaRefreshPending = false;
+    this.invalidateQuotaRefresh();
+    this.authRequired = true;
+    this.renderStatus('需要登录');
+    this.syncUi();
+  }
+
   private resetToCompose(): void {
     this.stopPolling();
     this.phase = 'idle';

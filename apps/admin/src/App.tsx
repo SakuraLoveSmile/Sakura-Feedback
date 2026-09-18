@@ -1,6 +1,11 @@
-import { type ReactNode, useCallback, useEffect, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+// 导入即自动注册 <feedback-widget> 自定义元素（副作用）。
+import "@feedback/web";
+import type { FeedbackWidget } from "@feedback/web";
 import { ApiError, api } from "./api.ts";
-import { ThemeSelect, useThemeSync } from "./theme.tsx";
+import { startFeedbackHostSession } from "./feedback-host.ts";
+import { ThemeSelect, useThemePreference, useThemeSync } from "./theme.tsx";
 import { Field, Icon, ToastProvider } from "./ui.tsx";
 import { useUrlState } from "./url.ts";
 import AccountsView from "./views/AccountsView.tsx";
@@ -150,6 +155,7 @@ export default function App() {
 
   // 主题：把偏好同步到 <html>，仅 "system" 时跟随系统变化（监听注册/清理由 hook 内部处理）。
   useThemeSync();
+  const [themePref] = useThemePreference();
 
   const check = useCallback(async () => {
     try {
@@ -163,6 +169,15 @@ export default function App() {
   useEffect(() => {
     void check();
   }, [check]);
+
+  // 内嵌反馈组件复用管理员会话：登录后以 Cookie 换握手令牌注入并按寿命续注；
+  // 退出登录由清理函数 dropSession 回到组件自登录态。
+  const widgetRef = useRef<FeedbackWidget | null>(null);
+  useEffect(() => {
+    const el = widgetRef.current;
+    if (!authed || !el) return;
+    return startFeedbackHostSession(el);
+  }, [authed]);
 
   async function logout() {
     await api.post("/api/auth/logout").catch(() => undefined);
@@ -188,14 +203,15 @@ export default function App() {
     setAuthed(false);
   }
 
-  if (authed === null)
-    return (
+  let content: ReactNode;
+  if (authed === null) {
+    content = (
       <p className="muted" style={{ padding: 40 }}>
         正在检查登录状态…
       </p>
     );
-  if (!authed)
-    return (
+  } else if (!authed) {
+    content = (
       <LoginView
         onSuccess={() => {
           setAuthed(true);
@@ -207,42 +223,66 @@ export default function App() {
         notice={loginNotice}
       />
     );
-
-  return (
-    <ToastProvider>
-      <div className="shell">
-        {/* 顶部菜单：仅 <1200px 显示 */}
-        <div className="shell-top">
-          <span className="shell-brand" style={{ padding: 0 }}>
-            Feedback 管理
-          </span>
-          <nav className="nav-scroll" aria-label="管理导航">
-            <NavItems page={page} onNav={nav} />
-          </nav>
-          <ThemeSelect />
-          <button type="button" className="btn sm" onClick={logout}>
-            退出
-          </button>
-        </div>
-        {/* 侧边导航：≥1200px */}
-        <nav className="shell-nav" aria-label="管理导航">
-          <div className="shell-brand">
-            <Icon name="feedback" size={20} />
-            Feedback 管理
-          </div>
-          <NavItems page={page} onNav={nav} />
-          <div style={{ marginTop: "var(--sp-6)", padding: "0 var(--sp-3)" }}>
-            <div style={{ marginBottom: "var(--sp-3)" }}>
-              <ThemeSelect />
-            </div>
-            <button type="button" className="btn" style={{ width: "100%" }} onClick={logout}>
-              退出登录
+  } else {
+    content = (
+      <ToastProvider>
+        <div className="shell">
+          {/* 顶部菜单：仅 <1200px 显示 */}
+          <div className="shell-top">
+            <span className="shell-brand" style={{ padding: 0 }}>
+              Feedback 管理
+            </span>
+            <nav className="nav-scroll" aria-label="管理导航">
+              <NavItems page={page} onNav={nav} />
+            </nav>
+            <ThemeSelect />
+            <button type="button" className="btn sm" onClick={logout}>
+              退出
             </button>
           </div>
-        </nav>
-        <main className="shell-body">{renderPage(page, handleCredentialsUpdated)}</main>
-      </div>
-    </ToastProvider>
+          {/* 侧边导航：≥1200px */}
+          <nav className="shell-nav" aria-label="管理导航">
+            <div className="shell-brand">
+              <Icon name="feedback" size={20} />
+              Feedback 管理
+            </div>
+            <NavItems page={page} onNav={nav} />
+            <div style={{ marginTop: "var(--sp-6)", padding: "0 var(--sp-3)" }}>
+              <div style={{ marginBottom: "var(--sp-3)" }}>
+                <ThemeSelect />
+              </div>
+              <button type="button" className="btn" style={{ width: "100%" }} onClick={logout}>
+                退出登录
+              </button>
+            </div>
+          </nav>
+          <main className="shell-body">{renderPage(page, handleCredentialsUpdated)}</main>
+        </div>
+      </ToastProvider>
+    );
+  }
+
+  return (
+    <>
+      {content}
+      {/* 管理后台自身也是反馈组件宿主：提交进入本服务的反馈收件箱；com.feedback.admin
+          软件与握手令牌由 feedback-host 编排（管理员 Cookie 会话，免组件内二次登录）。
+          密码输入由组件自动遮罩（input[type=password] 与 [data-feedback-capture-mask]）。 */}
+      {createPortal(
+        <feedback-widget
+          ref={widgetRef}
+          api-base={window.location.origin}
+          app-id="com.feedback.admin"
+          app-version={__ADMIN_VERSION__}
+          page-label={authed ? `admin:${page}` : "admin:login"}
+          side="right"
+          theme={themePref}
+          launcher-mode="orb"
+          capture-mode="viewport"
+        />,
+        document.body,
+      )}
+    </>
   );
 }
 

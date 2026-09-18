@@ -23,6 +23,16 @@ export type {
 export { normalizeServerBase } from './server_pref';
 export type { NormalizeServerBaseResult } from './server_pref';
 
+/**
+ * 宿主注入组件的会话凭据（`FeedbackWidget.adoptSession` 的参数）：
+ * accessToken 为服务端签发的 Bearer 令牌（如 `POST /api/auth/handshake` 的
+ * 握手令牌），expiresAt 为过期时刻（epoch 毫秒或 ISO 时间串）。
+ */
+export interface FeedbackHostSession {
+  accessToken: string;
+  expiresAt: number | string;
+}
+
 /** 元素标签名。 */
 export const FEEDBACK_ELEMENT_TAG = 'feedback-widget';
 
