@@ -104,7 +104,8 @@ U1 起，生产部署里多了一个独立服务 `updater`：后台「系统更�
 `updater` 的引入会改变 compose 文件形态（多一个服务、数据卷改成 external、feedback 多一个只读挂载），
 所以**第一次**必须在服务器上执行一次 `deploy/install-updater.sh`；之后的版本升级都可以从后台点。
 
-脚本在任何写入之前先核对：compose 文件（必须叫 `compose.yml`）、compose 项目名、正在运行的服务容器、
+脚本在任何写入之前先核对：compose 文件（`compose.yml`/`compose.yaml`/`docker-compose.yml`/`docker-compose.yaml`，
+部署目录内绝对路径，实际值登记为 `UPDATER_COMPOSE_FILE`）、compose 项目名、正在运行的服务容器、
 容器内 `/data` 是否挂的是命名卷、环境文件里登记的数据卷/端口是否与容器实际一致；任一不符即中止且不改文件。
 通过后：备份现有 compose 与 `.env.prod`（带时间戳、600、含 sha256 台账）→ 生成 600 随机令牌 →
 把**既有数据卷**原地登记为 `FEEDBACK_DATA_VOLUME`（绝不新建卷替换数据）→ 用候选文件先跑一次 `config -q` → 原子写入。

@@ -9,6 +9,14 @@
 
 ## [未发布]
 
+### 变更（放宽，非破坏）
+
+- **完整模式受管 compose 文件名放宽**：`deploy/install-updater.sh` 接受 `compose.yml` /
+  `compose.yaml` / `docker-compose.yml` / `docker-compose.yaml`（部署目录内绝对路径），实际路径经
+  `UPDATER_COMPOSE_FILE` 写入 `.env.prod` 供 updater 使用；既有 1Panel `docker-compose.yml` 部署
+  可原地接入，无需改名重建。同时新增核对：`--env-file` 必须是 `<deploy>/.env.prod`，
+  `--compose-file` 必须位于部署目录内。
+
 ## [0.5.0] — 2026-09-18
 
 ### 新增

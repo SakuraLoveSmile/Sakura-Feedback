@@ -62,7 +62,9 @@ services:
     image: ${UPDATER_IMAGE:?请设置 UPDATER_IMAGE=ghcr.io/sakuralovesmile/sakura-feedback-updater@sha256:<digest>}
     environment:
       UPDATER_LISTEN: 0.0.0.0:8790
-      UPDATER_COMPOSE_FILE: ${UPDATER_DEPLOY_DIR:?}/compose.yml
+      # 受管 compose 的绝对路径（宿主与容器内同一路径）：默认 <deploy>/compose.yml；
+      # 1Panel 等场景可用 docker-compose.yml——由 install-updater.sh 按 --compose-file 实际值登记
+      UPDATER_COMPOSE_FILE: ${UPDATER_COMPOSE_FILE:?请在 .env.prod 设置 UPDATER_COMPOSE_FILE（受管 compose 绝对路径）}
       UPDATER_COMPOSE_PROJECT: ${UPDATER_COMPOSE_PROJECT:-feedback}
       UPDATER_SERVICE: ${UPDATER_SERVICE:-feedback}
       UPDATER_DEPLOY_DIR: ${UPDATER_DEPLOY_DIR:?}
