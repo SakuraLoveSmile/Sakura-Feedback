@@ -17,7 +17,7 @@
 | `FEEDBACK_SESSION_TTL_MS` 等 | 否 | 会话有效期微调（cookie 14 天 / 客户端令牌 90 天 / 握手令牌 15 分钟） |
 
 上面是**服务端**读取的变量。生产部署还有一组供 compose 变量替换使用的部署变量（`FEEDBACK_IMAGE`、`FEEDBACK_PUBLIC_URL`、
-`FEEDBACK_DATA_VOLUME`、`FEEDBACK_BIND` 等），由 `deploy/bootstrap.sh` 写入 `<部署目录>/.env.prod`（600）；
+`FEEDBACK_DATA_VOLUME`、`FEEDBACK_DATA_PATH`（宿主目录挂载）、`FEEDBACK_BIND` 等），由 `deploy/bootstrap.sh` 写入 `<部署目录>/.env.prod`（600）；
 各项含义见 [`../deploy/README.md`](../deploy/README.md)。
 
 ## 2. Docker
@@ -29,7 +29,7 @@ docker build -t feedback-service .
 docker compose up -d       # 读取 .env（主密钥与初始账号），卷 ./data:/data
 ```
 
-生产部署形态（`deploy/compose.simple.yml`：单服务、可变镜像标签、compose 自管理数据卷）：
+生产部署形态（`deploy/compose.simple.yml`：单服务、可变镜像标签、命名卷或宿主目录存数据）：
 
 ```bash
 bash deploy/bootstrap.sh     # 首次：交互式收集域名、生成主密钥与管理员密码、写 .env.prod、启动
@@ -90,8 +90,8 @@ bash <仓库>/deploy/update.sh          # 卷备份 → compose pull → 重建 
 
 ### 2.3 升级与回退限制（重要）
 
-1. **数据卷行为**：`update.sh` 的备份是 tar 包，不复制卷；数据卷始终由原 compose 管理，
-   `FEEDBACK_DATA_VOLUME` 指定的命名卷不会被重建过程触碰。
+1. **数据位置行为**：`update.sh` 的备份是 tar 包；数据（命名卷或 `FEEDBACK_DATA_PATH`
+   指定的宿主目录）始终由 compose 管理，不会被重建过程触碰。
 2. **人工回退到旧版本**：先恢复 `backups/` 里升级前的 tar 备份（见 deploy/README.md 的恢复命令），
    再把 `FEEDBACK_IMAGE` 改回旧版本标签 → `docker compose --env-file .env.prod up -d`。
    只改标签不恢复备份，旧版本读不动新 schema 会直接起不来。

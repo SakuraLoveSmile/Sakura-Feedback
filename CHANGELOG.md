@@ -7,6 +7,16 @@
 [`docs/integration.md`](docs/integration.md) §1.7。标注 **破坏性** 的条目表示
 宿主升级时需要处理；未标注的均为兼容变更（新增可选字段 / 属性 / 端点）或内部变更。
 
+## [未发布]
+
+### 新增
+
+- **数据目录挂载（bind mount）**：`deploy/compose.simple.yml` 新增可选部署变量
+  `FEEDBACK_DATA_PATH`（宿主目录绝对路径）——设置后 `/data` 改为绑定挂载该目录，
+  替代命名卷；不设则行为不变。`update.sh` 的备份对两种形态通用
+  （`FEEDBACK_DATA_PATH` 优先于 `FEEDBACK_DATA_VOLUME`）。注意与容器内路径变量
+  `FEEDBACK_DATA_DIR`（`/data`，服务端变量）区分。
+
 ## [0.5.1] — 2026-09-19
 
 ### 破坏性

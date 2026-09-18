@@ -24,7 +24,11 @@ services:
       # FEEDBACK_MASTER_KEY / FEEDBACK_ADMIN_USER / FEEDBACK_ADMIN_PASSWORD
       - .env.prod
     volumes:
-      - feedback-data:/data
+      # 数据存放（.env.prod 里二选一）：
+      #   不设变量 → 下方声明的命名卷 feedback-data（物理名 = FEEDBACK_DATA_VOLUME）
+      #   目录挂载 → FEEDBACK_DATA_PATH=<宿主目录绝对路径>（如 /opt/feedback/data；
+      #              必须绝对路径；注意区别于容器内路径变量 FEEDBACK_DATA_DIR）
+      - ${FEEDBACK_DATA_PATH:-feedback-data}:/data
     restart: unless-stopped
     # 停机依赖优雅退出（SIGTERM → 排空队列 → checkpoint WAL 并关闭 SQLite）。
     stop_grace_period: 30s
@@ -37,6 +41,7 @@ services:
 
 volumes:
   feedback-data:
-    # 显式卷名（不带项目前缀）：默认 feedback-data；接管既有部署时在 .env.prod 设
+    # 命名卷物理名（不带项目前缀）：默认 feedback-data；接管既有部署时在 .env.prod 设
     # FEEDBACK_DATA_VOLUME=<现有卷名> 即可复用数据（卷已存在则直接使用）。
+    # 用目录挂载（FEEDBACK_DATA_PATH）时本声明不会被创建，FEEDBACK_DATA_VOLUME 无需设置。
     name: ${FEEDBACK_DATA_VOLUME:-feedback-data}
