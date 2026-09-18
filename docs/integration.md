@@ -814,6 +814,8 @@ MaterialApp(
 | 切换开关 | — | `toggle()` |
 | 读取开关状态 | 面板状态可在 DOM 上观察（`aria-expanded` 等） | `isOpen`（`FeedbackController` 是 `ChangeNotifier`） |
 | 展开登录表单 | `startLogin()`（在当前面板展开，返回空串） | 点击主按钮「登录并提交」时展开（Web / 原生共用） |
+| 宿主注入会话 | `adoptSession({ accessToken, expiresAt })`（宿主提供的 Bearer 令牌，免组件内登录；见 7.1.1） | — |
+| 宿主清除注入会话 | `dropSession()`（丢弃令牌回到需要登录态，草稿保留） | — |
 
 行为细节（两端一致）：
 
@@ -1106,6 +1108,26 @@ Flutter 端只提供内置视口截图 + `FeedbackCaptureMask` 遮挡。
 5. **旧登录窗口握手（兼容保留）**：`window.open("<apiBase>/login?appId=&nonce=&cb=…")`，登录页调用
    `POST /api/auth/handshake` 获得短期令牌后 `postMessage({ type: "feedback:auth", nonce, accessToken, expiresAt }, cbOrigin)`；
    令牌绑定当前登录用户。新集成请使用上面的面板内登录。
+
+#### 7.1.1 宿主注入会话（`adoptSession` / `dropSession`，Web）
+
+宿主若已持有服务端签发的 Bearer 令牌（例如同源页面以自身 Cookie 会话调
+`POST /api/auth/handshake` 换取的握手令牌），可注入组件免去面板内二次登录：
+
+```ts
+widget.adoptSession({ accessToken, expiresAt }); // expiresAt：epoch 毫秒或 ISO 串
+widget.dropSession();                            // 宿主会话结束时清除
+```
+
+- 注入与面板内登录等价：令牌仅存内存、绝不写 localStorage；注入后组件自动
+  拉取会话身份与额度（`GET /api/auth/session`）。宿主负责到期前续注（再次调用
+  `adoptSession`）或在自身会话结束时 `dropSession()`。
+- 注入非法参数（空令牌 / 不可解析或过期的 `expiresAt`）按 no-op 处理；注入令牌
+  401 时组件按既有规则回到需要登录态、草稿保留。
+- **首个使用者是 Feedback 管理后台自身**（v0.5.2）：后台内嵌
+  `<feedback-widget app-id="com.feedback.admin">`，登录后以管理员 Cookie 换握手
+  令牌注入并按寿命周期续注；`com.feedback.admin` 软件缺失时自动登记、缺当前
+  origin 时补入白名单，提交的反馈进入本服务收件箱。
 
 其他要点：
 

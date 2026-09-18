@@ -7,10 +7,21 @@
 [`docs/integration.md`](docs/integration.md) §1.7。标注 **破坏性** 的条目表示
 宿主升级时需要处理；未标注的均为兼容变更（新增可选字段 / 属性 / 端点）或内部变更。
 
-## [未发布]
+## [0.5.2] — 2026-09-19
 
 ### 新增
 
+- **管理后台自持反馈组件**：管理页内嵌 `<feedback-widget>`（灵感球入口 + 视口截图），
+  管理员在后台任何页面（含登录页）都能直接把问题反馈进本服务的收件箱；提交按
+  `appId=com.feedback.admin` 归类，`pageLabel` 自动跟随当前管理页（`admin:<page>`），
+  主题跟随后台主题偏好。截图遮罩沿用组件规则（`input[type=password]` 等敏感区自动遮盖）。
+- **组件宿主会话 API**：`FeedbackWidget` 新增 `adoptSession({accessToken, expiresAt})` /
+  `dropSession()` 公开方法与 `FeedbackHostSession` 类型——宿主持有服务端签发的
+  Bearer 令牌（如同源页面以自身 Cookie 会话调 `POST /api/auth/handshake` 换取的握手令牌）
+  时可注入组件，免去组件内二次登录；注入后自动拉取会话身份与额度，令牌仅存内存。
+  管理后台即首个使用者：登录后自动登记 `com.feedback.admin` 软件（缺失则创建、
+  缺当前 origin 则补入白名单），握手注入并按令牌寿命周期续注；任一步失败组件回退
+  为面板内自登录，不影响后台功能。
 - **数据目录挂载（bind mount）**：`deploy/compose.simple.yml` 新增可选部署变量
   `FEEDBACK_DATA_PATH`（宿主目录绝对路径）——设置后 `/data` 改为绑定挂载该目录，
   替代命名卷；不设则行为不变。`update.sh` 的备份对两种形态通用
