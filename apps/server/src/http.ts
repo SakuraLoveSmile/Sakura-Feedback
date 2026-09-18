@@ -3,7 +3,6 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { RateLimiter } from "./auth/ratelimit.ts";
 import { type Db, findActiveSessionByToken, getUserById, type SessionRow, type UserRow } from "./db/repos.ts";
 import type { ServerConfig } from "./env.ts";
-import { type ControlPlane, PAUSE_DEFAULT_MESSAGE, PAUSE_ERROR_CODE } from "./routes/system-update.ts";
 
 export const COOKIE_NAME = "fb_session";
 export const MAX_BODY_BYTES = 64 * 1024;
@@ -211,41 +210,4 @@ export async function readJson<T>(c: Context): Promise<T | Err> {
 
 export function isErr(v: unknown): v is Err {
   return typeof v === "object" && v !== null && "code" in v && "status" in v;
-}
-
-// ---------- U1-4：更新期间暂停业务写入 ----------
-
-/** 业务写入方法（GET/HEAD/OPTIONS 一律放行：后台读进度必须始终可用）。 */
-const WRITE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
-
-/**
- * 暂停闸门守卫：updater 写入共享控制目录的 `paused` 标记存在时，
- * 拒绝新的业务写入并给出明确错误码与可读提示。
- *
- * 这是一道**纯拦截**闸门（不进入任何路由处理）：暂停期间不会触发 worker 入队、
- * 不会调用 Kaneo/AI，因此「更新期间零归档调用」由它保证。
- * 控制面读取失败（文件缺失/损坏）一律按「未暂停」处理，绝不因控制面异常阻断业务。
- */
-export function requireWritesAllowed(control: Pick<ControlPlane, "readPause">) {
-  return async (c: Context, next: () => Promise<void>): Promise<Response | undefined> => {
-    if (WRITE_METHODS.has(c.req.method)) {
-      const pause = control.readPause();
-      if (pause.paused) {
-        const message = pause.marker?.message ?? PAUSE_DEFAULT_MESSAGE;
-        const phase = pause.marker?.phaseLabel;
-        return fail(c, err(PAUSE_ERROR_CODE, `${message}${phase ? `（当前阶段：${phase}）` : ""}`, 503));
-      }
-    }
-    await next();
-    return undefined;
-  };
-}
-
-/** 服务端内部调用（如 worker 自检）判断当前是否处于更新暂停。 */
-export function writePaused(control: Pick<ControlPlane, "isWritePaused">): boolean {
-  try {
-    return control.isWritePaused();
-  } catch {
-    return false;
-  }
 }

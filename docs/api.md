@@ -177,85 +177,43 @@ Cookie 或 Bearer。`200 { "authenticated": true, "kind": "cookie"|"client", "ex
 
 ### 系统更新（仅管理员 Cookie 会话，前缀 /api/admin/system/update）
 
-后台「系统更新」标签用到的三个接口。反馈服务只做**代理与展示**，真正的部署动作全部由独立的 updater
-执行器完成（`http://updater:8790`，见 `apps/updater/README.md`）。三个接口都走管理员 Cookie + **严格的同源检查
-（读操作也校验 `Origin`）**：普通账号 → `403 "forbidden"`、Bearer 令牌 → `403 "unauthorized"`、
-跨源 `Origin` → `403 "origin_mismatch"`。
+后台「系统更新」标签用到的两个接口。**v0.5.1 起只做版本检查，不提供安装**：
+服务端直接拉取 GitHub Release 的 `release-manifest.json` 并与本机版本比较；
+更新动作在服务器上手动执行（`deploy/update.sh`）。两个接口都走管理员 Cookie +
+**严格的同源检查（读操作也校验 `Origin`）**：普通账号 → `403 "forbidden"`、
+Bearer 令牌 → `403 "unauthorized"`、跨源 `Origin` → `403 "origin_mismatch"`。
 
-环境变量（全部可选，缺失即「未接入更新」）：
+环境变量（全部可选）：
 
-| 变量 | 规范名 | 说明 |
-| --- | --- | --- |
-| `FEEDBACK_UPDATER_URL` | ✅ **规范名** | updater 内网地址，默认 `http://updater:8790`。**该名字与 `deploy/compose.prod.yml` 注入的名字一致**；改这里才会真正生效。 |
-| `FEEDBACK_UPDATE_URL` | 别名（兼容） | v0.3.0 之前文档用过的旧名字。仅在 `FEEDBACK_UPDATER_URL` 未设置时才被读取；两者同时设置时**规范名优先**。新部署请用规范名。 |
-| `FEEDBACK_UPDATE_TOKEN_FILE` | ✅ 规范名 | 共享令牌文件（600 权限），请求头 `x-updater-token`；令牌**绝不**进入日志、响应或前端 |
-| `FEEDBACK_UPDATE_CONTROL_DIR` | ✅ 规范名 | 与执行器共享的控制目录（只读挂载）：`paused` 标记与 `state/tasks/*.json` 进度 |
-| `FEEDBACK_UPDATE_CHECK_INTERVAL_MS` | ✅ 规范名 | 自动**检查**间隔，默认 24 小时；`0` 关闭自动检查。compose 未注入（缺省即 24 小时），需要时可在 compose 覆盖层或 `.env.prod` 里加 |
+| 变量 | 说明 |
+| --- | --- |
+| `FEEDBACK_UPDATE_MANIFEST_URL` | 版本清单地址，默认稳定渠道 Release 的 `release-manifest.json`；`off` / `none` / `disabled` 显式关闭检查功能（接口仍可用，检查固定返回 `manifest_not_configured`） |
+| `FEEDBACK_UPDATE_CHECK_INTERVAL_MS` | 自动**检查**间隔，默认 24 小时；`0` 关闭自动检查（仍允许手动检查） |
 
-> 上表三处变量名与 `deploy/compose.prod.yml` 注入的名字逐一对齐：`FEEDBACK_UPDATER_URL`、
-> `FEEDBACK_UPDATE_CONTROL_DIR`、`FEEDBACK_UPDATE_TOKEN_FILE`。规范名之外只保留 `FEEDBACK_UPDATE_URL`
-> 一个兼容别名，且已在服务端 `apps/server/src/env.ts` 的 `UPDATE_URL_ENV` / `UPDATE_URL_ENV_ALIAS` 常量里落位。
-
-- `GET /api/admin/system/update` → 当前版本、更新配置、暂停状态、最近一次检查结果、最近任务：
+- `GET /api/admin/system/update` → 当前版本、检查配置、最近一次检查结果：
   ```jsonc
-  { "current": { "version": "0.4.0", "protocol": 1 },
-    "config": { "updateConfigured": true, "updaterBaseUrl": "http://updater:8790", "tokenFile": "…",
-                "controlDir": "…", "protocolSupported": 1, "checkIntervalMs": 86400000 },
-    "pause": { "paused": false, "since": null, "marker": null },
-    "check": { "state": "ok", "checkedAt": "<iso>", "latest": { "version": "0.4.0", "notes": "…",
-               "publishedAt": "<iso>", "digest": "sha256:…", "image": "…" },
-               "compatible": true, "requiredProtocol": 1, "supportedProtocol": 1, "guidance": null,
-               "failedCode": null, "failedMessage": null, "warnings": [] },
-    "recentOperations": [ /* 与下面 GET :id 的 operation 同构 */ ] }
+  { "current": { "version": "0.5.1" },
+    "config": { "manifestUrl": "https://github.com/<owner>/<repo>/releases/latest/download/release-manifest.json",
+                "checkIntervalMs": 86400000 },
+    "check": { "state": "ok", "checkedAt": "<iso>", "source": "<manifestUrl>",
+               "latest": { "version": "0.6.0", "tag": "v0.6.0", "notes": "…",
+                           "publishedAt": "<iso>", "digest": "sha256:…",
+                           "image": "ghcr.io/…", "releaseUrl": "https://github.com/<owner>/<repo>/releases/tag/v0.6.0" },
+               "failedCode": null, "failedMessage": null } }
   ```
-  - `check.state`：`never`（尚未检查）/ `ok`（有新版本）/ `up_to_date` / `incompatible`（执行器协议不兼容）/
+  - `check.state`：`never`（尚未检查）/ `ok`（有新版本）/ `up_to_date`（清单版本 ≤ 当前版本）/
     `failed`（检查失败，附 `failedCode` / `failedMessage`）。
-  - **检查失败只体现为状态**：updater 不可达、清单缺失或非法、令牌未配置都不会返回 5xx，
-    也绝不影响正在运行的服务（业务读写照常）。前端据此显示「检查失败，可稍后重试」。
-  - 协议不兼容（清单 `requiredUpdaterProtocol` 高于本服务支持的 `current.protocol`）时 `check.compatible = false`、
-    `state = "incompatible"`、`guidance` 给出「先在服务器上手工升级 updater 容器」的指引；版本信息仍正常展示。
+  - **检查失败只体现为状态**：清单不可达（`manifest_unreachable`）、HTTP 非 200（`manifest_http_error`）、
+    清单非法（`manifest_bad_response`）、功能被关闭（`manifest_not_configured`）都不会返回 5xx，
+    也绝不影响正在运行的服务。前端据此显示「检查失败，可稍后重试」。
+  - 检查结果缓存在 `FEEDBACK_DATA_DIR/update-check.json`，重启后仍可展示上次结果。
 - `POST /api/admin/system/update/check` → `200 { "check": 同上的 check 对象 }`：手动触发一次检查（只读，**绝不安装**）。
-  自动检查每 `checkIntervalMs` 跑一次，同样只检查、绝不定时自动安装。
-- `POST /api/admin/system/update` `{ "requestId": string, "version": string, "digest": string }` →
-  `202 { "operationId", "status", "deduplicated" }`
-  - **只接受这三个字段**：`composePath` / `composeFile` / `command` / `image` / `volume` / `service` / `project`
-    等一律 `400 "invalid_request"`——部署路径、命令、镜像与卷名由执行器按预配置决定，反馈服务不接触也不转发。
-  - `version` 必须是 semver、`digest` 必须是 `sha256:<64 位小写十六进制>`，否则 `400 "invalid_request"`。
-  - `requestId`（1..128 位 `[A-Za-z0-9._:-]`）用于幂等：同一 `requestId` 重发返回原任务的 `operationId`
-    （`deduplicated: true`）；已有任务在执行 → `409 { "error": { "code": "update_in_progress" }, "operationId", "phase" }`。
-  - 执行器协议不兼容、清单缺失或版本/digest 与清单不一致 → `409` 并给出原因。
-  - 执行器不可达 / 未接入 → `503 "update_executor_unreachable"` / `"update_not_configured"` / `"update_token_unavailable"`，
-    其它上游错误 → `502 "update_executor_error"`；**绝不返回 500 堆栈**。
+  自动检查每 `checkIntervalMs` 跑一次，同样只检查。
   - 限流：按管理员 id 独立计时，30 次 / 15 分钟（`429 "rate_limited"` + `Retry-After`）。
-- `GET /api/admin/system/update/:id` → 任务进度（`operationId` 非法 → `400 "invalid_request"`）：
-  ```jsonc
-  { "status": "known", "fromControlDir": true,
-    "operation": { "operationId": "op-…", "version": "0.4.0", "status": "running",
-                   "outcome": null, "outcomeLabel": "更新进行中", "phase": "backup_copy",
-                   "phaseLabel": "③保留备份并复制", "message": "…", "failure": null,
-                   "recoveryHint": null, "warnings": [],
-                   "evidence": [ { "at", "phase", "step", "ok", "detail"? } ] } }
-  ```
-  - 进度优先读控制目录里执行器逐阶段落盘的任务文件，因此**服务重启期间也能显示进度**。
-  - 上游不可达且本地无记录 → `200 { "status": "unreachable", "error": { "code": "updater_unreachable", … } }`：
-    这是「正在恢复连接」而**不是**更新失败，前端应继续重试（只有执行器给出的终态才是权威结果）。
-  - 上游与控制目录都没有该任务 → `200 { "status": "unknown" }`。
-  - `outcomeLabel` 用于区分终态：`succeeded` /「更新失败，未改动部署」（`failed_no_changes`）/
-    「更新失败，已恢复旧版本」（`failed_restored`）/「需要处理」（`needs_attention`，附 `failure`、`recoveryHint`
-    与 `evidence`）。前端不提供任何自动删除旧镜像或备份卷的入口。
 
-### 更新期间的暂停写入
-
-updater 在执行「②暂停并停服」前会向控制目录写入 `paused` 标记（JSON，含 `phase`/`message`），
-反馈服务**只读**读取该标记（`FEEDBACK_UPDATE_CONTROL_DIR`），并据此：
-
-- 拒绝新的业务写入：`POST /api/feedback` 以及管理侧写操作（`PATCH /api/admin/me`、账号/软件配置/连接配置）
-  统一返回 `503 "update_paused"`，`message` 带上执行器给出的阶段说明。
-- worker **不取队、不处理**：更新期间零 Kaneo/AI 调用（队列保留在内存，解除暂停后自动继续）。
-- 读操作（后台读进度、反馈状态查询）始终可用；**系统更新自己的检查入口显式豁免**，
-  避免暂停标记残留时后台无法自愈。
-- `paused` 标记按短 TTL 缓存读取；文件缺失即视为未暂停，控制面异常**绝不**阻断业务写入。
-- 解除暂停 = 执行器删除 `paused` 文件（`unlink` 原子），反馈服务随后自动恢复写入与 worker。
+> v0.5.1 前的接口 `POST /api/admin/system/update`（发起更新）与 `GET /api/admin/system/update/:id`
+> （任务进度）已随 updater 执行器一并移除，调用会返回 `404 "not_found"`；
+> 更新期间的 `update_paused` 暂停写入机制同样已移除。
 
 ## 反馈组
 

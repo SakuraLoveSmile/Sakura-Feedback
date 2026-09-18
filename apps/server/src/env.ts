@@ -1,25 +1,15 @@
 import { scryptSync } from "node:crypto";
 import path from "node:path";
 
-/** 反馈服务实现的更新执行器协议版本（与 apps/updater 的 UPDATER_PROTOCOL_VERSION 对齐）。 */
-export const SUPPORTED_UPDATER_PROTOCOL = 1;
-
-/** 后台「系统更新」默认检查间隔：24 小时（只检查，绝不自动安装）。 */
+/** 后台「检查更新」默认检查间隔：24 小时（只检查，绝不自动安装）。 */
 export const DEFAULT_UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
-/** updater 执行器内网地址默认值（与 deploy/compose.prod.yml 的默认值一致）。 */
-export const DEFAULT_UPDATE_URL = "http://updater:8790";
-
 /**
- * U1-4：updater 执行器地址的**规范环境变量名**。
- * 必须与 `deploy/compose.prod.yml` 注入的名字一致，否则真实部署里「注入生效但被静默忽略」。
+ * 「检查更新」的版本清单地址默认值：稳定渠道 Release 的 release-manifest.json。
+ * 服务端直接拉取（仓库公开、可匿名访问）；自建发布渠道可用 FEEDBACK_UPDATE_MANIFEST_URL 覆盖。
  */
-export const UPDATE_URL_ENV = "FEEDBACK_UPDATER_URL";
-/**
- * 兼容别名（v0.3.0 之前的文档与本仓测试曾用名）。
- * 规范名优先；仅在规范名未设置时才回退到别名。docs/api.md 里已标注哪个是规范名。
- */
-export const UPDATE_URL_ENV_ALIAS = "FEEDBACK_UPDATE_URL";
+export const DEFAULT_UPDATE_MANIFEST_URL =
+  "https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/latest/download/release-manifest.json";
 
 export interface ServerConfig {
   port: number;
@@ -34,15 +24,11 @@ export interface ServerConfig {
   clientTokenTtlMs: number; // flutter long-lived bearer
   handshakeTtlMs: number; // short-lived bearer for web component
   /**
-   * U1-4：updater 执行器内网地址；`null` 表示未接入（更新入口整体不可用）。
-   * 可选：仅 `loadConfig` 与更新相关测试需要显式提供，其它构造点缺省即「未接入」。
+   * 「检查更新」的版本清单地址（GitHub Release 资产 URL）。
+   * `null` 表示检查功能被显式关闭（`FEEDBACK_UPDATE_MANIFEST_URL=off`）。
    */
-  updateUrl?: string | null;
-  /** U1-4：共享令牌文件（600 权限），仅由部署脚本生成。 */
-  updateTokenFile?: string | null;
-  /** U1-4：与执行器共享的控制目录（只读挂载）：paused 标记与 state/tasks 进度。 */
-  updateControlDir?: string | null;
-  /** U1-4：自动检查间隔（毫秒）；0 表示只允许手动检查。 */
+  updateManifestUrl?: string | null;
+  /** 自动检查间隔（毫秒）；0 表示只允许手动检查。 */
   updateCheckIntervalMs?: number;
   /**
    * Assist 接入（contracts/feedback-integration.md §1，全部可选）。
@@ -90,12 +76,14 @@ function parsePositiveInt(raw: string | undefined, fallback: number): number {
 }
 
 /**
- * 解析 updater 地址：规范名 `FEEDBACK_UPDATER_URL`（compose 注入名）优先，
- * 未设置时才回退到旧别名 `FEEDBACK_UPDATE_URL`，都没有则用默认值。
- * 三种来源都为空 → 默认值，保证 compose 默认形态下仍指向内网 updater。
+ * 解析版本清单地址：显式 `off`/`none`/`disabled` → 关闭检查功能（返回 null）；
+ * 未设置 → 默认稳定渠道清单；其它非空值 → 视为自定义清单 URL（自建发布渠道用）。
  */
-function parseUpdateUrl(env: NodeJS.ProcessEnv): string | null {
-  return optionalText(env[UPDATE_URL_ENV]) ?? optionalText(env[UPDATE_URL_ENV_ALIAS]) ?? DEFAULT_UPDATE_URL;
+function parseUpdateManifestUrl(env: NodeJS.ProcessEnv): string | null {
+  const raw = optionalText(env.FEEDBACK_UPDATE_MANIFEST_URL);
+  if (raw === null) return DEFAULT_UPDATE_MANIFEST_URL;
+  if (["off", "none", "disabled"].includes(raw.toLowerCase())) return null;
+  return raw;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
@@ -116,9 +104,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     sessionTtlMs: Number(env.FEEDBACK_SESSION_TTL_MS ?? 14 * DAY),
     clientTokenTtlMs: Number(env.FEEDBACK_CLIENT_TOKEN_TTL_MS ?? 90 * DAY),
     handshakeTtlMs: Number(env.FEEDBACK_HANDSHAKE_TTL_MS ?? 15 * 60 * 1000),
-    updateUrl: parseUpdateUrl(env),
-    updateTokenFile: optionalText(env.FEEDBACK_UPDATE_TOKEN_FILE),
-    updateControlDir: optionalText(env.FEEDBACK_UPDATE_CONTROL_DIR),
+    updateManifestUrl: parseUpdateManifestUrl(env),
     updateCheckIntervalMs: parseCheckInterval(env.FEEDBACK_UPDATE_CHECK_INTERVAL_MS),
     // Assist 接入：全部可选；assistHubUrl 缺省 = 整体关闭（零行为变化）。
     assistHubUrl: optionalText(env.FEEDBACK_ASSIST_HUB_URL),

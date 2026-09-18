@@ -329,88 +329,39 @@ export interface SessionUser {
   role: string;
 }
 
-// ---------- U1-4：后台「系统更新」 ----------
+// ---------- 后台「检查更新」（v0.5.1 起只检查不安装） ----------
 
-/** 检查状态：ok=有新版本 / up_to_date=已是最新 / incompatible=执行器协议不兼容 / failed=检查失败 / never=尚未检查 */
-export type UpdateCheckState = "ok" | "up_to_date" | "incompatible" | "failed" | "never";
+/** 检查状态：ok=有新版本 / up_to_date=已是最新 / failed=检查失败 / never=尚未检查 */
+export type UpdateCheckState = "ok" | "up_to_date" | "failed" | "never";
 
 export interface UpdateCheckView {
   state: UpdateCheckState;
   checkedAt: string | null;
+  /** 检查来源（版本清单地址）。 */
   source: string | null;
   latest: {
     version: string;
+    tag: string | null;
     notes: string | null;
     publishedAt: string | null;
     digest: string | null;
     image: string | null;
-    requiredUpdaterProtocol: number | null;
+    /** 该版本的 Release 页面链接（服务端按清单地址推导）。 */
+    releaseUrl: string | null;
   } | null;
-  compatible: boolean;
-  requiredProtocol: number | null;
-  supportedProtocol: number;
-  guidance: string | null;
   failedCode: string | null;
   failedMessage: string | null;
-  warnings: string[];
-}
-
-export interface UpdateOperationView {
-  operationId: string;
-  requestId: string | null;
-  version: string | null;
-  digest: string | null;
-  status: string;
-  outcome: string | null;
-  /** 「更新失败，已恢复旧版本」/「需要处理」等终态文案（服务端给出）。 */
-  outcomeLabel: string | null;
-  phase: string;
-  phaseLabel: string;
-  message: string;
-  createdAt: string;
-  updatedAt: string;
-  startedAt: string | null;
-  finishedAt: string | null;
-  failure: { phase: string; code: string; message: string } | null;
-  recoveryHint: string | null;
-  warnings: string[];
-  evidence: { at: string; phase: string; step: string; ok: boolean; detail?: string }[];
-}
-
-export interface UpdatePauseState {
-  paused: boolean;
-  since: string | null;
-  marker: {
-    phase: string | null;
-    phaseLabel: string | null;
-    message: string | null;
-    operationId: string | null;
-    version: string | null;
-    updatedAt: string | null;
-    parseError: string | null;
-  } | null;
 }
 
 export interface SystemUpdateStatus {
-  current: { version: string; protocol: number };
+  current: { version: string };
   config: {
-    updateConfigured: boolean;
-    updaterBaseUrl: string | null;
-    tokenFile: string | null;
-    controlDir: string | null;
-    protocolSupported: number;
+    /** 版本清单地址；null 表示检查功能被显式关闭。 */
+    manifestUrl: string | null;
     checkIntervalMs: number;
   };
-  pause: UpdatePauseState;
   check: UpdateCheckView;
-  recentOperations: UpdateOperationView[];
 }
-
-/** 任务查询结果：unreachable **不等于** 失败（服务重启期间取不到进度属正常过程）。 */
-export type UpdateOperationResult =
-  | { status: "known"; fromControlDir: boolean; operation: UpdateOperationView }
-  | { status: "unknown"; operationId: string }
-  | { status: "unreachable"; operationId: string; error: { code: string; message: string } };
 
 export const STATUS_LABELS: Record<string, string> = {
   received: "已接收",

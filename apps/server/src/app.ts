@@ -11,20 +11,17 @@ import { decryptSecret } from "./crypto/secret.ts";
 import { type Db, openDb } from "./db/db.ts";
 import { findResumable, getSetting } from "./db/repos.ts";
 import type { ServerConfig } from "./env.ts";
-import { isCrossOriginRequest, normalizeRequestOrigin, requireWritesAllowed } from "./http.ts";
+import { isCrossOriginRequest, normalizeRequestOrigin } from "./http.ts";
 import { loginPageHtml } from "./pages/login.ts";
 import { createWorker, type Worker } from "./pipeline/worker.ts";
 import { adminRoutes } from "./routes/admin.ts";
 import { authRoutes, ensureInitialUser } from "./routes/auth.ts";
 import { feedbackRoutes } from "./routes/feedback.ts";
 import {
-  createControlPlane,
   createSystemUpdateService,
-  createUpdaterClient,
   SERVER_VERSION,
   type SystemUpdateService,
   systemUpdateRoutes,
-  type UpdaterClient,
 } from "./routes/system-update.ts";
 import { type AiClient, createAiClient } from "./services/ai.ts";
 import type { KaneoClient } from "./services/kaneo.ts";
@@ -42,10 +39,8 @@ export interface AppDeps {
   clearTimer?: (handle: unknown) => void;
   /** 测试注入：单次自动归档扫描批量（默认 50）。 */
   scanBatch?: number;
-  /** 测试注入：updater 客户端（默认按 FEEDBACK_UPDATE_* 配置创建）。 */
-  updaterClient?: UpdaterClient;
-  /** 测试注入：控制目录读取缓存时长（毫秒）；0 表示每次读盘。 */
-  controlTtlMs?: number;
+  /** 测试注入：版本检查 fetch 实现（默认全局 fetch，直连 GitHub Release 清单）。 */
+  updateFetch?: typeof fetch;
   /** 测试注入：Assist 投递 worker 的 fetch 实现（默认全局 fetch）。 */
   assistFetch?: typeof fetch;
 }
@@ -55,7 +50,7 @@ export interface FeedbackApp {
   db: Db;
   config: ServerConfig;
   worker: Worker;
-  /** U1-4：系统更新聚合（检查/更新代理/暂停状态）。 */
+  /** 后台「检查更新」服务（只检查不安装）。 */
   system: SystemUpdateService;
   /** Assist 投递 worker（未配置 FEEDBACK_ASSIST_HUB_URL 时为 null）。 */
   assist: AssistWorker | null;
@@ -66,20 +61,13 @@ export function createApp(config: ServerConfig, deps: AppDeps = {}): FeedbackApp
   const db = openDb(config.dataDir);
   ensureInitialUser(db, config);
 
-  // U1-4：控制目录（只读挂载）→ 暂停标记与任务进度；令牌只在请求上游时按需从文件读取。
-  const control = createControlPlane({
-    controlDir: config.updateControlDir ?? null,
-    ...(deps.controlTtlMs !== undefined ? { ttlMs: deps.controlTtlMs } : {}),
-    ...(deps.now ? { now: deps.now } : {}),
-  });
-  const updaterClient =
-    deps.updaterClient ??
-    createUpdaterClient({ baseUrl: config.updateUrl ?? null, tokenFile: config.updateTokenFile ?? null });
+  // 「检查更新」：服务端直连 GitHub Release 清单，结果缓存在数据目录，绝不安装。
   const system = createSystemUpdateService({
     currentVersion: SERVER_VERSION,
-    control,
-    client: updaterClient,
+    manifestUrl: config.updateManifestUrl ?? null,
     checkIntervalMs: config.updateCheckIntervalMs ?? 0,
+    stateFile: path.join(config.dataDir, "update-check.json"),
+    ...(deps.updateFetch ? { fetchImpl: deps.updateFetch } : {}),
     ...(deps.now ? { now: deps.now } : {}),
   });
 
@@ -107,7 +95,6 @@ export function createApp(config: ServerConfig, deps: AppDeps = {}): FeedbackApp
     ai,
     kaneo,
     snapshotKaneoSettings,
-    writesPaused: () => control.isWritePaused(),
     ...(deps.workerSleep ? { sleep: deps.workerSleep } : {}),
     ...(deps.now ? { now: deps.now } : {}),
     ...(deps.setTimer ? { setTimer: deps.setTimer } : {}),
@@ -167,24 +154,6 @@ export function createApp(config: ServerConfig, deps: AppDeps = {}): FeedbackApp
 
   app.get("/healthz", (c) => c.json({ ok: true }));
 
-  // U1-4：更新暂停闸门。paused 标记存在时拒绝业务写入（503 update_paused），
-  // 纯拦截、不进入路由处理：更新期间不会触发任何 worker 入队或远端归档调用。
-  // GET/HEAD 一律放行（后台读进度），/api/admin/system/update* 的检查与放行也显式豁免。
-  const pauseGate = requireWritesAllowed(control);
-  app.use("/api/feedback", pauseGate);
-  app.use("/api/feedback/*", pauseGate);
-  // 管理写入同样先拦截（只放行读方法）；系统更新自己的检查/放行入口必须始终可用，
-  // 因此对 /api/admin/system/update* 显式豁免——否则一旦暂停标记残留，后台将无法自愈。
-  app.use("/api/admin", pauseGate);
-  app.use("/api/admin/*", async (c, next) => {
-    // 挂载点内的路径可能带尾斜杠（/api/admin/system/update/），统一规范化后再判断。
-    const path = new URL(c.req.url).pathname.replace(/\/+$/, "");
-    if (path === "/api/admin/system/update" || path.startsWith("/api/admin/system/update/")) {
-      return next();
-    }
-    return pauseGate(c, next);
-  });
-
   // 宿主应用与反馈服务通常跨源（T1：未登记软件也必须能用）：
   // - 组件端点允许**任意合法 http(s) Origin** 的无凭据跨域请求，按请求回显 Origin；
   // - 绝不回显 access-control-allow-credentials：浏览器端使用 Bearer + `credentials: omit`；
@@ -217,7 +186,7 @@ export function createApp(config: ServerConfig, deps: AppDeps = {}): FeedbackApp
     }),
   );
   app.route("/api/admin", adminRoutes({ db, masterKey: config.masterKey, config, kaneo, ai, worker }));
-  // U1-4：系统更新接口（同样是 /api/admin 下的管理员守卫路由）。
+  // 「检查更新」接口（同样是 /api/admin 下的管理员守卫路由；只检查不安装）。
   app.route("/api/admin/system", systemUpdateRoutes({ db, config, system }));
   // Assist 只读回连路由：接入开启且存在可用密钥才挂载（READ_KEY 缺省回退 SOURCE_KEY）。
   const assistReadKey = config.assistHubUrl ? (config.assistReadKey ?? config.assistSourceKey) : null;
@@ -257,7 +226,7 @@ export function createApp(config: ServerConfig, deps: AppDeps = {}): FeedbackApp
     worker,
     system,
     assist,
-    // T3：先停调度与定时器（此后不再有任何回调访问数据库），再释放系统更新定时器。
+    // T3：先停调度与定时器（此后不再有任何回调访问数据库），再释放检查更新定时器。
     close: () => {
       worker.stop();
       assist?.stop();

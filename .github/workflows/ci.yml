@@ -76,8 +76,6 @@ jobs:
         run: pnpm --filter @feedback/admin test
       - name: test server
         run: pnpm --filter @feedback/server test -- --reporter=verbose
-      - name: test updater
-        run: pnpm --filter @feedback/updater test -- --reporter=verbose
       - name: test web
         run: pnpm --filter @feedback/web test -- --reporter=verbose
 

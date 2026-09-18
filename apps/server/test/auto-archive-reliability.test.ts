@@ -16,7 +16,6 @@ import {
   makeHarness,
   prepareAutoArchive,
   saveAppDefaults,
-  setPaused,
   submitFeedback,
 } from "./helpers.ts";
 
@@ -26,7 +25,7 @@ import {
  * 覆盖计划的通过标准：
  * 1. 人工保护矩阵（不完整 / 完整 / 清空后暂存）+「扫描后人工保存」事务内保护；
  * 2. 51 / 121 条积压一次启用后全部归档且各一次；混入人工、配置阻塞、未到期记录互不影响；
- * 3. 注入可恢复故障 + 推进时钟：到期前不重试、到期自动恢复、重启重排、重复触发、暂停恢复、退出后零数据库访问；
+ * 3. 注入可恢复故障 + 推进时钟：到期前不重试、到期自动恢复、重启重排、重复触发、退出后零数据库访问；
  * 4. 两个页面共用同一版本时的来源确认 / 规则保存冲突，以及同一操作重放不重复授权。
  */
 async function submitOnly(h: Harness, bearer: string, text: string): Promise<string> {
@@ -389,37 +388,6 @@ describe("T3 到期自动重试与生命周期", () => {
     h.feedbackApp.worker.scanAutoArchive();
     await h.feedbackApp.worker.idle();
     expect(h.kaneo.created).toHaveLength(1);
-  });
-
-  it("更新暂停期间不授权不归档，恢复后重新扫描完成积压", async () => {
-    const h = await makeHarness({ pausable: true });
-    await prepareAutoArchive(h);
-    // 暂停：提交被闸门拒绝，积压只能靠恢复后的扫描
-    setPaused(h, true);
-    h.feedbackApp.worker.scanAutoArchive();
-    await h.feedbackApp.worker.idle();
-    expect(h.kaneo.created).toHaveLength(0);
-
-    // 直接构造一条待处理积压（绕过写入闸门，模拟暂停前已落库的反馈）
-    const appRowId = h.app.id as string;
-    h.feedbackApp.db
-      .prepare(
-        `INSERT INTO feedbacks (id, app_row_id, app_id, user_id, text, idempotency_key, content_hash, status,
-           source_origin, archive_stage, attempt_count, created_at, updated_at)
-         VALUES ('fb-paused', ?, 'com.test.app', '', '暂停期间积压', 'key-paused', 'hash-paused', 'needs_info',
-           'http://localhost', 'task_pending', 0, ?, ?)`,
-      )
-      .run(appRowId, new Date().toISOString(), new Date().toISOString());
-    h.feedbackApp.worker.scanAutoArchive();
-    await h.feedbackApp.worker.idle();
-    expect(h.kaneo.remoteWrites).toBe(0);
-
-    // 解除暂停：恢复后重新扫描并完成归档
-    setPaused(h, false);
-    h.feedbackApp.worker.scanAutoArchive();
-    await h.feedbackApp.worker.idle();
-    expect(h.kaneo.created).toHaveLength(1);
-    expect(getFeedback(h.feedbackApp.db, "fb-paused")!.status).toBe("archived");
   });
 
   it("退出后不再有任何定时器回调访问数据库", async () => {
