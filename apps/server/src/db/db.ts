@@ -152,6 +152,28 @@ CREATE INDEX IF NOT EXISTS idx_assist_outbox_pending ON assist_outbox(state, nex
 CREATE TABLE IF NOT EXISTS assist_outbox_seq (id INTEGER PRIMARY KEY CHECK (id = 1), value INTEGER NOT NULL);
 `;
 
+/**
+ * Assist 管理面幂等请求表（v12，contracts/feedback-integration.md §4.2）：
+ * - request_id 为中枢下发的客户端幂等键（每次操作唯一）；
+ * - http_status = 0 表示「运行中」标记，>0 为已完成请求的 HTTP 状态；
+ * - outcome_json 保存该请求的参数与响应体（供同 requestId 回放 / 参数冲突判定），
+ *   只含操作结果字段，不含正文/附件字节；
+ * - 完成行保留 30 天，由操作路径顺带惰性清理；运行中标记超过 10 分钟视为崩溃残留，
+ *   惰性终结为 outcome_uncertain。
+ * 迁移号按契约冻结为 v12（v11 预留给 Issue 对话特性，允许跳号）。
+ */
+const ASSIST_MGMT_REQUESTS_DDL = `
+CREATE TABLE IF NOT EXISTS assist_mgmt_requests (
+  request_id   TEXT PRIMARY KEY,
+  feedback_id  TEXT NOT NULL,
+  action       TEXT NOT NULL,
+  http_status  INTEGER NOT NULL,
+  outcome_json TEXT NOT NULL,
+  created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_amr_feedback ON assist_mgmt_requests(feedback_id);
+`;
+
 const SCHEMA = `
 PRAGMA journal_mode = WAL;
 
@@ -244,6 +266,8 @@ CREATE INDEX IF NOT EXISTS idx_feedback_logs_feedback ON feedback_logs(feedback_
 ${FEEDBACK_DELETION_RECEIPTS_DDL}
 
 ${ASSIST_OUTBOX_DDL}
+
+${ASSIST_MGMT_REQUESTS_DDL}
 `;
 
 function columns(db: DatabaseSync, table: string): string[] {
@@ -715,6 +739,24 @@ export function migrate(db: DatabaseSync): void {
       db.exec("PRAGMA user_version = 10;");
       db.exec("COMMIT");
       console.info("[migration_v10] 已创建 Assist 接入 outbox 表");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
+  }
+
+  if (v < 12) {
+    // 迁移 12（Assist 管理面幂等请求表，契约 v1.1 §4.2）：
+    // - 新增 assist_mgmt_requests（request_id 幂等键 + 运行中/完成标记 + 结果快照）；
+    // - 纯加表（SCHEMA 已含同构定义，IF NOT EXISTS 幂等），不改任何既有表与状态机；
+    // - v11 预留给 Issue 对话特性（契约冻结本表为 v12），user_version 允许跳号；
+    // - 事务内执行、任一步失败回滚、版本号不前进。
+    db.exec("BEGIN");
+    try {
+      db.exec(ASSIST_MGMT_REQUESTS_DDL);
+      db.exec("PRAGMA user_version = 12;");
+      db.exec("COMMIT");
+      console.info("[migration_v12] 已创建 Assist 管理面幂等请求表");
     } catch (err) {
       db.exec("ROLLBACK");
       throw err;

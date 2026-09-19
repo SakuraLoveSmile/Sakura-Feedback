@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { type Context, Hono } from "hono";
+import { assistMgmtRoutes } from "./assist/manage_routes.ts";
 import { bindAssistRuntime } from "./assist/outbox.ts";
 import { assistRoutes } from "./assist/routes.ts";
 import { type AssistWorker, createAssistWorker } from "./assist/worker.ts";
@@ -190,8 +191,27 @@ export function createApp(config: ServerConfig, deps: AppDeps = {}): FeedbackApp
   app.route("/api/admin/system", systemUpdateRoutes({ db, config, system }));
   // Assist 只读回连路由：接入开启且存在可用密钥才挂载（READ_KEY 缺省回退 SOURCE_KEY）。
   const assistReadKey = config.assistHubUrl ? (config.assistReadKey ?? config.assistSourceKey) : null;
+  // v1.1 管理组：接入开启 + 已配置独立 MGMT_KEY，且必须与生效只读凭证不同
+  // （防止只读凭证意外获得写权限；相同则拒绝挂载并记警告）。
+  const assistMgmtKey = config.assistHubUrl ? (config.assistMgmtKey ?? null) : null;
+  let assistManageEnabled = false;
+  if (assistMgmtKey) {
+    if (assistReadKey !== null && assistMgmtKey === assistReadKey) {
+      console.warn(
+        "[assist] FEEDBACK_ASSIST_MGMT_KEY 与生效的只读凭证相同，已拒绝挂载管理接口组（管理凭证必须独立配置）",
+      );
+    } else {
+      app.route("/api/assist/manage", assistMgmtRoutes({ db, mgmtKey: assistMgmtKey, worker }));
+      assistManageEnabled = true;
+    }
+  }
+  if (!assistManageEnabled) {
+    // 管理组未挂载 → /api/assist/manage/* 显式 404（契约：未配置即整组不挂载）。
+    // 必须先于只读组注册，否则请求会被只读组认证中间件截获成 401。
+    app.all("/api/assist/manage/*", (c) => c.json({ error: { code: "not_found", message: "接口不存在" } }, 404));
+  }
   if (assistReadKey) {
-    app.route("/api/assist", assistRoutes({ db, readKey: assistReadKey }));
+    app.route("/api/assist", assistRoutes({ db, readKey: assistReadKey, manageEnabled: assistManageEnabled }));
   }
 
   app.notFound((c) => c.json({ error: { code: "not_found", message: "接口不存在" } }, 404));

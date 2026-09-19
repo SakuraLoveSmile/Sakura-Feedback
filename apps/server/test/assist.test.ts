@@ -115,14 +115,16 @@ function acceptAllHub(calls: { url: string; body: any }[] = []): typeof fetch {
   }) as unknown as typeof fetch;
 }
 
-describe("迁移 v10：assist_outbox 表结构", () => {
-  it("全新库创建 assist_outbox / assist_outbox_seq / 索引，user_version=10", () => {
+describe("迁移 v10/v12：assist 表结构", () => {
+  it("全新库创建 assist_outbox / assist_outbox_seq / assist_mgmt_requests / 索引，user_version=12", () => {
     const db = openDb(tmpDir());
-    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(10);
+    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(12);
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'assist_%'").all() as {
       name: string;
     }[];
-    expect(tables.map((t) => t.name).sort()).toEqual(["assist_outbox", "assist_outbox_seq"]);
+    expect(tables.map((t) => t.name).sort()).toEqual(["assist_mgmt_requests", "assist_outbox", "assist_outbox_seq"]);
+    const amrIdx = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_amr_feedback'").get();
+    expect(amrIdx).toBeTruthy();
     const idx = db
       .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_assist_outbox_pending'")
       .get();
