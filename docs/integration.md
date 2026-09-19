@@ -1374,9 +1374,10 @@ Blog 的反馈入口建议显式声明：`launcher-mode="orb"` + `capture-mode="
 
 | 环境变量 | 用途与默认值 |
 |---|---|
-| `FEEDBACK_ASSIST_HUB_URL` | Assist 中枢基地址；未设置时不入队、不投递、不开放只读接口 |
+| `FEEDBACK_ASSIST_HUB_URL` | Assist 中枢基地址；未设置时不入队、不投递、不开放只读/管理接口 |
 | `FEEDBACK_ASSIST_SOURCE_KEY` | 中枢签发的上报 Bearer 密钥；启用时应同时配置 |
 | `FEEDBACK_ASSIST_READ_KEY` | 中枢拉取本服务反馈/附件的独立密钥；缺省回退到来源密钥 |
+| `FEEDBACK_ASSIST_MGMT_KEY` | **0.6.0 新增**：中枢管理接口凭证（独立值，如 `amk_…`）。未配置则管理组不挂载；与生效只读凭证相同时拒绝挂载并记警告 |
 | `FEEDBACK_ASSIST_QUEUE_MAX` | pending 队列容量，默认 1000 |
 | `FEEDBACK_ASSIST_FLUSH_MS` | 空闲轮询间隔，默认 2000 毫秒 |
 
@@ -1386,9 +1387,30 @@ Blog 的反馈入口建议显式声明：`launcher-mode="orb"` + `capture-mode="
 
 中枢使用 `Authorization: Bearer <READ_KEY>` 访问：
 
-- `GET /api/assist/feedback/:id`：反馈详情和附件元数据。
+- `GET /api/assist/feedback/:id`：反馈详情和附件元数据（0.6.0 起含 `mgmtState`、
+  `lifecycleVersion`、`revision`、`issueStatus`、`collectionState`、`resumePaused`、
+  `archiveStage`、`kaneoTaskUrl`、`archivedAt`、`trashedAt`、`allowedActions`、
+  `capabilities.manage` 管理面字段）。
 - `GET /api/assist/feedback/:id/attachments/screenshot`：PNG 截图。
 - `GET /api/assist/feedback/:id/attachments/logs/:logId`：日志下载。
 
 只读凭证可读取全部反馈，请仅交给受信中枢，通过 HTTPS 传输并保存在服务端。
 本地彻底删除会清除关联事件副本及附件；已经发出的请求和中枢已保存的数据不能由本地删除撤回。
+
+### Assist 管理面（0.6.0，契约 v1.1）
+
+中枢使用 `Authorization: Bearer <MGMT_KEY>` 访问（独立于只读凭证，各自 60 次/分限流）：
+
+- `GET /api/assist/manage/feedback`：反馈列表。查询参数 `view=inbox|archived|trash|all`
+  （默认 inbox；all 含 inbox+archived，不含回收站）、`cursor`、`limit`（1..100，默认 50）、
+  `q`（≤200 字符，匹配 title/text/id）；响应含 `items`、`nextCursor` 与三区 `counts`。
+- `POST /api/assist/manage/feedback/:id/action`：单条操作。body
+  `{requestId, action, expectedLifecycleVersion?, expectedRevision?}`；
+  `requestId` 为幂等键（`[A-Za-z0-9._:-]{1,128}`），同键同参数回放已存结果
+  （`replayed: true`），同键不同参数返回 `request_id_conflict`；生命周期动作
+  （`archive`/`unarchive`/`trash`/`restore`/`resume_processing`）必填
+  `expectedLifecycleVersion`，`retry`/`recheck` 必填 `expectedRevision`。
+  成功响应 `detail` 为操作后实时详情快照；冲突/状态错误响应附 `detail` 供刷新。
+
+管理面明确不含：彻底删除（purge）、内容编辑、管理员回复与复杂 Kaneo 恢复操作。
+回收站恢复不自动重启处理；归档仅本地归档区语义（不代表创建 Kaneo 任务）。

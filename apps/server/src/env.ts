@@ -39,6 +39,11 @@ export interface ServerConfig {
   assistSourceKey?: string | null;
   /** 附件只读接口凭证；缺省回退 `assistSourceKey`，两者都未配置则路由组不挂载。 */
   assistReadKey?: string | null;
+  /**
+   * v1.1 管理接口凭证（独立值，如 `amk_…`）；未配置 → 管理路由组不挂载。
+   * 必须与生效的只读凭证（READ_KEY/SOURCE_KEY 生效值）不同，否则服务端拒绝挂载并记警告。
+   */
+  assistMgmtKey?: string | null;
   /** outbox pending 上限，默认 1000。 */
   assistQueueMax?: number;
   /** 投递循环空闲休眠毫秒，默认 2000。 */
@@ -110,6 +115,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     assistHubUrl: optionalText(env.FEEDBACK_ASSIST_HUB_URL),
     assistSourceKey: optionalText(env.FEEDBACK_ASSIST_SOURCE_KEY),
     assistReadKey: optionalText(env.FEEDBACK_ASSIST_READ_KEY),
+    assistMgmtKey: optionalText(env.FEEDBACK_ASSIST_MGMT_KEY),
     assistQueueMax: parsePositiveInt(env.FEEDBACK_ASSIST_QUEUE_MAX, 1000),
     assistFlushMs: parsePositiveInt(env.FEEDBACK_ASSIST_FLUSH_MS, 2000),
   };

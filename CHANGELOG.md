@@ -7,6 +7,33 @@
 [`docs/integration.md`](docs/integration.md) §1.7。标注 **破坏性** 的条目表示
 宿主升级时需要处理；未标注的均为兼容变更（新增可选字段 / 属性 / 端点）或内部变更。
 
+## [0.6.0] — 2026-09-19
+
+### 新增
+
+- **Assist 管理面（接入契约 v1.1）**：新增仅中枢内网回连的管理接口组
+  - `GET /api/assist/manage/feedback`：反馈列表回读，支持 `view`（inbox/archived/trash/all）、
+    `cursor`/`limit` 分页与 `q` 搜索，响应附三区计数；条目含 `mgmtState`、`lifecycleVersion`、
+    `collectionState`、`resumePaused`、`allowedActions` 等管理字段。
+  - `POST /api/assist/manage/feedback/:id/action`：单条生命周期与安全重试操作
+    （`archive`/`unarchive`/`trash`/`restore`/`resume_processing`/`retry`/`recheck`），
+    `requestId` 幂等去重（同键同参数回放已存结果，参数不同返回 `request_id_conflict`，
+    运行中超 10 分钟惰性终结为 `outcome_uncertain`），生命周期动作携带
+    `expectedLifecycleVersion`、`retry`/`recheck` 携带 `expectedRevision` 乐观锁。
+  - 新增环境变量 `FEEDBACK_ASSIST_MGMT_KEY`（独立管理凭证）：未配置则整组不挂载；
+    与生效只读凭证（`FEEDBACK_ASSIST_READ_KEY`/`FEEDBACK_ASSIST_SOURCE_KEY`）相同时拒绝挂载并记警告。
+- **`GET /api/assist/feedback/:id` 详情扩展字段**（兼容新增）：`appName`、`mgmtState`、
+  `lifecycleVersion`、`revision`、`issueStatus`、`collectionState`、`resumePaused`、
+  `archiveStage`、`kaneoTaskUrl`、`archivedAt`、`trashedAt`、`allowedActions`、
+  `capabilities.manage`（管理面是否挂载）。
+
+### 升级说明
+
+- 服务端数据库自动迁移至 **schema v12**：新增 `assist_mgmt_requests` 幂等请求表
+  （迁移号按契约冻结为 v12，v11 预留给 Issue 对话特性），不改任何既有表与状态机。
+- 管理面不改变反馈业务语义：回收站恢复不自动重启处理，`archive` 仅为本地归档区语义
+  （不代表创建 Kaneo 任务），彻底删除（purge）不开放给管理凭证。
+
 ## [0.5.2] — 2026-09-19
 
 ### 新增

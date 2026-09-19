@@ -172,7 +172,7 @@ describe("迁移 9：反馈本地管理生命周期", () => {
   it("全新库直接带生命周期列、回收站索引与删除凭据表", () => {
     const dir = mkdtempSync(path.join(tmpdir(), "feedback-mig-v9-fresh-"));
     const db = openDb(dir);
-    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(10);
+    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(12);
     const cols = fbCols(db);
     for (const c of [
       "mgmt_state",
@@ -199,7 +199,7 @@ describe("迁移 9：反馈本地管理生命周期", () => {
   it("v8 → v9：历史记录一律落收件箱，远端关联/附件/审计/授权证据全部保留", () => {
     const dir = makeV8Db();
     const db = openDb(dir);
-    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(10);
+    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(12);
     expect(db.prepare("PRAGMA foreign_key_check").all()).toHaveLength(0);
 
     // 历史记录全部进入收件箱（包括已同步的 archived 处理状态），不自动迁入已归档区。
@@ -230,7 +230,7 @@ describe("迁移 9：反馈本地管理生命周期", () => {
     first.close();
 
     const second = openDb(dir);
-    expect((second.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(10);
+    expect((second.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(12);
     expect(digest(second)).toBe(snapshot);
     expect(second.prepare("PRAGMA foreign_key_check").all()).toHaveLength(0);
     second.close();
@@ -258,7 +258,7 @@ describe("迁移 9：反馈本地管理生命周期", () => {
     fix.exec("DROP TABLE feedback_deletion_receipts");
     fix.close();
     const db = openDb(dir);
-    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(10);
+    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(12);
     expect(db.prepare("SELECT COUNT(*) n FROM feedbacks").get()).toEqual({ n: 2 });
     db.close();
   });
