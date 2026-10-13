@@ -563,6 +563,11 @@ export function MoreMenu({
     if (open) updatePos();
   }, [open, updatePos]);
 
+  const positioned = pos !== null;
+  useLayoutEffect(() => {
+    if (open && positioned) menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
+  }, [open, positioned]);
+
   useEffect(() => {
     if (!open) return;
     function onDoc(e: MouseEvent) {
@@ -571,7 +576,29 @@ export function MoreMenu({
       setOpen(false);
     }
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") setOpen(false);
+      if (!menuRef.current?.contains(document.activeElement) && document.activeElement !== btnRef.current) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        setOpen(false);
+        btnRef.current?.focus();
+        return;
+      }
+      if (e.key === "Tab") {
+        setOpen(false);
+        btnRef.current?.focus();
+        return;
+      }
+      const list = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? []);
+      const i = list.indexOf(document.activeElement as HTMLButtonElement);
+      let next: HTMLButtonElement | undefined;
+      if (e.key === "ArrowDown") next = list[i + 1] ?? list[0];
+      else if (e.key === "ArrowUp") next = list[i - 1] ?? list[list.length - 1];
+      else if (e.key === "Home") next = list[0];
+      else if (e.key === "End") next = list[list.length - 1];
+      else return;
+      e.preventDefault();
+      next?.focus();
     }
     document.addEventListener("mousedown", onDoc);
     document.addEventListener("keydown", onKey);
@@ -597,6 +624,13 @@ export function MoreMenu({
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
+        onKeyDown={(e) => {
+          if (!open && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+            e.preventDefault();
+            e.stopPropagation();
+            setOpen(true);
+          }
+        }}
       >
         <Icon name="more" />
       </button>
@@ -617,9 +651,11 @@ export function MoreMenu({
                 key={it.label}
                 type="button"
                 role="menuitem"
+                tabIndex={-1}
                 className={it.danger ? "danger" : ""}
                 onClick={() => {
                   setOpen(false);
+                  btnRef.current?.focus();
                   it.onClick();
                 }}
               >

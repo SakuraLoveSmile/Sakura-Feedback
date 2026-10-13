@@ -2557,16 +2557,56 @@ class FeedbackPanelState extends State<FeedbackPanel>
       }
       _logsCollected = true;
       if (result != null && result.isNotEmpty) {
-        final List<FeedbackLogFile> valid = <FeedbackLogFile>[];
+        final List<FeedbackLogFile> manual = _logs
+            .where((FeedbackLogFile l) => l.source != 'auto')
+            .toList(growable: false);
+        String? error;
+        if (manual.length + result.length > kFeedbackMaxLogFiles) {
+          error = '日志数量超过 $kFeedbackMaxLogFiles 个上限（含手动附加的日志）';
+        }
         for (final FeedbackLogFile log in result) {
-          if (valid.length >= kFeedbackMaxLogFiles) break;
+          if (error != null) break;
           final String ext = _getLogExtension(log.filename);
-          if (!kFeedbackAllowedLogExtensions.contains(ext)) continue;
-          if (log.byteSize > kFeedbackMaxLogBytes) continue;
-          valid.add(log);
+          String? reason;
+          if (log.filename.contains('/') || log.filename.contains('\\')) {
+            reason = '日志文件名不能包含路径分隔符';
+          } else if (!kFeedbackAllowedLogExtensions.contains(ext)) {
+            reason = '文件格式不受支持，仅支持 .log, .txt, .json, .jsonl';
+          } else if (log.bytes.isEmpty) {
+            reason = '日志文件不能为空';
+          } else if (log.byteSize > kFeedbackMaxLogBytes) {
+            reason = '日志文件不能超过 1MiB 限制';
+          } else {
+            try {
+              final String text = utf8.decode(log.bytes, allowMalformed: false);
+              if (text.contains('\u0000')) {
+                reason = '日志不能包含 NUL 字符';
+              }
+            } on FormatException {
+              reason = '日志必须是有效的 UTF-8 文本';
+            }
+          }
+          if (reason != null) error = '${log.filename}: $reason';
+        }
+        if (error != null) {
+          setState(() {
+            _logsCollecting = false;
+            _logError = error;
+          });
+          return;
         }
         setState(() {
-          _logs = valid;
+          // 整批校验成功才替换自动项；失败时保留原列表，手动项始终保留。
+          _logs = <FeedbackLogFile>[
+            ...manual,
+            for (final FeedbackLogFile log in result)
+              FeedbackLogFile(
+                filename: log.filename,
+                bytes: log.bytes,
+                source: 'auto',
+                sha256: log.sha256,
+              ),
+          ];
           _logsCollecting = false;
         });
       } else {

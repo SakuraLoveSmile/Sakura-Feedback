@@ -79,6 +79,18 @@ void main() {
       expect(find.byKey(const Key('feedback-log-error')), findsOneWidget);
       expect(find.textContaining('超时'), findsOneWidget);
 
+      // 超时后的迟到结果不能覆盖当前日志或清掉错误。
+      completer.complete([
+        FeedbackLogFile(
+          filename: 'late.log',
+          bytes: Uint8List.fromList(utf8.encode('late')),
+        ),
+      ]);
+      await tester.pumpAndSettle();
+      expect(tester.state<FeedbackPanelState>(find.byType(FeedbackPanel)).logs,
+          isEmpty);
+      expect(find.textContaining('超时'), findsOneWidget);
+
       // 用户正常输入并提交
       await tester.enterText(find.byKey(const Key('feedback-input')), '超时但正常提交');
       await tester.pump();
@@ -87,6 +99,86 @@ void main() {
 
       expect(server.count('POST /api/feedback'), 1);
 
+      await teardownPanel(tester);
+    });
+
+    for (final invalid in <(String, Uint8List, String)>[
+      ('image.png', Uint8List.fromList([65]), '格式不受支持'),
+      ('empty.log', Uint8List(0), '不能为空'),
+      ('huge.log', Uint8List(1024 * 1024 + 1), '超过 1MiB'),
+      ('invalid.txt', Uint8List.fromList([0xff, 0xfe]), 'UTF-8'),
+      ('nul.json', Uint8List.fromList([65, 0, 66]), 'NUL'),
+      ('logs/app.log', Uint8List.fromList([65]), '路径分隔符'),
+      (r'C:\logs\app.log', Uint8List.fromList([65]), '路径分隔符'),
+    ]) {
+      testWidgets('自动采集原子校验：${invalid.$1} 明确提示且有效项也不加入',
+          (WidgetTester tester) async {
+        if (invalid.$1.startsWith('C:')) {
+          // raw 字符串中的 Windows 分隔符均为单个 U+005C。
+          expect(invalid.$1.codeUnits[2], 0x5c);
+          expect(invalid.$1.codeUnits[7], 0x5c);
+          expect(invalid.$1.codeUnits.where((unit) => unit == 0x5c), hasLength(2));
+        }
+        server.respond('POST /api/feedback', {
+          'feedbackId': 'fb-invalid-log',
+          'status': 'received',
+        }, 201);
+        await pumpPanel(
+          tester,
+          server: server,
+          tokenStore: tokenStore,
+          config: FeedbackConfig(
+            'https://svc.test',
+            'com.example.app',
+            logProvider: () => [
+              FeedbackLogFile(
+                filename: 'valid.log',
+                bytes: Uint8List.fromList(utf8.encode('valid')),
+              ),
+              FeedbackLogFile(filename: invalid.$1, bytes: invalid.$2),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final state = tester.state<FeedbackPanelState>(find.byType(FeedbackPanel));
+        expect(state.logs, isEmpty);
+        expect(state.logsCollecting, isFalse);
+        final error = tester.widget<Text>(find.byKey(const Key('feedback-log-error')));
+        expect(error.data, contains(invalid.$1));
+        expect(error.data, contains(invalid.$3));
+        // 校验失败只影响日志，仍允许提交反馈。
+        await tester.enterText(find.byKey(const Key('feedback-input')), '日志异常仍提交');
+        await tester.pump();
+        expect(tester.widget<FilledButton>(find.widgetWithText(FilledButton, '提交'))
+            .onPressed, isNotNull);
+        await tester.tap(find.text('提交'));
+        await tester.pumpAndSettle();
+        expect(server.count('POST /api/feedback'), 1);
+
+        await teardownPanel(tester);
+      });
+    }
+
+    testWidgets('自动采集 4 个日志：明确拒绝整批而不截取前 3 个',
+        (WidgetTester tester) async {
+      await pumpPanel(
+        tester,
+        server: server,
+        tokenStore: tokenStore,
+        config: FeedbackConfig(
+          'https://svc.test',
+          'com.example.app',
+          logProvider: () => List.generate(4, (index) => FeedbackLogFile(
+                filename: '$index.log',
+                bytes: Uint8List.fromList(utf8.encode('log')),
+              )),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining('日志数量超过 3 个上限'), findsOneWidget);
+      expect(tester.state<FeedbackPanelState>(find.byType(FeedbackPanel)).logs,
+          isEmpty);
       await teardownPanel(tester);
     });
 
