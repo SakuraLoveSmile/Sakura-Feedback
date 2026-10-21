@@ -69,7 +69,7 @@ flutter run -d chrome
 flutter run -d macos
 ```
 
-本机 Flutter 不在 PATH 上时用绝对路径：`/Users/developer/flutter/bin/flutter`。
+本机 Flutter 不在 PATH 上时，先把本机 Flutter SDK 的 `bin` 目录加入 PATH。
 
 平台目录已生成：web、android、ios、linux、macos、windows。
 页面与反馈服务通常跨源：服务端只对**软件配置里登记的 `allowedOrigins`** 回显
@@ -79,8 +79,8 @@ CORS（`apps/server/src/app.ts`），记得把宿主 origin 加进去。
 
 ```sh
 cd examples/flutter
-/Users/developer/flutter/bin/flutter analyze   # 本机实测：No issues found!（exit 0）
-/Users/developer/flutter/bin/flutter test      # 本机实测：37 个用例全过（exit 0）
+flutter analyze   # 本机实测：No issues found!（exit 0）
+flutter test      # 本机实测：37 个用例全过（exit 0）
 ```
 
 `test/widget_test.dart` 覆盖（4 例）：
@@ -107,3 +107,9 @@ cd examples/flutter
 
 > 原生验证的完整范围与如实标注见 [`docs/flutter-storage-compat.md`](../../docs/flutter-storage-compat.md)：
 > Android 做过 9→10→11 迁移实测；macOS / iOS 只做构建，**未做 Keychain 运行时验证**。
+
+## 本机签名与原生探针
+
+示例工程不附带个人 Development Team。需要 Keychain Sharing 或 iOS 真机签名时，先在 Xcode 的 Signing & Capabilities 中选择自己的 Team；模拟器及 `flutter build ios --no-codesign` 无需个人 Team。
+
+`e2e/flutter_native/run_native.sh` 的 `macos-entitled`、`macos-release`、`cleanup` 读取 `APPLE_DEVELOPMENT_TEAM`；`ios` 还要求 `IPAD_UDID`。请在本机环境中设置这些值，不要提交设备标识、签名身份或未经脱敏的运行输出。

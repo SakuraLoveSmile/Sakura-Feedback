@@ -1,3 +1,5 @@
+> 隐私说明：本文保留历史验证结果；个人签名身份、设备、路径及内部服务记录已改为示例或占位值，不可直接用于签名配置。
+
 # 验证记录
 
 ## 第 1 轮（基线，2026-09-08）
@@ -109,7 +111,7 @@ React/Vue 示例静态托管 + 反馈服务 :8787 + 外部服务全 mock：组�
 | `pnpm -r lint` | ✅ exit 0 | server biome **0 error**（9 warning + 1 info，均为既有 `noExplicitAny`）；web eslint 通过；admin biome 通过 |
 | `pnpm -r build` | ✅ exit 0 | admin 216.89 kB；web ESM + 懒加载 chunk + UMD；react / vue 产物含 `html2canvas-pro.esm-CQ8baKsv-744Yx3ZH.js` 251.46 kB |
 
-Flutter 门禁（`/Users/developer/flutter/bin/flutter`，不在 PATH）：
+Flutter 门禁（`flutter`，不在 PATH）：
 
 | 项目 | 结果 |
 |---|---|
@@ -176,11 +178,11 @@ Flutter 门禁（`/Users/developer/flutter/bin/flutter`，不在 PATH）：
 
 ### 6. 真实 AI / 真实 Kaneo（本轮在已配置的真实环境实跑）
 
-在真实 `apps/server`（`.env` + `data/feedback.db` 中已配置的真实 Kaneo `https://service.example.com`、项目 `<redacted-record-id>` / 列 `待筛选`，真实 AI `https://ark.cn-beijing.volces.com/api/coding/v3` / `deepseek-v4-flash`）上真实提交：
+在真实 `apps/server`（`.env` + `data/feedback.db` 中已配置的真实 Kaneo `https://kaneo.example.com`、项目 `<redacted-record-id>` / 列 `待筛选`，真实 AI `https://ai.example.com/v1` / `<configured-model>`）上真实提交：
 
-- **纯文字闭环 ✅ 通过**：`POST /api/feedback` → 201 → 真实 AI 整理出标题与结构化三段（使用体验/问题/建议/待确认）→ 真实 Kaneo 创建候选任务 → 终态 `archived`，`kaneoUrl = https://service.example.com/dashboard/workspace/example-record-id/project/<redacted-record-id>/task/example-record-id`（反馈 ID `<redacted-feedback-id>`，`attemptCount=1`，无 error）。
+- **纯文字闭环 ✅ 通过**：`POST /api/feedback` → 201 → 真实 AI 整理出标题与结构化三段（使用体验/问题/建议/待确认）→ 真实 Kaneo 创建候选任务 → 终态 `archived`，`kaneoUrl = https://kaneo.example.com/workspace/example-workspace/project/example-project/task/example-task`（反馈 ID `<redacted-feedback-id>`，`attemptCount=1`，无 error）。
 - **图文闭环 ❌ BLOCKED（环境能力，非代码缺陷）**：带截图的提交（反馈 ID `<redacted-feedback-id>`）在 AI 阶段被真实拒绝 —— `AI 接口返回 400: Model do not support image input`。截图本身**已真实入库**（`screenshot.width/height/byteSize/sha256` 齐全，`capture.releasePoint={x:0.2,y:0.24}` 与 `viewportWidth/Height=1280/800` 持久化，管理页 `hasScreenshot: true`），即"提交 → 图片校验/重编码 → 落库 → 恢复信息"链路真实可用；缺的是所选模型不具备视觉输入能力，本轮无法完成带图归档。
-- 上述两条真实提交均在用户已授权的测试项目中创建了记录：纯文字那条已在 Kaneo 生成任务 `example-record-id`（**待人工核对后清理**）；图文那条因 AI 失败停在 `failed`，**未在 Kaneo 创建任何任务**。Kaneo 仓库零修改。
+- 上述两条真实提交均在用户已授权的测试项目中创建了记录：纯文字那条已在 Kaneo 生成任务 `<redacted-record-id>`（**待人工核对后清理**）；图文那条因 AI 失败停在 `failed`，**未在 Kaneo 创建任何任务**。Kaneo 仓库零修改。
 
 ### 7. 文档交付
 
@@ -198,10 +200,10 @@ Flutter 门禁（`/Users/developer/flutter/bin/flutter`，不在 PATH）：
 
 1. **真实 AI + Kaneo 的「图文」闭环**：**BLOCKED**。真实环境已跑通纯文字闭环；带图闭环被所配模型能力挡住。**后续补充取证（同一真实环境，改进了原先过于简略的表述）**：
    - 截图链路本身**完全正常**：截图已真实入库（640×400 / 1359 字节 / `sha256` / `capture.releasePoint={x:0.2,y:0.24}` / viewport 1280×800），真实浏览器像素级验证通过（179/179，见第 3、10 节）。
-   - 卡点在 AI：当前 `ai.baseUrl` 是**编码套餐端点** `https://ark.cn-beijing.volces.com/api/coding/v3`，该端点**只提供编码类模型**——实测 `doubao-1.5-vision-pro-250328`、`doubao-1-5-thinking-vision-pro-250428`、`doubao-vision-pro-32k-241028` 三个视觉模型全部 `404 The requested model does not support the coding plan feature`。
-   - **能力探针（决定性）**：用 96×96 纯红 PNG 问"主色调"，当前模型 `deepseek-v4-flash` 带图与不带图**回答完全相同**（均答"看不到"）→ 该模型**没有视觉能力，图片被静默丢弃**。
+   - 卡点在 AI：当前 `ai.baseUrl` 是**编码套餐端点** `https://ai.example.com/v1`，该端点**只提供编码类模型**——实测 `doubao-1.5-vision-pro-250328`、`doubao-1-5-thinking-vision-pro-250428`、`doubao-vision-pro-32k-241028` 三个视觉模型全部 `404 The requested model does not support the coding plan feature`。
+   - **能力探针（决定性）**：用 96×96 纯红 PNG 问"主色调"，当前模型 `<configured-model>` 带图与不带图**回答完全相同**（均答"看不到"）→ 该模型**没有视觉能力，图片被静默丢弃**。
    - **因此比"失败"更危险**：同一条生产路径（`ai.organize()` + 真实截图）**两次调用结果不一致**——流水线里那次返回 `400 Model do not support image input`（硬失败、反馈转 `failed`），补测时同样调用却返回 **200 并正常产出 JSON**，即"归档成功但 AI 从未看过截图"的**静默降级**，用户与开发者都不会察觉。
-   - 换到标准端点 `https://ark.cn-beijing.volces.com/api/v3` 后模型列表可见视觉模型，但本账号对这些模型返回 `404 does not exist or you do not have access to it` → 需在火山方舟控制台**开通视觉模型**或改用推理接入点 `ep-xxxx`，**这不是本仓库能修的问题**。
+   - 换到标准端点 `https://ai.example.com/api/v3` 后模型列表可见视觉模型，但本账号对这些模型返回 `404 does not exist or you do not have access to it` → 需在火山方舟控制台**开通视觉模型**或改用推理接入点 `ep-xxxx`，**这不是本仓库能修的问题**。
    - 结论：**截图能用；AI 看图不能用**。纯文字闭环真实通过；图文闭环在换用支持视觉的模型/端点前**不得标注为通过**。
 2. ~~**Firefox / WebKit 真实浏览器**：**BLOCKED**~~ → **第 10 节已解除**：为排查截图缩略图缺陷已实际安装 Playwright Firefox 146.0.1 与 WebKit，并在两引擎上实测了组件面板与管理页的截图渲染/放大。仍**未**做的：把完整 179 条 E2E 场景在 Firefox/WebKit 上整套重跑（本轮在这两个引擎上只跑了截图相关路径），因此其余场景仍不能推断到这两个引擎。
 3. **管理页恢复动作的真实浏览器点击**：**未验证**。`retry` / `resolve` / `recover`（含 `409 busy` / `revision_conflict` / `target_changed`）仅到 API 级；管理页新增的风险提示与确认框经 `tsc` + `biome` + 构建产物核对，**未经真实点击**。
@@ -211,7 +213,7 @@ Flutter 门禁（`/Users/developer/flutter/bin/flutter`，不在 PATH）：
 7. **Flutter 运行时热切换 `apiBase`/`appId`**：包内未导出运行时替换配置的入口，语义**未定义也未验证**；文档按"请重建组件实例"表述，未编造行为。
 8. **真实 Kaneo / S3 的预签名行为**：**未验证**。Docker 套件里"上传地址过期"用 mock 的 `Expires` 参数模拟，**没有**真实 `X-Amz-*` 签名与真实过期；真实存储侧是否会产生未被追踪的孤儿对象，本环境无法观测。
 9. **阶段 2（申请上传地址）无法被断言为 `maybe_sent`**：这是**产品实现限制**（`maybe_sent` 只在 PUT 前与评论 POST 前落盘，预签名阶段没有"结果未知"标记的落盘点），Docker 套件因此**如实断言真实行为**并在检查名里标注，**没有**伪装成"符合 no-new-key 用例"。该第三种情形（离线期间已补记）为避免误读已写入 `docs/api.md`；`worker.ts` 里原先自相矛盾的注释也已改正。
-10. **Kaneo 测试数据需人工清理**：真实闭环在用户项目 `<redacted-record-id>` 留下任务 `example-record-id`（纯文字那条）；带图那条因 AI 失败未创建任务。**本仓库不自动删除远端数据**，需人工核对后清理。
+10. **Kaneo 测试数据需人工清理**：真实闭环在用户项目 `<redacted-record-id>` 留下任务 `<redacted-record-id>`（纯文字那条）；带图那条因 AI 失败未创建任务。**本仓库不自动删除远端数据**，需人工核对后清理。
 
 ### 9. 抽查结论
 
@@ -1251,7 +1253,7 @@ $ python3 e2e/t1c_check_signing_config.py
 
 ### 1. 签名前置条件（用户完成后由执行模型配置）
 
-用户完成 Apple 账号登录（Xcode → Settings → Accounts），本机现有可用身份：`Apple Development: developer@example.com (<certificate-id>)`（SHA-1 `0000000000000000000000000000000000000000`，证书 OU/Team = `TEAMID0000`，Personal Team）。
+用户完成 Apple 账号登录（Xcode → Settings → Accounts），本机现有可用身份：`Apple Development: developer@example.com (<certificate-id>)`（SHA-1 `<certificate-sha1>`，证书 OU/Team = `EXAMPLE_TEAM_ID`，Personal Team）。
 
 **配置差异**（`git diff` 摘要；`examples/flutter/macos/Runner.xcodeproj/project.pbxproj`，SHA-256 `1444410f646dc43c…`）：
 
@@ -1259,21 +1261,21 @@ $ python3 e2e/t1c_check_signing_config.py
 + com.apple.KeychainSharing = { enabled = 1; };        # Runner target 能力声明
 - CODE_SIGN_IDENTITY = "-";                            # 项目基础配置 Debug/Release/Profile：消除继承的 ad-hoc
 + CODE_SIGN_IDENTITY = "Apple Development";            # Runner target Debug/Release/Profile
-+ DEVELOPMENT_TEAM = TEAMID0000;                       # 同上
++ DEVELOPMENT_TEAM = EXAMPLE_TEAM_ID;                       # 同上
 ```
 
 | 项目 | 配置前 | 配置后（生效设置） |
 |---|---|---|
-| `DEVELOPMENT_TEAM` | 未设置 | **TEAMID0000** |
+| `DEVELOPMENT_TEAM` | 未设置 | **EXAMPLE_TEAM_ID** |
 | `CODE_SIGN_IDENTITY` | `-`（ad-hoc，项目基础配置继承） | **Apple Development** |
 | `CODE_SIGN_STYLE` | Automatic | Automatic |
 | `CODE_SIGN_ENTITLEMENTS` | `Runner/DebugProfile.entitlements` | 不变 |
 | `PRODUCT_BUNDLE_IDENTIFIER` | `dev.example.feedbackExample` | **不变**（未静默改标识） |
-| Keychain 授权 | 无 | `keychain-access-groups = ["TEAMID0000.dev.example.feedbackExample"]` |
+| Keychain 授权 | 无 | `keychain-access-groups = ["EXAMPLE_TEAM_ID.dev.example.feedbackExample"]` |
 
-entitlements 使用 `$(AppIdentifierPrefix)dev.example.feedbackExample`（Xcode 生成形式，由构建变量展开，**未手填猜测的 Team 前缀**）：`DebugProfile.entitlements` SHA-256 `275cedebf190e24a…`、`Release.entitlements` SHA-256 `85420e210c34604c…`。自动签名生成描述文件 `00000000-0000-4000-8000-000000000000.provisionprofile`（`Mac Team Provisioning Profile: dev.example.feedbackExample`，`keychain-access-groups = ["TEAMID0000.*"]`）——**Personal Team 允许 Keychain Sharing**。
+entitlements 使用 `$(AppIdentifierPrefix)dev.example.feedbackExample`（Xcode 生成形式，由构建变量展开，**未手填猜测的 Team 前缀**）：`DebugProfile.entitlements` SHA-256 `275cedebf190e24a…`、`Release.entitlements` SHA-256 `85420e210c34604c…`。自动签名生成描述文件 `<profile-uuid>.provisionprofile`（`Mac Team Provisioning Profile: dev.example.feedbackExample`，`keychain-access-groups = ["EXAMPLE_TEAM_ID.*"]`）——**Personal Team 允许 Keychain Sharing**。
 
-**产物核验**（配置后重新构建，未使用任何构建后强制重签）：`Authority=Apple Development: …(CERTID0000)` → `Apple Worldwide Developer Relations Certification Authority` → `Apple Root CA`，`TeamIdentifier=TEAMID0000`，`CodeDirectory flags=0x0(none)`（非 adhoc），`codesign --verify --deep --strict` = `valid on disk` / `satisfies its Designated Requirement`，内嵌 `embedded.provisionprofile`，实际 entitlements 含 `keychain-access-groups=[TEAMID0000.dev.example.feedbackExample]`。
+**产物核验**（配置后重新构建，未使用任何构建后强制重签）：`Authority=Apple Development: …(<certificate-id>)` → `Apple Worldwide Developer Relations Certification Authority` → `Apple Root CA`，`TeamIdentifier=EXAMPLE_TEAM_ID`，`CodeDirectory flags=0x0(none)`（非 adhoc），`codesign --verify --deep --strict` = `valid on disk` / `satisfies its Designated Requirement`，内嵌 `embedded.provisionprofile`，实际 entitlements 含 `keychain-access-groups=[EXAMPLE_TEAM_ID.dev.example.feedbackExample]`。
 
 新增只读核查脚本 `python3 e2e/t1c_check_signing_config.py`（配置前后各跑一次；`exit 0=READY / 1=NOT READY`，`--json` 供机器读取），当前结论 **READY**。
 
@@ -1289,7 +1291,7 @@ entitlements 使用 `$(AppIdentifierPrefix)dev.example.feedbackExample`（Xcode 
 
 | runId | 结论 | 退出码 | 说明 |
 |---|---|---|---|
-| `20260914-000808-905343` | FAIL | 1 | 签名已生效（`类型=authority`、`Team=TEAMID0000`、身份链 3 级），**不再是 `-34018`**；暴露上面的 orb 夹具缺陷 |
+| `20260914-000808-905343` | FAIL | 1 | 签名已生效（`类型=authority`、`Team=EXAMPLE_TEAM_ID`、身份链 3 级），**不再是 `-34018`**；暴露上面的 orb 夹具缺陷 |
 | `20260914-001056-6ffa3f` | FAIL | 1 | 被用户中断（SIGINT）→ **真实**验证了 T1-C2 收尾：`本轮进程 pid=… 仍存活：先 SIGTERM，15 秒后仍存活才强制终止` → `写入来源停止` → `兜底清理入口：PASS` → `账号禁用：disabled=True verified=True`，无遗留进程 |
 | **`20260914-002316-fcf481`** | **PASS** | **0** | 真实两阶段全部满足（见下） |
 
@@ -1299,7 +1301,7 @@ entitlements 使用 `$(AppIdentifierPrefix)dev.example.feedbackExample`（Xcode 
 |---|---|
 | 阶段 1 | 应用真实启动并写出握手（`launch=verified`，pid 79023）；原位登录；默认存储写入成功（跨实例读回非空令牌）；`acceptance={httpStatus:201, feedbackId:4538276a-…, replayed:false}`；服务端核对本轮 1 条、**用量 1** |
 | 阶段 2 | 前一进程已退出；新进程重启（`launch=verified`，pid 79343）；**未输入凭据**即从默认存储恢复登录且身份为本轮账号；`acceptance={httpStatus:201, feedbackId:7c7d58f6-…, replayed:false}`（与阶段 1 **不同** ID）；服务端核对 2 条、**用量 2** |
-| 签名证据 | 两阶段各自采集成功（`parseStatus` 四项全 `ok`）；`类型=authority`、`Team=TEAMID0000`、身份链 3 级、`keychain-access-groups=[TEAMID0000.dev.example.feedbackExample]` 一致；`signatureComparison.ok=true`（二进制 UUID/CDHash/摘要仅作证据，不要求相同） |
+| 签名证据 | 两阶段各自采集成功（`parseStatus` 四项全 `ok`）；`类型=authority`、`Team=EXAMPLE_TEAM_ID`、身份链 3 级、`keychain-access-groups=[EXAMPLE_TEAM_ID.dev.example.feedbackExample]` 一致；`signatureComparison.ok=true`（二进制 UUID/CDHash/摘要仅作证据，不要求相同） |
 | 收尾 | `writerStopped=true`、`credentialCleanupConfirmed=true`、账号禁用并核验、专用服务停止、敏感参数删除；`cleanupSteps` 四步全 `ok`；资源清单按实际核验记录（`service=stopped/cleaned=true`、`user=disabled-and-verified/cleaned=true`、`app=retained-for-audit/cleaned=false`）；复跑后无遗留进程 |
 | 总结果 | 同一 runId 的结构化报告 **PASS**，进程退出码 **0** |
 
@@ -1324,7 +1326,7 @@ entitlements 使用 `$(AppIdentifierPrefix)dev.example.feedbackExample`（Xcode 
 
 ```bash
 cd examples/flutter
-/Users/developer/flutter/bin/flutter run -d macos
+flutter run -d macos
 ```
 
 体验要点（与验收一致）：点小圆球打开面板 → 写好内容点提交 → 在面板内原位登录 → 提交成功（提示已接收）→ **退出应用（⌘Q）并重新打开** → 打开面板应仍是登录态且账号正确 → 再次提交应成功且扣次正确（每日默认 3 次）。
@@ -1389,7 +1391,7 @@ python3 e2e/run_t1c_default_storage.py        # 需要时重跑完整两阶段�
 本轮新增的验证脚本（本节所有浏览器证据均由这个版本产生）：`e2e/run_admin_settings.py`
 sha256 = `648100ac45a4175f977528cc932bdce8d3e9d819685eacf3c82694a5304207dc`。
 
-环境：macOS，Node v22.23.2（`/usr/local/bin/node`），pnpm 11.23.0，Chromium（Playwright 1.58，`channel=chrome`），Python 3.10.10 + playwright（`/Users/developer/.pyenv/versions/3.10.10`）。
+环境：macOS，Node v22.23.2（`/usr/local/bin/node`），pnpm 11.23.0，Chromium（Playwright 1.58，`channel=chrome`），Python 3.10.10 + playwright（`/Users/example/.pyenv/versions/3.10.10`）。
 
 ### 2. 门禁与既有 verify 命令（本轮全部由验证者重新真实运行，不复用实现者结论）
 
@@ -1785,7 +1787,7 @@ Android SDK 在 `~/Library/Android/sdk`（有 `platforms/android-37.0`，但 `AN
 | 3 | `cd examples/flutter && flutter build apk --debug` | 0 | `✓ Built build/app/outputs/flutter-apk/app-debug.apk` |
 | 4 | `cd examples/flutter && flutter build macos --release` | 0 | `✓ Built build/macos/Build/Products/Release/feedback_example.app (43.2MB)` |
 | 5 | `cd examples/flutter && flutter build ios --no-codesign` | 0 | `✓ Built build/ios/iphoneos/Runner.app (16.9MB)` |
-| 6 | `security find-identity -v -p codesigning` | 0 | `1 valid identities found`：`Apple Development: developer@example.com (<certificate-id>)`（TeamIdentifier `TEAMID0000`） |
+| 6 | `security find-identity -v -p codesigning` | 0 | `1 valid identities found`：`Apple Development: developer@example.com (<certificate-id>)`（TeamIdentifier `EXAMPLE_TEAM_ID`） |
 | 7 | `bash tools/flutter-storage-matrix/run.sh 9.2.2 10.3.1 11.0.0` | 0 | 三档全 PASS（收敛前执行，之后未再跑） |
 | 8 | 契约中的 `grep -rn "dependency_overrides" <三个 pubspec> ; test $? -eq 1` | **1（不通过）** | grep 命中 `tools/flutter-storage-matrix/pubspec.yaml:25` 的**注释**行；见 §8-F1 |
 
@@ -1951,8 +1953,8 @@ adb shell run-as com.feedbackverify.keychain_probe cat code_cache/probe-<tag>.js
    反例对照（`work/macos-denied`，ad-hoc 签名、无 entitlement）：写入抛 `PlatformException`
    `code="Unexpected security result code"`、`details="-34018"`、`message="Code: -34018, Message: A required entitlement is not present."`，
    且读取返回 `null`、无明文回退——即"存储不可用"时的真实错误表现。
-   静态检查（本轮做）：`examples/flutter` Release 产物 `TeamIdentifier=TEAMID0000`、
-   `keychain-access-groups=[TEAMID0000.dev.example.feedbackExample]`、`app-sandbox=true`。
+   静态检查（本轮做）：`examples/flutter` Release 产物 `TeamIdentifier=EXAMPLE_TEAM_ID`、
+   `keychain-access-groups=[EXAMPLE_TEAM_ID.dev.example.feedbackExample]`、`app-sandbox=true`。
 
 ### 12. 体验入口与操作步骤（Flutter 安全存储兼容 = 待体验）
 
@@ -2340,7 +2342,7 @@ Flutter 3.41.3 (Dart 3.11.1)，Chromium（Playwright，`chromium_headless_shell-
 
 用户提供了真实 Kaneo 并明确授权在测试项目内写入，因此本节**产生了真实的远端写入**。
 
-- 环境：`https://service.example.com`，工作区「卡塞尔学院」，
+- 环境：`https://kaneo.example.com`，工作区「卡塞尔学院」，
   项目「Feedback 测试」(`<redacted-record-id>`)，目标列 `待筛选` (`rlac6c4plag9lnwyy1ihkgmk`)，
   工作区标签 `bug` (`c25t9szy48n2ncv3zh38mdrw`)；AI 为用户的真实 OpenAI 兼容端点。
 - 方式：经管理接口与组件接口完成「提交 → 自动发现待配置软件 → 配置规则 → 确认来源 → 启用自动归档」，

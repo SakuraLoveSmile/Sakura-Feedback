@@ -451,7 +451,7 @@ flutter build apk --debug \
 3. ~~**Nginx 模板未做 `nginx -t`**~~ → **已补做**：本轮起了 `nginx:alpine` 容器，模板替换占位符后
    `nginx -t` 通过，并实测 80→443 跳转、HTTPS 反代、`Secure` Cookie、公网 origin 校验
    （详见上文"生产 HTTPS 形态实测"）。**此项完成。** 仍未做的是真实域名 + 公网证书。
-4. **视觉探针已对真实模型跑过**（`ark.cn-beijing.volces.com/api/coding/v3` / `minimax-m3`）：
+4. **视觉探针已对真实模型跑过**（`ai.example.com/api/coding/v3` / `minimax-m3`）：
    文本连通 `ok`；随机色块探针修掉仪器歧义后 **18/18 通过**（详见上文"探针假失败"）。
    **仍未做**：`organize → Kaneo` 的真实截图闭环——探针只证明"模型会看图"，不替代业务验收。
 5. **本地 SSH 到 GitHub 22 端口不通**：`ssh.github.com:443` 返回 `Permission denied (publickey)`，

@@ -1,6 +1,6 @@
 # 真实浏览器 E2E 验证报告：灵感球拖动 / 遮罩 / 登录握手
 
-对象仓库：`/Users/developer/Documents/Code/Project/Personal Project/Feedback`
+对象仓库：`/Users/example/Documents/Code/Project/Personal Project/Feedback`
 被测产物：`packages/web/dist/feedback-web.umd.cjs`（`pnpm --filter @feedback/web build` 的当前构建）
 真实浏览器：系统 Chrome（Playwright `pw.chromium.launch(headless=True, channel="chrome")`，
 本机未安装 `chromium_headless_shell-1208`，脚本已内置回退）

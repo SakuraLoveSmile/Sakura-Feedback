@@ -24,8 +24,26 @@ WORK="$HERE/work"
 OUT="$HERE/out"
 BUNDLE_ID="com.feedbackverify.keychainProbe"
 ANDROID_APP_ID="com.feedbackverify.keychain_probe"
-IPAD_UDID="00000000-0000000000000000"
-TEAM="TEAMID0000"
+# 仅签名/真机子命令需要；模拟器与未签名 macOS 探针无需配置。
+IPAD_UDID="${IPAD_UDID:-}"
+TEAM="${APPLE_DEVELOPMENT_TEAM:-}"
+
+require_setting() {
+  local name="$1" value="$2"
+  if [ -z "$value" ]; then
+    printf '[native] %s must be set for %s\n' "$name" "$COMMAND" >&2
+    exit 2
+  fi
+}
+
+COMMAND="${1:-}"
+case "$COMMAND" in
+  macos-entitled|macos-release|cleanup)
+    require_setting APPLE_DEVELOPMENT_TEAM "$TEAM" ;;
+  ios)
+    require_setting IPAD_UDID "$IPAD_UDID"
+    require_setting APPLE_DEVELOPMENT_TEAM "$TEAM" ;;
+esac
 
 mkdir -p "$WORK" "$OUT"
 log() { printf '[native] %s\n' "$*"; }
@@ -51,7 +69,7 @@ PY
 sign_macos() {
   local dest="$1"
   python3 - "$dest" "$BUNDLE_ID" "$TEAM" <<'PY'
-import sys
+import re, sys
 dest, bundle, team = sys.argv[1], sys.argv[2], sys.argv[3]
 ents = f"""\t<key>keychain-access-groups</key>
 \t<array>
@@ -69,8 +87,21 @@ pbx = f"{dest}/macos/Runner.xcodeproj/project.pbxproj"
 src = open(pbx, encoding="utf-8").read()
 src = src.replace('CODE_SIGN_IDENTITY = "-";',
                   'CODE_SIGN_IDENTITY = "Apple Development";')
-src = src.replace("CODE_SIGN_STYLE = Automatic;",
-                  f"CODE_SIGN_STYLE = Automatic;\n\t\t\t\tDEVELOPMENT_TEAM = {team};")
+def configure_runner(settings):
+    block = settings.group(0)
+    if "CODE_SIGN_ENTITLEMENTS = Runner/" not in block:
+        return block
+    # Only Runner configurations need this Team; preserve framework/test settings.
+    block = re.sub(r"^\s*DEVELOPMENT_TEAM = [^;]*;\n", "", block, flags=re.M)
+    block, count = re.subn(
+        r"^([ \t]*)CODE_SIGN_STYLE = Automatic;",
+        lambda match: match.group(0) + f"\n{match.group(1)}DEVELOPMENT_TEAM = {team};",
+        block, count=1, flags=re.M)
+    if count != 1:
+        raise SystemExit("Runner configuration requires automatic signing")
+    return block
+src = re.sub(r"^\t{3}buildSettings = \{\n.*?^\t{3}\};",
+             configure_runner, src, flags=re.M | re.S)
 open(pbx, "w", encoding="utf-8").write(src)
 print("pbxproj patched: Apple Development + DEVELOPMENT_TEAM")
 PY
@@ -137,7 +168,7 @@ prime_profile() {
     {
       echo "=== $p"
       security cms -D -i "$p" 2>/dev/null | plutil -p - 2>/dev/null \
-        | grep -E 'AppIDName|application-identifier|keychain-access-groups|"[A-Za-z0-9.-]*TEAMID0000[^"]*"|ExpirationDate'
+        | grep -E "AppIDName|application-identifier|keychain-access-groups|$TEAM|ExpirationDate"
     } >> "$OUT/native/macos-profiles.txt" 2>&1
   done
 }
@@ -184,7 +215,8 @@ cleanup_all() {
 
 macos_release() {
   local dest="$WORK/macos-entitled/keychain_probe"
-  [ -d "$dest" ] || { prepare_probe "$dest"; sign_macos "$dest" >/dev/null; }
+  [ -d "$dest" ] || prepare_probe "$dest"
+  sign_macos "$dest" >/dev/null
   log "Release 构建 + 签名/entitlement 核查"
   ( cd "$dest" && flutter build macos --release ) > "$OUT/native/macos-release.build.log" 2>&1
   echo "build_exit=$?" >> "$OUT/native/macos-release.build.log"
@@ -372,6 +404,15 @@ android_post_probe() {
 ios_probe() {
   local dest="$WORK/ios/keychain_probe"
   prepare_probe "$dest"
+  python3 - "$dest/ios/Runner.xcodeproj/project.pbxproj" "$TEAM" <<'PY_SIGN'
+import re, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+source = path.read_text()
+source = re.sub(r'DEVELOPMENT_TEAM = [^;]*;',
+                lambda _: f'DEVELOPMENT_TEAM = "{sys.argv[2]}";', source)
+path.write_text(source)
+PY_SIGN
   mkdir -p "$OUT/native"
   {
     echo "=== Xcode / 模拟器运行时"
