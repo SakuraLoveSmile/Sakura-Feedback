@@ -676,9 +676,9 @@ node --input-type=module -e "await import('./packages/web/dist/feedback-web.js')
 
 ```sh
 cd examples/flutter
-/Users/sakurasep/flutter/bin/flutter analyze   # 本机实测：No issues found!（exit 0）
-/Users/sakurasep/flutter/bin/flutter test      # 本机实测：4 个用例全过（exit 0）
-/Users/sakurasep/flutter/bin/flutter run -d chrome     # 或 -d macos
+flutter analyze   # 本机实测：No issues found!（exit 0）
+flutter test      # 本机实测：4 个用例全过（exit 0）
+flutter run -d chrome     # 或 -d macos
 ```
 
 **挂载位置（本示例的核心）**：组件通过 `MaterialApp.builder` 包裹应用自己的 **Navigator 子树**，

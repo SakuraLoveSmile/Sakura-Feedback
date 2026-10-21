@@ -84,7 +84,7 @@ RUNS_ROOT = (REPO / "e2e" / "t1c-runs").resolve()
 LOCK_PATH = RUNS_ROOT / ".t1c-exclusive.lock"
 EXAMPLES_DIR = (REPO / "examples" / "flutter").resolve()
 SERVER_DIR = (REPO / "apps" / "server").resolve()
-FLUTTER_BIN = os.environ.get("T1C_FLUTTER_BIN", "/Users/sakurasep/flutter/bin/flutter")
+FLUTTER_BIN = os.environ.get("T1C_FLUTTER_BIN", "flutter")
 NODE_BIN = os.environ.get("T1C_NODE_BIN", "node")
 
 PHASE_TIMEOUT_S = 900          # 阶段/构建总超时（沿用）

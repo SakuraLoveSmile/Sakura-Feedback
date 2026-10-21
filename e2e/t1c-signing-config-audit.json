@@ -7,16 +7,16 @@
   "gaps": [],
   "notes": [
     "Keychain 访问组使用构建变量，会在签名时展开：['$(AppIdentifierPrefix)dev.example.feedbackExample']",
-    "现有构建产物已含 Keychain 授权（['C5Q966MAGT.dev.example.feedbackExample']）",
-    "现有产物签名身份链：['Apple Development: 13562008871@163.com (53J98NU8CJ)', 'Apple Worldwide Developer Relations Certification Authority', 'Apple Root CA']"
+    "现有构建产物已含 Keychain 授权（['EXAMPLE_TEAM_ID.dev.example.feedbackExample']）",
+    "现有产物签名身份链：['Apple Development: developer@example.com (<certificate-id>)', 'Apple Worldwide Developer Relations Certification Authority', 'Apple Root CA']"
   ],
   "identities": {
     "validCount": 1,
     "identities": [
       {
-        "sha1": "DFF0573FD9D11148BD20B25378C4D8E21CC04AB5",
-        "name": "Apple Development: 13562008871@163.com (53J98NU8CJ)",
-        "team": "53J98NU8CJ"
+        "sha1": "<certificate-sha1>",
+        "name": "Apple Development: developer@example.com (<certificate-id>)",
+        "team": "<certificate-id>"
       }
     ],
     "raw": null
@@ -27,7 +27,7 @@
     "CODE_SIGN_ENTITLEMENTS": "Runner/DebugProfile.entitlements",
     "CODE_SIGN_IDENTITY": "Apple Development",
     "CODE_SIGN_STYLE": "Automatic",
-    "DEVELOPMENT_TEAM": "C5Q966MAGT",
+    "DEVELOPMENT_TEAM": "EXAMPLE_TEAM_ID",
     "PRODUCT_BUNDLE_IDENTIFIER": "dev.example.feedbackExample"
   },
   "debugEntitlements": {
@@ -58,9 +58,9 @@
     "present": true,
     "path": "examples/flutter/build/macos/Build/Products/Debug/feedback_example.app",
     "identifier": "dev.example.feedbackExample",
-    "teamIdentifier": "C5Q966MAGT",
+    "teamIdentifier": "EXAMPLE_TEAM_ID",
     "authorityChain": [
-      "Apple Development: 13562008871@163.com (53J98NU8CJ)",
+      "Apple Development: developer@example.com (<certificate-id>)",
       "Apple Worldwide Developer Relations Certification Authority",
       "Apple Root CA"
     ],
@@ -76,19 +76,19 @@
       "keychain-access-groups"
     ],
     "keychainAccessGroups": [
-      "C5Q966MAGT.dev.example.feedbackExample"
+      "EXAMPLE_TEAM_ID.dev.example.feedbackExample"
     ]
   },
   "appliedConfiguration": {
-    "DEVELOPMENT_TEAM": "C5Q966MAGT",
+    "DEVELOPMENT_TEAM": "EXAMPLE_TEAM_ID",
     "CODE_SIGN_IDENTITY": "Apple Development",
     "CODE_SIGN_STYLE": "Automatic",
     "removedInheritedAdHoc": "项目基础配置 Debug/Release/Profile 的 CODE_SIGN_IDENTITY = \"-\"",
     "keychainAccessGroups": "$(AppIdentifierPrefix)dev.example.feedbackExample",
     "systemCapability": "com.apple.KeychainSharing",
     "bundleId": "dev.example.feedbackExample（未改动）",
-    "provisioningProfile": "8a92c5ed-ff0f-4180-a834-e2f5b4a0bfca.provisionprofile (Mac Team Provisioning Profile: dev.example.feedbackExample)",
-    "certificate": "Apple Development: 13562008871@163.com (53J98NU8CJ) / SHA-1 DFF0573FD9D11148BD20B25378C4D8E21CC04AB5"
+    "provisioningProfile": "<profile-uuid>.provisionprofile (Mac Team Provisioning Profile: dev.example.feedbackExample)",
+    "certificate": "Apple Development: developer@example.com (<certificate-id>) / SHA-1 <certificate-sha1>"
   },
   "fileDigests": {
     "Runner.xcodeproj/project.pbxproj": "1444410f646dc43cacaede5bec2bf1b6cc59e4dc5b6d67e0c905097f58091d84",
@@ -105,5 +105,6 @@
     "未关闭任何系统安全校验、未批量重签、未改用内存或明文存储",
     "未修改公开 API 与每日默认三次规则，未升级存储插件，未部署",
     "Release 配置已同步添加 Keychain 授权，但未做 Release 构建验证"
-  ]
+  ],
+  "privacyNote": "历史验证记录；签名身份和设备字段已脱敏，示例值不能用于本机签名配置。"
 }

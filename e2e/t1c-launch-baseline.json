@@ -3,7 +3,7 @@
   "recordedAt": "2026-09-13T17:30:00+08:00",
   "purpose": "T1-C4 启动签名失败的历史基线。只登记用户提供的那次事件，**不**作为当前启动失败的证据：Mach-O UUID 相同不等于签名状态相同，历史崩溃报告不能证明当前失败。",
   "originalCrashReport": {
-    "path": "/Users/sakurasep/.Trash/DiagnosticReports/feedback_example-2026-09-13-015858.ips",
+    "path": "/Users/example/.Trash/DiagnosticReports/feedback_example-2026-09-13-015858.ips",
     "sha256": "ba2b3c21534137921c94ff029507f2c80209adf4deb6b6823ee147bb7cd98f89",
     "appName": "feedback_example",
     "bundleId": "dev.example.feedbackExample",
