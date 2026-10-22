@@ -2,7 +2,7 @@
 //
 // 运行：
 //   cd examples/flutter
-//   /Users/developer/flutter/bin/flutter test integration_test/t1_native_lifecycle_test.dart -d macos
+//   flutter test integration_test/t1_native_lifecycle_test.dart -d macos
 //
 // 为什么用集成测试而不是合成鼠标/键盘：macOS 上合成输入受系统输入法状态影响，
 // 无法稳定把密码键入密码框（实测同一套 CGEvent 注入对输入区/用户名字段有效、
