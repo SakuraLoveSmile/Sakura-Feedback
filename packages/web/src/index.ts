@@ -3,15 +3,28 @@ import {
   type FeedbackSubmittedDetail,
   type FeedbackLogFile,
   type FeedbackLogProvider,
+  type DraftImage,
+  type FeedbackHostSession,
+  type FeedbackSessionStore,
+  type FeedbackHostBridge,
 } from './element';
 
 export { FeedbackWidget };
-export type { FeedbackSubmittedDetail, FeedbackLogFile, FeedbackLogProvider };
+export type {
+  FeedbackSubmittedDetail,
+  FeedbackLogFile,
+  FeedbackLogProvider,
+  DraftImage,
+  FeedbackHostSession,
+  FeedbackSessionStore,
+  FeedbackHostBridge,
+};
 export type {
   FeedbackStatus,
   FeedbackContext,
   FeedbackRecord,
   FeedbackCaptureInfo,
+  FeedbackCaptureRegion,
   FeedbackLogAttachment,
   FeedbackSubmitPayload,
   FeedbackSubmitResponse,
@@ -19,19 +32,25 @@ export type {
   Quota,
   LoginResponse,
   SessionResponse,
+  FeedbackCapabilities,
+  FeedbackImageDescriptor,
+  FeedbackImageInput,
+  FeedbackImageSource,
 } from './api';
+export {
+  FeedbackDiagnosticsRecorder,
+  FeedbackErrorCapture,
+  wrapFetch,
+} from './diagnostics';
+export type {
+  DiagnosticsEntry,
+  DiagnosticsRecorderOptions,
+  FeedbackErrorCaptureOptions,
+} from './diagnostics';
+export type { FetchLike } from './api';
 export { normalizeServerBase } from './server_pref';
 export type { NormalizeServerBaseResult } from './server_pref';
 
-/**
- * 宿主注入组件的会话凭据（`FeedbackWidget.adoptSession` 的参数）：
- * accessToken 为服务端签发的 Bearer 令牌（如 `POST /api/auth/handshake` 的
- * 握手令牌），expiresAt 为过期时刻（epoch 毫秒或 ISO 时间串）。
- */
-export interface FeedbackHostSession {
-  accessToken: string;
-  expiresAt: number | string;
-}
 
 /** 元素标签名。 */
 export const FEEDBACK_ELEMENT_TAG = 'feedback-widget';
@@ -59,6 +78,10 @@ export interface OpenFeedbackOptions {
   launcherMode?: 'tab' | 'orb';
   captureMode?: 'off' | 'viewport';
   logProvider?: import('./element').FeedbackLogProvider;
+  /** v12：诊断记录器（注入后组件请求经 wrapFetch 记录；身份切换时清空缓冲）。 */
+  diagnosticsRecorder?: import('./diagnostics').FeedbackDiagnosticsRecorder;
+  sessionStore?: FeedbackSessionStore;
+  hostBridge?: FeedbackHostBridge;
 }
 
 /**
@@ -81,6 +104,11 @@ export function openFeedback(options: OpenFeedbackOptions = {}): FeedbackWidget 
     if (options.launcherMode) widget.launcherMode = options.launcherMode;
     if (options.captureMode) widget.captureMode = options.captureMode;
     if (options.logProvider !== undefined) widget.logProvider = options.logProvider;
+    if (options.diagnosticsRecorder !== undefined) {
+      widget.diagnosticsRecorder = options.diagnosticsRecorder;
+    }
+    if (options.sessionStore !== undefined) widget.sessionStore = options.sessionStore;
+    if (options.hostBridge !== undefined) widget.hostBridge = options.hostBridge;
     document.body.appendChild(widget);
   } else {
     if (options.apiBase) widget.apiBase = options.apiBase;
@@ -94,6 +122,11 @@ export function openFeedback(options: OpenFeedbackOptions = {}): FeedbackWidget 
     if (options.launcherMode) widget.launcherMode = options.launcherMode;
     if (options.captureMode) widget.captureMode = options.captureMode;
     if (options.logProvider !== undefined) widget.logProvider = options.logProvider;
+    if (options.diagnosticsRecorder !== undefined) {
+      widget.diagnosticsRecorder = options.diagnosticsRecorder;
+    }
+    if (options.sessionStore !== undefined) widget.sessionStore = options.sessionStore;
+    if (options.hostBridge !== undefined) widget.hostBridge = options.hostBridge;
   }
   widget.open();
   return widget;

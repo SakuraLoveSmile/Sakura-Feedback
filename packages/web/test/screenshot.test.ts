@@ -47,7 +47,7 @@ describe('灵感球与视口截图组件测试', () => {
     expect(m.widget.hasAttribute('capture-mode')).toBe(false);
   });
 
-  it('灵感球拖拽交互：移动超过 8px 判定为拖拽，松手记录 releasePoint 并执行截图', async () => {
+  it('灵感球拖拽交互：移动超过 8px 判定为拖拽，松手记录 releasePoint 并进入局部选区', async () => {
     const m = mount({ 'launcher-mode': 'orb', 'capture-mode': 'viewport' });
     const mockBlob = new Blob(['mock-png-data'], { type: 'image/png' });
     let capturedReleasePoint: { x: number; y: number } | undefined;
@@ -93,7 +93,7 @@ describe('灵感球与视口截图组件测试', () => {
     );
     expect(orb.classList.contains('is-dragging')).toBe(true);
 
-    // 4. Pointerup 松手：平滑复位并触发截图打开面板
+    // 4. Pointerup 松手：球回停靠位置（截图定位不改停靠位），并捕获一次
     orb.dispatchEvent(
       new PointerEvent('pointerup', {
         clientX: 200,
@@ -106,11 +106,24 @@ describe('灵感球与视口截图组件测试', () => {
     await new Promise((r) => setTimeout(r, 20));
 
     expect(orb.classList.contains('is-dragging')).toBe(false);
+    expect(orb.style.transform).toBe(''); // 停靠位置复位
     expect(m.widget.captureProvider).toHaveBeenCalledTimes(1);
     expect(capturedReleasePoint).toBeDefined();
     expect(capturedReleasePoint?.x).toBeGreaterThanOrEqual(0);
     expect(capturedReleasePoint?.y).toBeGreaterThanOrEqual(0);
+
+    // T1：松手后进入「冻结画面 → 调整选区」覆盖层，此时既不写草稿也不开面板
+    const overlay = m.root.querySelector<HTMLElement>('.fb-region-overlay')!;
+    expect(overlay.hidden).toBe(false);
+    expect(m.panel.classList.contains('is-open')).toBe(false);
+    expect(m.screenshotWrap.hidden).toBe(true);
+
+    // 确认（截取整个窗口）后才写入草稿并进入填写
+    m.root.querySelector<HTMLButtonElement>('.fb-region-all')!.click();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(overlay.hidden).toBe(true);
     expect(m.panel.classList.contains('is-open')).toBe(true);
+    expect(m.screenshotWrap.hidden).toBe(false);
   });
 
   it('灵感球点击操作：无拖拽时正常呼出面板', async () => {

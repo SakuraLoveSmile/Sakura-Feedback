@@ -341,7 +341,8 @@ describe('服务身份隔离：app-id 切换（同服务）', () => {
     expect(m.textarea.value).toBe('新身份内容'); // 不清空新身份草稿
     expect(m.statusRegion.textContent).not.toContain('已保存');
     expect(m.errorRegion.hidden).toBe(true); // 旧身份的已接收结果不再存活
-    expect(gets(calls)).toHaveLength(0); // 不为旧身份的记录启动轮询
+    // 不为旧身份的记录启动轮询（v12 起 unread-summary 轮询不属于记录轮询，不计入）
+    expect(gets(calls).filter((c) => /\/api\/feedback\/fb-old$/.test(c.url))).toHaveLength(0);
     expect(posts(calls)).toHaveLength(1);
   });
 
@@ -358,12 +359,16 @@ describe('服务身份隔离：app-id 切换（同服务）', () => {
     await flush();
     expect(m.statusRegion.textContent).toContain('已保存，正在整理');
 
-    const before = calls.length;
+    // v12：已登录且页面可见时 unread-summary 轮询保留（徽标供数）——
+    // 「旧身份的轮询已停止」只断言该记录的状态请求。
+    const recordGets = () =>
+      calls.filter((c) => c.method === 'GET' && /\/api\/feedback\/fb-1$/.test(c.url)).length;
+    const before = recordGets();
     m.widget.setAttribute('app-id', OTHER_APP_ID);
     await flush();
     await vi.advanceTimersByTimeAsync(60000);
 
-    expect(calls.length).toBe(before); // 旧身份的轮询已停止
+    expect(recordGets()).toBe(before); // 旧身份的记录轮询已停止
     expect(m.errorRegion.hidden).toBe(true); // 旧身份的已接收结果不再存活
     expect(m.statusRegion.textContent).not.toContain('已保存');
     expect(m.textarea.value).toBe('');
