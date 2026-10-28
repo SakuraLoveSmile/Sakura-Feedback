@@ -206,7 +206,24 @@ Flutter 侧按「普通单元测试」交付，没有新建 benchmark bin，也�
 - 没有用真实文字背景再跑一遍对照。条纹是更严的受控替代，但「真实文字下也达标」属推论而非实测。
 - Web 截图落在 `e2e/shots/orb-contrast/`，按既有规则仅本地证据、不入库。
 
-## 6 遗留（本卡新增，需裁决）
+## 6 四片合并后的整体验证（2026-10-29）
+
+| 项 | 命令 | 结果 |
+| --- | --- | --- |
+| 组件静态分析 | `flutter analyze`（3.41.3，仓库 CI 基准） | `No issues found!` |
+| 组件用例 | `flutter test` | **367 passed**（基线 361 + 新增 6） |
+| 示例 app | `examples/flutter` 下 `flutter analyze` | `No issues found!` |
+| 存储矩阵三档 | `bash tools/flutter-storage-matrix/run.sh` | 9.2.2 / 10.3.1 / 11.0.0 **全部 PASS**（pub_get / analyze / test 退出码均 0） |
+| Web 类型 | `packages/web` 下 `pnpm typecheck` | 通过 |
+| Web 用例 | `packages/web` 下 `pnpm test` | 28 files / **359 passed** |
+| forced-colors 焦点环 | `e2e/run_orb_forced_colors_web.py` | **21/21 PASS** |
+| 对比度保持率（Web） | `e2e/run_orb_contrast_web.py` | **17/17 PASS** |
+
+`packages/web` **零改动**（片 3 的 CSS 尝试已回退），改动集中在 `flutter/feedback`、`e2e` 与 `docs`。Web 侧跑了 typecheck / 用例 / 两个浏览器脚本，是为了确认新脚本与既有 bundle 自洽。
+
+Node 侧统一用仓库钉住的 pnpm 11.23.0（`corepack pnpm`）+ `--frozen-lockfile`，`pnpm-lock.yaml` 未改动。
+
+## 7 遗留（本卡新增，需裁决）
 
 1. **`--fb-accent` 焦点环在中性灰背景上只有 2.849:1**，低于 WCAG 1.4.11 非文本的 3:1。见 §4.4，需产品裁决是否让焦点环与宿主背景解耦。
 2. **真实 Windows 高对比主题未体验**。见 §4.5，需局域网 Win11 机器。
