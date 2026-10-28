@@ -136,20 +136,33 @@ export function createApp(config: ServerConfig, deps: AppDeps = {}): FeedbackApp
       return undefined;
     }
     const origin = c.req.header("origin");
-    if (origin) {
-      const normalized = normalizeRequestOrigin(origin);
-      if (normalized) {
-        c.header("access-control-allow-origin", normalized);
-        c.header("access-control-allow-methods", "GET, POST, OPTIONS");
-        c.header("access-control-allow-headers", "authorization, content-type");
-        c.header("access-control-max-age", "300");
-        c.header("vary", "origin");
-        if (c.req.method === "OPTIONS") return c.body(null, 204);
-      }
+    const normalized = origin ? normalizeRequestOrigin(origin) : null;
+    if (normalized) {
+      c.header("access-control-allow-origin", normalized);
+      c.header("access-control-allow-methods", "GET, POST, OPTIONS");
+      c.header("access-control-allow-headers", "authorization, content-type");
+      c.header("access-control-max-age", "300");
+      c.header("vary", "origin");
+      if (c.req.method === "OPTIONS") return c.body(null, 204);
     }
     // 跨源组件请求只认 Bearer：即使浏览器带上了后台 Cookie，也不会被当作用户身份。
     if (isCrossOriginRequest(c, config)) c.set("crossOriginNoCookie", true);
     await next();
+    // 裸 new Response(...) 的二进制返回不合并 c.header() 写入的上下文头：
+    // 在最终响应对象上补写 ACAO（缺省时）+ vary，否则跨源 Bearer fetch 被浏览器拦截。
+    if (normalized && c.res && !c.res.headers.get("access-control-allow-origin")) {
+      c.res.headers.set("access-control-allow-origin", normalized);
+      const vary = c.res.headers.get("vary");
+      if (
+        !vary
+          ?.toLowerCase()
+          .split(",")
+          .map((v) => v.trim())
+          .includes("origin")
+      ) {
+        c.res.headers.set("vary", vary ? `${vary}, origin` : "origin");
+      }
+    }
     return undefined;
   };
 
@@ -162,6 +175,10 @@ export function createApp(config: ServerConfig, deps: AppDeps = {}): FeedbackApp
   // - 只覆盖组件真正需要的端点；后台管理、会话管理与旧登录握手保持原有限制。
   app.use("/api/feedback*", componentCors);
   app.use("/api/auth/*", componentCors);
+  app.use("/api/features", componentCors);
+
+  // v12：能力探测——dialogue 对话支持 + images 最大图片数（缺省视为 1）。
+  app.get("/api/features", (c) => c.json({ dialogue: true, images: 5 }));
 
   // 登录窗口页面（Web 组件握手入口），CSP 只放行带 nonce 的内联脚本
   app.get("/login", (c) => {
@@ -256,9 +273,18 @@ export function createApp(config: ServerConfig, deps: AppDeps = {}): FeedbackApp
 }
 
 /** 组件端点（允许无凭据跨域 + 只认 Bearer）的精确路径。 */
-const COMPONENT_ENDPOINTS = new Set(["/api/auth/login", "/api/auth/logout", "/api/auth/session", "/api/feedback"]);
-/** 本人记录查询与截图：/api/feedback/{id} 与 /api/feedback/{id}/screenshot。 */
-const COMPONENT_FEEDBACK_PATTERN = /^\/api\/feedback\/[^/]+(?:\/screenshot)?$/;
+const COMPONENT_ENDPOINTS = new Set([
+  "/api/auth/login",
+  "/api/auth/logout",
+  "/api/auth/session",
+  "/api/feedback",
+  "/api/feedback/mine",
+  "/api/feedback/unread-summary",
+  "/api/features",
+]);
+/** 本人记录查询、截图、对话详情、发消息、已读上报、附件/图片下载与日志下载/预览。 */
+const COMPONENT_FEEDBACK_PATTERN =
+  /^\/api\/feedback\/(?:messages\/attachments\/[^/]+|[^/]+(?:\/(?:screenshot|dialogue|messages|read)|\/images\/[^/]+|\/logs\/[^/]+\/(?:download|preview))?)$/;
 
 /**
  * 是否属于「组件需要用到的端点」：

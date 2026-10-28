@@ -1,5 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 // 导入即自动注册 <feedback-widget> Custom Element（副作用）。
+import {
+  FeedbackDiagnosticsRecorder,
+  FeedbackErrorCapture,
+  wrapFetch,
+} from '@feedback/web';
 import type { FeedbackWidget, FeedbackSubmittedDetail } from '@feedback/web';
 import '@feedback/web';
 
@@ -11,6 +16,38 @@ export function App() {
   // 因此重挂 effect 不会让用户丢失已输入内容。
   const [widget, setWidget] = useState<FeedbackWidget | null>(null);
   const [last, setLast] = useState<string | null>(null);
+
+  // ---- v12 诊断日志（§5.6）：三步接入 ----
+  // 1) 创建记录器：内存环形缓冲（200 条 / 256KiB），白名单字段，不记 URL/正文/凭据。
+  const diagnostics = useMemo(() => new FeedbackDiagnosticsRecorder({ pageLabel: 'home' }), []);
+  // 2) 宿主自身请求经 wrapFetch 记录（不替换全局 fetch）；
+  //    FeedbackErrorCapture 显式启用未捕获异常监听（可卸载、保留宿主处理）。
+  const diagnosticsFetch = useMemo(() => wrapFetch(diagnostics), [diagnostics]);
+  const errorCapture = useMemo(() => new FeedbackErrorCapture(diagnostics), [diagnostics]);
+
+  useEffect(() => {
+    errorCapture.install();
+    return () => errorCapture.uninstall();
+  }, [errorCapture]);
+
+  // 3) 注入组件：组件请求走 diagnosticsFetch；logProvider 让诊断文件随提交附加。
+  useEffect(() => {
+    if (!widget) return;
+    widget.diagnosticsRecorder = diagnostics;
+    widget.logProvider = async () => {
+      const file = diagnostics.toLogFile();
+      return file ? [file] : [];
+    };
+    return () => {
+      widget.diagnosticsRecorder = undefined;
+      widget.logProvider = undefined;
+    };
+  }, [widget, diagnostics]);
+
+  // 演示：宿主自己的请求也走 wrapFetch（点「调用宿主接口」可见记录）。
+  const callHostApi = (): void => {
+    void diagnosticsFetch('http://localhost:8787/healthz').catch(() => undefined);
+  };
 
   useEffect(() => {
     if (!widget) return;
@@ -32,6 +69,7 @@ export function App() {
       <div style={{ display: 'flex', gap: 12, marginBottom: 8 }}>
         <button onClick={() => widget?.open()}>纯文本打开（不截图）</button>
         <button onClick={() => widget?.captureAndOpen()}>截图并打开</button>
+        <button onClick={callHostApi}>调用宿主接口（写入诊断）</button>
       </div>
       <p style={{ margin: '0 0 20px 0', fontSize: 13, color: '#64748b' }}>
         下面显式写了 <code>launcher-mode=&quot;orb&quot;</code> 与{' '}

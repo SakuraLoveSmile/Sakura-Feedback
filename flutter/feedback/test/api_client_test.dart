@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:feedback_widget/feedback_widget.dart';
+import 'package:feedback_widget/src/api_client.dart' show Quota;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -370,6 +371,47 @@ void main() {
     test('FeedbackConfig 去除末尾斜杠', () {
       final c = FeedbackConfig('https://x.dev/', 'app');
       expect(c.apiBase, 'https://x.dev');
+    });
+  });
+
+  group('Quota.fromJson（双形态契约）', () {
+    test('不限形态：unlimited:true 解析为不限额度（无 dailyLimit/remaining）', () {
+      final q = Quota.fromJson(<String, Object?>{
+        'unlimited': true,
+        'used': 9,
+        'resetAt': '2030-01-01T16:00:00Z',
+      });
+      expect(q, isNotNull);
+      expect(q!.unlimited, isTrue);
+      expect(q.used, 9);
+      expect(q.dailyLimit, isNull);
+      expect(q.remaining, isNull);
+      expect(q.resetAt, isNotNull);
+    });
+
+    test('数值形态：原样解析，unlimited 为 false', () {
+      final q = Quota.fromJson(<String, Object?>{
+        'dailyLimit': 3,
+        'used': 1,
+        'remaining': 2,
+        'resetAt': '2030-01-01T16:00:00Z',
+      });
+      expect(q, isNotNull);
+      expect(q!.unlimited, isFalse);
+      expect(q.dailyLimit, 3);
+      expect(q.used, 1);
+      expect(q.remaining, 2);
+    });
+
+    test('畸形载荷：无法识别一律返回 null（调用方据此隐藏额度行）', () {
+      expect(Quota.fromJson(<String, Object?>{'unexpected': 'shape'}), isNull);
+      expect(Quota.fromJson(<String, Object?>{'unlimited': true}), isNull); // 缺 used
+      expect(
+        Quota.fromJson(<String, Object?>{'dailyLimit': 3, 'used': 1}),
+        isNull,
+      ); // 缺 remaining
+      expect(Quota.fromJson('not a map'), isNull);
+      expect(Quota.fromJson(null), isNull);
     });
   });
 }

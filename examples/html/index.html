@@ -71,6 +71,7 @@
       <div class="row">
         <button id="btn-open" type="button">打开面板（不截图）</button>
         <button id="btn-capture" type="button">截图并打开</button>
+        <button id="btn-host-api" type="button">调用宿主接口（写入诊断）</button>
       </div>
       <p class="hint">
         <code>open()</code> 只打开面板；截图必须调用元素的
@@ -123,6 +124,21 @@
       // UMD 顶层副作用已注册 <feedback-widget>；这里只做事件订阅与按钮接线。
       const widget = document.getElementById('widget');
       const status = document.getElementById('status');
+      const FB = window.FeedbackWeb; // UMD 全局命名空间
+
+      // ---- v12 诊断日志（§5.6）：三步接入 ----
+      // 1) 创建记录器：内存环形缓冲（200 条 / 256KiB），白名单字段，不记 URL/正文/凭据。
+      const diagnostics = new FB.FeedbackDiagnosticsRecorder({ pageLabel: 'home' });
+      // 2) 宿主自身请求经 wrapFetch 记录（不替换全局 fetch）；
+      //    FeedbackErrorCapture 显式启用未捕获异常监听（可卸载、保留宿主处理）。
+      const diagnosticsFetch = FB.wrapFetch(diagnostics);
+      new FB.FeedbackErrorCapture(diagnostics).install();
+      // 3) 注入组件：组件请求经 recorder 记录；logProvider 让诊断文件随提交附加。
+      widget.diagnosticsRecorder = diagnostics;
+      widget.logProvider = async () => {
+        const file = diagnostics.toLogFile();
+        return file ? [file] : [];
+      };
 
       if (!customElements.get('feedback-widget')) {
         status.style.color = '#dc2626';
@@ -145,6 +161,11 @@
 
       document.getElementById('btn-capture').addEventListener('click', () => {
         widget.captureAndOpen();
+      });
+
+      // 演示：宿主自己的请求也走 wrapFetch（写入诊断缓冲，随下次提交附上）。
+      document.getElementById('btn-host-api').addEventListener('click', () => {
+        diagnosticsFetch('http://localhost:8787/healthz').catch(() => {});
       });
     </script>
   </body>

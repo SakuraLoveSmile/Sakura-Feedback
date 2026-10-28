@@ -74,14 +74,15 @@ describe("T1：未登记软件也能接收", () => {
 
   it("额度用尽与幂等重放都不产生空软件记录", async () => {
     const h = await makeHarness();
-    // 管理员额度：默认 3 次/日。先用完额度。
+    // 普通账号额度：默认 3 次/日（管理员不受每日次数限制，429 场景须用普通账号）。
+    const bearer = await createUserBearer(h, { username: "quota-exhaust-user", dailyLimit: 3 });
     const used = [];
     for (let i = 0; i < 3; i++) {
-      used.push(await submitFeedback(h.feedbackApp, h.bearer, defaultSubmitBody({ appId: "com.quota.app" })));
+      used.push(await submitFeedback(h.feedbackApp, bearer, defaultSubmitBody({ appId: "com.quota.app" })));
     }
     expect(used.every((r) => r.status === 201)).toBe(true);
 
-    const over = await submitFeedback(h.feedbackApp, h.bearer, defaultSubmitBody({ appId: "com.never.created" }));
+    const over = await submitFeedback(h.feedbackApp, bearer, defaultSubmitBody({ appId: "com.never.created" }));
     expect(over.status).toBe(429);
     expect(over.data.error.code).toBe("daily_quota_exceeded");
 

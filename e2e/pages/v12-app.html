@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>E2E 宿主页 · v12 多图 / 捕获范围 / 不可绘制内容</title>
+    <!--
+      e2e 专用宿主页（不是产品代码）：为 v12 联调提供可精确断言的版面。
+
+      版面（1280x800 视口，dpr=1 → CSS 视口坐标 == 截图输出像素坐标）：
+        #nav      (0,40)-(176,760)    纯绿 #00c853  侧栏 → 必须入图
+        #menu     (200,40)-(430,220)  纯橙 #ff6d00  下拉菜单 → 必须入图
+        #modal    (200,300)-(560,560) 纯蓝 #00b0ff  弹窗（role=dialog）→ 必须入图
+        #embed    (600,40)-(840,240)  跨源 iframe（127.0.0.1:5189）→ 不提示会静默丢内容
+        #remote   (600,300)-(760,400) 跨源 img（无 crossorigin）→ 同上
+        右侧 x≥864 保持纯白：组件面板/灵感球都不应出现在截图里。
+
+      组件配置：launcher-mode="orb"（灵感球在右缘）+ capture-mode="viewport"
+      （点入口先截图后开面板）；面板固定右侧 400px，与 x≥864 的断言互不干扰。
+
+      暴露给 e2e 的钩子（window.__fbE2E）：
+        - shadow()/thumbSrcs()/thumbSha(i)：读组件草稿里每张图的预览字节摘要
+          （预览 blob == 最终上传字节，因此可用于「预览与上传一致」断言）
+        - imageCount()/hint()/error()/status()/draftText()
+    -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: #ffffff;
+      }
+      body {
+        position: relative;
+        width: 1280px;
+        height: 800px;
+        overflow: hidden;
+        font-family: system-ui, -apple-system, sans-serif;
+      }
+      .block {
+        position: absolute;
+        color: #ffffff;
+        font-size: 16px;
+        padding: 6px;
+        box-sizing: border-box;
+      }
+      #nav {
+        left: 0;
+        top: 40px;
+        width: 176px;
+        height: 720px;
+        background: #00c853;
+      }
+      #menu {
+        left: 200px;
+        top: 40px;
+        width: 230px;
+        height: 180px;
+        background: #ff6d00;
+      }
+      #modal {
+        left: 200px;
+        top: 300px;
+        width: 360px;
+        height: 260px;
+        background: #00b0ff;
+        color: #000000;
+      }
+      #open-overlays {
+        position: absolute;
+        left: 20px;
+        top: 700px;
+        width: 140px;
+        height: 40px;
+        background: #111111;
+        color: #ffffff;
+        font-size: 13px;
+        border: 0;
+      }
+      #embed {
+        position: absolute;
+        left: 600px;
+        top: 40px;
+        width: 240px;
+        height: 200px;
+        border: 0;
+        background: #ffe600;
+      }
+      #remote {
+        position: absolute;
+        left: 600px;
+        top: 300px;
+        width: 160px;
+        height: 100px;
+      }
+    </style>
+  </head>
+  <body>
+    <nav id="nav" class="block">SIDEBAR-CANARY</nav>
+    <div id="menu" class="block" hidden>MENU-CANARY</div>
+    <div id="modal" class="block" role="dialog" aria-label="示例弹窗" hidden>MODAL-CANARY</div>
+    <iframe id="embed" src="http://127.0.0.1:5189/v12-embed.html" title="跨源嵌入内容"></iframe>
+    <img id="remote" src="http://127.0.0.1:5189/leaky.png" alt="跨源图片" />
+    <button id="open-overlays" type="button">打开菜单+弹窗</button>
+
+    <script>
+      // 宿主交互（仅 e2e）：菜单与弹窗是**动态出现**的浮层，在点击截图入口之前展开，
+      // 用来证明「运行时才显示的侧栏/菜单/弹窗内容同样会进入截图」。
+      document.getElementById('open-overlays').addEventListener('click', () => {
+        document.getElementById('menu').hidden = false;
+        document.getElementById('modal').hidden = false;
+        window.__fbE2E.overlaysOpen = true;
+      });
+    </script>
+
+    <script>
+      // 测试脚手架（仅 e2e）：只暴露读取入口，页面内容本身是静态的。
+      const hex = (buf) =>
+        Array.from(new Uint8Array(buf))
+          .map((b) => b.toString(16).padStart(2, '0'))
+          .join('');
+      window.__fbE2E = {
+        widget: () => document.querySelector('feedback-widget'),
+        shadow() {
+          return this.widget().shadowRoot;
+        },
+        rects() {
+          const out = {};
+          for (const id of ['nav', 'menu', 'modal', 'embed', 'remote']) {
+            const el = document.getElementById(id);
+            const b = el.getBoundingClientRect();
+            out[id] = { x: b.x, y: b.y, width: b.width, height: b.height };
+          }
+          const orb = this.shadow().querySelector('.fb-orb');
+          if (orb) {
+            const b = orb.getBoundingClientRect();
+            out.orb = { x: b.x, y: b.y, width: b.width, height: b.height };
+          }
+          return out;
+        },
+        thumbSrcs() {
+          return Array.from(this.shadow().querySelectorAll('.fb-screenshot-thumb'))
+            .map((img) => img.getAttribute('src'))
+            .filter(Boolean);
+        },
+        async thumbSha(index) {
+          const srcs = this.thumbSrcs();
+          if (!srcs[index]) return null;
+          const res = await fetch(srcs[index]);
+          return hex(await crypto.subtle.digest('SHA-256', await res.arrayBuffer()));
+        },
+        async thumbBytes(index) {
+          const srcs = this.thumbSrcs();
+          if (!srcs[index]) return null;
+          const res = await fetch(srcs[index]);
+          const bytes = new Uint8Array(await res.arrayBuffer());
+          let s = '';
+          const chunk = 0x8000;
+          for (let i = 0; i < bytes.length; i += chunk) {
+            s += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+          }
+          return btoa(s);
+        },
+        imageCount() {
+          return this.shadow().querySelectorAll('.fb-screenshot-thumb').length;
+        },
+        badgeTexts() {
+          return Array.from(this.shadow().querySelectorAll('.fb-screenshot-badge')).map((n) => n.textContent);
+        },
+        hint() {
+          const el = this.shadow().querySelector('.fb-shot-hint');
+          return el && !el.hidden ? el.textContent : '';
+        },
+        error() {
+          const el = this.shadow().querySelector('.fb-shot-error');
+          return el && !el.hidden ? el.textContent : '';
+        },
+        status() {
+          const el = this.shadow().querySelector('.fb-status');
+          return el ? el.textContent : '';
+        },
+        errorSummary() {
+          const el = this.shadow().querySelector('.fb-error-summary');
+          return el ? el.textContent : '';
+        },
+        panelText() {
+          const p = this.shadow().querySelector('.fb-panel');
+          return p ? p.innerText : '';
+        },
+        draftText() {
+          const el = this.shadow().querySelector('.fb-textarea');
+          return el ? el.value : '';
+        },
+        replyText() {
+          const el = this.shadow().querySelector('.fb-dialogue-reply-box .fb-textarea');
+          return el ? el.value : '';
+        },
+        replyThumbCount() {
+          return this.shadow().querySelectorAll('.fb-reply-thumb').length;
+        },
+        panelBg() {
+          const p = this.shadow().querySelector('.fb-panel');
+          return p ? getComputedStyle(p).backgroundColor : null;
+        },
+        theme() {
+          return this.widget().getAttribute('theme');
+        },
+        historyMeta() {
+          const info = this.shadow().querySelector('.fb-history-page-info');
+          return {
+            info: info ? info.textContent : null,
+            items: this.shadow().querySelectorAll('.fb-history-item').length,
+            filterOptions: Array.from(this.shadow().querySelectorAll('.fb-history-filter option')).map(
+              (o) => o.textContent,
+            ),
+            filterValue: (this.shadow().querySelector('.fb-history-filter') || {}).value || null,
+            unreadTags: this.shadow().querySelectorAll('.fb-history-item .fb-badge').length,
+          };
+        },
+        dialogueImages() {
+          return Array.from(this.shadow().querySelectorAll('.fb-dialogue-attachment-img')).map((img) => ({
+            src: img.getAttribute('src'),
+            complete: img.complete,
+            naturalWidth: img.naturalWidth,
+          }));
+        },
+        dialogueText() {
+          const v = this.shadow().querySelector('.fb-dialogue-view');
+          return v ? v.innerText : '';
+        },
+        launcherBadge() {
+          const orb = this.shadow().querySelector('.fb-orb .fb-launcher-badge');
+          const tab = this.shadow().querySelector('.fb-fab .fb-launcher-badge');
+          const pick = (n) => (n && !n.hidden ? n.textContent : '');
+          return { orb: pick(orb), tab: pick(tab), any: pick(orb) || pick(tab) };
+        },
+      };
+    </script>
+
+    <script src="/sdk/feedback-web.umd.js"></script>
+    <feedback-widget
+      id="widget"
+      api-base="http://localhost:8787"
+      app-id="com.example.demo-e2e"
+      app-version="12.0.0"
+      page-label="e2e-v12"
+      launcher-mode="orb"
+      capture-mode="viewport"
+    ></feedback-widget>
+  </body>
+</html>

@@ -52,9 +52,6 @@ export default function SessionsView() {
           <div className="sub">当前登录的浏览器会话与客户端令牌；撤销后对应客户端需重新登录。</div>
         </div>
         <div className="btn-row">
-          <button type="button" className="btn" onClick={() => setRevokeAllAsk(true)}>
-            撤销其它全部会话
-          </button>
           <button type="button" className="btn" onClick={() => void load()}>
             <Icon name="refresh" size={16} />
             刷新
@@ -67,7 +64,15 @@ export default function SessionsView() {
         {sessions === null ? (
           <SkeletonRows rows={4} />
         ) : sessions.length === 0 ? (
-          <EmptyState title="没有会话" />
+          <EmptyState
+            title="没有会话"
+            hint="在其他浏览器或客户端登录后，会话会自动出现在这里。"
+            action={
+              <button type="button" className="btn sm" onClick={() => void load()}>
+                刷新
+              </button>
+            }
+          />
         ) : (
           <table>
             <thead>
@@ -92,7 +97,12 @@ export default function SessionsView() {
                     {s.current ? (
                       <span className="tag tone-info">当前</span>
                     ) : (
-                      <button type="button" className="btn sm" onClick={() => setRevokeTarget(s.id)}>
+                      <button
+                        type="button"
+                        className="btn sm danger"
+                        title="撤销该会话后，对应客户端需要重新登录"
+                        onClick={() => setRevokeTarget(s.id)}
+                      >
                         撤销
                       </button>
                     )}
@@ -102,6 +112,18 @@ export default function SessionsView() {
             </tbody>
           </table>
         )}
+      </div>
+
+      {/* 危险操作独立分区：与常规列表/刷新分开，进入即知影响范围，执行仍走二次确认。 */}
+      <div className="danger-zone">
+        <div className="danger-zone-head">
+          <h2>危险操作</h2>
+          <span className="tag tone-err">需二次确认</span>
+        </div>
+        <p>撤销除当前会话外的全部浏览器会话与客户端令牌：相关客户端需重新登录，且此操作不可撤销。当前会话不受影响。</p>
+        <button type="button" className="btn danger" onClick={() => setRevokeAllAsk(true)}>
+          撤销其它全部会话
+        </button>
       </div>
 
       {revokeAllAsk && (

@@ -603,4 +603,52 @@ void main() {
       await teardownPanel(tester);
     });
   });
+
+  group('管理员不限额度', () {
+    testWidgets('不限形态额度：显示「不限次数」，任意已用量下提交不被额度禁用', (tester) async {
+      final store = RecordingTokenStore('tok');
+      server.respond('GET /api/auth/session',
+          sessionJson(unlimitedQuotaJson(used: 9)));
+      server.respond('POST /api/feedback',
+          <String, Object?>{'feedbackId': 'f1', 'status': 'received'}, 201);
+
+      await pumpPanel(tester, server: server, tokenStore: store, visible: true);
+      await tester.pump();
+      await tester.pump();
+      expect(server.count('GET /api/auth/session'), 1);
+
+      expect(find.textContaining('不限次数'), findsOneWidget);
+      expect(find.textContaining('今日剩余'), findsNothing);
+      expect(find.byKey(const Key('feedback-quota-blocked')), findsNothing);
+
+      await tester.enterText(find.byKey(input), '管理员当日第 10 次提交');
+      await tester.pump();
+      expect(tester.widget<FilledButton>(find.byKey(submit)).onPressed,
+          isNotNull); // 任意已用量下不被额度禁用
+
+      await tester.tap(find.byKey(submit));
+      await tester.pump();
+      await tester.pump();
+      expect(server.count('POST /api/feedback'), 1); // 提交真实发出
+      await teardownPanel(tester);
+    });
+
+    testWidgets('不限形态额度：无剩余用尽概念，不排程周期额度查询', (tester) async {
+      final store = RecordingTokenStore('tok');
+      server.respond('GET /api/auth/session',
+          sessionJson(unlimitedQuotaJson(used: 9)));
+
+      await pumpPanel(tester, server: server, tokenStore: store, visible: true);
+      await tester.pump();
+      await tester.pump();
+      expect(server.count('GET /api/auth/session'), 1);
+      expect(find.textContaining('不限次数'), findsOneWidget);
+
+      // 不限额度没有「用尽恢复」场景：不产生周期额度轮询。
+      await tester.pump(const Duration(seconds: 600));
+      await tester.pump();
+      expect(server.count('GET /api/auth/session'), 1);
+      await teardownPanel(tester);
+    });
+  });
 }

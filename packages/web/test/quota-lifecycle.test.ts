@@ -524,3 +524,114 @@ describe('T1-B 额度刷新与生命周期（Web）', () => {
     }
   });
 });
+
+describe('管理员不限额度（Web）', () => {
+  function unlimitedQuota(over: Record<string, unknown> = {}): Record<string, unknown> {
+    return { unlimited: true, used: 9, resetAt: isoIn(3_600_000), ...over };
+  }
+
+  it('不限形态额度：显示「不限次数」，任意已用量下提交不被额度禁用', async () => {
+    const m = mount();
+    let submits = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown) => {
+        const url = String(input);
+        if (url.includes('/api/auth/login')) {
+          return httpResponse(200, loginBody(unlimitedQuota()));
+        }
+        if (url.includes('/api/auth/session')) {
+          return httpResponse(200, sessionBody(unlimitedQuota()));
+        }
+        submits += 1;
+        return httpResponse(201, {
+          feedbackId: 'fb-1',
+          status: 'received',
+          quota: unlimitedQuota({ used: 10 }),
+        });
+      }),
+    );
+
+    m.widget.open();
+    await flushPromises();
+    await login(m);
+    setTextarea(m, '管理员当日第 10 次提交');
+
+    expect(quotaText(m)).toContain('不限次数');
+    expect(quotaText(m)).not.toContain('今日剩余');
+    expect(m.submitBtn.disabled).toBe(false); // 任意已用量下不被额度禁用
+    expect(m.root.querySelector('.fb-quota-blocked')?.textContent ?? '').toBe('');
+
+    m.submitBtn.click();
+    await flushPromises();
+    expect(submits).toBe(1); // 提交真实发出（无前端额度拦截）
+    expect(quotaText(m)).toContain('不限次数');
+  });
+
+  it('不限形态额度：无剩余用尽概念，不排程周期额度查询', async () => {
+    vi.useFakeTimers();
+    try {
+      const m = mount();
+      let sessions = 0;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: unknown) => {
+          const url = String(input);
+          if (url.includes('/api/auth/login')) {
+            return httpResponse(200, loginBody(unlimitedQuota()));
+          }
+          if (url.includes('/api/auth/session')) {
+            sessions += 1;
+            return httpResponse(200, sessionBody(unlimitedQuota()));
+          }
+          return httpResponse(201, { feedbackId: 'fb-1', status: 'received' });
+        }),
+      );
+
+      m.widget.open();
+      await flushPromises();
+      await login(m);
+      setTextarea(m, '草稿');
+      expect(quotaText(m)).toContain('不限次数');
+
+      // 不限额度没有「用尽恢复」场景：不产生周期额度轮询。
+      await vi.advanceTimersByTimeAsync(600_000);
+      expect(sessions).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('无法解析的额度载荷：额度行隐藏而非显示错误文案，且不阻断提交', async () => {
+    const m = mount();
+    let submits = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown) => {
+        const url = String(input);
+        if (url.includes('/api/auth/login')) {
+          return httpResponse(200, loginBody({ unexpected: 'shape' }));
+        }
+        if (url.includes('/api/auth/session')) {
+          return httpResponse(200, sessionBody({ unexpected: 'shape' }));
+        }
+        submits += 1;
+        return httpResponse(201, { feedbackId: 'fb-1', status: 'received' });
+      }),
+    );
+
+    m.widget.open();
+    await flushPromises();
+    await login(m);
+    setTextarea(m, '草稿保留');
+
+    const quotaEl = m.root.querySelector<HTMLSpanElement>('.fb-quota');
+    expect(quotaEl?.hidden).toBe(true);
+    expect(quotaText(m)).toBe('');
+    expect(m.submitBtn.disabled).toBe(false); // 畸形额度不阻断提交
+
+    m.submitBtn.click();
+    await flushPromises();
+    expect(submits).toBe(1);
+  });
+});

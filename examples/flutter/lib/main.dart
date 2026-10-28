@@ -1,20 +1,24 @@
 import 'package:feedback_widget/feedback_widget.dart';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 
 import 'details_page.dart';
 import 'home_page.dart';
 
 void main() => runApp(const FeedbackExampleApp());
 
-/// 应用根：持有 [FeedbackController]，并把 [FeedbackWidget] 挂在 Navigator 之上。
+/// 应用根：持有 [FeedbackController]，并把 [FeedbackWidget] 挂在
+/// **MaterialApp 外侧**（v12 推荐挂载）。
 ///
 /// 三个关键结构（也是本示例要演示的重点）：
 /// 1. 控制器由**应用根**拥有，只在根的 `dispose()` 里释放——任何路由都能用同一个实例；
-/// 2. 组件通过 `MaterialApp.builder` 包裹 **Navigator 子树**，而不是某个页面的
-///    child：push/pop 路由不会重建组件，灵感球在任何路由下都在场，
-///    草稿与登录令牌也不会因为导航而丢失；
+/// 2. 组件**包在 MaterialApp 外侧**：截图边界提升到根 Navigator/Overlay 之上，
+///    `useRootNavigator: true` 的根弹窗（`showDialog` / `showModalBottomSheet`
+///    默认）也进入截图；面板与灵感球仍在截图边界之外。
+///    （旧的 `MaterialApp.builder` 包裹方式仍可运行，但根弹窗不入图——
+///    截图只覆盖应用自己的 Navigator 子树。）
 /// 3. 配置显式声明 `launcherMode: orb` 与 `captureMode: viewport`
-///    （组件默认是 `tab` / `off`，升级不改变旧宿主行为）。
+///    （组件默认是 `tab` / `off`，升级不会改变旧宿主行为）。
 class FeedbackExampleApp extends StatefulWidget {
   const FeedbackExampleApp({super.key});
 
@@ -31,6 +35,21 @@ class _FeedbackExampleAppState extends State<FeedbackExampleApp> {
   final ValueNotifier<String> _pageLabel =
       ValueNotifier<String>(HomePage.routeName);
 
+  /// v12 诊断日志：内存记录器 + http.Client 包装（T4 三步接入示例）。
+  ///
+  /// ① 创建 [FeedbackDiagnosticsRecorder]；
+  /// ② 用 [FeedbackHttpClient] 包装宿主自己的 http.Client（只记白名单字段：
+  ///    事件/错误码/状态码/耗时/pageLabel，绝不记录正文、凭据或完整 URL）；
+  /// ③ 把 `recorder.provide` 交给 [FeedbackConfig.logProvider]，随反馈提交；
+  ///    可选 [FeedbackExceptionCapture.install] 捕获未处理异常（保留宿主处理）。
+  final FeedbackDiagnosticsRecorder _diagnostics =
+      FeedbackDiagnosticsRecorder();
+
+  /// 示例用包装过的 http.Client（宿主自身请求走它，诊断自动入缓冲）。
+  /// 注意：组件自己的请求不经过它——两者独立，互不干扰。
+  late final FeedbackHttpClient _http =
+      FeedbackHttpClient(http.Client(), _diagnostics, pageLabel: 'example');
+
   late final NavigatorObserver _routeObserver =
       _RouteLabelObserver(_syncPageLabel);
 
@@ -46,71 +65,50 @@ class _FeedbackExampleAppState extends State<FeedbackExampleApp> {
     // 根 State 负责释放根持有的资源。
     _pageLabel.dispose();
     _feedback.dispose();
+    _http.close();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'feedback_widget 示例',
-      theme: ThemeData(
-        colorSchemeSeed: Colors.indigo,
-        useMaterial3: true,
-      ),
-      navigatorObservers: <NavigatorObserver>[_routeObserver],
-      initialRoute: HomePage.routeName,
-      routes: <String, WidgetBuilder>{
-        HomePage.routeName: (BuildContext context) =>
-            HomePage(controller: _feedback),
-        DetailsPage.routeName: (BuildContext context) => const DetailsPage(),
-      },
-      // builder 收到的 child 就是应用自己的 Navigator 子树。把组件包在它外面，
-      // 灵感球与面板就与当前路由无关了。
-      builder: (BuildContext context, Widget? child) {
-        return ValueListenableBuilder<String>(
-          valueListenable: _pageLabel,
-          builder: (BuildContext context, String pageLabel, Widget? _) {
-            // 为什么这里还要一个"宿主外层 Navigator"？
-            // 面板里的 TextField 需要 Overlay 祖先才能建立选择浮层，截图放大
-            // 预览用的 showDialog() 也需要 Navigator/Overlay 祖先（见
-            // flutter/feedback 的 FeedbackPanel）。而应用自己的 Navigator 在
-            // 组件**之下**（child），祖先查找只向上走，所以补一个只承载组件、
-            // 不做任何页面跳转的外层 Navigator：它同时提供 Overlay 与
-            // Navigator 祖先，且因为它位于应用 Navigator 之上，push/pop 路由
-            // 依旧不会重建组件。
-            return Navigator(
-              onGenerateRoute: (RouteSettings settings) => PageRouteBuilder<void>(
-                settings: settings,
-                // 外层路由只承载组件，不需要转场动画。
-                transitionDuration: Duration.zero,
-                reverseTransitionDuration: Duration.zero,
-                pageBuilder: (BuildContext context, Animation<double> animation,
-                        Animation<double> secondaryAnimation) =>
-                    _buildFeedbackLayer(child, pageLabel),
-              ),
-            );
-          },
-        );
-      },
-    );
-  }
-
-  /// 组件本体：包裹应用 Navigator 子树（[child]）。
-  Widget _buildFeedbackLayer(Widget? child, String pageLabel) {
+    // v12 挂载：组件包在 MaterialApp 外侧——截图边界包含根 Navigator 弹窗。
+    // 组件构造签名不变；面板所需的环境（主题/媒体查询/导航兜底）由组件自备。
     return FeedbackWidget(
       config: FeedbackConfig(
         // 改为你自己的 Feedback 服务地址与服务端登记的 appId。
         'http://localhost:8787',
         'com.example.demo',
         appVersion: '1.0.0',
-        pageLabel: pageLabel,
+        pageLabel: _pageLabel.value,
         side: FeedbackSide.right,
         // 显式声明：灵感球（可拖拽落点）+ 呼出时截取当前应用视口。
         launcherMode: FeedbackLauncherMode.orb,
         captureMode: FeedbackCaptureMode.viewport,
+        // v12 诊断日志三步接入之③：把记录器产出接给 logProvider。
+        logProvider: () => _diagnostics.provide(),
       ),
       controller: _feedback,
-      child: child ?? const SizedBox.shrink(),
+      // pageLabel 需要跟随路由变化：用 ValueListenableBuilder 局部重建配置。
+      child: ValueListenableBuilder<String>(
+        valueListenable: _pageLabel,
+        builder: (BuildContext context, String pageLabel, Widget? _) {
+          return MaterialApp(
+            title: 'feedback_widget 示例',
+            theme: ThemeData(
+              colorSchemeSeed: Colors.indigo,
+              useMaterial3: true,
+            ),
+            navigatorObservers: <NavigatorObserver>[_routeObserver],
+            initialRoute: HomePage.routeName,
+            routes: <String, WidgetBuilder>{
+              HomePage.routeName: (BuildContext context) =>
+                  HomePage(controller: _feedback),
+              DetailsPage.routeName: (BuildContext context) =>
+                  const DetailsPage(),
+            },
+          );
+        },
+      ),
     );
   }
 }

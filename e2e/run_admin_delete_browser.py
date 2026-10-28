@@ -378,7 +378,14 @@ def main() -> int:
                     page.locator(".fb-btn-capture").click()
                     page.wait_for_timeout(2500)
                 with page.expect_file_chooser() as fc_info:
-                    page.locator(".fb-btn-add-log").click()
+                    # 本轮 T4：「重新采集」复用同一基础类，.fb-btn-add-log 会命中 2 个元素
+                    # （Playwright 严格模式报错）→ 按 aria-label 精确定位「手动添加日志文件」。
+                    # 本轮 T4：日志区默认折叠（仅摘要 + 开关）→ 先展开再添加文件。
+                    logs_toggle = page.locator(".fb-logs-toggle")
+                    if logs_toggle.count() and logs_toggle.first.get_attribute("aria-expanded") != "true":
+                        logs_toggle.first.click()
+                        page.wait_for_timeout(250)
+                    page.get_by_label("手动添加日志文件").click()
                 fc_info.value.set_files(
                     {"name": "app.log", "mimeType": "text/plain", "buffer": b"2026-01-01 INFO del-e2e log\n"}
                 )

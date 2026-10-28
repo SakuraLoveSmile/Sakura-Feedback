@@ -63,13 +63,27 @@ export function setTextarea(m: Mounted, text: string): void {
   m.textarea.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
-/** 最小 fetch Response 桩（组件用 status/ok/json）。 */
+/** 最小 fetch Response 桩（组件用 status/ok/json；blob() 供附件下载路径）。 */
 export function httpResponse(status: number, body: unknown): {
   status: number;
   ok: boolean;
   json: () => Promise<unknown>;
+  blob: () => Promise<Blob>;
+  text: () => Promise<string>;
 } {
-  return { status, ok: status >= 200 && status < 300, json: async () => body };
+  const asBlob = (): Blob => {
+    if (body instanceof Blob) return body;
+    if (body instanceof ArrayBuffer) return new Blob([body]);
+    if (typeof body === 'string') return new Blob([body]);
+    return new Blob([JSON.stringify(body ?? null)], { type: 'application/json' });
+  };
+  return {
+    status,
+    ok: status >= 200 && status < 300,
+    json: async () => body,
+    blob: async () => asBlob(),
+    text: async () => (typeof body === 'string' ? body : JSON.stringify(body ?? null)),
+  };
 }
 
 export function apiError(status: number, code: string, message: string, extra?: Record<string, unknown>): unknown {
@@ -92,23 +106,25 @@ export function quota(over: Partial<{ dailyLimit: number; used: number; remainin
   return { dailyLimit: 3, used: 0, remaining: 3, resetAt: '2030-01-01T16:00:00.000Z', ...over };
 }
 
-export function loginResponse(token = TEST_TOKEN) {
+export function loginResponse(token = TEST_TOKEN, capabilities?: Record<string, unknown>) {
   return httpResponse(200, {
     ok: true,
     token,
     expiresAt: futureIso(3_600_000),
     user: authUser(),
     quota: quota(),
+    ...(capabilities !== undefined ? { capabilities } : {}),
   });
 }
 
-export function sessionResponse() {
+export function sessionResponse(capabilities?: Record<string, unknown>) {
   return httpResponse(200, {
     authenticated: true,
     kind: 'client',
     expiresAt: futureIso(3_600_000),
     user: authUser(),
     quota: quota(),
+    ...(capabilities !== undefined ? { capabilities } : {}),
   });
 }
 
@@ -127,7 +143,7 @@ export interface FetchCall {
  */
 export function recordFetch(
   impl: (url: string, init: { method?: string; body?: unknown }) => Promise<unknown>,
-  opts: { token?: string } = {},
+  opts: { token?: string; capabilities?: Record<string, unknown> } = {},
 ): { calls: FetchCall[]; authCalls: string[]; fetchMock: ReturnType<typeof vi.fn> } {
   const calls: FetchCall[] = [];
   const authCalls: string[] = [];
@@ -136,11 +152,11 @@ export function recordFetch(
       const url = String(input);
       if (url.includes('/api/auth/login')) {
         authCalls.push(url);
-        return loginResponse(opts.token);
+        return loginResponse(opts.token, opts.capabilities);
       }
       if (url.includes('/api/auth/session')) {
         authCalls.push(url);
-        return sessionResponse();
+        return sessionResponse(opts.capabilities);
       }
       let body: Record<string, unknown> | undefined;
       if (typeof init?.body === 'string') {
@@ -176,12 +192,12 @@ export async function flushPromises(): Promise<void> {
  * 安装“认证感知”的 fetch 包装：登录 / 会话查询由包装直接应答（不计入业务请求），
  * 其余请求委托给当前 fetch 桩（保留记录与故障注入）。
  */
-export function installAuthFetch(token = TEST_TOKEN): void {
+export function installAuthFetch(token = TEST_TOKEN, capabilities?: Record<string, unknown>): void {
   const inner = globalThis.fetch as unknown;
   vi.stubGlobal('fetch', async (input: unknown, init?: unknown) => {
     const url = String(input);
-    if (url.includes('/api/auth/login')) return loginResponse(token);
-    if (url.includes('/api/auth/session')) return sessionResponse();
+    if (url.includes('/api/auth/login')) return loginResponse(token, capabilities);
+    if (url.includes('/api/auth/session')) return sessionResponse(capabilities);
     if (inner) return (inner as (i: unknown, n?: unknown) => Promise<unknown>)(input, init);
     throw new Error(`unexpected fetch ${url}`);
   });
@@ -191,8 +207,8 @@ export function installAuthFetch(token = TEST_TOKEN): void {
  * 通过面板内登录表单完成登录（不打开新窗口）：
  * 展开表单 → 填入账号密码 → 点击「登录并提交」→ 等待令牌写入。
  */
-export async function completeLogin(m: Mounted, token = TEST_TOKEN): Promise<void> {
-  installAuthFetch(token);
+export async function completeLogin(m: Mounted, token = TEST_TOKEN, capabilities?: Record<string, unknown>): Promise<void> {
+  installAuthFetch(token, capabilities);
   m.widget.startLogin();
   const username = m.root.querySelector<HTMLInputElement>('.fb-login-username');
   const password = m.root.querySelector<HTMLInputElement>('.fb-login-password');

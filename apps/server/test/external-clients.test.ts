@@ -318,7 +318,7 @@ describe("AI HTTP 客户端契约", () => {
     const png = Buffer.from("fake-png");
     // 有输出像素 → 只出【截图输出尺寸】，不出【视口尺寸】
     await ai.organize("a", {
-      pngBuffer: png,
+      images: [{ buffer: png, mime: "image/png" }],
       viewport: { width: 1024, height: 768 },
       outputPixels: { width: 400, height: 300 },
     });
@@ -326,7 +326,7 @@ describe("AI HTTP 客户端契约", () => {
     expect(lastBody).toContain("【截图输出尺寸】：400 x 300 像素");
     expect(lastBody).not.toContain("【视口尺寸】");
     // 缺输出像素 → 回退【视口尺寸】
-    await ai.organize("b", { pngBuffer: png, viewport: { width: 1024, height: 768 } });
+    await ai.organize("b", { images: [{ buffer: png, mime: "image/png" }], viewport: { width: 1024, height: 768 } });
     lastBody = f.calls[1]?.body ?? "";
     expect(lastBody).toContain("【视口尺寸】：1024 x 768");
     expect(lastBody).not.toContain("【截图输出尺寸】");

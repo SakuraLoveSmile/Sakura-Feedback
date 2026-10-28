@@ -81,7 +81,7 @@ describe('L1-Web: 日志附件（自动采集、手动选择、预览、移除�
     m.widget.open();
     await settled();
 
-    const fileInput = m.root.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const fileInput = m.root.querySelector<HTMLInputElement>('.fb-log-input')!;
     expect(fileInput).not.toBeNull();
 
     // 1. 不支持的扩展名 (.png)
@@ -138,7 +138,7 @@ describe('L1-Web: 日志附件（自动采集、手动选择、预览、移除�
     m.widget.open();
     await settled();
 
-    const fileInput = m.root.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const fileInput = m.root.querySelector<HTMLInputElement>('.fb-log-input')!;
     const f1 = new File(['Hello Feedback Log Line 1\nLine 2'], 'debug.log', { type: 'text/plain' });
     Object.defineProperty(fileInput, 'files', {
       value: [f1],
@@ -179,7 +179,7 @@ describe('L1-Web: 日志附件（自动采集、手动选择、预览、移除�
     await settled();
 
     // 添加 2 个日志
-    const fileInput = m.root.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const fileInput = m.root.querySelector<HTMLInputElement>('.fb-log-input')!;
     const f1 = new File(['log-content-1'], 'error.log', { type: 'text/plain' });
     const f2 = new File(['log-content-2'], 'network.txt', { type: 'text/plain' });
     Object.defineProperty(fileInput, 'files', {
@@ -232,7 +232,7 @@ describe('L1-Web: 日志附件（自动采集、手动选择、预览、移除�
     m.widget.open();
     await settled();
 
-    const fileInput = m.root.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const fileInput = m.root.querySelector<HTMLInputElement>('.fb-log-input')!;
     const f1 = new File(['retry log content'], 'retry.log', { type: 'text/plain' });
     Object.defineProperty(fileInput, 'files', {
       value: [f1],
@@ -330,5 +330,115 @@ describe('L1-Web: 日志附件（自动采集、手动选择、预览、移除�
     await settled();
     expect(m.root.querySelector('.fb-log-name')?.textContent).toBe('fresh.log');
     expect(addLogButton?.disabled).toBe(false);
+  });
+
+  it('provider 成功附加日志后提示「已附诊断日志」', async () => {
+    const { m } = await ready();
+    m.widget.logProvider = async () => ({
+      filename: 'admin-diagnostics.jsonl',
+      blob: new Blob(['{"level":"info","event":"handshake","code":"ok"}'], { type: 'text/plain' }),
+    });
+
+    m.widget.open();
+    await settled(10);
+
+    expect(m.root.querySelectorAll('.fb-log-item').length).toBe(1);
+    const statusEl = m.root.querySelector('.fb-log-status');
+    expect(statusEl?.textContent).toContain('已附诊断日志');
+    expect((statusEl as HTMLElement | null)?.hidden).toBe(false);
+  });
+
+  it('provider 返回空（空数组 / null）时显示「当前会话暂无日志」且不阻断提交', async () => {
+    const { m, calls } = await ready();
+    m.widget.logProvider = async () => [];
+
+    m.widget.open();
+    await settled(10);
+
+    const statusEl = m.root.querySelector('.fb-log-status');
+    expect(statusEl?.textContent).toContain('当前会话暂无日志');
+    expect(m.root.querySelectorAll('.fb-log-item').length).toBe(0);
+    expect(m.root.querySelector('.fb-log-error')?.textContent ?? '').toBe('');
+
+    // 空返回不阻断纯文本提交
+    setTextarea(m, '没有日志也能提交');
+    m.submitBtn.click();
+    await settled(10);
+    expect(calls.length).toBe(1);
+    expect(calls[0]?.body?.text).toBe('没有日志也能提交');
+  });
+
+  it('provider 抛错时显示固定失败文案（不泄露原始 message），重试按钮可补采成功', async () => {
+    const { m, calls } = await ready();
+    let attempts = 0;
+    m.widget.logProvider = async () => {
+      attempts++;
+      if (attempts === 1) throw new Error('secret-internal-path /private/token leak');
+      return {
+        filename: 'admin-diagnostics.jsonl',
+        blob: new Blob(['{"level":"warn","event":"handshake","code":"network"}'], { type: 'text/plain' }),
+      };
+    };
+
+    m.widget.open();
+    await settled(10);
+
+    expect(attempts).toBe(1);
+    const errEl = m.root.querySelector('.fb-log-error');
+    expect(errEl?.textContent).toContain('日志获取失败');
+    expect(errEl?.textContent).toContain('可继续提交');
+    // provider 抛出的原始 message 不得展示（可能含任意文本）
+    expect(errEl?.textContent).not.toContain('secret-internal-path');
+    expect(errEl?.textContent).not.toContain('token');
+    expect(m.root.querySelectorAll('.fb-log-item').length).toBe(0);
+
+    // 显式重试入口：成功后日志补采进列表
+    const retryBtn = m.root.querySelector<HTMLButtonElement>('.fb-log-retry');
+    expect(retryBtn).not.toBeNull();
+    retryBtn!.click();
+    await settled(10);
+
+    expect(attempts).toBe(2);
+    expect(m.root.querySelector('.fb-log-name')?.textContent).toBe('admin-diagnostics.jsonl');
+    expect(m.root.querySelector('.fb-log-status')?.textContent).toContain('已附诊断日志');
+    expect(m.root.querySelector('.fb-log-error')?.textContent ?? '').toBe('');
+
+    // 重试补采后随文本一起提交
+    setTextarea(m, '日志重试成功后的反馈');
+    m.submitBtn.click();
+    await settled(10);
+    expect(calls.length).toBe(1);
+    expect(calls[0]?.body?.text).toBe('日志重试成功后的反馈');
+    const logsMeta = (calls[0]?.body as { logs?: Array<{ filename: string; source: string }> }).logs!;
+    expect(logsMeta.length).toBe(1);
+    expect(logsMeta[0]?.filename).toBe('admin-diagnostics.jsonl');
+    expect(logsMeta[0]?.source).toBe('auto');
+  });
+
+  it('删除自动附加的日志后不静默重新附加（重新打开面板也不再采集）', async () => {
+    const { m } = await ready();
+    let providerCalls = 0;
+    m.widget.logProvider = async () => {
+      providerCalls++;
+      return { filename: 'auto.log', blob: new Blob(['auto line'], { type: 'text/plain' }) };
+    };
+
+    m.widget.open();
+    await settled(10);
+    expect(providerCalls).toBe(1);
+    expect(m.root.querySelectorAll('.fb-log-item').length).toBe(1);
+
+    // 用户删除自动附加的日志
+    m.root.querySelector<HTMLButtonElement>('.fb-log-btn-remove')!.click();
+    await settled();
+    expect(m.root.querySelectorAll('.fb-log-item').length).toBe(0);
+
+    // 关闭再打开：不得静默重新调用 provider 附加
+    m.widget.close();
+    await settled();
+    m.widget.open();
+    await settled(10);
+    expect(providerCalls).toBe(1);
+    expect(m.root.querySelectorAll('.fb-log-item').length).toBe(0);
   });
 });

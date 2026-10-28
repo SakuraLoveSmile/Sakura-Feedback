@@ -17,13 +17,20 @@ Base URL：`http(s)://<host>:8787`。所有 JSON 请求必须 `Content-Type: app
 
 ### 每日提交额度
 
-- 每个账号默认每天 **3 次**，按**北京时间**每天零点刷新；所有接入项目与设备共用同一额度。
+- 每个**普通账号**默认每天 **3 次**，按**北京时间**每天零点刷新；所有接入项目与设备共用同一额度。
+- **管理员账号（`role = "admin"`）不受每日次数限制**：服务端不做额度阻断，`quota` 返回不限形态；
+  当日用量仍如实记录（`used` 计数保留，仅用于展示与观测），管理端不设「管理员额度」配置项。
 - 日期与 `resetAt` 均由服务端时钟产生，客户端时间不参与，也不依赖定时清零。
 - 一次反馈被服务端成功保存计一次；网络重试（同 key 同内容）不重复扣次；后台 AI / 归档失败不退次数；
   参数错误与事务失败不计次。
-- 统一额度结构：`{ "dailyLimit": number, "used": number, "remaining": number, "resetAt": "<iso UTC>" }`。
+- 统一额度结构（**双形态**，按账号角色区分）：
+  - 普通账号（数值形态）：`{ "dailyLimit": number, "used": number, "remaining": number, "resetAt": "<iso UTC>" }`
+  - 管理员（不限形态）：`{ "unlimited": true, "used": number, "resetAt": "<iso UTC>" }`——不返回 `dailyLimit` / `remaining`。
 - 登录、会话查询、提交成功与幂等重放响应都带 `user: { id, username, role }` 与 `quota`。
-- 额度用尽返回 `429 daily_quota_exceeded`（**明确未接收**，不扣次），响应携带同结构 `quota`。
+- 额度用尽返回 `429 daily_quota_exceeded`（**明确未接收**，不扣次），响应携带数值形态 `quota`；对管理员不可达。
+- **兼容**：`unlimited` 为新增字段。无法识别该形态的客户端应隐藏额度显示而非展示误导数字——
+  旧版 Flutter 端对缺少数值字段的 `quota` 解析为 `null`（额度行隐藏、不阻断提交）；
+  旧版 Web 组件请升级以获得「不限次数」显示。
 
 ## 契约稳定性
 
@@ -35,12 +42,17 @@ Base URL：`http(s)://<host>:8787`。所有 JSON 请求必须 `Content-Type: app
 
 - 客户端实际用到的端点路径、HTTP 方法与认证类别：`POST /api/feedback`、
   `GET /api/feedback/:id`、`GET /api/feedback/:id/screenshot`、`POST /api/auth/login`、
-  `GET /api/auth/session`、`POST /api/auth/logout`。
+  `GET /api/auth/session`、`POST /api/auth/logout`，以及 v11/v12 对话与附件端点
+  （`GET /api/feedback/mine`、`GET /api/feedback/unread-summary`、`GET /api/feedback/:id/dialogue`、
+  `POST /api/feedback/:id/messages`、`POST /api/feedback/:id/read`、
+  `GET /api/feedback/messages/attachments/:id`、`GET /api/feedback/:id/images/:imageId`、
+  `GET /api/feedback/:id/logs/:logId/download`、`GET /api/feedback/:id/logs/:logId/preview`、
+  `GET /api/features`）。
 - 错误信封 `{ "error": { "code", "message" } }` 与本文档已列出的 `code` 取值；
   `message` 措辞可随版本调整，不作为判等依据。
 - 幂等语义：同一 `idempotencyKey` + 相同内容 → `200` 重放；同 key 不同内容 →
   `409 idempotency_conflict`。
-- multipart 部件名：`metadata` / `screenshot` / `logs`；已文档化的请求与响应字段名和类型；
+- multipart 部件名：`metadata` / `screenshot` / `logs` / `images`；已文档化的请求与响应字段名和类型；
   `status`、`collectionState` 既有取值的含义。
 
 **兼容变更（任何版本都可能出现，客户端必须容忍）**
@@ -234,7 +246,7 @@ Bearer 令牌 → `403 "unauthorized"`、跨源 `Origin` → `403 "origin_mismat
 - `201 { "feedbackId": string, "status": "received", "user", "quota", "collectionState" }`
 - `200 { "feedbackId", "status", "replayed": true, "user", "quota", "collectionState" }`（同 key 同内容，幂等重放；**不扣次数**，额度已满也允许）
 - `409 "idempotency_conflict"`（同 key 不同内容；或同 key 被**其他账号**占用 —— 统一通用冲突，不透露原记录）
-- `429 "daily_quota_exceeded"`（当日额度用尽，明确**未接收**；响应携带同结构 `quota`，**不创建软件、不扣费**）
+- `429 "daily_quota_exceeded"`（当日额度用尽，明确**未接收**；响应携带数值形态 `quota`，**不创建软件、不扣费**；仅普通账号可达）
 - `410 "gone"`（该 `idempotencyKey` 曾对应的反馈已被管理员**彻底删除**；命中最小删除凭据，不新建、不扣次）
 - `401` / `400 "invalid_request"` / `400 "origin_not_allowed"` / `413 "too_large"` / `429 "rate_limited"`
 
@@ -266,9 +278,13 @@ POST 提交与 `GET /api/feedback/:id` 响应都会带上该字段（`GET` 按�
 组件在收到等待态后应停止轮询并保留手动刷新——等待不是「处理中」。
 自动模式下「等待自动重试」属于 `queued`（组件继续跟踪），**不得**显示为等待人工归档。
 
-**multipart 变体**（携带截图与/或日志附件）：`Content-Type: multipart/form-data`，总请求体上限 10 MiB。
-- 字段 `metadata`：同上 JSON，另加可选 `capture`（截图元数据）与可选 `logs`（日志附件描述符数组）。
+**multipart 变体**（携带截图与/或日志附件）：`Content-Type: multipart/form-data`。
+- 旧单图变体总请求体上限 10 MiB；携带 `images` 部件的多图变体总请求体上限 **32 MiB**（v12）。
+- 字段 `metadata`：同上 JSON，另加可选 `capture`（截图元数据）、可选 `logs`（日志附件描述符数组）
+  与可选 `images`（有序图片描述符数组，v12）。
 - 字段 `screenshot`（可选）：PNG 文件（上限 2048px / 400 万像素 / 5 MiB）。
+- 字段 `images`（可选，可重复，v12）：图片文件二进制流，按顺序与 `metadata.images` 描述符
+  一对一对应；**与 `screenshot` 同时出现一律 `400 "invalid_request"`**（避免重复附件）。
 - 字段 `logs`（可选，可重复）：日志文件二进制流（多部分字段名均为 `logs`，按顺序与 `metadata.logs` 描述符一对一对应）。
 
 `capture` 仅接受白名单字段，全部可选：
@@ -278,9 +294,16 @@ POST 提交与 `GET /api/feedback/:id` 响应都会带上该字段（`GET` 按�
 | `viewportWidth` / `viewportHeight` | number | 捕获时的**逻辑 CSS 视口**尺寸 |
 | `pixelWidth` / `pixelHeight` | number | 最终 PNG 的**实际输出像素**尺寸（1..65535 整数，成对出现；与逻辑视口区分；旧客户端可缺省） |
 | `capturedAt` | string | 截图时间 |
-| `releasePoint` | `{x,y}` | 0..1 归一化落点 |
+| `releasePoint` | `{x,y}` | 0..1 归一化落点（始终相对**原始捕获视口**，与是否局部截图无关） |
+| `region` | `{x,y,width,height}` | 可选，**局部截图区域**：0..1 归一化矩形，相对原始捕获视口；`x+width≤1`、`y+height≤1`、宽高为正。缺省表示整个视口（旧记录与整窗截图兼容） |
 
 未知字段忽略；输出像素出现但不完整或不是 1..65535 整数时整条请求 `400 "invalid_request"`。早期实现曾接受 `outputWidth`/`outputHeight` 作为同一字段的别名，命名定稿后已作废：现按未知字段忽略，规范名只有 `pixelWidth`/`pixelHeight`。AI 归档提示优先使用输出像素尺寸，逻辑视口仅作回退。服务端另行测量并持久化真实 PNG 尺寸（管理端 `screenshot.width/height` 为准），PNG 本身仍受 2048px / 400 万像素 / 5MiB 限制。
+
+`region` 一旦出现即必须完整合法：缺字段、含非数字/非有限数、宽高为非正数、越出 0..1 视口范围一律 `400 "invalid_request"`，**绝不静默丢弃、也绝不回退成整窗**（客户端取消或失败时不提交该次截图，而不是提交一张与预期不同的图）。局部截图语义：
+
+- `viewportWidth/Height` 仍是**原始捕获视口**的逻辑尺寸，`releasePoint` 仍相对该视口；`pixelWidth/Height` 是**裁剪后**最终 PNG 的输出像素。
+- AI 整理时，带 `region` 的落点会被换算为裁剪区域内的归一化坐标；**落点不在最终裁剪范围内时不提供「用户关注落点」提示**。
+- 不带 `region` 的旧客户端与旧记录行为完全不变。
 
 `metadata.logs` 数组（可选）：
 
@@ -290,12 +313,34 @@ POST 提交与 `GET /api/feedback/:id` 响应都会带上该字段（`GET` 按�
 | `source` | `"auto"` \| `"manual"` | 来源（组件/宿主自动采集 或 用户手动选择） |
 | `sha256` | string | 文件内容的 SHA-256 十六进制摘要（64 位小写） |
 
+`images`（v12 可选，与 `screenshot` 互斥）：有序图片描述符数组，每项：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `id` | string | 客户端生成的稳定 ID（1..64 字符），同一次提交内唯一；编辑保存替换附件内容时 ID 可复用 |
+| `source` | `"capture"` \| `"manual"` \| `"edited"` | 来源：自动截图 / 用户手动添加 / 经编辑器保存 |
+| `filename` | string | 文件名（仅基名），扩展名仅限 `.png`, `.jpg`, `.jpeg`, `.webp` |
+| `sha256` | string | 该图片二进制内容的 SHA-256（64 位小写） |
+| `mime` | `"image/png"` \| `"image/jpeg"` \| `"image/webp"` | 声明格式，服务端校验魔数一致 |
+
+校验规则（违规整条请求拒绝，零落盘且不扣额度）：
+- 数量：至多 **5** 张；`images` 部件数量与 `metadata.images` 描述符数量不一致 → `400 "invalid_request"`。
+- 格式：仅限 PNG / JPEG / WebP 静态图片（魔数校验；动图 WebP 拒绝），返回 `400 "invalid_image"`。
+- 尺寸与体积：每张最长边 ≤2048px、≤400 万像素、≤5 MiB，超出返回 `413 "too_large"`。
+- 完整性：二进制 SHA-256 必须与描述符 `sha256` 一致，否则 `400 "invalid_image"`。
+- `images` 与 `screenshot` 同时出现 → `400 "invalid_request"`；`metadata.images` 出现但缺部件、或部件出现但缺描述符 → `400 "invalid_request"`。
+- 数组顺序即展示顺序，服务端按序持久化 `sort` 序号。
+
+幂等判定（v12）：请求内容哈希综合计算 `text`、`context`、图片列表（**有序**，逐项 sha256）与全部 `logs` 的摘要。
+携带 `screenshot` 的旧式请求哈希算法保持不变（兼容既有幂等键）；`images` 顺序或任一内容变化即视为新内容。
+回复（`POST /api/feedback/:id/messages`）幂等同样比对附件摘要（v12 修复：此前仅比对文本）。
+
 日志附件校验规则（违规整条请求拒绝，零落盘且不扣减额度）：
 - 数量：每个反馈至多 3 份日志文件，超出返回 `400 "invalid_log"`。
 - 单文件体积：单份日志不得为空（0 字节）且不得超过 1 MiB（1,048,576 字节），超出返回 `413 "too_large"`。
 - 格式与编码：仅限 `.log`, `.txt`, `.json`, `.jsonl` 扩展名，且内容必须为有效 UTF-8 文本编码，非法格式/编码返回 `400 "invalid_log"`。
 - 完整性：二进制部分的 SHA-256 必须与 `metadata.logs` 中的 `sha256` 完全一致，且部分数量与描述符数量必须严格一致，否则返回 `400 "invalid_log"`。
-- 幂等判定：请求内容哈希综合计算 `text`、`context`、`screenshot` 与全部 `logs` 的摘要。日志内容发生任何改变即视为新内容；相同幂等键再次提交相同内容触发幂等重放（`200`，`replayed: true`）。
+- 幂等判定：旧式（无 `images`）请求哈希综合计算 `text`、`context`、`screenshot` 与全部 `logs` 的摘要，算法与既有版本一致；携带 `images` 的请求按上一段 v12 规则计算。日志或图片内容发生任何改变即视为新内容；相同幂等键再次提交相同内容触发幂等重放（`200`，`replayed: true`）。
 
 ### GET /api/feedback/:id （Bearer 或 Cookie）
 `200 { "id", "status", "createdAt", "updatedAt", "errorSummary"?: string|null, "kaneoUrl"?: string|null,
@@ -590,6 +635,117 @@ App 对象：
 - `GET /api/admin/feedback/:id/logs/:logId/preview` → 在浏览器内直接预览纯文本日志内容，`Content-Type: text/plain; charset=utf-8`，`Content-Disposition: inline`。
 - `GET /api/admin/feedback/:id/logs/:logId` → 便捷预览路由，行为等价于 `/preview`。
 
+## 简化 Issue 对话与补充闭环（v11 契约）
+
+### 独立问题状态 `issueStatus`
+问题状态完全独立于流水线同步状态（`status`）和本地管理生命周期（`mgmtState`）：
+- 取值：`open`（开启）/ `waiting_user`（等待用户补充）/ `waiting_admin`（待管理员处理）/ `resolved`（已解决）。
+- **用户端统一显示文案（v12 口径）**：`open` →「待处理」、`waiting_user` →「待补充」、
+  `waiting_admin` →「待管理员回复」、`resolved` →「已解决」。「同步到 Kaneo」等归档进度
+  **不得**显示为「问题已解决」；管理端可使用管理视角文案，但状态语义与取值不变。
+- 默认状态：初始提交及历史数据升级默认为 `open`；不把「已同步到 Kaneo」推断为 `resolved`。
+- 自动流转：已解决的反馈收到用户回复后，**自动恢复为 `waiting_admin`**。
+- 管理端操作：管理员在详情页可执行「回复」（保持或转为 `waiting_user`）、「发送并请求补充」（转为 `waiting_user`）、「标记已解决」（转为 `resolved`，v12 起必须填写处理说明）或重开问题。
+
+### 对话消息与附件模型
+- 数据库表：`feedback_messages`、`feedback_message_attachments`。
+- 单条反馈内维护单调递增的序号 `seq`（1, 2, 3...）与乐观并发版本 `dialogueVersion`。
+- 附件复用现有规则：截图（PNG，≤5MiB / 2048px）、日志（≤3份，单份≤1MiB UTF-8 文本）。
+- 用户回复支持仅发送文本、仅发送附件或图文混合；回复不消耗新建反馈配额，受独立频率限制（如 10 次/分/用户）。
+- 幂等支持：用户回复携带 `idempotencyKey`，网络重试返回 `200` 且不重复入库。
+
+### 已读游标与未读提醒（不产生邮件或系统推送）
+- 数据库表：`feedback_read_cursors`，记录每个账号在每个反馈中已读的最高序号 `lastReadSeq`。
+- 用户未读：该反馈存在 `seq > lastReadSeq` 且发送者为管理员（`sender_type IN ('admin', 'system')`）的消息。
+- 管理员未读：该反馈存在 `seq > lastReadSeq` 且发送者为用户（`sender_type = 'user'`）的消息。
+- 游标上报：`POST /api/feedback/:id/read` 与 `POST /api/admin/feedback/:id/read` 接收 `{ "lastReadSeq": number }`，服务端取 `max(last_read_seq, input.lastReadSeq)` 写入，旧确认不覆盖新消息。
+- 未读摘要：`GET /api/feedback/unread-summary?appId=` 返回 `{ unreadFeedbacksCount: number, totalUnreadMessages: number }`。
+- 轮询策略：面板打开时每 10 秒刷新；已登录但面板关闭时每 30 秒查未读摘要；面板销毁、隐藏或退出登录停止。
+
+### Kaneo 撤销闭环与重新归档（v11 规则，v12 起停止派发）
+
+> **v12 变更**：用户回复**不再**触发 Kaneo 任务删除。原 Kaneo 任务与链接保持不变，"已同步到
+> Kaneo"不推断为"问题已解决"。用户回复仍把 `issue_status` 置为 `waiting_admin`、`mgmt_state`
+> 移回 `inbox`、`resume_paused` 置 `1`（暂停自动归档），但不再登记新的撤销任务。
+>
+> 升级迁移把存量 `pending` / `processing` 撤销任务标记为 `cancelled`（停止派发，行与审计保留，
+> 供人工核对）；`uncertain` / `failed` 保留原状，可由管理员在后台核对或重试；
+> 已 `confirmed` 的删除**不自动重建** Kaneo 任务。
+
+- v11 行为（历史记录）：任何已同步到 Kaneo 或正在归档的反馈收到用户回复后：
+  1. 本地事务内：保存消息，`issue_status` 置为 `waiting_admin`，`mgmt_state` 移回 `inbox`，`resume_paused` 置为 `1`（暂停自动归档）。
+  2. 登记持久化撤销任务 `kaneo_cancellation_tasks`（固定当时归档的目标基址、项目与任务 ID）。
+  3. 后台撤销 Worker 执行 Kaneo 任务删除（`DELETE /api/task/{id}`）：
+     - `200`：删除成功，标记 `confirmed`。
+     - `404`：由于 Kaneo 实际实现与文档差异，立即使用 `GET /api/task/{id}` 核对。若任务确实不存在，标记 `confirmed`；若任务仍存在，标记失败。
+     - 超时、断网、`5xx`：标记 `uncertain`（待核对），持久化退避重试。
+     - 鉴权失败或配置错误：标记 `failed`，由管理员在后台重试或修正。
+- 确认删除后清除有效远端链接，归档轮次 `archive_round` 递增。
+- 重新归档：必须在旧任务确认已删除后方可进行。新轮次归档打包初始反馈、双方全部对话记录及全部附件（长内容分段同步），生成新任务链接。
+
+### API 接口清单
+- **用户端接口（需 Bearer 令牌）**：
+  - `GET /api/feedback/mine?appId=&page=1&limit=20&issueStatus=`：用户历史列表，按 `lastActivityAt` 倒序。
+    - 每条 `items` 新增 `appName`（所属项目显示名，`apps` 表无对应行或已软删时为 `null`，前端回退显示 `appId`）、`imageCount`（图片附件总数 = `feedback_images` 与 `feedback_screenshots` 两表计数之和；旧截图按 `feedback_id` 主键每反馈至多 1 行，无多轮归档重复）、`logCount`（日志附件总数 = `feedback_logs` 行数）。
+  - `GET /api/feedback/unread-summary?appId=`：未读徽标摘要。
+  - `GET /api/feedback/:id/dialogue`：获取完整 Issue 时间线及消息附件列表（限本人）。
+    - v12：`feedback.images` 返回初始反馈的有序图片列表（每项 `{ id, sort, source, mime, filename, byteSize, sha256, width, height, createdAt }`）；
+      历史单图记录经兼容读取进入同一列表（`screenshot` 元数据仍保留返回）。
+      消息附件 `kind` 新增 `"image"`（带 `mime` / `width` / `height`）。
+  - `POST /api/feedback/:id/messages`：用户回复（纯文本或 multipart，含可选图片/日志），写入幂等。
+    - v12：multipart 增加 `metadata`（JSON：`{ text, idempotencyKey?, images?: [...] }`）与 `images` 部件（≤5，规则同首次提交）；旧 `screenshot`/`logs` 字段继续接受，与 `images` 互斥。回复总请求体上限 32 MiB。
+  - `POST /api/feedback/:id/read`：用户标记已读 `{ "lastReadSeq": number }`。
+  - `GET /api/feedback/messages/attachments/:id`：下载/查看消息附件流（v12：`kind="image"` 按 `mime` 返回 `image/*`）。
+  - `GET /api/feedback/:id/images/:imageId`：v12 新增，下载/查看初始反馈某张图片流（按 `mime` 返回，`no-store`）。
+  - `GET /api/feedback/:id/logs/:logId/download`：v12 新增，用户下载本人反馈的日志附件（限本人，管理员可读全量）；`GET /api/feedback/:id/logs/:logId/preview` 内联预览纯文本。
+- **管理端接口（需管理员 Cookie + 同源）**：
+  - `GET /api/admin/feedback/:id/dialogue`：管理员查看 Issue 时间线与 Kaneo 撤销状态；v12 同样返回 `feedback.images` 有序列表。
+  - `GET /api/admin/feedback/:id/images/:imageId`：v12 新增，管理员查看初始反馈某张图片。
+  - `POST /api/admin/feedback/:id/messages`：管理员回复 `{ "text", "issueStatusAction": "reply"|"request_info"|"resolve", "resolutionNote"?: string, "expectedDialogueVersion"?: number }`。
+    - v12：`issueStatusAction === "resolve"` 时 `resolutionNote` **必填**（1..2000 字符），作为处理说明随解决动作入库并对用户可见；`request_info`/`reply` 可携带可选 `resolutionNote`。
+  - `POST /api/admin/feedback/:id/issue-status`：修改问题状态 `{ "issueStatus": "open"|"waiting_user"|"waiting_admin"|"resolved", "resolutionNote"?: string, "expectedDialogueVersion"?: number }`。
+    - v12：`issueStatus === "resolved"` 时 `resolutionNote` **必填**；处理说明在用户端对话中以系统/管理员消息形式可见。
+  - `POST /api/admin/feedback/:id/read`：管理员标记已读。
+  - `POST /api/admin/feedback/:id/cancellation/retry`：重试/核对 Kaneo 撤销任务（v12 起仅用于存量 `uncertain`/`failed` 人工核对）。
+- **能力探测**：
+  - `GET /api/features` → `{ "dialogue": true, "images": 5 }`。
+  - `GET /api/auth/session` 响应扩展 `capabilities: { "dialogue": true, "images": 5 }`。
+    `images` 为最大图片数；旧服务无此字段（或为 `true` 之外的缺失形态）时，新组件保持**单图模式**
+    并在界面提示「升级服务端以支持多图」，不得静默丢弃其余图片。
+
+## 多图附件与客户端取图要求（v12 增量）
+
+### 图片列表统一视图
+
+- 初始反馈图片持久化在 `feedback_images` 子表（`sort` 保序）；历史 `feedback_screenshots`
+  单图记录经**兼容读取**进入同一列表（读取接口统一返回 `feedback.images`，旧字段
+  `hasScreenshot`/`screenshot` 元数据保留返回，不迁移历史数据）。
+- 回复消息图片与日志共用 `feedback_message_attachments`，`kind` 新增 `"image"`，
+  图片附件带 `mime`/`width`/`height`。
+- AI 内容整理、管理端详情、用户对话详情与 Kaneo 归档均消费**完整图片列表**；
+  归档按图记录上传进度（`attachments` 记录以稳定 `id` 为键），失败恢复不重复上传
+  已确认附件、不重复创建任务。
+- `screenshot.png` 兼容名：单图模式下 `GET .../screenshot` 继续返回唯一图片。
+
+### 客户端附件加载（Bearer，跨源可用）
+
+- 图片/日志附件 URL 本身**不携带凭据**：组件一律用 `Authorization: Bearer <token>` 主动
+  `fetch` 后转本地对象 URL（Web）或字节流（Flutter `Image.memory`）渲染，**不得**把 URL
+  直接挂到 `<img>`/`<a>`/`Image.network`（跨源下必然 401）。
+- 附件加载失败显示占位与「重试」，不阻塞消息文本渲染。
+
+### 轮询与草稿保护（v12 口径）
+
+- 应用在前台且已登录：面板**关闭**时每 30s 查询 `unread-summary`；对话详情**打开**时每 10s
+  刷新 `dialogue`。后台（页面隐藏/应用退后）、退出登录、组件销毁时停止。仅组件内提醒。
+- 轮询刷新**不得清空回复草稿**，**不得强制改变滚动位置**（消息增量追加或原位更新；
+  仅当用户已在底部时跟随新消息滚到底）。
+
+### 处理说明 `resolutionNote`
+
+- 管理员标记解决时必填（1..2000 字符），随 `issueStatus` 变更持久化；
+  在用户端对话中作为该状态变更消息的一部分展示。
+
 ## 面板内登录（Web 组件 / Flutter，当前方式）
 
 1. 未登录也可在面板内编辑反馈文字与截图；点击主按钮「登录并提交」。
@@ -628,7 +784,12 @@ App 对象：
 **组件真正用到的端点**开放无凭据跨域，并对任意**合法 http(s) Origin** 回显：
 
 - 允许跨源的路径仅限：`POST /api/auth/login`、`POST /api/auth/logout`、`GET /api/auth/session`、
-  `POST /api/feedback`、`GET /api/feedback/:id`、`GET /api/feedback/:id/screenshot`；
+  `POST /api/feedback`、`GET /api/feedback/:id`、`GET /api/feedback/:id/screenshot`、
+  `GET /api/feedback/mine`、`GET /api/feedback/unread-summary`、`GET /api/feedback/:id/dialogue`、
+  `POST /api/feedback/:id/messages`、`POST /api/feedback/:id/read`、
+  `GET /api/feedback/messages/attachments/:id`、`GET /api/feedback/:id/images/:imageId`、
+  `GET /api/feedback/:id/logs/:logId/download`、`GET /api/feedback/:id/logs/:logId/preview`、
+  `GET /api/features`；
 - 回显 `access-control-allow-origin: <请求 Origin>` 与 `access-control-max-age: 300`，
   **绝不回显 `access-control-allow-credentials`**——组件一律使用 Bearer + `credentials: omit`；
 - **跨源请求一律不认后台 Cookie**：携带 `Origin` 且与服务 origin 不一致时，Cookie 不参与鉴权

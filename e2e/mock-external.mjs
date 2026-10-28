@@ -42,7 +42,9 @@ const KANEO_PORT = Number(process.env.E2E_KANEO_PORT || 8898);
 const STAGES = ["task", "presign", "put", "finalize", "comment"];
 
 function emptyCalls() {
-  return { task: 0, presign: 0, put: 0, finalize: 0, comment: 0 };
+  // `taskDelete`（v12 新增计数）：v12 起用户回复不再派发 Kaneo 任务删除，
+  // 该计数让 e2e 能断言“一次 DELETE /api/task 都没发生”，而不是只看任务还在不在。
+  return { task: 0, presign: 0, put: 0, finalize: 0, comment: 0, taskDelete: 0 };
 }
 
 const state = {
@@ -50,6 +52,7 @@ const state = {
   kaneoFail: null, // null | "uncertain" | "definite"（旧的任务创建阶段开关，保留兼容）
   tasks: [],
   taskSeq: 0,
+  taskDeletes: [], // [{ taskId, at }]：收到的 DELETE /api/task/:id 请求（v12 期望恒为空）
   aiCalls: [],
   assets: new Map(), // key -> { bytes, contentType }
   comments: new Map(), // taskId -> [{ id, content }]
@@ -283,6 +286,7 @@ http
         // ---- 本轮新增（精确阶段观测 + 故障注入）----
         fail: failState(),
         calls: { ...state.calls },
+        taskDeletes: state.taskDeletes,
         presigns: state.presigns,
         putAttempts: state.putAttempts,
         finalizeAttempts: state.finalizeAttempts,
@@ -668,6 +672,15 @@ http
         return holdResponse(res, "task", { id, projectId: taskId, note: "hold-after-write" });
       }
       return json(res, 200, { id, number: state.taskSeq, ...body });
+    }
+    // ---- v12：Kaneo 任务删除观测点 ----
+    // 记录（不改行为：仍返回 404，与删除端点不存在时一致）。v12 之后用户回复不再
+    // 触发撤销任务，因此任何 DELETE 都是回归信号，e2e 直接断言 taskDeletes 为空。
+    match = p.match(/^\/api\/task\/([^/]+)$/);
+    if (match && req.method === "DELETE") {
+      state.calls.taskDelete += 1;
+      state.taskDeletes.push({ taskId: match[1], at: new Date().toISOString() });
+      return json(res, 404, { error: "not found" });
     }
     if (p === "/api/search/" || p === "/api/search") {
       const q = url.searchParams.get("q") ?? "";

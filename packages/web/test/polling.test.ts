@@ -58,9 +58,13 @@ describe('轮询 GET /api/feedback/:id', () => {
     expect(archived?.href).toBe('https://kaneo.test/task/42');
     expect(archived?.target).toBe('_blank');
 
-    const before = calls.length;
-    await vi.advanceTimersByTimeAsync(120000); // 终态后不再轮询
-    expect(calls.length).toBe(before);
+    // v12：终态后**记录轮询**停止；已登录且页面可见时 unread-summary 轮询仍在
+    // 运行（面板关闭也保留徽标供数）——断言只针对该记录的状态请求。
+    const recordGets = () =>
+      calls.filter((c) => c.method === 'GET' && /\/api\/feedback\/fb-1$/.test(c.url)).length;
+    const before = recordGets();
+    await vi.advanceTimersByTimeAsync(120000); // 终态后不再轮询该记录
+    expect(recordGets()).toBe(before);
   });
 
   it('轮询到 failed：说明原话已保存，引导管理页处理，不把原话作为新反馈再次提交', async () => {

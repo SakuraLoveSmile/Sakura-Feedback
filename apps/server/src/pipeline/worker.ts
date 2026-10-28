@@ -4,28 +4,36 @@ import {
   type AppRow,
   authorizeArchiveInTx,
   clearAutoBlocked,
+  confirmCancellationInTx,
   type FeedbackRow,
   findAiPendingCandidates,
   findAutoArchiveCandidates,
   findNextAutoRetryAt,
+  findNextCancellationRetryAt,
   finishAiOrganization,
   getApp,
   getAppSource,
   getFeedback,
+  getFeedbackImages,
   getFeedbackLogs,
   getFeedbackScreenshot,
   getFeedbackScreenshotMeta,
+  getPendingCancellationTasks,
   getUserById,
   isAppRuleComplete,
   isManuallyHandled,
+  type KaneoCancellationTaskRow,
+  listFeedbackMessages,
   markAutoBlocked,
   parseAppLabelIds,
   resolveOutputPixels,
+  updateCancellationTaskStatus,
   updateFeedback,
 } from "../db/repos.ts";
 import { type AiClient, AiError, prepareLogEvidence } from "../services/ai.ts";
 import { resolveArchiveTarget } from "../services/archive-target.ts";
 import {
+  buildImageComment,
   buildLogComment,
   buildScreenshotComment,
   buildTaskDescription,
@@ -51,6 +59,7 @@ import {
   checkArchiveTarget,
   commentMarker,
   decryptUploadCredentials,
+  imageCommentMarker,
   loadArchiveData,
   logCommentMarker,
   MAX_SAME_KEY_RECOVERIES,
@@ -101,18 +110,24 @@ function getLogContentType(filename: string): string {
   return "text/plain";
 }
 
-/** 归档完成判定：截图 + 全部日志 + 全部目标标签都已确认，缺一不可。 */
+/** 归档完成判定：截图（或 v12 全部有序图片）+ 全部日志 + 全部目标标签都已确认，缺一不可。 */
 function isFullyArchived(
   data: ArchiveDataV3 | null,
   hasScreenshot: boolean,
   logs: { id: string }[],
   labelIds: string[] = [],
+  /** v12：有序图片附件（feedback_images 的稳定 id 列表）。 */
+  images: { id: string }[] = [],
 ): boolean {
   if (!data) return false;
   if (hasScreenshot) {
     const s = data.attachments?.screenshot;
     const sConfirmed = s?.comment?.outcome === "confirmed" || data.comment?.outcome === "confirmed";
     if (!sConfirmed) return false;
+  }
+  for (const img of images) {
+    const i = data.attachments?.[img.id];
+    if (i?.comment?.outcome !== "confirmed") return false;
   }
   for (const log of logs) {
     const l = data.attachments?.[log.id];
@@ -487,7 +502,7 @@ export function createWorker(deps: WorkerDeps) {
       return false;
     }
     const source = getAppSource(db, app.id, row.source_origin);
-    if (!source || source.status !== "confirmed") {
+    if (source?.status !== "confirmed") {
       markAutoBlocked(db, feedbackId, "config", "来源尚未确认，确认后会自动补处理", 0, now());
       return false;
     }
@@ -620,8 +635,11 @@ export function createWorker(deps: WorkerDeps) {
     try {
       clearRetryTimer();
       if (stopped) return;
-      const next = findNextAutoRetryAt(deps.db);
-      if (next === null) return;
+      const nextArchive = findNextAutoRetryAt(deps.db);
+      const nextCancel = findNextCancellationRetryAt(deps.db);
+      const candidates = [nextArchive, nextCancel].filter((t): t is number => t !== null);
+      if (candidates.length === 0) return;
+      const next = Math.min(...candidates);
       retryTimer = setTimer(
         () => {
           retryTimer = null;
@@ -649,11 +667,77 @@ export function createWorker(deps: WorkerDeps) {
     if (!scanRunning) void runScanLoop();
   }
 
+  async function processCancellationTask(task: KaneoCancellationTaskRow): Promise<void> {
+    if (!tryAcquire(task.feedback_id)) return;
+    try {
+      updateCancellationTaskStatus(deps.db, task.id, {
+        status: "processing",
+        incAttempts: true,
+      });
+
+      const currentSettings = deps.snapshotKaneoSettings();
+      if (!currentSettings) {
+        updateCancellationTaskStatus(deps.db, task.id, {
+          status: "failed",
+          lastError: "Kaneo 连接未配置，无法执行撤销",
+        });
+        return;
+      }
+
+      // 固定旧任务 ID、原连接和项目快照。更换连接配置不能把删除请求转向其他服务。
+      const currentNorm = normalizeKaneoApiBase(currentSettings.baseUrl);
+      if (task.target_api_base && currentNorm !== task.target_api_base) {
+        updateCancellationTaskStatus(deps.db, task.id, {
+          status: "failed",
+          lastError: `Kaneo 连接配置已改变（原目标: ${task.target_api_base}，当前: ${currentNorm}），已拒绝执行删除`,
+        });
+        return;
+      }
+
+      const boundClient = deps.kaneo.bind(currentSettings);
+      try {
+        const delRes = await boundClient.deleteTask(task.kaneo_task_id);
+        if (delRes.ok) {
+          confirmCancellationInTx(deps.db, task.feedback_id, task.archive_round, new Date(now()).toISOString());
+          console.log(`[worker] Kaneo 任务撤销成功: 反馈 ${task.feedback_id} 任务 ${task.kaneo_task_id}`);
+        }
+      } catch (err) {
+        const msg = (err as Error).message?.slice(0, 200) || String(err);
+        if (err instanceof KaneoUncertainError) {
+          // 退避重试: 2s, 4s, 8s, 最大 60s
+          const delayMs = Math.min(60_000, 2000 * 2 ** Math.min(5, task.attempts));
+          const nextAt = new Date(now() + delayMs).toISOString();
+          updateCancellationTaskStatus(deps.db, task.id, {
+            status: "uncertain",
+            lastError: msg,
+            nextAttemptAt: nextAt,
+          });
+          console.warn(`[worker] Kaneo 任务撤销结果不确定: 反馈 ${task.feedback_id}，将于 ${nextAt} 重试: ${msg}`);
+        } else {
+          updateCancellationTaskStatus(deps.db, task.id, {
+            status: "failed",
+            lastError: msg,
+          });
+          console.error(`[worker] Kaneo 任务撤销明确失败: 反馈 ${task.feedback_id}: ${msg}`);
+        }
+      }
+    } finally {
+      release(task.feedback_id);
+    }
+  }
+
   async function runScanLoop(): Promise<void> {
     if (scanRunning) return;
     scanRunning = true;
     const attempted = new Set<string>();
     try {
+      // 1. 处理待撤销的 Kaneo 任务
+      const cancelTasks = getPendingCancellationTasks(deps.db, 20);
+      for (const ct of cancelTasks) {
+        if (stopped) break;
+        await processCancellationTask(ct);
+      }
+
       // 一批处理结束后继续查询，直到没有“尚未在本轮尝试过”的可执行候选：
       // 51 条 = 50 + 1，121 条 = 50 + 50 + 21，批次上限不限制总吞吐。
       while (!stopped) {
@@ -757,30 +841,62 @@ export function createWorker(deps: WorkerDeps) {
         updateFeedback(db, feedbackId, { status: "processing" });
         const screenshot = getFeedbackScreenshot(db, feedbackId);
         const screenshotMeta = screenshot ? getFeedbackScreenshotMeta(db, feedbackId) : null;
+        // v12：有序多图（feedback_images）；旧单图记录仍走 feedback_screenshots。
+        const images = getFeedbackImages(db, feedbackId);
         const logs = getFeedbackLogs(db, feedbackId);
         const logEvidence = logs.length > 0 ? prepareLogEvidence(logs) : null;
+        // 捕获元数据挂在 source='capture' 的首张图上（缺省回退 images[0]）。
+        const captureMeta = (() => {
+          const target = images.find((i) => i.source === "capture") ?? images[0];
+          if (!target?.capture_json) return null;
+          try {
+            return JSON.parse(target.capture_json) as {
+              releasePoint?: { x: number; y: number };
+              viewportWidth?: number;
+              viewportHeight?: number;
+              pixelWidth?: number;
+              pixelHeight?: number;
+              region?: { x: number; y: number; width: number; height: number };
+            };
+          } catch {
+            return null;
+          }
+        })();
+        const visual =
+          images.length > 0
+            ? {
+                images: images.map((i) => ({ buffer: Buffer.from(i.bytes), mime: i.mime, filename: i.filename })),
+                releasePoint: captureMeta?.releasePoint,
+                region: captureMeta?.region,
+                viewport:
+                  captureMeta?.viewportWidth || captureMeta?.viewportHeight
+                    ? { width: captureMeta.viewportWidth, height: captureMeta.viewportHeight }
+                    : undefined,
+                outputPixels:
+                  captureMeta?.pixelWidth && captureMeta?.pixelHeight
+                    ? { width: captureMeta.pixelWidth, height: captureMeta.pixelHeight }
+                    : undefined,
+              }
+            : screenshot
+              ? {
+                  images: [{ buffer: Buffer.from(screenshot.png_blob), mime: "image/png" }],
+                  releasePoint: screenshotMeta?.capture?.releasePoint,
+                  region: screenshotMeta?.capture?.region,
+                  viewport: screenshotMeta?.capture
+                    ? {
+                        width: screenshotMeta.capture.viewportWidth,
+                        height: screenshotMeta.capture.viewportHeight,
+                      }
+                    : undefined,
+                  // 输出像素优先（pixelWidth/pixelHeight，兼容 outputWidth/outputHeight 别名）
+                  outputPixels: resolveOutputPixels(screenshotMeta?.capture),
+                }
+              : null;
         let lastErr: AiError | null = null;
         for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
           updateFeedback(db, feedbackId, { attempt_count: row.attempt_count + attempt });
           try {
-            processed = await deps.ai.organize(
-              row.text,
-              screenshot
-                ? {
-                    pngBuffer: Buffer.from(screenshot.png_blob),
-                    releasePoint: screenshotMeta?.capture?.releasePoint,
-                    viewport: screenshotMeta?.capture
-                      ? {
-                          width: screenshotMeta.capture.viewportWidth,
-                          height: screenshotMeta.capture.viewportHeight,
-                        }
-                      : undefined,
-                    // 输出像素优先（pixelWidth/pixelHeight，兼容 outputWidth/outputHeight 别名）
-                    outputPixels: resolveOutputPixels(screenshotMeta?.capture),
-                  }
-                : null,
-              logEvidence,
-            );
+            processed = await deps.ai.organize(row.text, visual, logEvidence);
             break;
           } catch (err) {
             const aiErr =
@@ -1051,6 +1167,7 @@ export function createWorker(deps: WorkerDeps) {
     if (!taskId) {
       const context = row.context_json ? (JSON.parse(row.context_json) as Record<string, string>) : {};
       const logs = getFeedbackLogs(db, row.id);
+      const messages = listFeedbackMessages(db, row.id);
       const description = buildTaskDescription(row.id, processed, {
         appName: app.name,
         appId: app.app_id,
@@ -1063,6 +1180,14 @@ export function createWorker(deps: WorkerDeps) {
           source: l.source,
           byteSize: l.byte_size,
           sha256: l.sha256,
+        })),
+        messages: messages.map((m) => ({
+          seq: m.seq,
+          senderType: m.sender_type,
+          senderName: m.sender_name,
+          text: m.text,
+          createdAt: m.created_at,
+          attachments: m.attachments.map((a) => ({ filename: a.filename, kind: a.kind })),
         })),
       });
 
@@ -1222,9 +1347,11 @@ export function createWorker(deps: WorkerDeps) {
       }
     }
 
-    // 检查是否有附件（截图或日志）需要归档（已在阶段前置检查中读取）
+    // 检查是否有附件（截图/多图/日志）需要归档（已在阶段前置检查中读取）
     const logs = getFeedbackLogs(db, row.id);
-    if (!screenshot && logs.length === 0) {
+    // v12：有序图片附件（与旧单截图互斥；统一按稳定 id 逐图记录上传进度）。
+    const images = getFeedbackImages(db, row.id);
+    if (!screenshot && images.length === 0 && logs.length === 0) {
       // 纯文字反馈：任务 + 标签全部确认后才代表归档完成
       if (!isFullyArchived(cur, false, [], target.labelIds ?? [])) {
         updateFeedback(db, row.id, {
@@ -1609,6 +1736,318 @@ export function createWorker(deps: WorkerDeps) {
         }
       }
 
+      // 1.5 v12 有序图片归档：逐图按稳定 id 记录上传/资产/评论进度，
+      //     失败恢复沿用既有断点语义（不重复上传、不重复建任务/评论）。
+      for (const img of images) {
+        let imgAtt: ArchiveAttachmentRecord = cur.attachments?.[img.id] ?? {
+          id: img.id,
+          kind: "image",
+          filename: img.filename,
+          byteSize: img.byte_size,
+          sha256: img.sha256,
+        };
+        if (imgAtt.comment?.outcome === "confirmed") continue;
+
+        const imgMarker = imageCommentMarker(row.id, img.id, img.sha256);
+        const currentImgAssetUrl = imgAtt.asset?.url ?? null;
+        const imgCommentMatches = (c: { content: string }, assetRef?: string | null): boolean =>
+          c.content.includes(row.id) &&
+          c.content.includes(img.id) &&
+          c.content.includes(img.sha256) &&
+          (assetRef ? c.content.includes(assetRef) : true);
+
+        const matchedImgComment = existingComments.find((c) => imgCommentMatches(c, currentImgAssetUrl));
+        if (matchedImgComment) {
+          imgAtt = {
+            ...imgAtt,
+            id: img.id,
+            kind: "image",
+            filename: img.filename,
+            byteSize: img.byte_size,
+            sha256: img.sha256,
+            comment: { marker: imgMarker, id: matchedImgComment.id, outcome: "confirmed" },
+          };
+          try {
+            persistArchive(
+              { ...cur, attachments: { ...cur.attachments, [img.id]: imgAtt } },
+              `补记已有图片 ${img.filename} 评论`,
+            );
+          } catch {}
+          continue;
+        }
+
+        let imgAssetUrl: string;
+        if (imgAtt?.asset?.url) {
+          imgAssetUrl = imgAtt.asset.url;
+        } else {
+          if (!gateUpdate(row.id, "标记 asset_uploading", { archive_stage: "asset_uploading" })) return;
+
+          let uploadRecord = imgAtt?.upload;
+          let uploadUrl = "";
+          let uploadHeaders: Record<string, string> = {};
+          let sameKeyRecovery = false;
+
+          if (uploadRecord && uploadRecord.outcome === "confirmed") {
+            const asset = await kaneo.finalizeImageUpload(taskId, {
+              key: uploadRecord.key,
+              filename: img.filename,
+              contentType: img.mime,
+              size: img.byte_size,
+              surface: "comment",
+            });
+            const downloaded = await kaneo.downloadAsset(asset.url);
+            const dlSha = createHash("sha256").update(Buffer.from(downloaded)).digest("hex");
+            if (dlSha !== img.sha256) {
+              updateFeedback(db, row.id, {
+                status: "needs_review",
+                error_summary: `图片 ${img.filename} 远端资产字节校验失败（SHA-256 不一致），待核对`,
+                last_error: `image sha mismatch: expected ${img.sha256} got ${dlSha}`,
+              });
+              return;
+            }
+            imgAssetUrl = asset.url;
+            if (!gateUpdate(row.id, "标记 asset_finalized", { archive_stage: "asset_finalized" })) return;
+            imgAtt = {
+              ...imgAtt,
+              id: img.id,
+              kind: "image",
+              filename: img.filename,
+              byteSize: img.byte_size,
+              sha256: img.sha256,
+              asset: { id: asset.id, url: asset.url },
+            };
+            if (
+              !persistArchive(
+                { ...cur, attachments: { ...cur.attachments, [img.id]: imgAtt } },
+                `保存图片 ${img.filename} 资产信息`,
+              )
+            )
+              return;
+          } else {
+            if (uploadRecord) {
+              if ((uploadRecord.recoveries ?? 0) >= MAX_SAME_KEY_RECOVERIES) {
+                updateFeedback(db, row.id, {
+                  status: "needs_review",
+                  error_summary: `图片 ${img.filename} 同 key 恢复次数已达上限（3 次），待人工核对`,
+                  last_error: `upload.key=${uploadRecord.key.slice(0, 80)} outcome=${uploadRecord.outcome}`,
+                });
+                return;
+              }
+              let creds: UploadCredentials;
+              try {
+                creds = decryptUploadCredentials(deps.masterKey, uploadRecord.credentialsEnc);
+              } catch (err) {
+                updateFeedback(db, row.id, {
+                  status: "needs_review",
+                  error_summary: `图片 ${img.filename} 预签名凭证无法解密，待人工核对`,
+                  last_error: (err as Error).message.slice(0, 300),
+                });
+                return;
+              }
+              if (uploadRecord.expiresAt !== null && Date.parse(uploadRecord.expiresAt) <= Date.now()) {
+                updateFeedback(db, row.id, {
+                  status: "needs_review",
+                  error_summary: `图片 ${img.filename} 上传地址已过期，已停止同 key 恢复；请在管理页重试`,
+                  last_error: `upload.key=${uploadRecord.key.slice(0, 80)} expiresAt=${uploadRecord.expiresAt}`,
+                });
+                return;
+              }
+              uploadUrl = creds.uploadUrl;
+              uploadHeaders = creds.headers;
+              sameKeyRecovery = true;
+            } else {
+              const presigned = await kaneo.createImageUpload(taskId, {
+                filename: img.filename,
+                contentType: img.mime,
+                size: img.byte_size,
+                surface: "comment",
+              });
+              uploadRecord = buildUploadRecord(deps.masterKey, presigned, "not_sent");
+              uploadUrl = presigned.uploadUrl;
+              uploadHeaders = presigned.headers;
+              imgAtt = {
+                ...imgAtt,
+                id: img.id,
+                kind: "image",
+                filename: img.filename,
+                byteSize: img.byte_size,
+                sha256: img.sha256,
+                upload: uploadRecord,
+              };
+              if (
+                !persistArchive(
+                  { ...cur, attachments: { ...cur.attachments, [img.id]: imgAtt } },
+                  `保存图片 ${img.filename} 预签名凭证`,
+                )
+              )
+                return;
+            }
+
+            if (sameKeyRecovery) {
+              const bumped = { ...uploadRecord, recoveries: (uploadRecord.recoveries ?? 0) + 1 };
+              imgAtt = { ...imgAtt, upload: bumped };
+              if (
+                !persistArchive(
+                  { ...cur, attachments: { ...cur.attachments, [img.id]: imgAtt } },
+                  `登记图片 ${img.filename} 同 key 重传意图`,
+                )
+              )
+                return;
+              uploadRecord = bumped;
+            }
+
+            imgAtt = { ...imgAtt, upload: { ...uploadRecord, outcome: "maybe_sent" } };
+            if (
+              !persistArchive(
+                { ...cur, attachments: { ...cur.attachments, [img.id]: imgAtt } },
+                `登记图片 ${img.filename} 上传已发出（结果未知）`,
+              )
+            )
+              return;
+
+            try {
+              await kaneo.uploadImageToPresigned(uploadUrl, uploadHeaders, Buffer.from(img.bytes));
+            } catch (err) {
+              if (err instanceof KaneoUncertainError) throw err;
+              if (!uploadRecord.recoveries || uploadRecord.recoveries <= 0) throw err;
+              updateFeedback(db, row.id, {
+                status: "needs_review",
+                error_summary: `图片 ${img.filename} 同 key 重传被拒绝，待人工核对`,
+                last_error:
+                  `同 key 重传被拒绝（key=${uploadRecord.key.slice(0, 60)}）：${(err as Error).message.slice(0, 200)}`.slice(
+                    0,
+                    1000,
+                  ),
+              });
+              return;
+            }
+
+            imgAtt = { ...imgAtt, upload: { ...uploadRecord, outcome: "confirmed" } };
+            if (
+              !persistArchive(
+                { ...cur, attachments: { ...cur.attachments, [img.id]: imgAtt } },
+                `登记图片 ${img.filename} 上传成功`,
+              )
+            )
+              return;
+
+            const asset = await kaneo.finalizeImageUpload(taskId, {
+              key: uploadRecord.key,
+              filename: img.filename,
+              contentType: img.mime,
+              size: img.byte_size,
+              surface: "comment",
+            });
+
+            const downloaded = await kaneo.downloadAsset(asset.url);
+            const dlSha = createHash("sha256").update(Buffer.from(downloaded)).digest("hex");
+            if (dlSha !== img.sha256) {
+              updateFeedback(db, row.id, {
+                status: "needs_review",
+                error_summary: `图片 ${img.filename} 远端资产字节校验失败（SHA-256 不一致），待核对`,
+                last_error: `image sha mismatch: expected ${img.sha256} got ${dlSha}`,
+              });
+              return;
+            }
+
+            imgAssetUrl = asset.url;
+            if (!gateUpdate(row.id, "标记 asset_finalized", { archive_stage: "asset_finalized" })) return;
+            imgAtt = {
+              ...imgAtt,
+              id: img.id,
+              kind: "image",
+              filename: img.filename,
+              byteSize: img.byte_size,
+              sha256: img.sha256,
+              asset: { id: asset.id, url: asset.url },
+            };
+            if (
+              !persistArchive(
+                { ...cur, attachments: { ...cur.attachments, [img.id]: imgAtt } },
+                `保存图片 ${img.filename} 资产信息`,
+              )
+            )
+              return;
+          }
+        }
+
+        if (!gateUpdate(row.id, "标记 comment_pending", { archive_stage: "comment_pending" })) return;
+        const imgCommentContent = buildImageComment({
+          feedbackId: row.id,
+          imageId: img.id,
+          filename: img.filename,
+          assetUrl: imgAssetUrl,
+          mime: img.mime,
+          sha256: img.sha256,
+          byteSize: img.byte_size,
+          width: img.width,
+          height: img.height,
+          sort: img.sort,
+          source: img.source,
+        });
+
+        const priorImgCommentOutcome = imgAtt?.comment?.outcome ?? null;
+        if (priorImgCommentOutcome === "maybe_sent" || priorImgCommentOutcome === "confirmed") {
+          updateFeedback(db, row.id, {
+            status: "needs_review",
+            error_summary: `图片 ${img.filename} 评论写入结果未知且核对未命中，已停止自动处理，待人工核对`,
+            last_error: `auto: image ${img.id} comment.outcome=${priorImgCommentOutcome}`,
+          });
+          return;
+        }
+
+        imgAtt = { ...imgAtt, comment: { marker: imgMarker, id: null, outcome: "maybe_sent" } };
+        if (
+          !persistArchive(
+            { ...cur, attachments: { ...cur.attachments, [img.id]: imgAtt } },
+            `登记图片 ${img.filename} 评论已发出（结果未知）`,
+          )
+        )
+          return;
+
+        let createdImgComment: { id: string };
+        try {
+          createdImgComment = await kaneo.createComment(taskId, { content: imgCommentContent });
+        } catch (err) {
+          if (err instanceof KaneoDefiniteError) {
+            imgAtt = { ...imgAtt, comment: { marker: imgMarker, id: null, outcome: "not_sent" } };
+            persistArchive(
+              { ...cur, attachments: { ...cur.attachments, [img.id]: imgAtt } },
+              `登记图片 ${img.filename} 评论被拒绝`,
+            );
+          }
+          throw err;
+        }
+
+        const verifiedImgComments = await kaneo.listComments(taskId);
+        const isImgCommentConfirmed = verifiedImgComments.some((c) => imgCommentMatches(c, imgAssetUrl));
+        if (!isImgCommentConfirmed) {
+          imgAtt = {
+            ...imgAtt,
+            comment: { marker: imgMarker, id: createdImgComment.id || null, outcome: "maybe_sent" },
+          };
+          try {
+            persistArchive(
+              { ...cur, attachments: { ...cur.attachments, [img.id]: imgAtt } },
+              `登记图片 ${img.filename} 评论待核对`,
+            );
+          } catch {}
+          updateFeedback(db, row.id, {
+            status: "needs_review",
+            error_summary: `图片 ${img.filename} 评论已提交但核对未发现，待人工核对`,
+          });
+          return;
+        }
+
+        imgAtt = { ...imgAtt, comment: { marker: imgMarker, id: createdImgComment.id || null, outcome: "confirmed" } };
+        try {
+          persistArchive(
+            { ...cur, attachments: { ...cur.attachments, [img.id]: imgAtt } },
+            `登记图片 ${img.filename} 评论成功`,
+          );
+        } catch {}
+      }
+
       // 2. 日志附件归档
       for (const log of logs) {
         let logAtt: ArchiveAttachmentRecord = cur.attachments?.[log.id] ?? {
@@ -1918,8 +2357,8 @@ export function createWorker(deps: WorkerDeps) {
         } catch {}
       }
 
-      // 3. 所有附件（截图若存在 + 全部日志）与全部标签都确认后，才标记归档完成
-      if (isFullyArchived(cur, Boolean(screenshot), logs, target.labelIds ?? [])) {
+      // 3. 所有附件（旧截图或 v12 全部有序图片 + 全部日志）与全部标签都确认后，才标记归档完成
+      if (isFullyArchived(cur, Boolean(screenshot), logs, target.labelIds ?? [], images)) {
         updateFeedback(db, row.id, {
           status: "archived",
           archive_stage: "complete",
@@ -2037,10 +2476,11 @@ export function createWorker(deps: WorkerDeps) {
         }
       }
 
-      // 2. 检查是否有截图与日志
+      // 2. 检查是否有截图/多图与日志
       const screenshot = getFeedbackScreenshot(deps.db, feedbackId);
       const logs = getFeedbackLogs(deps.db, feedbackId);
-      if (!screenshot && logs.length === 0) {
+      const images = getFeedbackImages(deps.db, feedbackId);
+      if (!screenshot && images.length === 0 && logs.length === 0) {
         // 纯文字反馈，确认有 task 即归档完成
         if (
           !gateUpdate(feedbackId, "核对归档", { status: "archived", archive_stage: "complete", error_summary: null })
@@ -2093,6 +2533,45 @@ export function createWorker(deps: WorkerDeps) {
         } else {
           const sOutcome = curV3.attachments?.screenshot?.comment?.outcome ?? curV3.comment?.outcome;
           if (sOutcome === "maybe_sent" || sOutcome === "confirmed") {
+            hasUnconfirmedMaybeOrConfirmed = true;
+          }
+        }
+      }
+
+      // v12：有序图片逐张核对（稳定 id + sha256 + 资产引用定位评论）。
+      let allImagesConfirmed = true;
+      for (const img of images) {
+        const imgAssetRef = curV3.attachments?.[img.id]?.asset?.url ?? null;
+        const matchedImg = comments.find(
+          (c) =>
+            c.content.includes(row.id) &&
+            c.content.includes(img.id) &&
+            c.content.includes(img.sha256) &&
+            (imgAssetRef ? c.content.includes(imgAssetRef) : true),
+        );
+        if (matchedImg) {
+          const imgCommentRecord = {
+            marker: imageCommentMarker(feedbackId, img.id, img.sha256),
+            id: matchedImg.id,
+            outcome: "confirmed" as const,
+          };
+          const imgAtt: ArchiveAttachmentRecord = {
+            ...(curV3.attachments?.[img.id] ?? {}),
+            id: img.id,
+            kind: "image" as const,
+            filename: img.filename,
+            byteSize: img.byte_size,
+            sha256: img.sha256,
+            comment: imgCommentRecord,
+          };
+          curV3 = {
+            ...curV3,
+            attachments: { ...curV3.attachments, [img.id]: imgAtt },
+          };
+        } else {
+          allImagesConfirmed = false;
+          const iOutcome = curV3.attachments?.[img.id]?.comment?.outcome;
+          if (iOutcome === "maybe_sent" || iOutcome === "confirmed") {
             hasUnconfirmedMaybeOrConfirmed = true;
           }
         }
@@ -2183,7 +2662,7 @@ export function createWorker(deps: WorkerDeps) {
         }
       }
 
-      const allAttachmentsConfirmed = (!screenshot || screenshotConfirmed) && allLogsConfirmed;
+      const allAttachmentsConfirmed = (!screenshot || screenshotConfirmed) && allImagesConfirmed && allLogsConfirmed;
       if (allAttachmentsConfirmed && allLabelsConfirmed) {
         if (
           !gateUpdate(feedbackId, "核对归档", { status: "archived", archive_stage: "complete", error_summary: null })
@@ -2262,6 +2741,16 @@ export function createWorker(deps: WorkerDeps) {
           reason: "invalid_state",
           status: row.status,
           note: "存在已知附件状态，不允许 force-create",
+        };
+      }
+      // v12：按稳定附件 id 记录的上传/资产/评论进度同样阻止重建（绝不丢弃恢复信息、不重复上传）。
+      const v3Atts = data && "attachments" in data ? (data as ArchiveDataV3).attachments : undefined;
+      if (v3Atts && Object.keys(v3Atts).length > 0) {
+        return {
+          ok: false,
+          reason: "invalid_state",
+          status: row.status,
+          note: "存在按附件记录的归档进度，不允许 force-create",
         };
       }
       // 保留已固定的恢复目标（同一目标的密钥轮换仍可继续），仅清空写入类状态
@@ -2345,8 +2834,9 @@ export function createWorker(deps: WorkerDeps) {
         );
         if (!saved) return { ok: false, reason: "persist_failed" };
         const logs = getFeedbackLogs(deps.db, feedbackId);
+        const images = getFeedbackImages(deps.db, feedbackId);
         const freshV3 = normalizeToV3(saved);
-        if (isFullyArchived(freshV3, true, logs)) {
+        if (isFullyArchived(freshV3, true, logs, [], images)) {
           if (
             !gateUpdate(feedbackId, "核对归档", { status: "archived", archive_stage: "complete", error_summary: null })
           ) {

@@ -44,6 +44,13 @@ void main() {
 
       expect(find.byKey(const Key('feedback-logs-count')), findsOneWidget);
       expect(find.text('日志附件 (2/3)'), findsOneWidget);
+      // T4：默认折叠只显示摘要（已附诊断日志），展开后才列出文件。
+      expect(find.byKey(const Key('feedback-logs-summary')), findsOneWidget);
+      expect(find.text('已附诊断日志'), findsOneWidget);
+      expect(find.byKey(const Key('feedback-log-name-0')), findsNothing);
+      await tester.tap(find.byKey(const Key('feedback-logs-expand')));
+      await tester.pumpAndSettle();
+
       expect(find.byKey(const Key('feedback-log-name-0')), findsOneWidget);
       expect(find.text('app.log'), findsOneWidget);
       expect(find.text('info.txt'), findsOneWidget);
@@ -79,6 +86,18 @@ void main() {
       expect(find.byKey(const Key('feedback-log-error')), findsOneWidget);
       expect(find.textContaining('超时'), findsOneWidget);
 
+      // 超时后的迟到结果不能覆盖当前日志或清掉错误。
+      completer.complete([
+        FeedbackLogFile(
+          filename: 'late.log',
+          bytes: Uint8List.fromList(utf8.encode('late')),
+        ),
+      ]);
+      await tester.pumpAndSettle();
+      expect(tester.state<FeedbackPanelState>(find.byType(FeedbackPanel)).logs,
+          isEmpty);
+      expect(find.textContaining('超时'), findsOneWidget);
+
       // 用户正常输入并提交
       await tester.enterText(find.byKey(const Key('feedback-input')), '超时但正常提交');
       await tester.pump();
@@ -87,6 +106,137 @@ void main() {
 
       expect(server.count('POST /api/feedback'), 1);
 
+      await teardownPanel(tester);
+    });
+
+    for (final invalid in <(String, Uint8List, String)>[
+      ('image.png', Uint8List.fromList([65]), '格式不受支持'),
+      ('empty.log', Uint8List(0), '不能为空'),
+      ('huge.log', Uint8List(1024 * 1024 + 1), '超过 1MiB'),
+      ('invalid.txt', Uint8List.fromList([0xff, 0xfe]), 'UTF-8'),
+      ('nul.json', Uint8List.fromList([65, 0, 66]), 'NUL'),
+      ('logs/app.log', Uint8List.fromList([65]), '路径分隔符'),
+      (r'C:\logs\app.log', Uint8List.fromList([65]), '路径分隔符'),
+    ]) {
+      testWidgets('自动采集原子校验：${invalid.$1} 明确提示且有效项也不加入',
+          (WidgetTester tester) async {
+        if (invalid.$1.startsWith('C:')) {
+          // raw 字符串中的 Windows 分隔符均为单个 U+005C。
+          expect(invalid.$1.codeUnits[2], 0x5c);
+          expect(invalid.$1.codeUnits[7], 0x5c);
+          expect(invalid.$1.codeUnits.where((unit) => unit == 0x5c), hasLength(2));
+        }
+        server.respond('POST /api/feedback', {
+          'feedbackId': 'fb-invalid-log',
+          'status': 'received',
+        }, 201);
+        await pumpPanel(
+          tester,
+          server: server,
+          tokenStore: tokenStore,
+          config: FeedbackConfig(
+            'https://svc.test',
+            'com.example.app',
+            logProvider: () => [
+              FeedbackLogFile(
+                filename: 'valid.log',
+                bytes: Uint8List.fromList(utf8.encode('valid')),
+              ),
+              FeedbackLogFile(filename: invalid.$1, bytes: invalid.$2),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final state = tester.state<FeedbackPanelState>(find.byType(FeedbackPanel));
+        expect(state.logs, isEmpty);
+        expect(state.logsCollecting, isFalse);
+        final error = tester.widget<Text>(find.byKey(const Key('feedback-log-error')));
+        expect(error.data, contains(invalid.$1));
+        expect(error.data, contains(invalid.$3));
+        // 校验失败只影响日志，仍允许提交反馈。
+        await tester.enterText(find.byKey(const Key('feedback-input')), '日志异常仍提交');
+        await tester.pump();
+        expect(tester.widget<FilledButton>(find.widgetWithText(FilledButton, '提交'))
+            .onPressed, isNotNull);
+        await tester.tap(find.text('提交'));
+        await tester.pumpAndSettle();
+        expect(server.count('POST /api/feedback'), 1);
+
+        await teardownPanel(tester);
+      });
+    }
+
+    testWidgets('自动重采校验：数量包含手动项，失败保留原日志，成功只替换自动项',
+        (WidgetTester tester) async {
+      FeedbackLogFile log(String name, {String source = 'auto'}) => FeedbackLogFile(
+            filename: name,
+            bytes: Uint8List.fromList(utf8.encode(name)),
+            source: source,
+            sha256: 'host-digest',
+          );
+      var result = [log('old.log')];
+      var calls = 0;
+      await pumpPanel(
+        tester,
+        server: server,
+        tokenStore: tokenStore,
+        config: FeedbackConfig(
+          'https://svc.test',
+          'com.example.app',
+          logProvider: () {
+            calls++;
+            return result;
+          },
+          filePicker: () => [log('manual.log')],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('feedback-btn-add-log')));
+      await tester.pumpAndSettle();
+      final state = tester.state<FeedbackPanelState>(find.byType(FeedbackPanel));
+      final original = state.logs;
+
+      result = [log('a.log'), log('b.log'), log('c.log')];
+      await tester.tap(find.byKey(const Key('feedback-logs-recollect')));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('日志数量超过 3 个上限'), findsOneWidget);
+      expect(state.logs, orderedEquals(original));
+      expect(state.logsCollecting, isFalse);
+      await tester.pumpAndSettle();
+      expect(calls, 2); // 失败不自动重试。
+
+      result = [log('new.log', source: 'manual')];
+      await tester.tap(find.byKey(const Key('feedback-logs-recollect')));
+      await tester.pumpAndSettle();
+      expect(state.logs.map((file) => file.filename), ['manual.log', 'new.log']);
+      expect(state.logs.map((file) => file.source), ['manual', 'auto']);
+      expect(state.logs.last.sha256, 'host-digest');
+      expect(find.byKey(const Key('feedback-log-error')), findsNothing);
+      expect(calls, 3);
+
+      await teardownPanel(tester);
+    });
+
+    testWidgets('自动采集 4 个日志：明确拒绝整批而不截取前 3 个',
+        (WidgetTester tester) async {
+      await pumpPanel(
+        tester,
+        server: server,
+        tokenStore: tokenStore,
+        config: FeedbackConfig(
+          'https://svc.test',
+          'com.example.app',
+          logProvider: () => List.generate(4, (index) => FeedbackLogFile(
+                filename: '$index.log',
+                bytes: Uint8List.fromList(utf8.encode('log')),
+              )),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining('日志数量超过 3 个上限'), findsOneWidget);
+      expect(tester.state<FeedbackPanelState>(find.byType(FeedbackPanel)).logs,
+          isEmpty);
       await teardownPanel(tester);
     });
 

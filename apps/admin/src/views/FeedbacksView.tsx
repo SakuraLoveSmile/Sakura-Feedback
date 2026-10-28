@@ -1,6 +1,10 @@
 /**
  * 反馈工作台：收件箱 / 已归档 / 回收站。
- * - URL 保存 view/q/status/appId/from/to/id，刷新与前进后退可恢复；
+ * - 列表层级：标题/摘要为阅读主体，工单状态（issueStatus）为主要标签（桌面表格 .fb-table
+ *   与移动卡片 .fb-cards 用同一结构），同步/处理状态与附件降为灰度辅助信息（次要字号/灰度）；
+ * - URL 保存 view/q/status/issueStatus/appId/from/to/id，刷新与前进后退可恢复；
+ * - ≥768：搜索与常用筛选（软件/处理状态/工单状态）常驻，「更多筛选」默认收起（日期等次要条件，
+ *   收起时仍显示已生效条件的摘要与清除入口）；<768：整个筛选区默认收起，由「筛选」开关展开；
  * - 搜索防抖 300ms、上限 200 字符；游标分页每页 50；
  * - 有活动处理时每 5 秒原位刷新（不打断选择、详情与草稿），页面隐藏停止；
  * - 批量只操作已勾选记录（超过服务端单次上限 100 条时自动分片），逐项结果不回滚。
@@ -13,6 +17,8 @@ import {
   type FeedbackCounts,
   type FeedbackDetail,
   type FeedbackListItem,
+  ISSUE_STATUS_LABELS,
+  issueTone,
   type LifecycleAction,
   type LifecycleBatchResponse,
   type LifecycleItemResult,
@@ -54,10 +60,15 @@ export default function FeedbacksView() {
   const view = (VIEWS.includes(params.get("view") as MgmtView) ? params.get("view") : "inbox") as MgmtView;
   const q = params.get("q") ?? "";
   const status = params.get("status") ?? "";
+  const issueStatus = params.get("issueStatus") ?? "";
   const appId = params.get("appId") ?? "";
   const from = params.get("from") ?? "";
   const to = params.get("to") ?? "";
   const detailId = params.get("id");
+  /** 次要筛选（日期）是否生效：决定「更多筛选」的摘要与计数提示。 */
+  const hasDateFilter = Boolean(from || to);
+  /** 生效的筛选条件数（移动端「筛选」开关收起时的计数提示）。 */
+  const activeFilterCount = [q, status, issueStatus, appId].filter(Boolean).length + (hasDateFilter ? 1 : 0);
 
   const [items, setItems] = useState<FeedbackListItem[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -73,6 +84,11 @@ export default function FeedbacksView() {
     failures: { id: string; message: string }[];
   } | null>(null);
   const [detail, setDetail] = useState<FeedbackDetail | "loading" | "purged" | "error" | null>(null);
+  /** 「更多筛选」（日期）折叠区：默认收起；纯 UI 状态，不进 URL。 */
+  const [moreOpen, setMoreOpen] = useState(false);
+  /** <768 移动断点与筛选区开关：移动端整个筛选区（含搜索）默认收起；纯 UI 状态，不进 URL。 */
+  const [isMobile, setIsMobile] = useState(() => window.matchMedia("(max-width: 767px)").matches);
+  const [filterAreaOpen, setFilterAreaOpen] = useState(false);
   /** 详情拉取失败后的重试计数：自增触发详情 effect 重新请求。 */
   const [detailRetry, setDetailRetry] = useState(0);
   /** 列表请求序号：切换筛选/区域后的迟到响应直接丢弃，不回写旧数据。 */
@@ -93,6 +109,14 @@ export default function FeedbacksView() {
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   // 卸载时取消防抖：否则切换页面后迟到的写入会把 ?q= 拼到目标页 URL 上。
   useEffect(() => () => clearTimeout(debounceRef.current), []);
+
+  // 断点跟踪：<768 视为移动端（筛选区默认收起）；窗口跨断点（旋转/分屏）时同步形态。
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 767px)");
+    const onChange = () => setIsMobile(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
   const onSearch = useCallback(
     (v: string) => {
       const clipped = v.slice(0, 200);
@@ -103,10 +127,32 @@ export default function FeedbacksView() {
     [setParams],
   );
 
+  function clearFilters() {
+    clearTimeout(debounceRef.current);
+    setQDraft("");
+    setParams({ q: null, status: null, issueStatus: null, appId: null, from: null, to: null }, true);
+  }
+
+  const appliedFilters = [
+    ...(q ? [{ key: "q", label: `搜索：${q}` }] : []),
+    ...(appId ? [{ key: "appId", label: `软件：${appOptions.find((o) => o.appId === appId)?.name ?? appId}` }] : []),
+    ...(status ? [{ key: "status", label: `处理：${STATUS_LABELS[status] ?? status}` }] : []),
+    ...(issueStatus
+      ? [
+          {
+            key: "issueStatus",
+            label: `工单：${Object.entries(ISSUE_STATUS_LABELS).find(([key]) => key === issueStatus)?.[1] ?? issueStatus}`,
+          },
+        ]
+      : []),
+    ...(hasDateFilter ? [{ key: "date", label: `日期：${from || "不限"} 至 ${to || "不限"}` }] : []),
+  ];
+
   const filterQuery = useCallback(
     (extra?: Record<string, string>) => {
       const p = new URLSearchParams();
       if (status) p.set("status", status);
+      if (issueStatus) p.set("issueStatus", issueStatus);
       if (appId) p.set("appId", appId);
       if (q) p.set("q", q);
       const f = dayToIso(from, false);
@@ -116,7 +162,7 @@ export default function FeedbacksView() {
       for (const [k, v] of Object.entries(extra ?? {})) p.set(k, v);
       return p.toString();
     },
-    [status, appId, q, from, to],
+    [status, issueStatus, appId, q, from, to],
   );
 
   const loadList = useCallback(
@@ -194,7 +240,7 @@ export default function FeedbacksView() {
     setLoading("initial");
     void loadList("reset");
     void loadCounts();
-  }, [view, q, status, appId, from, to]);
+  }, [view, q, status, issueStatus, appId, from, to]);
 
   useEffect(() => {
     api.get<{ items: FeedbackAppOption[] }>("/api/admin/feedback/app-options").then(
@@ -370,11 +416,11 @@ export default function FeedbacksView() {
   const closeDetail = useCallback(() => setParams({ id: null }, false), [setParams]);
 
   return (
-    <div>
+    <div className="feedback-page">
       <div className="page-header">
         <div>
           <h1>反馈</h1>
-          <div className="sub">收件箱只保留需要关注的反馈；已同步内容可整理，测试数据可安全清理。</div>
+          <div className="sub">查看用户反馈、回复并跟进问题，处理完成后归档整理。</div>
         </div>
         <button
           type="button"
@@ -408,39 +454,180 @@ export default function FeedbacksView() {
         ))}
       </div>
 
-      <div className="filter-bar">
-        <input
-          type="search"
-          placeholder="搜索标题、原文或反馈 ID"
-          aria-label="搜索反馈"
-          value={qDraft}
-          onChange={(e) => onSearch(e.target.value)}
-        />
-        <select aria-label="软件筛选" value={appId} onChange={(e) => setParams({ appId: e.target.value }, true)}>
-          <option value="">全部软件</option>
-          {appOptions.map((o) => (
-            <option key={o.appId} value={o.appId}>
-              {o.name}
-              {o.deleted ? "（已删除）" : ""}
-            </option>
+      {/* <768：整个筛选区（含搜索与常用筛选）默认收起，由 #fb-filter-toggle 展开；
+          ≥768：搜索与常用筛选常驻，「更多筛选」默认收起（日期等次要条件在内，收起时
+          仍显示已生效条件的摘要与清除入口）。定位锚点：开关 #fb-filter-toggle、
+          区域 #fb-filter-area（普通块级容器，开关紧邻其前，收起态由 data-collapsed 标记）、
+          分组 #fb-common-filters / #fb-more-filters / #fb-more-filters-summary。 */}
+      {isMobile && (
+        <button
+          type="button"
+          id="fb-filter-toggle"
+          className="btn sm"
+          aria-expanded={filterAreaOpen}
+          aria-controls="fb-filter-area"
+          onClick={() => setFilterAreaOpen((v) => !v)}
+        >
+          {filterAreaOpen ? "收起筛选" : "筛选"}
+          {!filterAreaOpen && activeFilterCount > 0 ? `（${activeFilterCount} 项生效）` : ""}
+        </button>
+      )}
+      <div id="fb-filter-area" data-collapsed={isMobile && !filterAreaOpen ? "true" : undefined}>
+        {(!isMobile || filterAreaOpen) && (
+          <div className="filter-bar feedback-filters" id="fb-common-filters">
+            <div className="feedback-filter-group">
+              <span className="feedback-filter-label">搜索</span>
+              <input
+                type="search"
+                placeholder="搜索标题、原文或反馈 ID"
+                aria-label="搜索反馈"
+                value={qDraft}
+                onChange={(e) => onSearch(e.target.value)}
+              />
+            </div>
+            <div className="feedback-filter-group">
+              <span className="feedback-filter-label">软件</span>
+              <select aria-label="软件筛选" value={appId} onChange={(e) => setParams({ appId: e.target.value }, true)}>
+                <option value="">全部软件</option>
+                {appOptions.map((o) => (
+                  <option key={o.appId} value={o.appId}>
+                    {o.name}
+                    {o.deleted ? "（已删除）" : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="feedback-filter-group">
+              <span className="feedback-filter-label">处理状态</span>
+              <select
+                aria-label="处理状态筛选"
+                value={status}
+                onChange={(e) => setParams({ status: e.target.value }, true)}
+              >
+                <option value="">全部处理状态</option>
+                {STATUSES.map((s) => (
+                  <option key={s} value={s}>
+                    {STATUS_LABELS[s]}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="feedback-filter-group">
+              <span className="feedback-filter-label">工单状态</span>
+              <select
+                aria-label="工单沟通状态筛选"
+                value={issueStatus}
+                onChange={(e) => setParams({ issueStatus: e.target.value }, true)}
+              >
+                <option value="">全部工单状态</option>
+                {Object.entries(ISSUE_STATUS_LABELS).map(([k, label]) => (
+                  <option key={k} value={k}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="feedback-filter-group">
+              <span className="feedback-filter-label">更多</span>
+              <button
+                type="button"
+                id="fb-more-filters-toggle"
+                className="btn sm"
+                aria-expanded={moreOpen}
+                aria-controls="fb-more-filters"
+                onClick={() => setMoreOpen((v) => !v)}
+              >
+                {moreOpen ? "收起日期" : "更多筛选"}
+                {!moreOpen && hasDateFilter ? "（日期已生效）" : ""}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {moreOpen && (!isMobile || filterAreaOpen) && (
+          <div className="filter-bar feedback-filters" id="fb-more-filters">
+            <div className="feedback-filter-group">
+              <span className="feedback-filter-label">日期</span>
+              <span className="feedback-date-range">
+                <input
+                  type="date"
+                  aria-label="开始日期"
+                  value={from}
+                  onChange={(e) => setParams({ from: e.target.value }, true)}
+                />
+                <span className="muted small">至</span>
+                <input
+                  type="date"
+                  aria-label="结束日期"
+                  value={to}
+                  onChange={(e) => setParams({ to: e.target.value }, true)}
+                />
+              </span>
+            </div>
+            <button
+              type="button"
+              className="btn sm ghost"
+              disabled={!hasDateFilter}
+              title={hasDateFilter ? "清除日期范围" : "当前没有生效的日期条件"}
+              onClick={() => setParams({ from: null, to: null }, true)}
+            >
+              清除日期
+            </button>
+          </div>
+        )}
+        {!moreOpen && hasDateFilter && (!isMobile || filterAreaOpen) && (
+          /* 「更多筛选」收起时仍显示已生效条件的摘要与清除入口 */
+          <div className="filter-bar feedback-filters" id="fb-more-filters-summary">
+            <div className="feedback-filter-group">
+              <span className="feedback-filter-label">日期</span>
+              <span className="muted small">
+                {from || "不限"} 至 {to || "不限"}
+              </span>
+            </div>
+            <button type="button" className="btn sm ghost" onClick={() => setParams({ from: null, to: null }, true)}>
+              清除日期
+            </button>
+          </div>
+        )}
+      </div>
+
+      {appliedFilters.length > 0 && (
+        <section className="applied-filters" aria-label="已生效筛选">
+          <span className="small muted">已筛选</span>
+          {appliedFilters.map((filter) => (
+            <button
+              type="button"
+              className="filter-chip"
+              key={filter.key}
+              title={`移除${filter.label}`}
+              aria-label={`移除${filter.label}`}
+              onClick={() => {
+                if (filter.key === "q") {
+                  clearTimeout(debounceRef.current);
+                  setQDraft("");
+                }
+                setParams(filter.key === "date" ? { from: null, to: null } : { [filter.key]: null }, true);
+              }}
+            >
+              <span>{filter.label}</span>
+              <Icon name="close" size={12} />
+            </button>
           ))}
-        </select>
-        <select aria-label="处理状态筛选" value={status} onChange={(e) => setParams({ status: e.target.value }, true)}>
-          <option value="">全部状态</option>
-          {STATUSES.map((s) => (
-            <option key={s} value={s}>
-              {STATUS_LABELS[s]}
-            </option>
-          ))}
-        </select>
-        <input
-          type="date"
-          aria-label="开始日期"
-          value={from}
-          onChange={(e) => setParams({ from: e.target.value }, true)}
-        />
-        <span className="muted small">至</span>
-        <input type="date" aria-label="结束日期" value={to} onChange={(e) => setParams({ to: e.target.value }, true)} />
+          <button type="button" className="btn sm ghost" onClick={clearFilters}>
+            清除全部筛选
+          </button>
+        </section>
+      )}
+
+      <div className="feedback-list-heading">
+        <h2>{VIEW_LABELS[view]}</h2>
+        <span className="small muted" role="status">
+          {loading === "initial"
+            ? "正在加载反馈…"
+            : counts
+              ? `共 ${counts[view]} 条 · 已加载 ${items.length} 条`
+              : `已加载 ${items.length} 条`}
+        </span>
       </div>
 
       {hasNew && (
@@ -540,26 +727,47 @@ export default function FeedbacksView() {
 
       {listError && <InlineError message={listError} onRetry={() => void loadList("reset")} />}
 
-      {loading === "initial" && items.length === 0 ? (
+      {listError && items.length === 0 ? (
+        <div className="table-wrap">
+          <EmptyState title="反馈暂时无法加载" hint="请使用上方的重试入口重新加载。" />
+        </div>
+      ) : loading === "initial" && items.length === 0 ? (
         <div className="table-wrap">
           <SkeletonRows rows={6} />
         </div>
       ) : items.length === 0 ? (
         <div className="table-wrap">
           <EmptyState
-            title={view === "trash" ? "回收站为空" : view === "archived" ? "还没有已归档的反馈" : "收件箱为空"}
+            title={
+              activeFilterCount > 0
+                ? "没有符合筛选条件的反馈"
+                : view === "trash"
+                  ? "回收站为空"
+                  : view === "archived"
+                    ? "还没有已归档的反馈"
+                    : "收件箱为空"
+            }
             hint={
-              view === "inbox"
-                ? "新提交的反馈会先出现在这里；同步完成后可手动归档整理。"
-                : view === "archived"
-                  ? "只有完整同步到 Kaneo 的反馈可以归档。"
-                  : "移入回收站的反馈会保留全部内容，可恢复或手动彻底删除。"
+              activeFilterCount > 0
+                ? "尝试减少筛选条件，或清除全部筛选查看此区域的反馈。"
+                : view === "inbox"
+                  ? "新提交的反馈会先出现在这里；同步完成后可手动归档整理。"
+                  : view === "archived"
+                    ? "只有完整同步到 Kaneo 的反馈可以归档。"
+                    : "移入回收站的反馈会保留全部内容，可恢复或手动彻底删除。"
+            }
+            action={
+              activeFilterCount > 0 ? (
+                <button type="button" className="btn" onClick={clearFilters}>
+                  清除全部筛选
+                </button>
+              ) : undefined
             }
           />
         </div>
       ) : (
         <>
-          {/* 桌面表格（≥768px） */}
+          {/* 桌面表格（≥768px）：标题/摘要为阅读主体，工单状态为主标签，处理状态降为灰度辅助 */}
           <div className="table-wrap fb-table">
             <table>
               <thead>
@@ -602,25 +810,58 @@ export default function FeedbacksView() {
                           openDetail(it.id);
                         }}
                       >
-                        <span className="clamp-2">{it.title ?? it.textPreview ?? "（无标题）"}</span>
+                        <span className="feedback-title clamp-2">{it.title ?? it.textPreview ?? "（无标题）"}</span>
+                        {it.title && it.textPreview && it.title !== it.textPreview && (
+                          <span className="feedback-summary clamp-2">{it.textPreview}</span>
+                        )}
                       </button>
                     </td>
                     <td>
-                      <div>{it.appName ?? it.appId}</div>
-                      <div className="muted small wrap-anywhere">{it.appId}</div>
+                      {it.appName && it.appName !== it.appId ? (
+                        <>
+                          <div>{it.appName}</div>
+                          <div className="muted small wrap-anywhere">{it.appId}</div>
+                        </>
+                      ) : (
+                        <div className="wrap-anywhere">{it.appId}</div>
+                      )}
                       {it.appDeleted && <span className="tag tone-warn">软件已删除</span>}
                     </td>
-                    <td>{it.username ?? <span className="muted">—</span>}</td>
                     <td>
-                      <span className={`tag ${it.status}`}>{STATUS_LABELS[it.status] ?? it.status}</span>
+                      {it.username === null || it.username === undefined ? (
+                        <span className="muted">—</span>
+                      ) : (
+                        <span className="feedback-username feedback-username--table" title={it.username}>
+                          {it.username}
+                        </span>
+                      )}
+                    </td>
+                    <td>
+                      <div className="row row-wrap">
+                        {/* 主要标签：工单状态（issueStatus），四种状态全部有色 */}
+                        <span className={`tag ${issueTone(it.issueStatus)}`}>
+                          {ISSUE_STATUS_LABELS[it.issueStatus ?? "open"] ?? it.issueStatus ?? "新反馈"}
+                        </span>
+                        {/* 同步/处理状态：灰度辅助标签，不与主标签争抢 */}
+                        <span className="tag">{STATUS_LABELS[it.status] ?? it.status}</span>
+                        {it.unread && (
+                          <span
+                            className="tag tone-err"
+                            style={{ padding: "1px 5px", fontSize: "11px", fontWeight: "bold" }}
+                          >
+                            未读
+                          </span>
+                        )}
+                      </div>
                       {it.resumePaused && <div className="muted small">已暂停</div>}
+                      {it.resolutionNote && (
+                        <div className="muted small clamp-2" title={it.resolutionNote}>
+                          处理说明：{it.resolutionNote}
+                        </div>
+                      )}
                       {waitingText(it) && <div className="muted small clamp-2">{waitingText(it)}</div>}
                     </td>
-                    <td className="muted small nowrap-ellipsis">
-                      {it.hasScreenshot ? "图" : ""}
-                      {it.logCount ? `${it.logCount} 日志` : ""}
-                      {!it.hasScreenshot && !it.logCount ? "—" : ""}
-                    </td>
+                    <td className="muted small nowrap-ellipsis">{attachText(it)}</td>
                     <td className="muted small" style={{ whiteSpace: "nowrap" }}>
                       {new Date(it.createdAt).toLocaleString()}
                     </td>
@@ -663,7 +904,7 @@ export default function FeedbacksView() {
             </table>
           </div>
 
-          {/* 移动卡片（<768px）：两行摘要 + 状态/时间单独一行 */}
+          {/* 移动卡片（<768px）：与桌面同一层级——标题摘要主体、工单状态主标签、灰度辅助信息 */}
           <div className="fb-cards">
             {items.map((it) => (
               <div key={it.id} className="fb-card">
@@ -680,7 +921,10 @@ export default function FeedbacksView() {
                     style={{ flex: 1, minWidth: 0 }}
                     onClick={() => openDetail(it.id)}
                   >
-                    <span className="fb-card-title">{it.title ?? it.textPreview ?? "（无标题）"}</span>
+                    <span className="fb-card-title feedback-title">{it.title ?? it.textPreview ?? "（无标题）"}</span>
+                    {it.title && it.textPreview && it.title !== it.textPreview && (
+                      <span className="feedback-summary clamp-2">{it.textPreview}</span>
+                    )}
                   </button>
                   <MoreMenu
                     items={rowMenuItems(it, {
@@ -697,11 +941,37 @@ export default function FeedbacksView() {
                     })}
                   />
                 </div>
-                <div className="fb-card-meta">
-                  <span className={`tag ${it.status}`}>{STATUS_LABELS[it.status] ?? it.status}</span>
-                  <span>{it.appName ?? it.appId}</span>
+                <div className="fb-card-meta feedback-meta">
+                  {/* 主要标签：工单状态（issueStatus），四种状态全部有色 */}
+                  <span className={`tag ${issueTone(it.issueStatus)}`}>
+                    {ISSUE_STATUS_LABELS[it.issueStatus ?? "open"] ?? it.issueStatus ?? "新反馈"}
+                  </span>
+                  {/* 同步/处理状态：灰度辅助标签 */}
+                  <span className="tag">{STATUS_LABELS[it.status] ?? it.status}</span>
+                  {it.unread && (
+                    <span className="tag tone-err" style={{ padding: "1px 5px", fontSize: "11px", fontWeight: "bold" }}>
+                      未读
+                    </span>
+                  )}
+                  {it.appName && it.appName !== it.appId ? (
+                    <>
+                      <span>{it.appName}</span>
+                      <span className="muted small wrap-anywhere">{it.appId}</span>
+                    </>
+                  ) : (
+                    <span className="wrap-anywhere">{it.appId}</span>
+                  )}
+                  {it.appDeleted && <span className="tag tone-warn">软件已删除</span>}
+                  <span className="feedback-username feedback-username--mobile">{it.username ?? "—"}</span>
+                  <span>{attachText(it)}</span>
                   <span>{new Date(it.createdAt).toLocaleString()}</span>
                   {it.resumePaused && <span>已暂停</span>}
+                  {it.resolutionNote && (
+                    <span className="muted small clamp-2" title={it.resolutionNote}>
+                      处理说明：{it.resolutionNote}
+                    </span>
+                  )}
+                  {waitingText(it) && <span className="muted small clamp-2">{waitingText(it)}</span>}
                 </div>
               </div>
             ))}
@@ -833,6 +1103,15 @@ function rowMenuItems(
 
 function detailToListItem(d: FeedbackDetail): FeedbackListItem {
   return { ...d, lifecycleVersion: d.lifecycleVersion };
+}
+
+/** 附件摘要：v12 优先用 imageCount（含历史单图兼容计数），缺失时回退 hasScreenshot。 */
+function attachText(it: FeedbackListItem): string {
+  const imgs = it.imageCount !== undefined ? it.imageCount : it.hasScreenshot ? 1 : 0;
+  const parts: string[] = [];
+  if (imgs > 0) parts.push(`${imgs} 图`);
+  if (it.logCount) parts.push(`${it.logCount} 日志`);
+  return parts.length > 0 ? parts.join(" · ") : "—";
 }
 
 /** 自动归档阻塞原因（配置问题 / 可恢复故障）。 */

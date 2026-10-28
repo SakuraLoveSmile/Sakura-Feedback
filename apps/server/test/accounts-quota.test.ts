@@ -13,11 +13,13 @@ import {
   instantSleep,
   jsonReq,
   loginAsAdmin,
+  loginAsClient,
   makeConfig,
   makeMockAi,
   makeMockKaneo,
   seedApp,
   submitFeedback,
+  TEST_PASSWORD,
 } from "./helpers.ts";
 
 // 隔离测试库的临时口令：运行时拼装，避免在源码中出现可直接复用的凭据字面量。
@@ -117,7 +119,7 @@ describe("数据库迁移 v2 → v4", () => {
     const fb = db.prepare("SELECT user_id FROM feedbacks WHERE id = 'fb-old'").get() as any;
     expect(fb.user_id).toBe(userId);
     const uv = (db.prepare("PRAGMA user_version").get() as any).user_version;
-    expect(uv).toBe(12);
+    expect(uv).toBe(14);
     const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as any[]).map((t) => t.name);
     expect(tables).toContain("feedback_logs");
     db.prepare("INSERT INTO daily_usage (user_id, day, used, reset_at) VALUES (?, '2026-01-01', 0, 'x')").run(userId);
@@ -150,7 +152,7 @@ describe("数据库迁移 v2 → v4", () => {
 
     const db = openDb(dir);
     const uv = (db.prepare("PRAGMA user_version").get() as any).user_version;
-    expect(uv).toBe(12);
+    expect(uv).toBe(14);
     const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as any[]).map((t) => t.name);
     expect(tables).toContain("feedback_logs");
     db.close();
@@ -376,6 +378,75 @@ describe("每日提交额度", () => {
     expect(beijingDay(Date.parse("2026-01-01T15:59:59.999Z"))).toBe("2026-01-01");
     expect(beijingDay(Date.parse("2026-01-01T16:00:00.000Z"))).toBe("2026-01-02");
     expect(beijingResetAt(Date.parse("2026-01-01T00:00:00.000Z"))).toBe("2026-01-01T16:00:00.000Z");
+  });
+});
+
+// ------------------------------------------------------------------ 管理员额度豁免
+
+describe("管理员额度豁免", () => {
+  it("管理员登录 / 会话 / 提交返回不限额度形态；超过默认上限仍全部 201，used 如实计数", async () => {
+    const t = newApp();
+    const cookie = await loginAsAdmin(t);
+    await seedApp(t, cookie);
+    await seedApp(t, cookie, { appId: "com.test.other" });
+
+    // client 令牌会话：不限形态，无 dailyLimit / remaining 数值
+    const bearer = await loginAsClient(t);
+    const session = await jsonReq(t.app, "GET", "/api/auth/session", { bearer });
+    expect(session.status).toBe(200);
+    expect(session.data.quota.unlimited).toBe(true);
+    expect(session.data.quota.dailyLimit).toBeUndefined();
+    expect(session.data.quota.remaining).toBeUndefined();
+    expect(typeof session.data.quota.used).toBe("number");
+    expect(typeof session.data.quota.resetAt).toBe("string");
+    const adminId = session.data.user.id as string;
+
+    // Cookie 登录（管理后台路径）同样为不限形态
+    const cookieLogin = await jsonReq(t.app, "POST", "/api/auth/login", {
+      body: { username: "admin", password: TEST_PASSWORD },
+    });
+    expect(cookieLogin.status).toBe(200);
+    expect(cookieLogin.data.quota.unlimited).toBe(true);
+    expect(cookieLogin.data.quota.dailyLimit).toBeUndefined();
+    expect(cookieLogin.data.quota.remaining).toBeUndefined();
+
+    // 连续提交超过默认上限（3 次，含跨 app）：全部 201，无 429
+    const results = [];
+    for (let i = 0; i < 4; i++) {
+      const body = defaultSubmitBody(i === 3 ? { appId: "com.test.other" } : {});
+      results.push(await submitFeedback(t, bearer, body));
+    }
+    const r5 = await submitFeedback(t, bearer, defaultSubmitBody());
+    results.push(r5);
+    expect(results.map((r) => r.status)).toEqual([201, 201, 201, 201, 201]);
+    expect(r5.data.quota.unlimited).toBe(true);
+    expect(r5.data.quota.used).toBe(5);
+    expect(r5.data.quota.dailyLimit).toBeUndefined();
+    expect(r5.data.quota.remaining).toBeUndefined();
+    await t.worker.idle();
+
+    // daily_usage 如实计数：记录保留但不参与任何阻断
+    const used = t.db.prepare("SELECT used FROM daily_usage WHERE user_id = ?").get(adminId) as
+      | { used: number }
+      | undefined;
+    expect(used?.used).toBe(5);
+  });
+
+  it("管理员幂等重放：replayed:true 且 quota 同为不限形态", async () => {
+    const t = newApp();
+    const cookie = await loginAsAdmin(t);
+    await seedApp(t, cookie);
+    const bearer = await loginAsClient(t);
+    const body = defaultSubmitBody({ idempotencyKey: "admin-replay-key" });
+    expect((await submitFeedback(t, bearer, body)).status).toBe(201);
+
+    const replay = await submitFeedback(t, bearer, body);
+    expect(replay.status).toBe(200);
+    expect(replay.data.replayed).toBe(true);
+    expect(replay.data.quota.unlimited).toBe(true);
+    expect(replay.data.quota.used).toBe(1);
+    expect(replay.data.quota.dailyLimit).toBeUndefined();
+    await t.worker.idle();
   });
 });
 

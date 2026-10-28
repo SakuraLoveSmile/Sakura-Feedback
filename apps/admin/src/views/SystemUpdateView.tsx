@@ -16,12 +16,16 @@ function fmt(iso: string | null): string {
 export default function SystemUpdateView() {
   const [status, setStatus] = useState<SystemUpdateStatus | null>(null);
   const [checking, setChecking] = useState(false);
+  /** 页级：状态加载失败（带重试）。 */
   const [error, setError] = useState<string | null>(null);
+  /** 卡内：手动检查失败——贴近「检查更新」按钮，点按钮即重试。 */
+  const [checkError, setCheckError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   const loadStatus = useCallback(async () => {
     const s = await api.get<SystemUpdateStatus>("/api/admin/system/update");
     setStatus(s);
+    setError(null);
     return s;
   }, []);
 
@@ -31,7 +35,7 @@ export default function SystemUpdateView() {
 
   async function check() {
     setChecking(true);
-    setError(null);
+    setCheckError(null);
     setNotice(null);
     try {
       const r = await api.post<{ check: SystemUpdateStatus["check"] }>("/api/admin/system/update/check");
@@ -44,7 +48,7 @@ export default function SystemUpdateView() {
             : "发现新版本，请到服务器上手动更新",
       );
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "检查失败");
+      setCheckError(err instanceof ApiError ? err.message : "检查失败");
     } finally {
       setChecking(false);
     }
@@ -59,9 +63,16 @@ export default function SystemUpdateView() {
             <div className="sub">当前版本与最新稳定版检查。</div>
           </div>
         </div>
-        <div className="card">
-          <SkeletonRows rows={3} />
-        </div>
+        {error ? (
+          <InlineError
+            message={error}
+            onRetry={() => void loadStatus().catch((e) => setError(e instanceof ApiError ? e.message : "加载失败"))}
+          />
+        ) : (
+          <div className="card">
+            <SkeletonRows rows={3} />
+          </div>
+        )}
       </div>
     );
   }
@@ -75,7 +86,11 @@ export default function SystemUpdateView() {
         </div>
       </div>
       {error && <InlineError message={error} onRetry={() => void loadStatus().catch(() => undefined)} />}
-      {notice && <p className="ok-text">{notice}</p>}
+      {notice && (
+        <p className="inline-ok" role="status">
+          {notice}
+        </p>
+      )}
 
       <div className="card">
         <div className="kv">
@@ -104,11 +119,30 @@ export default function SystemUpdateView() {
         <div className="row row-wrap spread" style={{ marginBottom: 12 }}>
           <h2 style={{ margin: 0 }}>版本状态</h2>
           <div className="btn-row">
-            <button type="button" className="btn" onClick={check} disabled={checking || !status.config.manifestUrl}>
+            <button
+              type="button"
+              className="btn"
+              onClick={check}
+              disabled={checking || !status.config.manifestUrl}
+              title={
+                checking
+                  ? "正在检查…"
+                  : !status.config.manifestUrl
+                    ? "已关闭更新检查（FEEDBACK_UPDATE_MANIFEST_URL=off），无法手动检查"
+                    : undefined
+              }
+              aria-busy={checking}
+            >
               {checking ? "检查中…" : "检查更新"}
             </button>
           </div>
         </div>
+        {/* 禁用原因可见化：配置关闭检查时说明为什么按钮不可点 */}
+        {!status.config.manifestUrl && (
+          <p className="muted small">已关闭更新检查（FEEDBACK_UPDATE_MANIFEST_URL=off），无法手动检查。</p>
+        )}
+        {/* 检查请求失败：贴近按钮回显，点「检查更新」即重试 */}
+        {checkError && <InlineError message={checkError} onRetry={() => void check()} />}
         <CheckSummary check={status.check} />
       </div>
 

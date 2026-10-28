@@ -142,6 +142,18 @@ def main() -> int:
             check("面板无登录表单（握手注入生效）",
                   login_panel.count() == 0 or login_panel.first.is_hidden())
 
+            # 3b) 握手注入的是管理员会话：quota 为不限形态，面板显示「不限次数」，
+            #     不出现「今日剩余」，也不存在额度阻断提示。
+            page.wait_for_selector(".fb-quota", state="visible", timeout=15000)
+            quota_text = page.locator(".fb-quota").first.inner_text()
+            check("管理员额度显示「不限次数」", "不限次数" in quota_text, quota_text)
+            check("管理员额度不出现「今日剩余」", "今日剩余" not in quota_text, quota_text)
+            qb = page.locator(".fb-quota-blocked")
+            qb_text = qb.first.inner_text() if qb.count() else ""
+            check("无额度阻断提示",
+                  qb.count() == 0 or qb.first.is_hidden() or "已用完" not in qb_text,
+                  qb_text)
+
             # 4) 提交反馈（空文本时按钮本就禁用，先输入再断言可用）
             page.fill(".fb-textarea", FB_TEXT)
             page.wait_for_timeout(300)

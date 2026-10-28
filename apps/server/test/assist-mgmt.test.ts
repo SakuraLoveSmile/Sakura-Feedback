@@ -891,9 +891,9 @@ describe("busy 映射", () => {
 });
 
 describe("迁移 v12：assist_mgmt_requests", () => {
-  it("全新库建表 + 索引，user_version=12；http_status=0 运行中标记", () => {
+  it("全新库建表 + 索引，user_version=14；http_status=0 运行中标记", () => {
     const db = openDb(tmpDir());
-    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(12);
+    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(14);
     const cols = db.prepare("PRAGMA table_info(assist_mgmt_requests)").all() as { name: string }[];
     expect(cols.map((c) => c.name)).toEqual([
       "request_id",
@@ -917,7 +917,7 @@ describe("迁移 v12：assist_mgmt_requests", () => {
     db.exec("PRAGMA user_version = 10");
     db.close();
     const db2 = openDb(dir);
-    expect((db2.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(12);
+    expect((db2.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(14);
     const t = db2.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='assist_mgmt_requests'").get();
     expect(t).toBeTruthy();
     db2.close();

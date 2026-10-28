@@ -1,6 +1,7 @@
 import 'dart:ui' show Offset;
 
-import 'api_client.dart' show FeedbackFilePicker, FeedbackLogProvider;
+import 'api_client.dart'
+    show FeedbackFilePicker, FeedbackImagePicker, FeedbackLogProvider;
 
 /// 悬浮按钮停靠的侧边。
 enum FeedbackSide {
@@ -65,6 +66,7 @@ class FeedbackConfig {
     this.captureMode = FeedbackCaptureMode.off,
     this.logProvider,
     this.filePicker,
+    this.imagePicker,
   })  : assert(apiBase.trim().isNotEmpty, 'apiBase 不能为空'),
         assert(appId.trim().isNotEmpty, 'appId 不能为空'),
         assert(_isHttpUrl(apiBase), 'apiBase 必须是 http(s) 地址'),
@@ -117,6 +119,13 @@ class FeedbackConfig {
   /// 手动日志文件选择器（可选）。
   final FeedbackFilePicker? filePicker;
 
+  /// 手动图片选择器（可选，v12）。
+  ///
+  /// 默认实现走 `file_selector`（PNG/JPEG/WebP，多选）；宿主可覆盖为
+  /// 相册/拍照等自定义来源。返回的每张图仍会经客户端校验与等比缩小
+  /// （2048px / 400万像素 / 5MiB）。
+  final FeedbackImagePicker? imagePicker;
+
   /// T6：派生新配置（用于按「有效地址」重建 API 客户端 / 令牌仓库；
   /// 仅覆盖可变的身份字段，其余展示与采集配置原样保留）。
   FeedbackConfig copyWith({
@@ -138,6 +147,7 @@ class FeedbackConfig {
       captureMode: captureMode,
       logProvider: logProvider,
       filePicker: filePicker,
+      imagePicker: imagePicker,
     );
   }
 
