@@ -98,6 +98,27 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
+  // spec 5.1（2026-10-29 裁决）：命中区永远不大于该状态的视觉轮廓，不存在独立热区。
+  // 其余用例只断言 56 盒的尺寸，不会发现有人在球外包一层带 padding 的热区。
+  testWidgets('spec 5.1：静止态轮廓之外 1dp 不可点，轮廓之内可点',
+      (WidgetTester tester) async {
+    await pumpHost(tester);
+    final Rect body = tester.getRect(_body);
+    expect(body.size, const Size(56, 56));
+
+    await tester.tapAt(Offset(body.left - 1, body.center.dy));
+    await tester.pump();
+    expect(controller.openRequests, 0,
+        reason: '球沿外 1dp 不得命中：56 轮廓之外不允许有热区');
+
+    await tester.tapAt(body.center);
+    await tester.pump();
+    expect(controller.openRequests, 1, reason: '轮廓之内必须可点');
+
+    debugPrint('spec 5.1 hit area: rect=$body, outsideTap=0, insideTap=1');
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('dragging：基础直径84、不叠加按压与呼吸缩放', (WidgetTester tester) async {
     await pumpHost(tester);
     final TestGesture gesture = await drag(tester);
