@@ -1,6 +1,6 @@
 # 发布流水线（Release）
 
-一个 `v*` 标签推上去之后发生什么、`release-manifest.json` 里必须有什么、以及为什么 GitHub Release
+手动触发一次发布之后发生什么、`release-manifest.json` 里必须有什么、以及为什么 GitHub Release
 在全部产物齐全之前一直是 draft。实现见 [`.github/workflows/release.yml`](../.github/workflows/release.yml)。
 
 > **验证状态**：v0.4.0 的 GitHub Release 与发布流水线已成功运行（2026-09-16）。下文第 6 节是早期静态验证记录，不代表当前版本本次实测；当前版本的审查与验证以 `VERIFICATION.md` 为准。
@@ -9,26 +9,34 @@
 
 ## 1. 触发方式与渠道
 
-| 事件 | 推镜像 | 产出稳定清单 | Release |
+**只能手动触发。** 推 `v*` 标签**不会**自动发布——打完标签还要在 Actions 里点一次 Release
+（或 `gh workflow run`），把标签名填进 `version_tag`。这样「打标签」和「对外发布」是两个独立决定。
+
+| 触发 | 推镜像 | 产出稳定清单 | Release |
 |---|---|---|---|
-| 推送**正式**版本标签 `vX.Y.Z`（与根 `package.json` 的 version 完全一致） | 是 | 是 | 创建 draft → 齐全后公开 |
-| 推送**预发布**标签（如 `v0.3.0-rc.1`） | 是 | 否 | 不创建、不公开 |
-| 推送正式标签但标签与源码版本不一致（如 `v0.2.0` 而源码是 `0.3.0`） | **否**（推任何镜像之前就失败） | 否 | 不创建 |
-| 推送标签但标签名不符合 `v*` 约定（如 `release-0.3.0`） | 否 | 否 | 不创建 |
-| 手动触发 `workflow_dispatch` | 是（`sha-<提交>` 标签） | 否 | 不创建、不公开 |
+| 手动触发 + `version_tag` = **正式**标签 `vX.Y.Z`（与根 `package.json` 的 version 完全一致，且标签指向本次运行的提交） | 是 | 是 | 创建 draft → 齐全后公开 |
+| 手动触发 + `version_tag` = **预发布**标签（如 `v0.3.0-rc.1`） | 是 | 否 | 不创建、不公开 |
+| 手动触发 + `version_tag` **留空** | 是（`sha-<提交>` 标签） | 否 | 不创建、不公开 |
+| 手动触发 + 正式标签与源码版本不一致（如 `v0.2.0` 而源码是 `0.3.0`） | **否**（推任何镜像之前就失败） | 否 | 不创建 |
+| 手动触发 + 正式标签不存在或不指向本次运行的提交 | **否**（同上，fail-closed） | 否 | 不创建 |
+| 手动触发 + 标签名不符合 `v*` 约定（如 `release-0.3.0`） | 否 | 否 | 不创建 |
+| 推 `v*` 标签 | 否 | 否 | 不创建（**不再触发本工作流**） |
 | PR / 分支推送 | 否 | 否 | 不创建（只有 `ci.yml` 检查） |
 
 **稳定渠道判定**（四个条件同时成立，缺一即不是稳定发布）：
 
-1. 事件是标签推送（`push` + `ref_type=tag`）；
+1. `version_tag` 输入非空；
 2. 标签名匹配正式版本 `^v\d+\.\d+\.\d+$`（无 `-rc`／`+build` 之类后缀）；
 3. 标签严格等于 `v<根 package.json 的 version>`；
-4. 标签指向本次运行的提交：`git rev-parse refs/tags/<标签>^{commit}` == `github.sha`。
+4. 标签已推到远端且指向本次运行的提交：`git rev-parse refs/tags/<标签>^{commit}` == `github.sha`。
 
 判定由 `plan` job 在任何构建之前完成。条件 3、4 不满足时**直接失败退出**——因为发布错的清单比不发布更糟：
-镜像一旦用错误的版本标签推上去就无法收回。条件 1、2 不满足（手动触发 / 预发布标签）不报错，只是不进入
+镜像一旦用错误的版本标签推上去就无法收回。条件 1、2 不满足（留空 / 预发布标签）不报错，只是不进入
 稳定渠道：仍可构建推镜像用于验证，但**不会**创建 Release、不会产出 `release-manifest.json`。
 `checks`（复用 `ci.yml`）不通过时同样不会构建、不会推送。
+
+镜像的 `latest` 标签只在稳定渠道附加（由 `publish` job 按 `plan` 的 `stable` 输出显式控制），
+预发布与留空触发都不会动 `latest`。
 
 ## 2. job 结构与权限
 
@@ -44,7 +52,7 @@
 权限约束：顶层只有 `contents: read`；`packages: write` 只属于 `publish`；`contents: write` 只属于 `release`，
 且 `artifacts` / `manifest` job 完全不接触 GitHub Release——**唯一能写 Release 的 job 就是最后公开它的 job**。
 
-外部值（`github.ref_name`、`github.sha`、标签名等）一律经 `env:` 传入，**不插值进 `run:` 的 shell 文本**；
+外部值（`inputs.version_tag`、`github.sha`、标签名等）一律经 `env:` 传入，**不插值进 `run:` 的 shell 文本**；
 镜像标签继续由 `docker/metadata-action` 生成。
 
 ## 3. `release-manifest.json` 契约
@@ -124,7 +132,7 @@
   第 6 步自身失败同样只留下 draft（此时 Release 完整但未公开，人工重跑或手工公开即可）。
 - **已公开的 Release 不会被流水线改写**：重跑同一标签时第 3 步会失败退出，不会重新上传或改动已公开资产。
 - **稳定清单只会出现在正式版本上**：`manifest` 与 `release` job 都带
-  `if: needs.plan.outputs.stable == 'true'`，手动触发与预发布标签不会走到这里。
+  `if: needs.plan.outputs.stable == 'true'`，`version_tag` 留空与预发布标签不会走到这里。
 - 同一 ref 的发布串行化（`concurrency: release-${{ github.ref }}`，`cancel-in-progress: false`），
   避免两次运行同时改同一个 draft。
 
@@ -137,28 +145,35 @@
 # 1) 确认版本号（必须等于要去掉的 v 之后的标签名）
 python3 -c "import json;print(json.load(open('package.json'))['version'])"   # → 0.3.0
 
-# 2) 打标签并推送（由人工执行；本仓库工作流不会自动打标签）
+# 2) 打标签并推送（由人工执行；本仓库工作流不会自动打标签，推标签也不会自动发布）
 git tag v0.3.0
 git push origin v0.3.0
 
-# 3) 观察运行
+# 3) 手动触发发布：ref 用标签本身，version_tag 填同一个标签
+gh workflow run Release --ref v0.3.0 -f version_tag=v0.3.0
+
+# 4) 观察运行
 gh run watch
 
-# 4) 核对 Release（公开前是 draft；公开后 isDraft=false、isLatest=true）
+# 5) 核对 Release（公开前是 draft；公开后 isDraft=false、isLatest=true）
 gh release view v0.3.0 --json isDraft,url,assets
 gh release list --limit 10 --json tagName,isLatest
 
-# 5) 取清单核对字段与 digest
+# 6) 取清单核对字段与 digest
 gh release download v0.3.0 -p release-manifest.json -O -
 ```
+
+第 3 步的 `--ref` 与 `version_tag` 必须指向同一个提交：`plan` 会断言
+`refs/tags/<version_tag>^{commit}` == 本次运行的 `github.sha`，不一致就在推任何镜像之前失败。
+所以标签要先推上去（第 2 步）再触发，顺序不能颠倒。
 
 预期 job 顺序：`checks` → `plan` → `artifacts` → `publish` → `manifest` → `release`。
 （`manifest`、`release` 只在稳定渠道出现；`artifacts` 与 `publish` 会并行推进。）
 
 失败处理：
 
-- 停在 `plan`：标签与源码版本/提交不匹配，或标签名不合法。修正后重新打标签（**不要**用同一个标签强推覆盖：
-  删掉旧标签再推）。
+- 停在 `plan`：`version_tag` 与源码版本/提交不匹配，标签名不合法，或标签还没推到远端。
+  修正后**重新触发一次**即可；要改标签指向就删掉旧标签再推（**不要**用同一个标签强推覆盖）。
 - 停在 `artifacts` / `publish` / `manifest`：Release 还没被创建或仍是 draft，修好后重跑该 run 即可。
 - 停在 `release` 的第 5 步之前：Release 是 draft 且可能只有部分资产，重跑会重新上传并覆盖（`--clobber`）。
 - `release` 的第 6 步失败：Release 完整但未公开；重跑该 run（第 3 步会因「已存在」而跳过创建），
@@ -205,9 +220,10 @@ gh release download v0.3.0 -p release-manifest.json -O -
 ## 7. 已知边界
 
 - **本机无法运行 Actions**：上表所有结论都是静态/脚本级，不等价于真机验证；第一次发布请按第 5 节逐步核对。
-- **预发布/手动触发不再创建 Release**（相对 v0.1.0 时期「任何标签都挂 Release」的行为是收紧）：
+- **预发布标签与留空的手动触发不会创建 Release**（相对 v0.1.0 时期「任何标签都挂 Release」的行为是收紧）：
   原因是「检查更新」按 `releases/latest/download/` 取清单，任何非稳定内容都不应出现在 Releases 里。
   如果确实要把预发布挂出来，请人工用 `gh release create --prerelease` 处理（流水线不会代替你判断）。
-- 镜像的 `provenance` 与 `sbom` 仍开启；`latest` 标签由 `metadata-action` 自动附加，部署可自行选择是否使用。
+- 镜像的 `provenance` 与 `sbom` 仍开启；`latest` 标签**只在稳定渠道**附加（由 `publish` job 显式按
+  `plan` 的 `stable` 输出控制，不再依赖 `metadata-action` 的 `flavor latest=auto`），部署可自行选择是否使用。
 - `docs/closeout.md` 里「release.yml 只推一个镜像、标签推送即挂 Release」的描述是 v0.1.0 时期的历史记录，
   与本文档不一致；该文件不在本任务改动范围内，需要在 U1 收口时一并更新。

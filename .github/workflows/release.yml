@@ -1,18 +1,18 @@
 name: Release
 
 # 触发与渠道（判定规则与不变量见 docs/release.md）：
-#   - 推送正式版本标签 v*（例如 v0.5.1）：唯一进入「稳定渠道」的方式——构建并推送 feedback
-#     镜像，生成 release-manifest.json，创建 draft Release，全部资产齐全后最后一步才公开。
-#   - 手动触发（workflow_dispatch）：只构建并按 sha 标签推送，不创建 Release、不产出稳定清单。
+#   - 只能手动触发（workflow_dispatch）：标签推送不再自动发布，发版必须由人点一次。
+#   - 填 version_tag 且是正式版本标签 v*（例如 v0.5.1）：唯一进入「稳定渠道」的方式——构建并推送
+#     feedback 镜像，生成 release-manifest.json，创建 draft Release，全部资产齐全后最后一步才公开。
+#     标签必须已推到远端且指向本次运行的提交，否则在推任何镜像之前就失败。
+#   - 留空 version_tag，或填预发布标签（如 v0.3.0-rc.1）：只构建并推镜像，不创建 Release、不产出稳定清单。
 #   - PR 永远不会发布（见 ci.yml）。
 # 发布前必须先通过 CI：调用 ci.yml（workflow_call），检查不通过则不构建、不推送。
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
     inputs:
       version_tag:
-        description: 版本标签（例如 v0.3.0）。留空则只发布 sha 标签；手动触发不产出稳定清单。
+        description: 版本标签（例如 v0.3.0）。留空则只发布 sha 标签、不产出稳定清单；填正式标签才进入稳定渠道。
         required: false
         default: ""
 
@@ -35,7 +35,7 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   # 版本与渠道判定放在任何构建之前：标签/版本写错时，在推送任何镜像之前就失败。
-  # 稳定渠道 =「正式 v<源码版本> 标签」且该标签指向本次运行的提交。
+  # 稳定渠道 =「手动触发时填了正式 v<源码版本> 标签」且该标签指向本次运行的提交。
   plan:
     needs: [checks]
     runs-on: ubuntu-latest
@@ -57,9 +57,7 @@ jobs:
         id: classify
         env:
           # 外部值一律经 env 传入，不插值进 shell 命令文本
-          EVENT_NAME: ${{ github.event_name }}
-          REF_TYPE: ${{ github.ref_type }}
-          TAG_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.version_tag }}
           HEAD_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
@@ -76,28 +74,28 @@ jobs:
           channel="manual"
           tag=""
 
-          if [ "$EVENT_NAME" = "push" ] && [ "$REF_TYPE" = "tag" ]; then
-            tag="$TAG_NAME"
-            # 标签名来自外部，先做白名单校验再使用
-            if ! printf '%s' "$TAG_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
-              echo "::error::标签名不符合 v* 命名约定：$TAG_NAME"; exit 1
+          if [ -n "$INPUT_TAG" ]; then
+            tag="$INPUT_TAG"
+            # 标签名来自外部输入，先做白名单校验再使用
+            if ! printf '%s' "$INPUT_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+              echo "::error::标签名不符合 v* 命名约定：$INPUT_TAG"; exit 1
             fi
-            if printf '%s' "$TAG_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            if printf '%s' "$INPUT_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
               # 正式版本：必须与源码版本一致（否则清单的版本与标签会互相矛盾）
-              if [ "$TAG_NAME" != "v$version" ]; then
-                echo "::error::标签 $TAG_NAME 与根 package.json 版本 v$version 不一致；稳定渠道只接受匹配源码版本的正式标签"; exit 1
+              if [ "$INPUT_TAG" != "v$version" ]; then
+                echo "::error::标签 $INPUT_TAG 与根 package.json 版本 v$version 不一致；稳定渠道只接受匹配源码版本的正式标签"; exit 1
               fi
-              # 并且标签必须指向本次运行的提交
-              tag_commit="$(git rev-parse --verify --quiet "refs/tags/$TAG_NAME^{commit}" 2>/dev/null || true)"
+              # 并且标签必须已推到远端、且指向本次运行的提交
+              tag_commit="$(git rev-parse --verify --quiet "refs/tags/$INPUT_TAG^{commit}" 2>/dev/null || true)"
               if [ -z "$tag_commit" ]; then
-                git fetch --no-tags --depth=1 origin "+refs/tags/$TAG_NAME:refs/tags/$TAG_NAME" >/dev/null 2>&1 || true
-                tag_commit="$(git rev-parse --verify --quiet "refs/tags/$TAG_NAME^{commit}" 2>/dev/null || true)"
+                git fetch --no-tags --depth=1 origin "+refs/tags/$INPUT_TAG:refs/tags/$INPUT_TAG" >/dev/null 2>&1 || true
+                tag_commit="$(git rev-parse --verify --quiet "refs/tags/$INPUT_TAG^{commit}" 2>/dev/null || true)"
               fi
               if [ -z "$tag_commit" ]; then
-                echo "::error::无法解析标签 $TAG_NAME 指向的提交（fail-closed，拒绝进入稳定渠道）"; exit 1
+                echo "::error::无法解析标签 $INPUT_TAG 指向的提交（标签必须已推送到远端；fail-closed，拒绝进入稳定渠道）"; exit 1
               fi
               if [ "$tag_commit" != "$HEAD_SHA" ]; then
-                echo "::error::标签 $TAG_NAME 指向 $tag_commit，本次运行提交为 $HEAD_SHA（不一致）"; exit 1
+                echo "::error::标签 $INPUT_TAG 指向 $tag_commit，本次运行提交为 $HEAD_SHA（不一致；请在该标签所指的提交/ref 上触发）"; exit 1
               fi
               stable="true"
               channel="stable"
@@ -202,15 +200,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 标签由 metadata-action 生成，不把 ref 插值进 shell
+      # 标签由 metadata-action 生成，不把 ref 插值进 shell。
+      # 不再有 tag push 事件，所以 type=ref,event=tag 永远不会命中：版本标签改从 version_tag 输入来，
+      # 而 latest 显式只在稳定渠道附加（旧的 flavor latest=auto 会把预发布标签也标成 latest）。
       - name: 生成 feedback 镜像标签
         id: meta-feedback
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=tag
             type=raw,value=${{ inputs.version_tag }},enable=${{ inputs.version_tag != '' }}
+            type=raw,value=latest,enable=${{ needs.plan.outputs.stable == 'true' }}
             type=sha,format=long
 
       - name: 构建并推送 linux/amd64 feedback 服务镜像

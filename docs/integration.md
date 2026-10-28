@@ -368,14 +368,15 @@ macOS / iOS 只做构建，**未做 Keychain 运行时验证**；Windows / Linux
 
 **稳定渠道判定（权威口径，与 [`docs/release.md`](./release.md) 一致）**
 
-只有 4 个条件同时成立，才产出稳定版本（`release-manifest.json` + 公开 Release）：
+发布流水线**只能手动触发**（推 `v*` 标签不会自动发布）。只有 4 个条件同时成立，才产出稳定版本
+（`release-manifest.json` + 公开 Release）：
 
-1. 事件是**标签推送**（不是 `workflow_dispatch` 手动触发）；
+1. 手动触发时填了 `version_tag` 输入（留空只构建推 sha 镜像）；
 2. 标签是**正式版本** `vX.Y.Z`（没有 `-rc.1` 之类的预发布后缀）；
 3. 标签严格等于 `v<根 package.json 的 version>`；
-4. 标签指向本次运行的提交（`git rev-parse refs/tags/<标签>^{commit}` == `github.sha`）。
+4. 标签已推到远端且指向本次运行的提交（`git rev-parse refs/tags/<标签>^{commit}` == `github.sha`）。
 
-条件 3、4 不成立 → **在推送任何镜像之前就失败退出**；条件 1、2 不成立（手动触发、预发布标签）→
+条件 3、4 不成立 → **在推送任何镜像之前就失败退出**；条件 1、2 不成立（留空、预发布标签）→
 仍可构建推送镜像（用于验证），但**不产出稳定清单、不创建任何 Release**。
 **这是有意收紧**：「检查更新」按
 `https://github.com/<owner>/<repo>/releases/latest/download/release-manifest.json` 取清单，
@@ -394,7 +395,7 @@ macOS / iOS 只做构建，**未做 Keychain 运行时验证**；Windows / Linux
 `SHA256SUMS` 清单、`SOURCE.txt`（含来源提交）、镜像 digest（`feedback-image-digest.txt`）
 与稳定清单 `release-manifest.json`（清单字段见 [`docs/release.md`](./release.md)）。
 
-**draft → 公开的顺序**：标签推送时先创建 **draft** Release，把上述全部产物与清单传上去，**复查资产齐全**
+**draft → 公开的顺序**：进入稳定渠道时先创建 **draft** Release，把上述全部产物与清单传上去，**复查资产齐全**
 （缺一即失败退出、保持 draft），**最后一步才公开**。流水线不改动已公开的 Release，
 因此不存在「已公开但产物缺失」的中间状态。
 

@@ -393,7 +393,8 @@ def check_classify():
             ok = all(got.get(k) == v for k, v in expect.items())
         record(f"plan 判定：{label}", ok, f"exit={proc.returncode} out={got} {(proc.stdout.strip().splitlines() or [''])[-1][:120]}")
 
-    # 正式标签 + 版本一致 + 标签指向本次提交 → stable（用真实仓库的既有标签 v0.1.0 只读验证 git 分支）
+    # 手动触发 + 正式标签 + 版本一致 + 标签指向本次提交 → stable
+    # （用真实仓库的既有标签 v0.1.0 只读验证 git 分支）
     real_commit = subprocess.run(["git", "rev-parse", "v0.1.0^{commit}"], cwd=ROOT, capture_output=True, text=True).stdout.strip()
     tmp = sandbox(version="0.1.0")
     (tmp / "step.sh").write_text(run, encoding="utf-8")
@@ -404,15 +405,13 @@ def check_classify():
         env={
             "GITHUB_OUTPUT": str(tmp / "github_output"),
             "GIT_DIR": str(git_dir),
-            "EVENT_NAME": "push",
-            "REF_TYPE": "tag",
-            "TAG_NAME": "v0.1.0",
+            "INPUT_TAG": "v0.1.0",
             "HEAD_SHA": real_commit,
         },
     )
     got = outputs(tmp)
     record(
-        "plan 判定：正式标签且与源码版本、提交都一致 → stable=true（真实 git 标签只读校验）",
+        "plan 判定：version_tag 是正式标签且与源码版本、提交都一致 → stable=true（真实 git 标签只读校验）",
         proc.returncode == 0 and got.get("stable") == "true" and got.get("channel") == "stable",
         f"exit={proc.returncode} out={got}",
     )
@@ -423,9 +422,7 @@ def check_classify():
         env={
             "GITHUB_OUTPUT": str(tmp / "github_output"),
             "GIT_DIR": str(git_dir),
-            "EVENT_NAME": "push",
-            "REF_TYPE": "tag",
-            "TAG_NAME": "v0.1.0",
+            "INPUT_TAG": "v0.1.0",
             "HEAD_SHA": "f" * 40,
         },
     )
@@ -433,27 +430,27 @@ def check_classify():
 
     scenario(
         "正式标签与源码版本不一致 → 失败",
-        {"EVENT_NAME": "push", "REF_TYPE": "tag", "TAG_NAME": "v0.2.0", "HEAD_SHA": real_commit},
+        {"INPUT_TAG": "v0.2.0", "HEAD_SHA": real_commit},
         expect_exit=1,
     )
     scenario(
         "预发布标签 → 不进入稳定渠道（channel=prerelease, stable=false）",
-        {"EVENT_NAME": "push", "REF_TYPE": "tag", "TAG_NAME": "v0.3.0-rc.1", "HEAD_SHA": real_commit},
+        {"INPUT_TAG": "v0.3.0-rc.1", "HEAD_SHA": real_commit},
         expect={"channel": "prerelease", "stable": "false"},
     )
     scenario(
-        "手动触发（workflow_dispatch）→ channel=manual, stable=false",
-        {"EVENT_NAME": "workflow_dispatch", "REF_TYPE": "branch", "TAG_NAME": "main", "HEAD_SHA": real_commit},
-        expect={"channel": "manual", "stable": "false"},
+        "version_tag 留空 → channel=manual, stable=false",
+        {"INPUT_TAG": "", "HEAD_SHA": real_commit},
+        expect={"channel": "manual", "stable": "false", "tag": ""},
     )
     scenario(
-        "分支推送标签名不合法 → 失败",
-        {"EVENT_NAME": "push", "REF_TYPE": "tag", "TAG_NAME": "release-0.3.0", "HEAD_SHA": real_commit},
+        "标签名不合法 → 失败",
+        {"INPUT_TAG": "release-0.3.0", "HEAD_SHA": real_commit},
         expect_exit=1,
     )
     scenario(
-        "标签无法解析（空 git 仓库）→ fail-closed",
-        {"EVENT_NAME": "push", "REF_TYPE": "tag", "TAG_NAME": "v0.3.0", "HEAD_SHA": real_commit, "GIT_DIR": str(pathlib.Path(tempfile.mkdtemp(prefix="t5-empty-git-")))},
+        "标签无法解析（标签没推到远端，等价于空 git 仓库）→ fail-closed",
+        {"INPUT_TAG": "v0.3.0", "HEAD_SHA": real_commit, "GIT_DIR": str(pathlib.Path(tempfile.mkdtemp(prefix="t5-empty-git-")))},
         expect_exit=1,
     )
 
@@ -462,8 +459,8 @@ def check_classify():
     (tmp / "github_output").write_text("", encoding="utf-8")
     proc = run_cmd(
         "bash step.sh", tmp,
-        env={"GITHUB_OUTPUT": str(tmp / "github_output"), "GIT_DIR": str(git_dir), "EVENT_NAME": "workflow_dispatch",
-             "REF_TYPE": "branch", "TAG_NAME": "main", "HEAD_SHA": real_commit},
+        env={"GITHUB_OUTPUT": str(tmp / "github_output"), "GIT_DIR": str(git_dir),
+             "INPUT_TAG": "", "HEAD_SHA": real_commit},
     )
     record("plan 判定：version 输出与源码版本一致（0.3.0）", outputs(tmp).get("version") == "0.3.0", str(outputs(tmp)))
 
@@ -472,10 +469,39 @@ def check_classify():
     (tmp / "github_output").write_text("", encoding="utf-8")
     proc = run_cmd(
         "bash step.sh", tmp,
-        env={"GITHUB_OUTPUT": str(tmp / "github_output"), "GIT_DIR": str(git_dir), "EVENT_NAME": "workflow_dispatch",
-             "REF_TYPE": "branch", "TAG_NAME": "main", "HEAD_SHA": real_commit},
+        env={"GITHUB_OUTPUT": str(tmp / "github_output"), "GIT_DIR": str(git_dir),
+             "INPUT_TAG": "", "HEAD_SHA": real_commit},
     )
     record("plan 判定：源码版本不是 X.Y.Z → 失败", proc.returncode != 0, f"exit={proc.returncode}")
+
+
+def check_triggers():
+    """发布只能手动触发：标签推送不得再自动跑这条流水线。"""
+    # PyYAML 把裸 `on:` 解析成布尔键 True
+    triggers = WF[True] if True in WF else WF.get("on")
+    record(
+        "触发器：只有 workflow_dispatch（没有 push/pull_request 等自动触发）",
+        isinstance(triggers, dict) and set(triggers) == {"workflow_dispatch"},
+        f"triggers={sorted(map(str, triggers)) if isinstance(triggers, dict) else triggers!r}",
+    )
+    inputs = (triggers or {}).get("workflow_dispatch", {}).get("inputs", {}) if isinstance(triggers, dict) else {}
+    record(
+        "触发器：version_tag 输入存在且非必填（留空=只推 sha 镜像）",
+        "version_tag" in inputs and inputs["version_tag"].get("required") is not True and inputs["version_tag"].get("default") == "",
+        f"version_tag={inputs.get('version_tag')}",
+    )
+    # latest 只能在稳定渠道附加，否则预发布会把 latest 指向非正式镜像
+    meta = next(
+        (s for s in WF["jobs"]["publish"]["steps"] if s.get("id") == "meta-feedback"),
+        None,
+    )
+    tags = (meta or {}).get("with", {}).get("tags", "")
+    record(
+        "publish：latest 标签只在 stable 渠道附加，且不再依赖已不存在的 tag push 事件",
+        "type=ref,event=tag" not in tags
+        and "type=raw,value=latest,enable=${{ needs.plan.outputs.stable == 'true' }}" in tags,
+        f"tags={tags.strip().splitlines()}",
+    )
 
 
 def check_shell_syntax():
@@ -498,6 +524,7 @@ def main():
     check_permissions()
     check_ci_gate_preserved()
     check_shell_syntax()
+    check_triggers()
     check_classify()
     check_digest_step()
     check_manifest_generation()
