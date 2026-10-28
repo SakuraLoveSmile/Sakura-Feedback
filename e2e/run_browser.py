@@ -78,7 +78,11 @@ VUE_ORIGIN = "http://localhost:5188"
 PAGES_ORIGIN = "http://localhost:5189"
 ATTACKER_ORIGIN = "http://127.0.0.1:5189"
 PAGES_DIR = os.path.join(ROOT, "e2e/pages")
-SDK_UMD = os.path.join(ROOT, "packages/web/dist/feedback-web.umd.cjs")
+# FB_E2E_SDK_DIST / FB_E2E_ADMIN_DIST / FB_E2E_SHOTS：指向其它构建产物或截图目录，
+# 用于「本轮改动前」基线与「改动后」同场景对比（缺省行为与历史一致）。
+SDK_DIST = os.environ.get("FB_E2E_SDK_DIST") or os.path.join(ROOT, "packages", "web", "dist")
+SDK_UMD = os.path.join(SDK_DIST, "feedback-web.umd.cjs")
+ADMIN_DIST = os.environ.get("FB_E2E_ADMIN_DIST") or os.path.join(ROOT, "apps", "admin", "dist")
 APP_ID = "com.example.demo-e2e"
 
 results = []
@@ -304,12 +308,12 @@ def main():
         FEEDBACK_MASTER_KEY="bG9jYWwtZTJlLW1hc3Rlci1rZXktMzItYnl0ZXMhIQ==",
         FEEDBACK_ADMIN_USER=ADMIN_USER,
         FEEDBACK_ADMIN_PASSWORD=ADMIN_PASS,
-        FEEDBACK_ADMIN_DIST=os.path.join(ROOT, "apps/admin/dist"),
+        FEEDBACK_ADMIN_DIST=ADMIN_DIST,
         NODE_ENV="production",
     )
     env = dict(base_env, FEEDBACK_DATA_DIR=data_dir, FEEDBACK_PORT="8787")
     env2 = dict(base_env, FEEDBACK_DATA_DIR=data_dir2, FEEDBACK_PORT="8788")
-    shots = os.path.join(ROOT, "e2e/shots")
+    shots = os.environ.get("FB_E2E_SHOTS") or os.path.join(ROOT, "e2e/shots")
     os.makedirs(shots, exist_ok=True)
     os.makedirs(PAGES_DIR, exist_ok=True)
     assert os.path.exists(SDK_UMD), f"缺少组件产物：{SDK_UMD}（pnpm --filter @feedback/web build）"

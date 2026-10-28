@@ -198,6 +198,9 @@ def main() -> int:
             # Failed classify keeps the idempotency key and does not show success.
             page.goto(f"{base}/admin/?page=feedbacks&id=classify-id", wait_until="domcontentloaded")
             page.wait_for_selector("text=Text for classify-id", timeout=5000)
+            # 本轮 T5 改版：分类与同步分组默认折叠 → 先展开分组再操作保存。
+            page.locator("summary", has_text="分类与同步目标").first.click()
+            page.wait_for_timeout(250)
             page.get_by_role("button", name="保存", exact=True).click()
             page.wait_for_timeout(100)
             check("classify conflict has no success notice", page.get_by_text("已保存", exact=True).count() == 0)
