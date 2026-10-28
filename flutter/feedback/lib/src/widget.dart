@@ -1223,7 +1223,13 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
             themeMode: config.theme,
             child: Stack(
               children: <Widget>[
+                // 每个条件槽位都带稳定 key：Stack 对无 key 子节点按下标匹配，
+                // 一旦遮罩出现/消失就会让后面的槽位整体位移，面板元素被丢弃后
+                // 再经 _panelKey 重新收养（deactivate → activate）。那条路径会
+                // 让面板内 EditableText 的 OverlayPortal 在 theater 尚未 attach
+                // 时 markNeedsLayout，在 Flutter 3.41.x 上直接断言失败。
                 Positioned.fill(
+                  key: const Key('feedback-host-slot'),
                   child: RepaintBoundary(
                     key: _repaintBoundaryKey,
                     child: widget.child,
@@ -1232,6 +1238,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
                 // 宽屏抽屉展开时压一层可点击遮罩；窄屏为全屏页面不需要。
                 if (open && wide && !_temporarilyHideForCapture)
                   Positioned.fill(
+                    key: const Key('feedback-scrim-slot'),
                     child: GestureDetector(
                       key: const Key('feedback-scrim'),
                       behavior: HitTestBehavior.opaque,
@@ -1243,6 +1250,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
                 // 重拍期间用 Offstage 隐藏（SizedBox.shrink 会卸载面板子树，
                 // 销毁 FeedbackPanelState 导致草稿与旧截图丢失）。
                 Positioned(
+                  key: const Key('feedback-panel-slot'),
                   // 宽屏抽屉：上下各留 ≥16px 余量（高 min(720, 视口高−32)）；
                   // 窄屏（<768）：top/bottom 均为 0，全屏页面式。
                   top: panelTop,
@@ -1267,6 +1275,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
                 ),
                 if (!open && config.showLauncher)
                   Positioned(
+                    key: const Key('feedback-launcher-slot'),
                     bottom: bottom,
                     left: left,
                     right: right,
@@ -1281,6 +1290,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
                 // 冻结位图不透明铺满，灵感球 / 面板 / 启动入口都被其覆盖。
                 if (_selectionCapture != null)
                   Positioned.fill(
+                    key: const Key('feedback-capture-selection-slot'),
                     child: CaptureSelectionOverlay(
                       key: const Key('feedback-capture-selection-overlay'),
                       image: _selectionCapture!.image,
