@@ -48,5 +48,10 @@ examples/flutter/t1c-defines.json
 e2e/flutter_matrix/out/
 e2e/flutter_native/out/
 
+# 浏览器与矩阵验证产出的截图证据：按次生成、体积大，只作为本地证据保留。
+# 已入库的历史截图不受影响（.gitignore 不影响已跟踪文件）；
+# 确有必要入库的个别图用 `git add -f` 显式添加。
+e2e/shots/
+
 # 本机 IDE/代理会话数据
 .zcode/
