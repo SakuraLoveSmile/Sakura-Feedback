@@ -262,23 +262,23 @@ void main() {
   });
 
   group('灵感球主题令牌', () {
-    test('浅色主题的六个字段保留准确的浮点颜色', () {
+    // 原来是六个字段；2026-10-29 裁决「内侧 1px hairline 不画」后删掉了
+    // OrbPalette.hairline 死字段（painter 从未引用），故这里只剩五个。
+    test('浅色主题的五个字段保留准确的浮点颜色', () {
       const OrbPalette palette = OrbPalette.light;
       expect(palette.bloomWhiteAlpha, closeTo(0.45, _colorTolerance));
       _expectColor(palette.warm, 255, 190, 120, 0.58);
       _expectColor(palette.cyan, 120, 200, 255, 0.70);
       _expectColor(palette.edge, 255, 255, 255, 0.95);
-      _expectColor(palette.hairline, 0, 0, 0, 0.10);
       _expectColor(palette.sweepWhite, 255, 255, 255, 0.80);
     });
 
-    test('深色主题的六个字段保留准确的浮点颜色', () {
+    test('深色主题的五个字段保留准确的浮点颜色', () {
       const OrbPalette palette = OrbPalette.dark;
       expect(palette.bloomWhiteAlpha, closeTo(0.55, _colorTolerance));
       _expectColor(palette.warm, 200, 24, 0, 0.43);
       _expectColor(palette.cyan, 0, 76, 255, 0.33);
       _expectColor(palette.edge, 255, 255, 255, 0.85);
-      _expectColor(palette.hairline, 255, 255, 255, 0.18);
       _expectColor(palette.sweepWhite, 255, 255, 255, 0.80);
     });
 

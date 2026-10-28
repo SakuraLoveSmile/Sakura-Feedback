@@ -76,7 +76,7 @@
 | `--fb-orb-pale-purple` | — | **已作废**，见 12.6.1：暖冷过渡段实测接近中性，应为透明 |
 | `--fb-orb-dispersion-opacity` | `kFeedbackOrbDispersionOpacityLight` / `kFeedbackOrbDispersionOpacityDark` | **原 `0.55` 上限已作废**（自拟值，非实测）；以 12.6.1 的有效 alpha 为准 |
 | `--fb-orb-edge` | `kFeedbackOrbEdgeLight` / `kFeedbackOrbEdgeDark` | `rgba(255, 255, 255, 0.95)` | `rgba(255, 255, 255, 0.85)` |
-| `--fb-orb-hairline` | `kFeedbackOrbHairlineLight` / `kFeedbackOrbHairlineDark` | `rgba(0, 0, 0, 0.10)` | `rgba(255, 255, 255, 0.18)` |
+| ~~`--fb-orb-hairline`~~ | ~~`kFeedbackOrbHairlineLight` / `kFeedbackOrbHairlineDark`~~ | **已作废**（2026-10-29 裁决）：hairline 决定不画，`OrbPalette.hairline` 死字段已删除 | 同左 |
 | `--fb-orb-bloom-white` | `kFeedbackOrbBloomWhiteLight` / `kFeedbackOrbBloomWhiteDark` | `rgba(255, 255, 255, 0.45)` | `rgba(255, 255, 255, 0.55)` |
 | `--fb-orb-bloom-cyan-tint` | `kFeedbackOrbBloomCyanTintLight` / `kFeedbackOrbBloomCyanTintDark` | **已作废**（T10）：bloom 不承载青 tint（第 4 节图层 1、第 5 节）；实现无对应常量 / 变量 |
 | `--fb-orb-sweep-white` | `kFeedbackOrbSweepWhiteLight` / `kFeedbackOrbSweepWhiteDark` | `rgba(255, 255, 255, 0.80)` | `rgba(255, 255, 255, 0.80)`；设计推断 |
@@ -95,7 +95,7 @@
 | `--fb-orb-edge-width` | `kFeedbackOrbEdgeWidth` | **已废止等宽描边**；主白环改为第 12.2 节的径向渐变，半高宽约 `0.22R`（56px 球体约 6px），峰值位于 `0.95R`–`1.00R` |
 | `--fb-orb-edge-outer-blur` | `kFeedbackOrbEdgeOuterBlur` | `0.5px` / `0.5`，只柔化主白环外沿 |
 | `--fb-orb-core-backdrop-blur` | `kFeedbackOrbCoreBackdropSigma` | **已作废**（T10）：清玻璃核心不做 backdrop blur，见第 4 节图层 4 与 12.3.1；实现只对 bloom / glow 层做 blur |
-| `--fb-orb-hairline-width` | `kFeedbackOrbHairlineWidth` | `1px` / `1.0`；仅为内侧次级线，不代替 4px 主白环 |
+| ~~`--fb-orb-hairline-width`~~ | ~~`kFeedbackOrbHairlineWidth`~~ | **已作废**（2026-10-29 裁决）：内侧 1px hairline 决定不画，令牌与配色字段一并删除，见第 4 节图层 4 与 12.2 |
 | `--fb-orb-focus-width` | `kFeedbackOrbFocusWidth` | `2px` / `2.0` |
 | `--fb-orb-focus-offset` | `kFeedbackOrbFocusOffset` | `2px` / `2.0` |
 
@@ -133,6 +133,17 @@
 **焦点环颜色（T10 记录）**：Web 取 `--fb-accent`；Flutter 取 `Theme.of(context).colorScheme.primary`，不新增独立 Flutter 令牌。两者都是入口强调色，不改变主题 API；若宿主主题让两者不一致，以各自平台既有强调色为准。Web 用独立 `.fb-orb-focus-ring` 层绘制，不再使用 `outline`；因此 `forced-colors` 下不会自动继承系统高对比环，该场景留待后续卡验证（见任务记录 §9.5）。
 
 **键盘激活与焦点回归（2026-10-28 T7 定稿）**：球可获得键盘焦点；Space / Enter / 小键盘 Enter 各触发一次与点按等价的 `_handleLauncherTap()`，忽略长按重复（`includeRepeats: false`）。Web 使用原生 `:focus-visible` 与按钮激活；Flutter 3.47.7 的 `FocusableActionDetector` 不带默认快捷键，故在球局部映射这三个键，不改宿主全局快捷键——这是平台差异，不是契约差异。面板 open → closed（含 `controller.close()` 与程序化开合）一律把焦点还给球；焦点环只在**最近一次输入是键盘**时点亮。指针关闭会抑制下一次环显示，随后任意按键 / Tab 重新点亮。选区覆盖层打开期间球退出焦点链（`enabled: false`），Space / Enter 不再落回球。焦点环使用 `IgnorePointer`，不改变 56 / 84 布局与命中区；hidden 时随入口移除，并同步清除锁存的环与 releasing / hover / pressed 残留。
+
+### 5.1 命中区契约（2026-10-29 裁决）
+
+**不为任何状态新增独立热区；命中区永远不大于该状态的视觉轮廓。**
+
+- **基准命中区 = 静止态 56dp**，已高于 Material 的 48dp 与 Apple 的 44pt 最小可点尺寸，不需要靠放大来保证可达性。
+- **视觉缩放一律不改命中区**：hover `1.04`、pressed `0.94`、呼吸 `±2%`、方向拉伸都只作用于绘制，不改变可点区域。两端现状已满足（Flutter 的 `stateScale` 只进 painter，Web 的 `--fb-orb-state-scale` 只进 `pointer-events: none` 的视觉层）。
+- **`dragging` 的 84dp 是视觉直径**。两端实现路径不同：Flutter 用 `AnimatedContainer` 的布局尺寸实现放大，所以拖动期间命中盒恰好也是 84；Web 的 `.fb-orb` 根元素恒为 56 且 `transform` 只留给 1:1 指针平移，放大由四个视觉层承担，所以命中区恒为 56。**这不构成可观察差异**：进入 `dragging` 的前提是已越过 8px 阈值、指针已被 pan 手势捕获，更大的命中盒对该指针不起任何作用。
+- 唯一能观察到上述差异的路径是**第二根手指落在 56–84 环带**。该行为归入既有的「多指 / 非主键过滤」待办统一处理，不靠「命中区更大」来掩盖。
+- 因此**不做改动**：不给 Flutter 加固定 56 命中盒（会与第 7 节 56/84 布局契约和既有断言冲突，换不到可观察收益），也不给 Web 根元素加放大（会破坏 1:1 指针平移与 badge 的 1:1 要求）。
+- 装饰层的负 inset 同样不得扩大命中区（见第 4 节图层约束第 4 条）；`hidden` 时整棵入口不可命中（见下表）。
 
 呼吸计算统一为：
 

@@ -97,7 +97,6 @@ class OrbPalette {
     required this.warm,
     required this.cyan,
     required this.edge,
-    required this.hairline,
     required this.sweepWhite,
   });
 
@@ -113,9 +112,6 @@ class OrbPalette {
   /// 主白环边缘颜色。
   final Color edge;
 
-  /// 次级细线颜色令牌。
-  final Color hairline;
-
   /// 白色扫光的峰值颜色。
   final Color sweepWhite;
 
@@ -125,7 +121,6 @@ class OrbPalette {
     warm: Color.fromRGBO(255, 190, 120, 0.58),
     cyan: Color.fromRGBO(120, 200, 255, 0.70),
     edge: Color.fromRGBO(255, 255, 255, 0.95),
-    hairline: Color.fromRGBO(0, 0, 0, 0.10),
     sweepWhite: Color.fromRGBO(255, 255, 255, 0.80),
   );
 
@@ -135,7 +130,6 @@ class OrbPalette {
     warm: Color.fromRGBO(200, 24, 0, 0.43),
     cyan: Color.fromRGBO(0, 76, 255, 0.33),
     edge: Color.fromRGBO(255, 255, 255, 0.85),
-    hairline: Color.fromRGBO(255, 255, 255, 0.18),
     sweepWhite: Color.fromRGBO(255, 255, 255, 0.80),
   );
 
