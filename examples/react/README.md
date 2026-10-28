@@ -100,8 +100,9 @@ effect（mount → unmount → mount），本示例是安全的：
 />
 ```
 
-截图范围是**当前应用视口**；灵感球拖拽落点只标记问题位置，没有局部裁剪、
-没有系统悬浮窗、不跨应用截图。`data-feedback-capture-mask` 标注的区域
+截图来源是**当前应用视口**；灵感球拖拽松手后可调整选区、只提交选中区域
+（选区先完成敏感区遮挡，落点、选区与工具栏不入图）。没有系统悬浮窗、
+不跨应用截图、不自动长截图。`data-feedback-capture-mask` 标注的区域
 （见 `src/App.tsx` 的敏感数据演示区）在截图中会被中性遮罩覆盖。
 
 ## 连你本地的服务
@@ -115,3 +116,25 @@ effect（mount → unmount → mount），本示例是安全的：
 
 - 原生 `<script>` 直挂 UMD 产物：见 `examples/html`；
 - 服务端渲染 + 客户端动态 `import()`：见 `examples/ssr`。
+
+## v12 新能力速览
+
+- **多图附件**：「添加图片」/ 拖入 / 粘贴 PNG·JPEG·WebP（≤5 张，两列缩略图，
+  可放大、删除、打开全屏编辑器做裁剪 / 矩形标注 / 遮挡）。
+- **我的反馈**：面板内切换「我的反馈」标签，支持状态筛选与分页，历史图片与
+  日志附件以登录令牌取回（跨源可下载）。
+- **诊断日志（§5.6，三步接入）**：
+
+```ts
+import { FeedbackDiagnosticsRecorder, FeedbackErrorCapture, wrapFetch } from '@feedback/web';
+// 1) 记录器：200 条 / 256KiB 环形缓冲，白名单字段（不记 URL/正文/凭据）
+const rec = new FeedbackDiagnosticsRecorder({ pageLabel: 'home' });
+// 2) 宿主请求经 wrapFetch 记录（不替换全局 fetch）；异常监听显式安装可卸载
+const myFetch = wrapFetch(rec);
+new FeedbackErrorCapture(rec).install();
+// 3) 注入组件：组件请求同样被记录；logProvider 让诊断文件随提交附加
+widget.diagnosticsRecorder = rec;
+widget.logProvider = async () => (rec.toLogFile() ? [rec.toLogFile()!] : []);
+```
+
+完整示例见 `src/App.tsx`；协议细节见 `docs/integration.md` §5.5/§5.6。

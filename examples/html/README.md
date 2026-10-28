@@ -62,8 +62,9 @@ pnpm --filter @feedback/example-html serve        # http://127.0.0.1:8080/
 - `feedback-submitted`：服务**已接收**提交（201/200）后派发，
   `event.detail = { feedbackId, status, replayed }`。
 - `data-feedback-capture-mask`：标在任意元素上，截图时整棵子树被中性遮罩覆盖。
-- 截图范围是**当前应用视口**；拖拽落点只标记问题位置。没有局部裁剪、
-  没有系统悬浮窗、不跨应用截图。
+- 截图来源是**当前应用视口**；灵感球拖拽松手后可调整选区、只提交选中区域
+  （选区先完成敏感区遮挡，落点、选区与工具栏不入图）。没有系统悬浮窗、
+  不跨应用截图、不自动长截图。
 
 ## 连你本地的服务
 
@@ -82,3 +83,25 @@ PORT=8080 pnpm --filter @feedback/example-html serve &
 curl -sI http://127.0.0.1:8080/                    | head -1   # HTTP/1.1 200 OK
 curl -sI http://127.0.0.1:8080/feedback-web.umd.js | head -1   # HTTP/1.1 200 OK
 ```
+
+## v12 新能力速览
+
+- **多图附件**：「添加图片」/ 拖入 / 粘贴 PNG·JPEG·WebP（≤5 张，两列缩略图，
+  可放大、删除、打开全屏编辑器做裁剪 / 矩形标注 / 遮挡）。
+- **我的反馈**：面板内切换「我的反馈」标签，支持状态筛选与分页，历史图片与
+  日志附件以登录令牌取回（跨源可下载）。
+- **诊断日志（§5.6，三步接入，UMD 全局 `FeedbackWeb`）**：
+
+```js
+const FB = window.FeedbackWeb;
+// 1) 记录器：200 条 / 256KiB 环形缓冲，白名单字段（不记 URL/正文/凭据）
+const rec = new FB.FeedbackDiagnosticsRecorder({ pageLabel: 'home' });
+// 2) 宿主请求经 wrapFetch 记录（不替换全局 fetch）；异常监听显式安装可卸载
+const myFetch = FB.wrapFetch(rec);
+new FB.FeedbackErrorCapture(rec).install();
+// 3) 注入组件：组件请求同样被记录；logProvider 让诊断文件随提交附加
+widget.diagnosticsRecorder = rec;
+widget.logProvider = async () => (rec.toLogFile() ? [rec.toLogFile()] : []);
+```
+
+完整示例见 `index.html`；协议细节见 `docs/integration.md` §5.5/§5.6。
