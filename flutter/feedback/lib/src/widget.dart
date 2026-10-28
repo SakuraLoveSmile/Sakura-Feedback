@@ -3,8 +3,9 @@ import 'dart:math' as math;
 import 'dart:ui' as ui show Image, ImageByteFormat, Picture, PictureRecorder;
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/gestures.dart' show GestureBinding;
+import 'package:flutter/gestures.dart' show GestureBinding, kPrimaryButton;
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart' show SchedulerBinding, SchedulerPhase;
 import 'package:flutter/rendering.dart'
     show MatrixUtils, RenderEditable, RenderRepaintBoundary;
 import 'package:flutter/services.dart'
@@ -243,6 +244,10 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   double _orbReleaseAngle = 0.0;
   bool _orbPointerCancelled = false;
 
+  /// 当前被灵感球接受的指针 id；非空表示已有活跃指针，第二指一律忽略。
+  /// 与 Web 的 `orbPointerId` 守卫同一口径（spec 5.2）。
+  int? _orbPointer;
+
   /// 灵感球键盘焦点节点：由 Tab 聚焦，鼠标点击不请求焦点。
   final FocusNode _orbFocusNode = FocusNode(debugLabel: 'feedback-orb');
 
@@ -265,6 +270,30 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
       // 保留刚退出 pressed 的 140ms 窗口，对齐 Web 的 is-unpressing。
       _orbPressTransition = !_isDragging && (_orbPressed || pressed);
       _orbPressed = pressed;
+    });
+  }
+
+  /// 拖动清理专用的状态提交。
+  ///
+  /// `onPanCancel` 有两条来源：正常的手势取消（指针事件路径，调度相位是 idle），
+  /// 以及**入口在拖动中被隐藏**——此时 `RawGestureDetectorState.dispose` 会在
+  /// 卸载过程中 reject 手势并回调过来，而那一刻 widget 树是锁定的，直接
+  /// `setState` 会抛 `widget tree was locked`（球在拖动中打开面板即可复现）。
+  /// 所以这里按调度相位分流：idle 走同步 setState 保持既有同帧语义，帧内被回调
+  /// 则先落字段、推迟一帧再通知，状态结果一致。
+  ///
+  /// 这里**不**释放 `_orbPointer`：手势取消不等于指针抬起（pan 输掉竞争时指针
+  /// 仍按着），清掉会让第二指被当成首指放进来。释放只走 `onPointerUp` /
+  /// `onPointerCancel`——入口在按下期间被隐藏也不例外，Flutter 按指针保留按下时
+  /// 的命中路径，抬起仍会派发到已 detach 的 `Listener`。
+  void _cleanUpOrbPan(VoidCallback mutate) {
+    if (SchedulerBinding.instance.schedulerPhase == SchedulerPhase.idle) {
+      setState(mutate);
+      return;
+    }
+    mutate();
+    WidgetsBinding.instance.addPostFrameCallback((Duration _) {
+      if (mounted) setState(() {});
     });
   }
 
@@ -1519,7 +1548,18 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
           button: true,
           label: '灵感球',
           child: Listener(
-            onPointerDown: (_) {
+            onPointerDown: (PointerDownEvent event) {
+              // 与 Web 同一口径（element.ts 的 `ev.button !== 0` 与
+              // `orbPointerId` 守卫）：只认主键，且同一时刻只认一根指针。
+              // 不过滤时右键按下会亮起 pressed 态；更要紧的是第二指按下会把
+              // _dragOffset 清零，让正在拖动的球瞬间跳回原位。
+              if (event.buttons != kPrimaryButton) {
+                return;
+              }
+              if (_orbPointer != null) {
+                return;
+              }
+              _orbPointer = event.pointer;
               setState(() {
                 _orbReleasing = false;
                 _orbPointerCancelled = false;
@@ -1527,8 +1567,18 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
               });
               _setOrbPressed(true);
             },
-            onPointerUp: (_) => _setOrbPressed(false),
-            onPointerCancel: (_) {
+            onPointerUp: (PointerUpEvent event) {
+              if (_orbPointer != event.pointer) {
+                return;
+              }
+              _orbPointer = null;
+              _setOrbPressed(false);
+            },
+            onPointerCancel: (PointerCancelEvent event) {
+              if (_orbPointer != event.pointer) {
+                return;
+              }
+              _orbPointer = null;
               // 已接受的 Flutter pan 在 PointerCancel 时也调用 onPanEnd。
               _orbPointerCancelled = true;
               _setOrbPressed(false);
@@ -1579,7 +1629,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
               onPanCancel: () {
                 final bool dragged = _isDragging;
                 final double releaseAngle = orbDragAngle(_dragOffset);
-                setState(() {
+                _cleanUpOrbPan(() {
                   _orbReleaseAngle = releaseAngle;
                   _orbReleasing = dragged && !reduceMotion;
                   _orbPressTransition =
