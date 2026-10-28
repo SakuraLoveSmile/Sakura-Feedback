@@ -7,7 +7,7 @@
 | 片 | 内容 | T4 §10.3 编号 | 状态 |
 | --- | --- | --- | --- |
 | 1 | 多指 / 非主键过滤（Flutter 追平 Web） | 4 | 已完成 |
-| 2 | 回弹结束的 `breathWeight` 过渡 | 6 | 未开始 |
+| 2 | 回弹结束的 `breathWeight` 过渡 | 6 | 已完成 |
 | 3 | `forced-colors` 焦点环可见性 | 5 | 未开始 |
 | 4 | 对比度保持率 `≥ 0.85` 自动化 | 3 | 未开始 |
 
@@ -73,6 +73,47 @@
 - 真实多指硬件（触屏 / 触控板双指）未实机复核，仅 widget 测试覆盖。
 - Web 侧未改动（`element.ts` 本来就有两道守卫），本片未重跑 Web 用例。
 
-## 3 片 2–4
+## 3 片 2：呼吸权重过渡（已完成）
+
+### 3.1 契约
+
+写入 `docs/orb-spec.md` §7.4「呼吸权重过渡」，并修正 §5 状态表 `releasing` 行。要点：`breathWeight` 与 `stateScale` 共用同一时长与曲线（220 / 140 / 460ms），`releasing` 的目标是 1 而不是 0。
+
+### 3.2 改动（仅 Flutter，Web 本来就有 transition）
+
+`flutter/feedback/lib/src/widget.dart`：
+
+- 把 stateScale 的时长 / 曲线三元表达式提成局部 `stateDuration` / `stateCurve`，与呼吸权重共用。
+- 新增局部 `breathWeightTarget`。**原实现把 `_orbReleasing` 也算进压 0 的条件，这是错的**：Web 的 `.is-releasing` 规则只把 `--fb-orb-breath-weight` 写进 transition 列表、不设值，所以它回落到 `.fb-orb` 基值 1；hover / pressed 规则又都带 `:not(.is-releasing)`。因此回弹是在 460ms 内把权重从 0 拉回 1，而不是结束瞬间阶跃接上呼吸——spec §5 表里「过渡到当前 `breathScale`」说的就是这件事。
+- 外层加一层 `TweenAnimationBuilder<double>` 承载权重，`orbPainter` 改为接收 `breathWeight` 入参。未给 `OrbPainter` 新增字段，9 字段单字段变异集不受影响。
+
+### 3.3 验证
+
+Flutter 3.41.3，组件包：`flutter analyze` 干净；`flutter test` **365 passed**。
+
+被改动的既有断言（都是在钉改前的分叉行为，不是放宽强度）：
+
+| 位置 | 原断言 | 现断言与依据 |
+| --- | --- | --- |
+| `orb_drag_test` 回弹 @55ms / @230ms | `breathWeight == 0.0` | 按回弹曲线精确断言 `_releaseProgress(55)` 与 `progress`（@230ms 过冲 >1）。依据：权重在回弹期间渐入，原值钉的是改前的阶跃行为。 |
+| `orb_drag_test` 释放中 hover | `breathWeight == 0.0`；取 `.first` 的 TweenAnimationBuilder 当 scale | 权重按 `_releaseProgress(55)`；改为对最外两层（权重、stateScale）各自断言共用回弹时长 / 曲线与目标 1.0。依据：新增一层后 `.first` 指向权重层，不改会把 scale 的断言悄悄挪到别的 widget 上。 |
+| `orb_drag_test` 源码守卫 | `TweenAnimationBuilder<` 计 3 | 计 4。依据：守卫本意是「只有一个 `AnimationController`、不新增 Timer」，声明式 tween 不引入额外计时资源。 |
+
+新增断言：`orb_state_test` 的 hover 退出 @110ms 加 `breathWeight ∈ (0, 1)`——回弹用例只覆盖 460ms 曲线，220ms 这条路径此前无人钉。
+
+**变异检查（2/2 红）**：
+
+| 变异 | 结果 |
+| --- | --- |
+| 权重过渡时长归零（等价阶跃） | 红（回弹 @55ms、释放中 hover、hover 退出 @110ms） |
+| 回弹期间权重仍压 0（改前行为） | 红（回弹 @55ms / @230ms、释放中 hover） |
+
+### 3.4 未验证
+
+- 未做视觉复核：权重渐入的观感差异在 ±2% 幅度内，截图矩阵分辨不出，只有数值断言。
+- Web 侧零改动，未重跑 Web 用例。
+
+## 4 片 3–4
 
 未开始。
+

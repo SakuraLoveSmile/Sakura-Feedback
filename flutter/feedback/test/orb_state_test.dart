@@ -150,6 +150,9 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 110));
     expect(_painter(tester).stateScale, inExclusiveRange(1.0, 1.04));
+    // 呼吸权重与 stateScale 共用 220ms 过渡（spec 7）：退出 hover 时 ±2% 呼吸
+    // 必须渐入，不能 0→1 阶跃。没有过渡时这一帧会直接读到 1.0。
+    expect(_painter(tester).breathWeight, inExclusiveRange(0.0, 1.0));
     expect(tester.getSize(_body), const Size(56, 56));
     await tester.pump(const Duration(milliseconds: 150));
     expect(_painter(tester).stateScale, closeTo(1.0, 1e-6));

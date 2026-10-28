@@ -1397,15 +1397,32 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
             ? orbDragAngle(_dragOffset)
             : (_orbReleasing ? _orbReleaseAngle : 0.0));
     final bool pressTransition = _orbPressed || _orbPressTransition;
+    // 状态过渡时长 / 曲线：stateScale 与呼吸权重共用，对齐 Web 把两个
+    // registered number 写进同一条 transition 的做法。
+    final Duration stateDuration = reduceMotion
+        ? Duration.zero
+        : (_orbReleasing
+            ? kFeedbackOrbReleaseDuration
+            : (pressTransition
+                ? kFeedbackOrbPressDuration
+                : kFeedbackOrbSizeDuration));
+    final Curve stateCurve = _orbReleasing
+        ? kFeedbackOrbReleaseCurve
+        : (pressTransition ? kFeedbackOrbPressCurve : kFeedbackOrbStateCurve);
+    // 呼吸权重目标（spec 7）：hover / pressed / dragging 压到 0，其余为 1。
+    // `releasing` 刻意不压 0——Web 的 `.is-releasing` 不设该变量、回落到基值 1，
+    // 所以回弹是把权重在 460ms 内从 0 拉回 1，而不是结束瞬间阶跃接上呼吸。
+    // 同理回弹期间 hover 不参与（Web 的 hover 规则带 :not(.is-releasing)）。
+    final double breathWeightTarget = _orbReleasing
+        ? 1.0
+        : ((_isDragging || _orbPressed || _orbHovered) ? 0.0 : 1.0);
     final Brightness brightness = Theme.of(context).brightness;
-    OrbPainter orbPainter(double flow, double stateScale, double pull) =>
+    OrbPainter orbPainter(
+            double flow, double stateScale, double pull, double breathWeight) =>
         OrbPainter(
           flow: flow,
           breath: orbBreath(flow),
-          breathWeight:
-              (_isDragging || _orbPressed || _orbHovered || _orbReleasing)
-                  ? 0.0
-                  : 1.0,
+          breathWeight: breathWeight,
           stateScale: stateScale,
           dragAngle: angle,
           pull: pull,
@@ -1421,45 +1438,45 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
       width: diameter,
       height: diameter,
       child: TweenAnimationBuilder<double>(
-        tween: Tween<double>(begin: 1.0, end: target),
-        duration: reduceMotion
-            ? Duration.zero
-            : (_orbReleasing
-                ? kFeedbackOrbReleaseDuration
-                : (pressTransition
-                    ? kFeedbackOrbPressDuration
-                    : kFeedbackOrbSizeDuration)),
-        curve: _orbReleasing
-            ? kFeedbackOrbReleaseCurve
-            : (pressTransition
-                ? kFeedbackOrbPressCurve
-                : kFeedbackOrbStateCurve),
-        onEnd: () {
-          _orbPressTransition = false;
-        },
-        builder: (BuildContext context, double stateScale, Widget? child) =>
+        tween: Tween<double>(begin: 1.0, end: breathWeightTarget),
+        duration: stateDuration,
+        curve: stateCurve,
+        builder: (BuildContext context, double breathWeight, Widget? child) =>
             TweenAnimationBuilder<double>(
-          tween: Tween<double>(begin: 0.0, end: pull),
-          duration: _orbReleasing ? kFeedbackOrbReleaseDuration : Duration.zero,
-          curve: kFeedbackOrbReleaseCurve,
-          builder: (BuildContext context, double value, Widget? child) {
-            // 回弹过冲会产生负 pull，必须钳制以免 stretch<1、glow 反向。
-            final double safePull =
-                (_orbReleasing ? value : pull).clamp(0.0, 1.0).toDouble();
-            return glow == null
-                ? CustomPaint(painter: orbPainter(0.0, stateScale, safePull))
-                : AnimatedBuilder(
-                    animation: glow,
-                    builder: (BuildContext context, Widget? child) =>
-                        CustomPaint(
-                      painter: orbPainter(
-                        reduceMotion ? 0.0 : glow.value,
-                        stateScale,
-                        safePull,
-                      ),
-                    ),
-                  );
+          tween: Tween<double>(begin: 1.0, end: target),
+          duration: stateDuration,
+          curve: stateCurve,
+          onEnd: () {
+            _orbPressTransition = false;
           },
+          builder: (BuildContext context, double stateScale, Widget? child) =>
+              TweenAnimationBuilder<double>(
+            tween: Tween<double>(begin: 0.0, end: pull),
+            duration:
+                _orbReleasing ? kFeedbackOrbReleaseDuration : Duration.zero,
+            curve: kFeedbackOrbReleaseCurve,
+            builder: (BuildContext context, double value, Widget? child) {
+              // 回弹过冲会产生负 pull，必须钳制以免 stretch<1、glow 反向。
+              final double safePull =
+                  (_orbReleasing ? value : pull).clamp(0.0, 1.0).toDouble();
+              return glow == null
+                  ? CustomPaint(
+                      painter:
+                          orbPainter(0.0, stateScale, safePull, breathWeight))
+                  : AnimatedBuilder(
+                      animation: glow,
+                      builder: (BuildContext context, Widget? child) =>
+                          CustomPaint(
+                        painter: orbPainter(
+                          reduceMotion ? 0.0 : glow.value,
+                          stateScale,
+                          safePull,
+                          breathWeight,
+                        ),
+                      ),
+                    );
+            },
+          ),
         ),
       ),
     );

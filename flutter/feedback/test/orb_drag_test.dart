@@ -39,6 +39,10 @@ void _expectOffset(Offset actual, Offset expected, {String? reason}) {
   expect(actual.dy, closeTo(expected.dy, 1e-6), reason: reason);
 }
 
+/// 回弹第 `elapsedMs` 毫秒的曲线进度，用于按精确曲线断言中间帧。
+double _releaseProgress(int elapsedMs) => kFeedbackOrbReleaseCurve
+    .transform(elapsedMs / kFeedbackOrbReleaseDuration.inMilliseconds);
+
 void _logFrame(WidgetTester tester, String label) {
   final OrbPainter painter = _painter(tester);
   final Offset offset = _offset(tester);
@@ -365,7 +369,10 @@ void main() {
     expect(tester.getSize(_body).width, inExclusiveRange(56.0, 84.0));
     expect(_painter(tester).pull, inExclusiveRange(0.0, 1.0));
     expect(_offset(tester).dx, inExclusiveRange(0.0, 80.0));
-    expect(_painter(tester).breathWeight, 0.0);
+    // 呼吸权重按同一回弹曲线从 0 拉回 1（spec 7）：回弹不是「结束瞬间接上呼吸」，
+    // 而是整段 460ms 内渐入，与 Web 的 `--fb-orb-breath-weight` transition 同口径。
+    expect(_painter(tester).breathWeight,
+        closeTo(_releaseProgress(55), 1e-6));
     _logFrame(tester, 'RELEASE @55ms');
     await tester.pump(const Duration(milliseconds: 175));
     // 指定 Cubic 在 230ms 已过冲；按精确曲线断言，不能伪造 (56,84)/(0,1)。
@@ -376,7 +383,9 @@ void main() {
     _expectOffset(_offset(tester), Offset(80 * (1 - progress), 0));
     _expectOffset(_painter(tester).glowOffset, Offset.zero);
     expect(_offset(tester).dx, isNot(0.0));
-    expect(_painter(tester).breathWeight, 0.0);
+    // 权重与 scale 共用曲线，所以这里同样过冲到 >1（Web 的 registered number
+    // 也不钳制）；0.02 × 过冲量只让呼吸幅度短暂略超 ±2%。
+    expect(_painter(tester).breathWeight, closeTo(progress, 1e-6));
     _logFrame(tester, 'RELEASE @230ms');
     await tester.pump(const Duration(milliseconds: 250));
     await tester.pump();
@@ -544,16 +553,22 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 55));
     expect(_painter(tester).stateScale, 1.0);
-    expect(_painter(tester).breathWeight, 0.0);
-    final TweenAnimationBuilder<double> scale = tester
+    // hover 不抢占回弹，呼吸权重也一样按回弹曲线渐入（Web 的 hover 规则带
+    // `:not(.is-releasing)`，回弹期间权重回落到基值 1）。
+    expect(_painter(tester).breathWeight, closeTo(_releaseProgress(55), 1e-6));
+    final List<TweenAnimationBuilder<double>> stateTweens = tester
         .widgetList<TweenAnimationBuilder<double>>(find.descendant(
             of: _body,
             matching: find.byWidgetPredicate(
                 (Widget widget) => widget is TweenAnimationBuilder<double>)))
-        .first;
-    expect(scale.duration, kFeedbackOrbReleaseDuration);
-    expect(scale.curve, kFeedbackOrbReleaseCurve);
-    expect(scale.tween.end, 1.0);
+        .toList();
+    // 由外到内：呼吸权重、stateScale。两者共用回弹时长与曲线，目标同为 1。
+    expect(stateTweens.length, greaterThanOrEqualTo(2));
+    for (final TweenAnimationBuilder<double> tween in stateTweens.take(2)) {
+      expect(tween.duration, kFeedbackOrbReleaseDuration);
+      expect(tween.curve, kFeedbackOrbReleaseCurve);
+      expect(tween.tween.end, 1.0);
+    }
     await tester.pump(const Duration(milliseconds: 425));
     await tester.pump();
     await mouse.moveTo(Offset.zero);
@@ -586,8 +601,10 @@ void main() {
     final String source = readComponentSource('lib/src/widget.dart');
     expect(RegExp(r'AnimationController\(').allMatches(source).length, 1);
     expect(RegExp(r'\bTimer(?:\.periodic)?\(').allMatches(source), isEmpty);
-    expect(RegExp(r'TweenAnimationBuilder<').allMatches(source).length, 3);
+    // 4 = 平移、呼吸权重、stateScale、pull。2026-10-29 从 3 改为 4：呼吸权重
+    // 过渡是声明式 tween，不新增 Ticker 之外的计时资源，守卫的本意不变。
+    expect(RegExp(r'TweenAnimationBuilder<').allMatches(source).length, 4);
     debugPrint(
-        'T4-5 SOURCE AnimationController(=1 TweenAnimationBuilder=3 Timer=0');
+        'T4-5 SOURCE AnimationController(=1 TweenAnimationBuilder=4 Timer=0');
   });
 }

@@ -175,7 +175,7 @@ bloomWhiteAlpha = themeBloomWhiteAlpha × (1 + 0.08 × breath)
 | `focus-visible` | 键盘等输入触发 `:focus-visible`，且无更高优先级主状态 | 基础直径 56；`scale = breathScale`；2px `--fb-accent` 焦点环贴合当前视觉直径（每侧 2px 间隙 + 2px 环宽，外径 = 视觉直径 + 8：56 → 64，拖动 84 → 92；呼吸 ±2% 不改变环半径），与球同心；扫光与 bloom 呼吸运行 | 焦点环不做自身过渡：显隐瞬时，尺寸随视觉直径同步（拖动按同一 220ms 状态过渡跟随）；失焦立即移除；pressed / dragging 时保留，hidden 时随整棵入口消失 |
 | `pressed` | 指针或键盘按下，累计位移尚未超过拖动阈值 | 基础直径 56；固定 `scale = 0.94`；焦点环按上述规则保留 | 进入和退出均 140ms `ease-out`；退出到 hover 或当前 `breathScale` |
 | `dragging` | 同一指针累计位移 `hypot(dx, dy) > 8px` | 基础直径 84；Web 固定基础 `scale = 1.5`，Flutter 直接 diameter 84；沿拖动轴 `stretch = 1 + 0.04 × pull`，垂直轴为 1；位置 1:1 跟随；更新 glow 反向位移 | 跨过阈值后的尺寸进入为 220ms；指针平移、pull、glow 位移和 stretch 不加延迟或平滑 |
-| `releasing` | 拖动松手或拖动取消后的视觉复位阶段 | 基础 scale 从 1.5 过渡到当前 `breathScale`；方向拉伸回到 1；平移回到既有停靠位置；glow 反向位移回到 0 | 统一 460ms `cubic-bezier(0.2, 1.35, 0.32, 1)`；结束后进入 idle / hover / focus-visible |
+| `releasing` | 拖动松手或拖动取消后的视觉复位阶段 | 基础 scale 从 1.5 过渡到当前 `breathScale`；呼吸权重同步从 0 回到 1（不是结束瞬间接上）；方向拉伸回到 1；平移回到既有停靠位置；glow 反向位移回到 0 | 统一 460ms `cubic-bezier(0.2, 1.35, 0.32, 1)`；结束后进入 idle / hover / focus-visible |
 | `hidden` | 既有 launcher-mode、面板或捕获遮挡规则要求隐藏 | 整棵入口（含 badge）不可见、不可命中；扫光与 breath 停止；不得仅将 opacity 设为 0 后继续运行动画 | 立即生效；恢复可见时从 `flow = 0`、`breath = 0` 开始，不补算隐藏期间相位 |
 
 `releasing` 只描述视觉复位，不推迟、替换或取消既有点击 / 拖动松手业务流程。若同一时刻业务规则要求 hidden，hidden 优先，不输出可见回弹，也不增加胶囊中间态。
@@ -251,13 +251,16 @@ bloomWhiteAlpha = themeBloomWhiteAlpha × (1 + 0.08 × breath)
 | --- | --- |
 | `flow` | `double`，0..1；只表示白色扫光相位 |
 | `breath` | `double`，0..1 |
+| `breathWeight` | `double`，0..1（回弹曲线过冲时可短暂略超 1）；呼吸幅度权重，见下 |
 | `stateScale` | `double`，0.94..1.04；hover/pressed/idle/releasing 的连续视觉缩放 |
 | `dragAngle` | `double`，弧度；无位移时为 0 |
 | `pull` | `double`，0..1 |
 
 布尔 pressed 无法表达 140ms 过渡，Flutter 用连续 stateScale 承载，七态语义不变，对应 Web 的 `--fb-orb-state-scale`。
 
-`shouldRepaint` 必须逐项覆盖上述全部入参：任意一项变化都返回 true；五项均不变且没有其他绘制字段变化时返回 false。实现若另加主题、透明度或其他绘制字段，也必须纳入 `shouldRepaint`，不得以“字段表已列完”为由漏比较。
+**呼吸权重过渡（2026-10-29 加固）**：`breathWeight` 对应 Web 的 `--fb-orb-breath-weight`，目标值 hover / pressed / dragging 为 0、其余为 1，`releasing` **不压 0**（Web 的 `.is-releasing` 不设该变量、回落到基值 1，hover 规则带 `:not(.is-releasing)`）。它必须与 `stateScale` **共用同一时长与曲线**——状态切换 220ms、pressed 进出 140ms、回弹 460ms——不得作为布尔阶跃传入，否则 hover / press 切换与回弹结束会出现 ±2% 呼吸的整段跳变。Flutter 用一层 `TweenAnimationBuilder<double>` 承载，不新增控制器或 Timer（§7.2 约束不变）。回弹曲线会过冲，两端都不钳制权重：`0.02 × 过冲量` 只让呼吸幅度短暂略超 ±2%。
+
+`shouldRepaint` 必须逐项覆盖上述全部入参：任意一项变化都返回 true；上表各项均不变且没有其他绘制字段变化时返回 false。实现若另加主题、透明度或其他绘制字段，也必须纳入 `shouldRepaint`，不得以“字段表已列完”为由漏比较。
 
 ## 8. Reduced-motion 独立契约
 
