@@ -319,7 +319,7 @@ e2e/shots/orb-hyperos4/<web|flutter>/<light|dark>-<idle|hover|pressed|dragging|r
 | dragging | 从球心拖动到 `(dx, dy) = (80, 0)` 并保持，尺寸进入 220ms 后截图；基础直径 84，水平轮廓 87.36px、垂直轮廓 84px；pull 1、glowOffset `(-4, 0)` |
 | releasing | 在组件视觉测试夹具中触发 releasing，于 460ms 的中点 230ms 截图；验证回弹中间帧和方向拉伸复位。真实业务 E2E 另行验证松手后的捕获流程，不得为截图推迟或改写捕获 |
 
-Web 端出图与动效回归使用 Playwright；系统 `python3` 不自带该包，统一用 `uv run --with playwright python e2e/run_orb_shots_web.py`（动效为 `e2e/run_orb_motion_browser.py`，`forced-colors` 焦点环为 `e2e/run_orb_forced_colors_web.py`，后者还需 `--with pillow --with numpy` 做像素统计）。脚本只读 `packages/web/dist`，不改源码；Chrome 156 实测。
+Web 端出图与动效回归使用 Playwright；系统 `python3` 不自带该包，统一用 `uv run --with playwright python e2e/run_orb_shots_web.py`（动效为 `e2e/run_orb_motion_browser.py`，`forced-colors` 焦点环为 `e2e/run_orb_forced_colors_web.py`，12.3.1 对比度保持率为 `e2e/run_orb_contrast_web.py`，后两者还需 `--with pillow --with numpy` 做像素统计）。脚本只读 `packages/web/dist`，不改源码；Chrome 156 实测。
 
 另需保留 focus-visible、hidden、reduced-motion 的行为断言；它们不替代上述 20 张必交截图。**2026-10-28 用户已对照官网「找同款 2.50s」「记日程 2.50s」完成视觉确认**（清玻璃透字、径向白环、双极色散、无投影、七态截图均通过）。官方四段演示只有浅色背景；深色主题的色散 RGB 仍为按亮度中性原理推导、非官方数据。idle 呼吸、扫光、方向拉伸、glow lag 与回弹曲线仍不得标记为“官方已验证”。
 
@@ -393,6 +393,19 @@ FIND-SAME 实测白色叠加 alpha 随归一化半径变化（峰值在 `0.95R`�
 - 局限：官方球内外落在不同字形上，std 不是完全受控对比；但 2 倍差距远超字形差异可解释的范围，且 p5 的一致性（97 对 99）与之互证。官方球内 min 59 对球外 min 15 说明极暗笔画仍有衰减，故结论是「接近清玻璃」，不是「完全无衰减」。
 - **硬性验收指标（取代 12.3 原先的「实现自选」）**：在带文字背景的截图上，`对比度保持率 ≥ 0.85`。同时保留 12.3 的亮度约束（球心不得比同位置背景更暗）——亮度与对比度两项必须同时满足，只测亮度会漏掉纯模糊造成的缺陷。
 - 两端一致：Flutter 侧 `ImageFilter.blur` 的 sigma 受同一指标约束，不得各自取值。
+
+**自动化与实测值（2026-10-29）**：该指标已固化为两端共用口径的回归用例，不再只有人工测量。
+
+| 端 | 载体 | light 保持率 | dark 保持率 | 球外 std |
+| --- | --- | --- | --- | --- |
+| Flutter | `flutter/feedback/test/orb_contrast_test.dart`（普通 `flutter test`，走 `OrbPainter` 直绘） | **0.8991** | **0.8990** | 76.50 / 92.00 |
+| Web | `e2e/run_orb_contrast_web.py`（Playwright，`uv run --with playwright --with pillow --with numpy`） | **0.8997** | **0.8988** | 76.50 / 92.00 |
+
+- 两端差 < 0.001，采样数完全相同（球内 2738、球外 9206 设备像素）。浅色亮度约束同时满足（球内均值 137.8 对背景 124.5，更亮不更暗）。
+- `0.899 ≈ 1 − 0.10` 与第 4 节图层 4 的「`0.45R` 以内白色叠加 alpha 上限 `0.11`」互相印证：清玻璃核心的保持率上限由该 alpha 决定，不是由模糊决定。
+- **背景用周期性竖条纹，不用真实文字**：本节上面已写明官方测量的局限是「球内外落在不同字形上，std 不是完全受控对比」。条纹（周期 8 设备像素、50% 占空比、关于球心对称）把这个变量消掉，球内外的理论 std 相同；用例先自检 `fixtureRatio`（只有背景时球内外 std 之比，实测 1.0000），再算保持率，并另算一条受控保持率（同区域「有球 / 只有背景」之比）。这比用真实文字更严，不是更松。
+- 变异验证：Flutter 把核心白 alpha 从 `0.11` 提到 `0.30` → 0.832 / 0.834 转红；Web 给 `.fb-orb-core` 加 `backdrop-filter: blur(3px)` → 0.055 / 0.045 转红。
+- 条纹夹具的数字与官方帧的 `1.038` 不可直接比（背景构造不同）；官方帧那一行仍是唯一的官方参照，不得用条纹实测值替换它。
 
 
 ### 12.4 内部没有独立高光点
