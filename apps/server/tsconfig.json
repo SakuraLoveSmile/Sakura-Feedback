@@ -6,5 +6,8 @@
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
-  "include": ["src", "test"]
+  "include": ["src", "test"],
+  // admin-diagnostics.test.ts 仅由 vitest 运行：被测模块在 apps/admin，
+  // 其 @feedback/web 类型依赖不属于本包，tsc 编译会解析失败。
+  "exclude": ["test/admin-diagnostics.test.ts"]
 }

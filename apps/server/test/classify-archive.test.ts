@@ -1,12 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { resumeWorker } from "../src/app.ts";
-import {
-  getFeedback,
-  getFeedbackLogs,
-  getFeedbackScreenshot,
-  listFeedbackAudit,
-  updateFeedback,
-} from "../src/db/repos.ts";
+import { getFeedback, getFeedbackScreenshot, listFeedbackAudit, updateFeedback } from "../src/db/repos.ts";
 import { loadArchiveData, parseArchiveData, saveArchiveData } from "../src/pipeline/archive-data.ts";
 import {
   appRuleVersion,

@@ -12,8 +12,9 @@ import {
   getFeedbackLog,
   getFeedbackLogsMeta,
   getFeedbackScreenshot,
-  getFeedbackScreenshotMeta,
+  getUnifiedFeedbackImage,
   lifecycleAvailableActions,
+  listUnifiedFeedbackImages,
 } from "../db/repos.ts";
 import { checkLimiter, type Err, err, fail, readBearer } from "../http.ts";
 import { parseArchiveData } from "../pipeline/archive-data.ts";
@@ -82,7 +83,8 @@ function issueStatusOf(row: Pick<FeedbackRow, "id">): string {
  */
 export function assistFeedbackDetail(db: Db, row: FeedbackRow, manageEnabled: boolean) {
   const logs = getFeedbackLogsMeta(db, row.id);
-  const hasScreenshot = getFeedbackScreenshotMeta(db, row.id) !== null;
+  // v12：统一有序图片列表（新图片表 + 旧截图兼容），hasScreenshot 兼容保留。
+  const images = listUnifiedFeedbackImages(db, row.id);
   const app = getApp(db, row.app_row_id);
   return {
     id: row.id,
@@ -94,7 +96,18 @@ export function assistFeedbackDetail(db: Db, row: FeedbackRow, manageEnabled: bo
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     errorSummary: row.error_summary,
-    hasScreenshot,
+    hasScreenshot: images.length > 0,
+    images: images.map((i) => ({
+      id: i.id,
+      sort: i.sort,
+      source: i.source,
+      mime: i.mime,
+      filename: i.filename,
+      byteSize: i.byteSize,
+      sha256: i.sha256,
+      width: i.width,
+      height: i.height,
+    })),
     logs: logs.map((l) => ({
       id: l.id,
       filename: l.filename,
@@ -188,6 +201,21 @@ export function assistRoutes(deps: AssistRouteDeps): Hono {
         "content-type": "image/png",
         "content-length": String(shot.byte_size),
         etag: `"${shot.sha256}"`,
+        "cache-control": "no-store",
+      },
+    });
+  });
+
+  // 多图附件（v12）：按统一图片 id 返回字节（旧截图以 id="screenshot" 兼容命中）。
+  routes.get("/feedback/:id/attachments/images/:imageId", (c) => {
+    const img = getUnifiedFeedbackImage(db, c.req.param("id"), c.req.param("imageId"));
+    if (!img) return fail(c, err("not_found", "图片附件不存在", 404));
+    return new Response(img.bytes as unknown as BodyInit, {
+      status: 200,
+      headers: {
+        "content-type": img.mime,
+        "content-length": String(img.byteSize),
+        etag: `"${img.sha256}"`,
         "cache-control": "no-store",
       },
     });

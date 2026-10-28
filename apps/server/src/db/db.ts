@@ -94,6 +94,11 @@ CREATE TABLE IF NOT EXISTS ${table} (
   mgmt_trashed_by    TEXT,
   lifecycle_version  INTEGER NOT NULL DEFAULT 0,
   resume_paused      INTEGER NOT NULL DEFAULT 0,
+  -- ---- v11：简化 Issue 对话与闭环 ----
+  issue_status       TEXT NOT NULL DEFAULT 'open' CHECK (issue_status IN ('open','waiting_user','waiting_admin','resolved')),
+  dialogue_version   INTEGER NOT NULL DEFAULT 0,
+  archive_round      INTEGER NOT NULL DEFAULT 1,
+  last_activity_at   TEXT NOT NULL DEFAULT '',
   created_at       TEXT NOT NULL,
   updated_at       TEXT NOT NULL
 );`;
@@ -160,7 +165,7 @@ CREATE TABLE IF NOT EXISTS assist_outbox_seq (id INTEGER PRIMARY KEY CHECK (id =
  *   只含操作结果字段，不含正文/附件字节；
  * - 完成行保留 30 天，由操作路径顺带惰性清理；运行中标记超过 10 分钟视为崩溃残留，
  *   惰性终结为 outcome_uncertain。
- * 迁移号按契约冻结为 v12（v11 预留给 Issue 对话特性，允许跳号）。
+ * 迁移号按契约冻结为 v12（v11 空号，Issue 对话特性实际落在迁移 v13）。
  */
 const ASSIST_MGMT_REQUESTS_DDL = `
 CREATE TABLE IF NOT EXISTS assist_mgmt_requests (
@@ -172,6 +177,122 @@ CREATE TABLE IF NOT EXISTS assist_mgmt_requests (
   created_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_amr_feedback ON assist_mgmt_requests(feedback_id);
+`;
+
+/**
+ * 简化 Issue 对话与闭环（契约 v11，迁移 v13）+ 多图附件 / 撤销停止派发（契约 v12，迁移 v14）：
+ * - feedback_messages：反馈内的结构化消息流（用户、管理员或系统回复），契约 v12 增加 resolution_note；
+ * - feedback_message_attachments：消息附带的截图/日志/图片附件（契约 v12 起 kind 允许 'image'，
+ *   携带 mime 与排序号 sort）；
+ * - feedback_read_cursors：每个账号在每个反馈中的已读消息序号游标；
+ * - kaneo_cancellation_tasks：Kaneo 旧任务撤销持久化任务队列（契约 v12 起新增 'cancelled' 终态——
+ *   用户回复不再派发撤销；存量 pending/processing 由迁移置为 cancelled，行与审计保留）。
+ *
+ * 契约号与迁移号错开：契约 v11/v12 定稿时 user_version 11/12 已被 Assist 管理面占用，
+ * 故这两段 schema 顺延为迁移 v13/v14，不改契约命名。
+ */
+function feedbackMessagesTableDdl(table: string): string {
+  return `
+CREATE TABLE IF NOT EXISTS ${table} (
+  id               TEXT PRIMARY KEY,
+  feedback_id      TEXT NOT NULL REFERENCES feedbacks(id) ON DELETE CASCADE,
+  seq              INTEGER NOT NULL,
+  sender_type      TEXT NOT NULL CHECK (sender_type IN ('user','admin','system')),
+  sender_id        TEXT NOT NULL DEFAULT '',
+  sender_name      TEXT NOT NULL DEFAULT '',
+  text             TEXT NOT NULL DEFAULT '',
+  idempotency_key  TEXT,
+  resolution_note  TEXT,
+  created_at       TEXT NOT NULL
+);`;
+}
+
+function messageAttachmentsTableDdl(table: string): string {
+  return `
+CREATE TABLE IF NOT EXISTS ${table} (
+  id               TEXT PRIMARY KEY,
+  message_id       TEXT NOT NULL REFERENCES feedback_messages(id) ON DELETE CASCADE,
+  feedback_id      TEXT NOT NULL REFERENCES feedbacks(id) ON DELETE CASCADE,
+  sort             INTEGER NOT NULL DEFAULT 0,
+  kind             TEXT NOT NULL CHECK (kind IN ('screenshot','log','image')),
+  filename         TEXT NOT NULL,
+  mime             TEXT,
+  byte_size        INTEGER NOT NULL,
+  sha256           TEXT NOT NULL,
+  bytes            BLOB NOT NULL,
+  width            INTEGER,
+  height           INTEGER,
+  created_at       TEXT NOT NULL
+);`;
+}
+
+function cancellationTasksTableDdl(table: string): string {
+  return `
+CREATE TABLE IF NOT EXISTS ${table} (
+  id                  TEXT PRIMARY KEY,
+  feedback_id         TEXT NOT NULL REFERENCES feedbacks(id) ON DELETE CASCADE,
+  archive_round       INTEGER NOT NULL,
+  kaneo_task_id       TEXT NOT NULL,
+  target_api_base     TEXT NOT NULL,
+  target_project_id   TEXT NOT NULL,
+  target_workspace_id TEXT NOT NULL,
+  status              TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','processing','uncertain','failed','confirmed','cancelled')),
+  attempts            INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at     TEXT,
+  last_error          TEXT,
+  confirmed_at        TEXT,
+  created_at          TEXT NOT NULL,
+  updated_at          TEXT NOT NULL
+);`;
+}
+
+const FEEDBACK_MESSAGES_DDL = `
+${feedbackMessagesTableDdl("feedback_messages")}
+CREATE UNIQUE INDEX IF NOT EXISTS idx_feedback_messages_seq ON feedback_messages(feedback_id, seq);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_feedback_messages_idem ON feedback_messages(feedback_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_feedback_messages_fb_created ON feedback_messages(feedback_id, created_at);
+
+${messageAttachmentsTableDdl("feedback_message_attachments")}
+CREATE INDEX IF NOT EXISTS idx_fma_message ON feedback_message_attachments(message_id);
+CREATE INDEX IF NOT EXISTS idx_fma_feedback ON feedback_message_attachments(feedback_id);
+
+CREATE TABLE IF NOT EXISTS feedback_read_cursors (
+  user_id          TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  feedback_id      TEXT NOT NULL REFERENCES feedbacks(id) ON DELETE CASCADE,
+  last_read_seq    INTEGER NOT NULL DEFAULT 0,
+  updated_at       TEXT NOT NULL,
+  PRIMARY KEY (user_id, feedback_id)
+);
+CREATE INDEX IF NOT EXISTS idx_frc_feedback ON feedback_read_cursors(feedback_id);
+
+${cancellationTasksTableDdl("kaneo_cancellation_tasks")}
+CREATE UNIQUE INDEX IF NOT EXISTS idx_kct_fb_round ON kaneo_cancellation_tasks(feedback_id, archive_round);
+CREATE INDEX IF NOT EXISTS idx_kct_pending ON kaneo_cancellation_tasks(status, next_attempt_at);
+`;
+
+/**
+ * v12：初始反馈的有序多图附件（旧 feedback_screenshots 单图继续存在，
+ * 读取时经统一列表兼容合并；不迁移旧数据，二进制仍留在原表）。
+ * sha256 为客户端声明且经服务端核验的原始字节摘要（bytes 原样入库、不二次编码）。
+ */
+const FEEDBACK_IMAGES_DDL = `
+CREATE TABLE IF NOT EXISTS feedback_images (
+  id           TEXT PRIMARY KEY,
+  feedback_id  TEXT NOT NULL REFERENCES feedbacks(id) ON DELETE CASCADE,
+  sort         INTEGER NOT NULL,
+  mime         TEXT NOT NULL CHECK (mime IN ('image/png','image/jpeg','image/webp')),
+  filename     TEXT NOT NULL,
+  byte_size    INTEGER NOT NULL,
+  sha256       TEXT NOT NULL,
+  bytes        BLOB NOT NULL,
+  width        INTEGER,
+  height       INTEGER,
+  capture_json TEXT,
+  source       TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('capture','manual','edited')),
+  created_at   TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_feedback_images_feedback ON feedback_images(feedback_id, sort);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_feedback_images_id ON feedback_images(feedback_id, id);
 `;
 
 const SCHEMA = `
@@ -268,6 +389,10 @@ ${FEEDBACK_DELETION_RECEIPTS_DDL}
 ${ASSIST_OUTBOX_DDL}
 
 ${ASSIST_MGMT_REQUESTS_DDL}
+
+${FEEDBACK_MESSAGES_DDL}
+
+${FEEDBACK_IMAGES_DDL}
 `;
 
 function columns(db: DatabaseSync, table: string): string[] {
@@ -749,7 +874,7 @@ export function migrate(db: DatabaseSync): void {
     // 迁移 12（Assist 管理面幂等请求表，契约 v1.1 §4.2）：
     // - 新增 assist_mgmt_requests（request_id 幂等键 + 运行中/完成标记 + 结果快照）；
     // - 纯加表（SCHEMA 已含同构定义，IF NOT EXISTS 幂等），不改任何既有表与状态机；
-    // - v11 预留给 Issue 对话特性（契约冻结本表为 v12），user_version 允许跳号；
+    // - v11 为空号（Issue 对话特性实际落在迁移 v13），user_version 允许跳号；
     // - 事务内执行、任一步失败回滚、版本号不前进。
     db.exec("BEGIN");
     try {
@@ -760,6 +885,164 @@ export function migrate(db: DatabaseSync): void {
     } catch (err) {
       db.exec("ROLLBACK");
       throw err;
+    }
+  }
+
+  if (v < 13) {
+    // 迁移 13（简化 Issue 对话与闭环，契约 v11）：
+    // - feedbacks 扩展 issue_status、dialogue_version、archive_round 与 last_activity_at；
+    // - 历史反馈的 issue_status 统一置为 'open'，last_activity_at 回填为 created_at；
+    // - 新增 feedback_messages、feedback_message_attachments、feedback_read_cursors、kaneo_cancellation_tasks；
+    // - 事务内执行、任一步失败回滚、版本号不前进。
+    db.exec("BEGIN");
+    try {
+      const fbCols = columns(db, "feedbacks");
+      if (!fbCols.includes("issue_status")) {
+        db.exec(
+          "ALTER TABLE feedbacks ADD COLUMN issue_status TEXT NOT NULL DEFAULT 'open' CHECK (issue_status IN ('open','waiting_user','waiting_admin','resolved'))",
+        );
+      }
+      if (!fbCols.includes("dialogue_version")) {
+        db.exec("ALTER TABLE feedbacks ADD COLUMN dialogue_version INTEGER NOT NULL DEFAULT 0");
+      }
+      if (!fbCols.includes("archive_round")) {
+        db.exec("ALTER TABLE feedbacks ADD COLUMN archive_round INTEGER NOT NULL DEFAULT 1");
+      }
+      if (!fbCols.includes("last_activity_at")) {
+        db.exec("ALTER TABLE feedbacks ADD COLUMN last_activity_at TEXT NOT NULL DEFAULT ''");
+        db.exec("UPDATE feedbacks SET last_activity_at = created_at WHERE last_activity_at = ''");
+      }
+      db.exec("CREATE INDEX IF NOT EXISTS idx_feedbacks_last_activity ON feedbacks(last_activity_at)");
+      db.exec("CREATE INDEX IF NOT EXISTS idx_feedbacks_user_activity ON feedbacks(user_id, last_activity_at)");
+      db.exec(FEEDBACK_MESSAGES_DDL);
+      db.exec("PRAGMA user_version = 13;");
+      db.exec("COMMIT");
+      console.info("[migration_v13] 已创建 Issue 对话、附件、已读游标与 Kaneo 撤销任务表");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
+  }
+
+  if (v < 14) {
+    // 迁移 14（多图附件与撤销停止派发，契约 v12）：
+    // - 新增 feedback_images 有序图片子表（初始反馈的多图附件；旧 feedback_screenshots 不迁移，
+    //   读取时以 source='capture' 兼容并入统一 images 列表）；
+    // - feedback_messages 增加 resolution_note（管理员「标记已解决」的处理说明，对用户可见）；
+    // - feedback_message_attachments 重建：kind 允许 'image'，新增 mime（图片部件类型）与
+    //   sort（消息内附件顺序，回复幂等摘要的排序依据）；
+    // - kaneo_cancellation_tasks 重建：status 枚举加入 'cancelled'；存量 pending/processing
+    //   统一置 cancelled（不再派发撤销，行保留、每条补一条审计）；uncertain/failed 保留人工核对；
+    //   confirmed 不重建（保留已撤销留痕）。
+    // 与 v6/v8 同理：重建期间关闭外键（feedback_message_attachments 与
+    // kaneo_cancellation_tasks 都被 feedbacks 级联引用），事务内执行、任一步失败回滚、
+    // 版本号不前进，重启后按幂等步骤重试。
+    const fkWasOn =
+      ((db.prepare("PRAGMA foreign_keys").get() as { foreign_keys?: number } | undefined)?.foreign_keys ?? 0) === 1;
+    if (fkWasOn) db.exec("PRAGMA foreign_keys = OFF");
+    db.exec("BEGIN");
+    try {
+      db.exec(FEEDBACK_IMAGES_DDL);
+
+      const msgCols = columns(db, "feedback_messages");
+      if (!msgCols.includes("resolution_note")) {
+        db.exec("ALTER TABLE feedback_messages ADD COLUMN resolution_note TEXT");
+      }
+
+      const attCols = columns(db, "feedback_message_attachments");
+      if (!attCols.includes("mime") || !attCols.includes("sort")) {
+        db.exec(messageAttachmentsTableDdl("feedback_message_attachments_v14"));
+        db.exec(`
+          INSERT INTO feedback_message_attachments_v14 (
+            id, message_id, feedback_id, sort, kind, filename, mime, byte_size, sha256, bytes, width, height, created_at
+          )
+          SELECT
+            id, message_id, feedback_id,
+            ROW_NUMBER() OVER (PARTITION BY message_id ORDER BY rowid) - 1,
+            kind, filename, NULL, byte_size, sha256, bytes, width, height, created_at
+          FROM feedback_message_attachments;
+        `);
+        const before = db.prepare("SELECT COUNT(*) AS n FROM feedback_message_attachments").get() as { n: number };
+        const after = db.prepare("SELECT COUNT(*) AS n FROM feedback_message_attachments_v14").get() as { n: number };
+        if (Number(after.n) !== Number(before.n)) {
+          throw new Error(`feedback_message_attachments_v14 行数 ${after.n} 与旧表 ${before.n} 不一致，放弃迁移`);
+        }
+        db.exec("DROP TABLE feedback_message_attachments;");
+        db.exec("ALTER TABLE feedback_message_attachments_v14 RENAME TO feedback_message_attachments;");
+        db.exec("CREATE INDEX IF NOT EXISTS idx_fma_message ON feedback_message_attachments(message_id)");
+        db.exec("CREATE INDEX IF NOT EXISTS idx_fma_feedback ON feedback_message_attachments(feedback_id)");
+      }
+
+      // 撤销任务：重建放宽 status CHECK（含 cancelled），随后把存量 pending/processing
+      // 统一置 cancelled 并逐条补审计（v12 起用户回复不再触发撤销派发）。
+      // 守卫按既有 CHECK 判定（而非列集合），避免对已是新结构的库做无意义重建。
+      const kctSql = (
+        db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='kaneo_cancellation_tasks'").get() as
+          | { sql: string | null }
+          | undefined
+      )?.sql;
+      if (kctSql && !kctSql.includes("'cancelled'")) {
+        db.exec(cancellationTasksTableDdl("kaneo_cancellation_tasks_v14"));
+        db.exec(`
+          INSERT INTO kaneo_cancellation_tasks_v14 (
+            id, feedback_id, archive_round, kaneo_task_id, target_api_base, target_project_id, target_workspace_id,
+            status, attempts, next_attempt_at, last_error, confirmed_at, created_at, updated_at
+          )
+          SELECT
+            id, feedback_id, archive_round, kaneo_task_id, target_api_base, target_project_id, target_workspace_id,
+            status, attempts, next_attempt_at, last_error, confirmed_at, created_at, updated_at
+          FROM kaneo_cancellation_tasks;
+        `);
+        const before = db.prepare("SELECT COUNT(*) AS n FROM kaneo_cancellation_tasks").get() as { n: number };
+        const after = db.prepare("SELECT COUNT(*) AS n FROM kaneo_cancellation_tasks_v14").get() as { n: number };
+        if (Number(after.n) !== Number(before.n)) {
+          throw new Error(`kaneo_cancellation_tasks_v14 行数 ${after.n} 与旧表 ${before.n} 不一致，放弃迁移`);
+        }
+        db.exec("DROP TABLE kaneo_cancellation_tasks;");
+        db.exec("ALTER TABLE kaneo_cancellation_tasks_v14 RENAME TO kaneo_cancellation_tasks;");
+        db.exec(
+          "CREATE UNIQUE INDEX IF NOT EXISTS idx_kct_fb_round ON kaneo_cancellation_tasks(feedback_id, archive_round)",
+        );
+        db.exec("CREATE INDEX IF NOT EXISTS idx_kct_pending ON kaneo_cancellation_tasks(status, next_attempt_at)");
+
+        const stale = db
+          .prepare(
+            "SELECT id, feedback_id, archive_round, kaneo_task_id FROM kaneo_cancellation_tasks WHERE status IN ('pending','processing')",
+          )
+          .all() as { id: string; feedback_id: string; archive_round: number; kaneo_task_id: string }[];
+        if (stale.length > 0) {
+          const at = nowIso();
+          const mark = db.prepare(
+            "UPDATE kaneo_cancellation_tasks SET status = 'cancelled', next_attempt_at = NULL, updated_at = ? WHERE id = ?",
+          );
+          const auditStmt = db.prepare(
+            `INSERT INTO feedback_audit (id, feedback_id, at, actor_user_id, actor_username, action, detail_json)
+             VALUES (?, ?, ?, '', 'system', 'kaneo_cancellation_cancelled', ?)`,
+          );
+          for (const t of stale) {
+            mark.run(at, t.id);
+            auditStmt.run(
+              randomUUID(),
+              t.feedback_id,
+              at,
+              JSON.stringify({
+                taskId: t.kaneo_task_id,
+                round: t.archive_round,
+                reason: "v12 起用户回复不再触发 Kaneo 撤销派发；存量排队任务停止执行，行保留",
+              }),
+            );
+          }
+        }
+      }
+
+      db.exec("PRAGMA user_version = 14;");
+      db.exec("COMMIT");
+      console.info("[migration_v14] 已创建多图附件表、消息处理说明与撤销任务取消态");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    } finally {
+      if (fkWasOn) db.exec("PRAGMA foreign_keys = ON");
     }
   }
 }

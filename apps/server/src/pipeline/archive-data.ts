@@ -75,10 +75,10 @@ export interface ArchiveComment {
   outcome: WriteOutcome;
 }
 
-/** V2 单个附件恢复记录（按稳定附件 ID 存储）。 */
+/** V2 单个附件恢复记录（按稳定附件 ID 存储）。v12 起 kind 允许 'image'（有序多图附件）。 */
 export interface ArchiveAttachmentRecord {
   id: string;
-  kind: "screenshot" | "log";
+  kind: "screenshot" | "log" | "image";
   filename: string;
   byteSize: number;
   sha256: string;
@@ -366,7 +366,7 @@ function validateAttachmentRecord(id: string, att: Record<string, unknown>): Arc
   }
   if (att.id !== undefined && att.id !== id) return null;
   const kind = att.kind;
-  if (kind !== "screenshot" && kind !== "log") return null;
+  if (kind !== "screenshot" && kind !== "log" && kind !== "image") return null;
   if (typeof att.filename !== "string" || !att.filename) return null;
   if (typeof att.byteSize !== "number" || !Number.isInteger(att.byteSize) || att.byteSize < 0) return null;
   if (typeof att.sha256 !== "string") return null;
@@ -920,4 +920,9 @@ export function commentMarker(feedbackId: string, screenshotSha256: string): str
 /** 日志附件评论定位标记：`<feedbackId>|<logId>|<sha256>`。 */
 export function logCommentMarker(feedbackId: string, logId: string, sha256: string): string {
   return `${feedbackId}|${logId}|${sha256}`;
+}
+
+/** 有序图片附件评论定位标记（v12）：`<feedbackId>|<imageId>|<sha256>`，与日志同构但按图片稳定 id。 */
+export function imageCommentMarker(feedbackId: string, imageId: string, sha256: string): string {
+  return `${feedbackId}|${imageId}|${sha256}`;
 }

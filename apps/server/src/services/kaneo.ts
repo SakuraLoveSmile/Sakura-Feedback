@@ -124,6 +124,10 @@ export interface KaneoClient {
   createComment(taskId: string, input: { content: string }): Promise<{ id: string }>;
   /** 获取任务所有评论列表。 */
   listComments(taskId: string): Promise<KaneoComment[]>;
+  /** 读取任务（核对任务是否存在）。只读请求；404 时返回 null。 */
+  getTask(taskId: string): Promise<KaneoTaskRef | null>;
+  /** 删除任务（Kaneo DELETE /task/{taskId}）。200 或任务确定不存在时视为成功。 */
+  deleteTask(taskId: string): Promise<{ ok: boolean; notFound?: boolean }>;
   /**
    * 经现有鉴权资产下载接口读取资产字节（确认远端真实文件用，比对本地 PNG SHA-256）。
    * 只读请求；任何失败（含 404）都不可当作“文件不存在”的证明，调用方必须保持恢复状态。
@@ -157,6 +161,31 @@ export function buildScreenshotComment(meta: {
   return parts.join("\n\n");
 }
 
+/** 生成有序图片附件评论内容（v12，多图逐张挂载；imageId 为稳定图片 ID，用于读回核对）。 */
+export function buildImageComment(meta: {
+  feedbackId: string;
+  imageId: string;
+  filename: string;
+  assetUrl: string;
+  mime: string;
+  sha256: string;
+  byteSize: number;
+  width: number | null;
+  height: number | null;
+  sort: number;
+  source: "capture" | "manual" | "edited";
+}): string {
+  const dims = meta.width && meta.height ? `${meta.width}×${meta.height}` : "未知尺寸";
+  const sourceLabel = meta.source === "capture" ? "自动截图" : meta.source === "edited" ? "编辑保存" : "手动添加";
+  return [
+    `![${meta.filename}](${meta.assetUrl})`,
+    "---",
+    `**反馈ID**：${meta.feedbackId}`,
+    `**图片ID**：${meta.imageId}`,
+    `**图片摘要**：\`${meta.sha256}\` · ${dims} · ${meta.byteSize} 字节 · 第 ${meta.sort + 1} 张 · ${sourceLabel}`,
+  ].join("\n\n");
+}
+
 /** 生成日志附件评论内容（标准 Markdown 普通附件链接）。 */
 export function buildLogComment(meta: {
   feedbackId: string;
@@ -188,6 +217,14 @@ export function buildTaskDescription(
     submittedAt: string;
     text: string;
     logs?: { filename: string; source: "auto" | "manual"; byteSize: number; sha256?: string }[];
+    messages?: Array<{
+      seq: number;
+      senderType: string;
+      senderName: string;
+      text: string;
+      createdAt: string;
+      attachments?: Array<{ filename: string; kind: string }>;
+    }>;
   },
 ): string {
   const parts: string[] = [];
@@ -211,6 +248,20 @@ export function buildTaskDescription(
     .map((l) => `> ${l}`)
     .join("\n");
   parts.push(`**用户原话**：\n\n${quoted}`);
+
+  if (meta.messages && meta.messages.length > 0) {
+    const msgItems = meta.messages.map((m) => {
+      const sender =
+        m.senderType === "admin" ? `管理员（${m.senderName || "admin"}）` : `用户（${m.senderName || "user"}）`;
+      const attInfo =
+        m.attachments && m.attachments.length > 0
+          ? `\n  - 附件: ${m.attachments.map((a) => `\`${a.filename}\``).join(", ")}`
+          : "";
+      return `### #${m.seq} ${sender} · ${m.createdAt}\n\n${m.text || "（仅附件）"}${attInfo}`;
+    });
+    parts.push(`## 对话记录 (${meta.messages.length})\n\n${msgItems.join("\n\n")}`);
+  }
+
   if (meta.logs && meta.logs.length > 0) {
     const logItems = meta.logs.map(
       (l) =>

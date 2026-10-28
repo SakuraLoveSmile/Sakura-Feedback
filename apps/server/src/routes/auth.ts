@@ -151,6 +151,10 @@ export function authRoutes(deps: AuthDeps): Hono {
       expiresAt: row.expires_at,
       user: publicUser(user),
       quota,
+      capabilities: {
+        dialogue: true,
+        images: 5,
+      },
     });
   });
 
@@ -174,6 +178,11 @@ export function authRoutes(deps: AuthDeps): Hono {
       expiresAt: s.expires_at,
       user: publicUser(user),
       quota: getQuota(db, user),
+      capabilities: {
+        dialogue: true,
+        // v12：单次提交/回复允许的最大图片数（缺省视为 1）。
+        images: 5,
+      },
     });
   });
 

@@ -569,6 +569,62 @@ export function createKaneoHttpClient(
       return parsed;
     },
 
+    async getTask(taskId: string) {
+      let res: Response;
+      try {
+        res = await req(`/task/${encodeURIComponent(taskId)}`, {
+          timeoutMs: 15_000,
+          uncertainOnNetwork: false,
+        });
+      } catch (err) {
+        throw new KaneoUncertainError(`读取 Kaneo 任务异常: ${(err as Error).message}`);
+      }
+      if (res.status === 404) return null;
+      if (res.status === 401 || res.status === 403) {
+        throw new KaneoDefiniteError(`Kaneo 认证失败或无权限 (${res.status})`);
+      }
+      if (!res.ok) {
+        throw new KaneoUncertainError(`读取 Kaneo 任务返回异常状态 (${res.status})`);
+      }
+      return { taskId, taskUrl: "" };
+    },
+
+    async deleteTask(taskId: string) {
+      let res: Response;
+      try {
+        res = await req(`/task/${encodeURIComponent(taskId)}`, {
+          method: "DELETE",
+          timeoutMs: 15_000,
+          uncertainOnNetwork: true,
+        });
+      } catch (err) {
+        throw new KaneoUncertainError(`删除 Kaneo 任务连接异常: ${(err as Error).message}`);
+      }
+      if (res.status === 200 || res.status === 204) {
+        return { ok: true };
+      }
+      if (res.status === 404) {
+        // Kaneo 实际实现缺失任务返回 404，通过 GET 核对是否确实不存在
+        try {
+          const check = await this.getTask(taskId);
+          if (check === null) {
+            return { ok: true, notFound: true };
+          }
+          throw new KaneoDefiniteError("删除任务返回 404 但核对时任务仍存在");
+        } catch (err) {
+          if (err instanceof KaneoDefiniteError) throw err;
+          throw new KaneoUncertainError("删除返回 404 但随后核对失败，结果不确定");
+        }
+      }
+      if (res.status === 401 || res.status === 403) {
+        throw new KaneoDefiniteError(`Kaneo 认证失败或无权限删除任务 (${res.status})`);
+      }
+      if (res.status >= 500) {
+        throw new KaneoUncertainError(`删除 Kaneo 任务服务端返回 ${res.status}，结果不确定`);
+      }
+      throw new KaneoDefiniteError(`删除 Kaneo 任务失败 (${res.status})：${await bodyText(res)}`);
+    },
+
     async downloadAsset(assetUrl) {
       // 经现有鉴权资产下载接口读字节（确认远端真实文件用）。只读请求：
       // 任何失败（含 404）都不可当作“文件不存在”的证明，由调用方保持恢复状态。
