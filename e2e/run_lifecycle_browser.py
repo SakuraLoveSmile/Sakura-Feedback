@@ -211,8 +211,9 @@ def goto_view(page, view: str) -> None:
 def open_drawer(page, text: str) -> None:
     page.locator(".fb-table tbody tr", has_text=text).first.click()
     page.wait_for_selector(".drawer", timeout=10000)
-    # 详情异步加载：等正文出现（quote 块 = 用户原话已渲染）。
-    page.wait_for_selector(".drawer .quote", timeout=10000)
+    # 详情异步加载：等「原始反馈（用户原话）」区渲染。
+    # 本轮 T5 改版后正文前置到该区，原 `.quote` 时间线块已移除。
+    page.wait_for_selector(".drawer h3:has-text('原始反馈')", timeout=10000)
 
 
 def main() -> int:
@@ -398,7 +399,8 @@ def main() -> int:
             drawer = page.locator(".drawer")
             check("抽屉打开", drawer.count() == 1)
             check("抽屉含「用户原话」", drawer.locator("h3", has_text="用户原话").count() == 1)
-            check("抽屉含「分类与同步目标」", drawer.locator("h3", has_text="分类与同步目标").count() == 1)
+            # 本轮改版：AI 分组入口由 h3 改为默认折叠的 <summary>（.collapsible.section-fold）
+            check("抽屉含「分类与同步目标」折叠组", drawer.locator("summary", has_text="分类与同步目标").count() == 1)
             check("URL 写入 id 参数", "id=" in page.url)
             shot(page, "02-drawer")
             page.keyboard.press("Escape")

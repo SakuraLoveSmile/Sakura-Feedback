@@ -103,7 +103,8 @@ void main() {
     await tester.pump(const Duration(seconds: 10));
   });
 
-  testWidgets('宽屏为侧边抽屉（约 400px）+ 遮罩；随 side 停靠', (tester) async {
+  testWidgets('宽屏为侧边抽屉（440px / 最大高 min(720, 视口高−32)）+ 遮罩；随 side 停靠',
+      (tester) async {
     final controller =
         await pumpHost(tester, surface: const Size(1200, 800));
     controller.open();
@@ -112,9 +113,56 @@ void main() {
 
     expect(find.byKey(const Key('feedback-scrim')), findsOneWidget);
     final panelRect = tester.getRect(find.byType(FeedbackPanel));
-    expect(panelRect.width, 400);
+    // 冻结视觉规格：宽 min(440, 1200−32)=440；高 min(720, 800−32)=720，
+    // 上下各留 40px 余量（垂直居中、不贴边）。
+    expect(panelRect.width, 440);
+    expect(panelRect.height, moreOrLessEquals(720, epsilon: 1));
+    expect(panelRect.top, moreOrLessEquals(40, epsilon: 1));
+    expect(panelRect.bottom, moreOrLessEquals(760, epsilon: 1));
     // 默认右侧停靠。
     expect(panelRect.right, closeTo(1200, 1));
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump(const Duration(seconds: 10));
+  });
+
+  testWidgets('断点两侧：767 全屏页面式；768 抽屉 440 宽、上下各留 16px；高屏 720 封顶',
+      (tester) async {
+    // 768×500 → 宽屏抽屉：宽 min(440, 736)=440，高 min(720, 468)=468，
+    // 上下各留 16px（视口高 − 32）。
+    final controller = await pumpHost(tester, surface: const Size(768, 500));
+    controller.open();
+    await tester.pump();
+    await tester.pump();
+    Rect panelRect = tester.getRect(find.byType(FeedbackPanel));
+    expect(panelRect.width, 440);
+    expect(panelRect.height, moreOrLessEquals(468, epsilon: 1),
+        reason: '最大高 = min(720, 视口高−32)');
+    expect(panelRect.top, moreOrLessEquals(16, epsilon: 1),
+        reason: '抽屉上边留余量 ≥16px');
+    expect(panelRect.bottom, moreOrLessEquals(484, epsilon: 1),
+        reason: '抽屉下边留余量 ≥16px（不贴边不溢出）');
+
+    // 高视口：1200×900 → 高 720 封顶，上边距 (900−720)/2 = 90。
+    await tester.binding.setSurfaceSize(const Size(1200, 900));
+    await tester.pump();
+    await tester.pump();
+    panelRect = tester.getRect(find.byType(FeedbackPanel));
+    expect(panelRect.width, 440);
+    expect(panelRect.height, moreOrLessEquals(kFeedbackPanelMaxHeight, epsilon: 1),
+        reason: '最大高 720 封顶');
+    expect(panelRect.top, moreOrLessEquals(90, epsilon: 1));
+
+    // 断点下侧：767×500 → 全屏页面式（宽高都用满），无遮罩。
+    await tester.binding.setSurfaceSize(const Size(767, 500));
+    await tester.pump();
+    await tester.pump();
+    panelRect = tester.getRect(find.byType(FeedbackPanel));
+    expect(find.byKey(const Key('feedback-scrim')), findsNothing,
+        reason: '<768 全屏不需要遮罩');
+    expect(panelRect.width, 767);
+    expect(panelRect.height, 500);
+    expect(panelRect.top, 0);
 
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump(const Duration(seconds: 10));
@@ -212,10 +260,11 @@ void main() {
     await tester.pump(const Duration(seconds: 10));
   });
 
-  testWidgets('灵感球拖动超过 8dp 记录落点并触发截图与呼出', (tester) async {
+  testWidgets('灵感球拖动超过 8dp 进入选区流程：冻结画面 → 调整选区 → 确认后交付截图',
+      (tester) async {
     final controller = await pumpHost(
       tester,
-      surface: const Size(1000, 800),
+      surface: const Size(800, 600),
       launcherMode: FeedbackLauncherMode.orb,
       captureMode: FeedbackCaptureMode.viewport,
       hostChild: Container(
@@ -227,23 +276,54 @@ void main() {
     final orbFinder = find.byKey(const Key('feedback-orb'));
     expect(orbFinder, findsOneWidget);
 
-    // 模拟拖拽灵感球：从初始位置拖动 100px
-    final TestGesture gesture = await tester.startGesture(tester.getCenter(orbFinder));
-    await gesture.moveBy(const Offset(-100, -100));
-    await tester.pump();
+    // T1：拖拽灵感球（多次位移事件，累计位移超过 8dp 进入拖动态）。
+    final TestGesture gesture =
+        await tester.startGesture(tester.getCenter(orbFinder));
+    for (int i = 0; i < 3; i++) {
+      await gesture.moveBy(const Offset(-40, -40));
+      await tester.pump(const Duration(milliseconds: 16));
+    }
     await gesture.up();
     await tester.pump();
-    await tester.runAsync(() async {
-      await Future<void>.delayed(const Duration(milliseconds: 200));
-    });
+    // 等待冻结捕获完成并挂载选区覆盖层（真实异步 toImage/编码）。
+    for (int i = 0;
+        i < 60 &&
+            find
+                .byKey(const Key('feedback-capture-selection-overlay'))
+                .evaluate()
+                .isEmpty;
+        i++) {
+      await tester.pump(const Duration(milliseconds: 16));
+      await tester.runAsync(() async {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      });
+    }
+    expect(
+        find.byKey(const Key('feedback-capture-selection-overlay')),
+        findsOneWidget,
+        reason: 'T1：拖动松手后必须进入选区流程，而不是直接写草稿');
+    expect(controller.isOpen, isFalse, reason: '确认前不打开面板');
     await tester.pump();
-    // 先截图后开面板：捕获完成后才挂载面板，post-frame 交付截图需再等一帧。
     await tester.pump();
 
+    // 确认「使用此区域」→ 打开面板并只交付选区截图。
+    await tester.tap(find.byKey(const Key('feedback-capture-use-region')));
+    for (int i = 0;
+        i < 60 &&
+            find.byKey(const Key('feedback-screenshot-wrap')).evaluate().isEmpty;
+        i++) {
+      await tester.pump(const Duration(milliseconds: 16));
+      await tester.runAsync(() async {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      });
+    }
     expect(controller.isOpen, isTrue);
     expect(find.byKey(const Key('feedback-input')), findsOneWidget);
     // 应当展示截图缩略图包装容器
     expect(find.byKey(const Key('feedback-screenshot-wrap')), findsOneWidget);
+    expect(find.byKey(const Key('feedback-capture-selection-overlay')),
+        findsNothing,
+        reason: '确认后选区覆盖层收起');
 
     // 点击移除截图按钮
     await tester.tap(find.byKey(const Key('feedback-remove-screenshot-btn')));

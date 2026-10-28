@@ -44,6 +44,13 @@ void main() {
 
       expect(find.byKey(const Key('feedback-logs-count')), findsOneWidget);
       expect(find.text('日志附件 (2/3)'), findsOneWidget);
+      // T4：默认折叠只显示摘要（已附诊断日志），展开后才列出文件。
+      expect(find.byKey(const Key('feedback-logs-summary')), findsOneWidget);
+      expect(find.text('已附诊断日志'), findsOneWidget);
+      expect(find.byKey(const Key('feedback-log-name-0')), findsNothing);
+      await tester.tap(find.byKey(const Key('feedback-logs-expand')));
+      await tester.pumpAndSettle();
+
       expect(find.byKey(const Key('feedback-log-name-0')), findsOneWidget);
       expect(find.text('app.log'), findsOneWidget);
       expect(find.text('info.txt'), findsOneWidget);
@@ -159,6 +166,57 @@ void main() {
         await teardownPanel(tester);
       });
     }
+
+    testWidgets('自动重采校验：数量包含手动项，失败保留原日志，成功只替换自动项',
+        (WidgetTester tester) async {
+      FeedbackLogFile log(String name, {String source = 'auto'}) => FeedbackLogFile(
+            filename: name,
+            bytes: Uint8List.fromList(utf8.encode(name)),
+            source: source,
+            sha256: 'host-digest',
+          );
+      var result = [log('old.log')];
+      var calls = 0;
+      await pumpPanel(
+        tester,
+        server: server,
+        tokenStore: tokenStore,
+        config: FeedbackConfig(
+          'https://svc.test',
+          'com.example.app',
+          logProvider: () {
+            calls++;
+            return result;
+          },
+          filePicker: () => [log('manual.log')],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('feedback-btn-add-log')));
+      await tester.pumpAndSettle();
+      final state = tester.state<FeedbackPanelState>(find.byType(FeedbackPanel));
+      final original = state.logs;
+
+      result = [log('a.log'), log('b.log'), log('c.log')];
+      await tester.tap(find.byKey(const Key('feedback-logs-recollect')));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('日志数量超过 3 个上限'), findsOneWidget);
+      expect(state.logs, orderedEquals(original));
+      expect(state.logsCollecting, isFalse);
+      await tester.pumpAndSettle();
+      expect(calls, 2); // 失败不自动重试。
+
+      result = [log('new.log', source: 'manual')];
+      await tester.tap(find.byKey(const Key('feedback-logs-recollect')));
+      await tester.pumpAndSettle();
+      expect(state.logs.map((file) => file.filename), ['manual.log', 'new.log']);
+      expect(state.logs.map((file) => file.source), ['manual', 'auto']);
+      expect(state.logs.last.sha256, 'host-digest');
+      expect(find.byKey(const Key('feedback-log-error')), findsNothing);
+      expect(calls, 3);
+
+      await teardownPanel(tester);
+    });
 
     testWidgets('自动采集 4 个日志：明确拒绝整批而不截取前 3 个',
         (WidgetTester tester) async {

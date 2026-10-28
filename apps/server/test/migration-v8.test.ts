@@ -155,7 +155,7 @@ describe("迁移 8：软件软删除", () => {
     const dir = makeV7Db();
     const db = openDb(dir);
 
-    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(10);
+    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(12);
     expect(db.prepare("PRAGMA foreign_key_check").all()).toHaveLength(0);
 
     // 列级 UNIQUE 已移除、部分唯一索引已建立且为 UNIQUE
@@ -260,7 +260,7 @@ describe("迁移 8：软件软删除", () => {
     fix.exec("DROP TABLE apps_v8");
     fix.close();
     const db = openDb(dir);
-    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(10);
+    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(12);
     expect(db.prepare("PRAGMA foreign_key_check").all()).toHaveLength(0);
     expect(db.prepare("SELECT COUNT(*) n FROM apps").get()).toEqual({ n: 2 });
     db.close();
@@ -274,7 +274,7 @@ describe("迁移 8：软件软删除", () => {
     first.close();
 
     const second = openDb(dir);
-    expect((second.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(10);
+    expect((second.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(12);
     expect(digest(second)).toBe(snapshot);
     expect(second.prepare("PRAGMA foreign_key_check").all()).toHaveLength(0);
     second.close();
@@ -283,7 +283,7 @@ describe("迁移 8：软件软删除", () => {
   it("全新库直接带 deleted_at 与活跃唯一索引", () => {
     const dir = mkdtempSync(path.join(tmpdir(), "feedback-mig-v8-fresh-"));
     const db = openDb(dir);
-    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(10);
+    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(12);
     const cols = (db.prepare("PRAGMA table_info(apps)").all() as { name: string }[]).map((c) => c.name);
     expect(cols).toContain("deleted_at");
     const idx = db.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_apps_active_appid'").get() as

@@ -21,13 +21,36 @@ export 'src/api_client.dart'
     show
         ApiException,
         ApiClient,
+        FeedbackCapabilities,
         FeedbackCaptureInfo,
+        FeedbackCaptureRegion,
         FeedbackFilePicker,
+        FeedbackImageFile,
+        FeedbackImagePicker,
+        FeedbackImageView,
         FeedbackLogFile,
         FeedbackLogProvider,
         FeedbackSubmitResult,
         FeedbackRecord,
-        LoginResult;
+        IssueStatus,
+        FeedbackMessageAttachment,
+        FeedbackMessageItem,
+        UserFeedbackListItem,
+        UserFeedbackListResponse,
+        UnreadSummaryResponse,
+        FeedbackDialogueResponse,
+        LoginResult,
+        SessionInfo;
+export 'src/diagnostics.dart'
+    show
+        FeedbackDiagnosticsRecorder,
+        FeedbackHttpClient,
+        FeedbackExceptionCapture;
+export 'src/images.dart'
+    show
+        FeedbackImageException,
+        kFeedbackMaxImages,
+        normalizeFeedbackImage;
 export 'src/capture_mask.dart' show FeedbackCaptureMask;
 export 'src/config.dart'
     show
@@ -50,4 +73,8 @@ export 'src/server_pref.dart'
 export 'src/token_store.dart'
     show FeedbackTokenStore, MemoryTokenStore, feedbackTokenStorageKey;
 export 'src/widget.dart'
-    show FeedbackWidget, kFeedbackWideBreakpoint, kFeedbackPanelWidth;
+    show
+        FeedbackWidget,
+        kFeedbackWideBreakpoint,
+        kFeedbackPanelWidth,
+        kFeedbackPanelMaxHeight;

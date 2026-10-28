@@ -129,15 +129,22 @@ void main() {
     await tester.tap(find.byKey(const Key('feedback-close')));
     await tester.pump();
 
-    // 拖动灵感球超过 8dp 后释放：releasePoint 入口也必须先检查草稿。
+    // 拖动灵感球超过 8dp 后释放（多次位移事件）：releasePoint 入口也必须
+    // 先检查草稿——进入选区流程前就被守卫拦下，直接打开面板恢复草稿。
     final TestGesture gesture =
         await tester.startGesture(tester.getCenter(find.byKey(const Key('feedback-orb'))));
-    await gesture.moveBy(const Offset(-100, -100));
-    await tester.pump();
+    for (int i = 0; i < 3; i++) {
+      await gesture.moveBy(const Offset(-40, -40));
+      await tester.pump(const Duration(milliseconds: 16));
+    }
     await gesture.up();
     await tester.pump();
     await tester.pump();
     expect(controller.isOpen, isTrue);
+    expect(
+        find.byKey(const Key('feedback-capture-selection-overlay')),
+        findsNothing,
+        reason: '已有草稿：拖动释放不得进入选区流程');
     await allowCaptureToFinish(tester);
 
     panel = tester.state<FeedbackPanelState>(find.byType(FeedbackPanel));

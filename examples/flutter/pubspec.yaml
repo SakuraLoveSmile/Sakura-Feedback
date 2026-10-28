@@ -34,6 +34,9 @@ dependencies:
   feedback_widget:
     path: ../../flutter/feedback
 
+  # T4 诊断接入示例：FeedbackHttpClient 包装宿主的 http.Client。
+  http: ^1.2.0
+
   # 示例作为“使用 11 的宿主”固定在这一档：文本与 Music（sakuramusic）一致
   # （Music/pubspec.yaml: flutter_secure_storage: ^11.0.0），而 11.0.0 也是
   # tools/flutter-storage-matrix 的 11 档与 MUSIC-CONSTRAINTS.md 里记录的版本。
@@ -55,10 +58,6 @@ dev_dependencies:
     sdk: flutter
   integration_test:
     sdk: flutter
-
-  # T1-C 集成测试用：真实 HTTP 转发观察器（只观察反馈 POST 的接收结果，
-  # 底层仍是正常客户端，不伪造响应）。
-  http: ^1.2.0
 
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is

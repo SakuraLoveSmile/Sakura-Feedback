@@ -116,9 +116,9 @@ function acceptAllHub(calls: { url: string; body: any }[] = []): typeof fetch {
 }
 
 describe("迁移 v10：assist_outbox 表结构", () => {
-  it("全新库创建 assist_outbox / assist_outbox_seq / 索引，user_version=10", () => {
+  it("全新库创建 assist_outbox / assist_outbox_seq / 索引，user_version=11", () => {
     const db = openDb(tmpDir());
-    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(10);
+    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(12);
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'assist_%'").all() as {
       name: string;
     }[];

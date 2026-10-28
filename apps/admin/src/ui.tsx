@@ -328,7 +328,13 @@ export function ConfirmDialog({
           <button type="button" className="btn" onClick={onClose}>
             取消
           </button>
-          <button type="button" className={`btn ${danger ? "danger" : "primary"}`} disabled={!ok} onClick={onConfirm}>
+          <button
+            type="button"
+            className={`btn ${danger ? "danger" : "primary"}`}
+            disabled={!ok}
+            title={ok ? undefined : `输入「${need}」后可确认`}
+            onClick={onConfirm}
+          >
             {confirmLabel}
           </button>
         </>
@@ -354,13 +360,16 @@ export function ConfirmDialog({
   );
 }
 
-/** 文本输入弹窗（替代 window.prompt）。 */
+/** 输入弹窗（替代 window.prompt）；异步提交失败保留输入并在字段下回显。 */
 export function PromptDialog({
   title,
   body,
   label,
   placeholder,
+  inputType = "text",
+  autoComplete = "off",
   confirmLabel = "确定",
+  danger = false,
   onSubmit,
   onClose,
 }: {
@@ -368,37 +377,82 @@ export function PromptDialog({
   body?: ReactNode;
   label: string;
   placeholder?: string;
+  inputType?: "text" | "password";
+  autoComplete?: string;
   confirmLabel?: string;
-  onSubmit: (value: string) => void;
+  danger?: boolean;
+  onSubmit: (value: string) => void | Promise<void>;
   onClose: () => void;
 }) {
   const [value, setValue] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const submittingRef = useRef(false);
+  // 密码按原文提交，空格也是密码的一部分；普通文本保留原有空白校验。
+  const empty = inputType === "password" ? value === "" : value.trim() === "";
+
+  function close() {
+    if (!submittingRef.current) onClose();
+  }
+
+  async function submit() {
+    if (empty || submittingRef.current) return;
+    submittingRef.current = true;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await onSubmit(value);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "操作失败，请重试");
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
+    }
+  }
+
   return (
     <Modal
       title={title}
-      onClose={onClose}
+      onClose={close}
       actions={
         <>
-          <button type="button" className="btn" onClick={onClose}>
+          <button type="button" className="btn" disabled={submitting} onClick={close}>
             取消
           </button>
-          <button type="button" className="btn primary" disabled={value.trim() === ""} onClick={() => onSubmit(value)}>
-            {confirmLabel}
+          <button
+            type="button"
+            className={`btn ${danger ? "danger" : "primary"}`}
+            disabled={empty || submitting}
+            title={submitting ? "提交中，请稍候" : empty ? `填写${label}后可提交` : undefined}
+            onClick={() => void submit()}
+          >
+            {submitting ? "提交中…" : confirmLabel}
           </button>
         </>
       }
     >
       {body}
       <div style={{ marginTop: "var(--sp-3)" }}>
-        <Field id="prompt-input" label={label}>
+        <Field id="prompt-input" label={label} error={error}>
           {(control) => (
             <input
               {...control}
-              type="text"
+              type={inputType}
               value={value}
+              readOnly={submitting}
+              aria-busy={submitting}
               placeholder={placeholder}
-              onChange={(e) => setValue(e.target.value)}
-              autoComplete="off"
+              onChange={(e) => {
+                setValue(e.target.value);
+                setError(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  void submit();
+                }
+              }}
+              autoComplete={autoComplete}
             />
           )}
         </Field>

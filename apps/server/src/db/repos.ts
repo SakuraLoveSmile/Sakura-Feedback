@@ -48,14 +48,26 @@ export interface UserRow {
   created_at: string;
 }
 
-/** 每日提交额度（响应契约统一结构）。 */
-export interface Quota {
+/** 普通账号的每日提交额度（响应契约数值形态；unlimited 缺省即 false）。 */
+export interface LimitedQuota {
+  unlimited?: false;
   dailyLimit: number;
   used: number;
   remaining: number;
   /** 下次额度刷新时间（北京时间次日零点，ISO-8601 UTC）。 */
   resetAt: string;
 }
+
+/** 管理员账号的每日提交额度：不受次数限制，不返回 dailyLimit / remaining 数值。 */
+export interface UnlimitedQuota {
+  unlimited: true;
+  used: number;
+  /** 下次额度刷新时间（北京时间次日零点，ISO-8601 UTC）。 */
+  resetAt: string;
+}
+
+/** 每日提交额度（响应契约统一结构）：管理员为不限形态，普通账号为数值形态。 */
+export type Quota = LimitedQuota | UnlimitedQuota;
 
 export const DEFAULT_DAILY_LIMIT = 3;
 
@@ -82,7 +94,7 @@ export function beijingResetAt(at: Date | number = Date.now()): string {
 }
 
 /** 由上限与已用量构造统一额度结构（remaining 不为负）。 */
-export function makeQuota(dailyLimit: number, used: number, resetAt: string): Quota {
+export function makeQuota(dailyLimit: number, used: number, resetAt: string): LimitedQuota {
   const remaining = Math.max(0, dailyLimit - used);
   return { dailyLimit, used, remaining, resetAt };
 }
@@ -224,6 +236,136 @@ export interface FeedbackRow {
   lifecycle_version: number;
   /** 恢复后暂停标记（0/1）：回收站恢复出的未完成记录保持暂停，显式恢复处理后才继续。 */
   resume_paused: number;
+  /** ---- v11：简化 Issue 对话与闭环 ---- */
+  issue_status: IssueStatus;
+  dialogue_version: number;
+  archive_round: number;
+  last_activity_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 独立问题状态（v11，独立于 status 与 mgmt_state）。 */
+export type IssueStatus = "open" | "waiting_user" | "waiting_admin" | "resolved";
+
+export type MessageSenderType = "user" | "admin" | "system";
+
+export interface FeedbackMessageRow {
+  id: string;
+  feedback_id: string;
+  seq: number;
+  sender_type: MessageSenderType;
+  sender_id: string;
+  sender_name: string;
+  text: string;
+  idempotency_key: string | null;
+  /** v12：管理员「标记已解决」等动作携带的处理说明（对用户可见；可为 null）。 */
+  resolution_note: string | null;
+  created_at: string;
+}
+
+export type MessageAttachmentKind = "screenshot" | "log" | "image";
+
+export interface FeedbackMessageAttachmentRow {
+  id: string;
+  message_id: string;
+  feedback_id: string;
+  /** v12：消息内附件顺序（回复幂等摘要的排序依据；旧行迁移回填）。 */
+  sort: number;
+  kind: MessageAttachmentKind;
+  filename: string;
+  /** v12：kind='image' 的 MIME 类型（image/png|jpeg|webp）；其余 kind 为 null。 */
+  mime: string | null;
+  byte_size: number;
+  sha256: string;
+  bytes: Buffer | Uint8Array;
+  width: number | null;
+  height: number | null;
+  created_at: string;
+}
+
+// ------------------------------------------------------------------ v12: 初始反馈有序图片附件
+
+export interface FeedbackImageRow {
+  id: string;
+  feedback_id: string;
+  sort: number;
+  mime: "image/png" | "image/jpeg" | "image/webp";
+  filename: string;
+  byte_size: number;
+  sha256: string;
+  bytes: Uint8Array;
+  width: number | null;
+  height: number | null;
+  capture_json: string | null;
+  source: "capture" | "manual" | "edited";
+  created_at: string;
+}
+
+export type FeedbackImageMeta = Omit<FeedbackImageRow, "bytes">;
+
+/** 入库输入（路由完成全部校验后传入；sort 按数组序生成）。 */
+export interface FeedbackImageInput {
+  id: string;
+  mime: "image/png" | "image/jpeg" | "image/webp";
+  filename: string;
+  byteSize: number;
+  sha256: string;
+  bytes: Uint8Array | Buffer;
+  width: number | null;
+  height: number | null;
+  captureJson: string | null;
+  source: "capture" | "manual" | "edited";
+}
+
+/** 统一图片视图（v12）：新图片表按序，或旧 feedback_screenshots 兼容行（id 固定 "screenshot"）。 */
+export interface UnifiedImageView {
+  id: string;
+  sort: number;
+  source: "capture" | "manual" | "edited";
+  mime: string;
+  filename: string;
+  byteSize: number;
+  sha256: string;
+  width: number | null;
+  height: number | null;
+  createdAt: string;
+  /**
+   * 捕获元数据（仅来源为截图的图片存在）：含可选 region（局部截图区域，
+   * 0..1 归一化、相对原始捕获视口；缺省 = 整窗）。旧记录按原样透传。
+   */
+  capture?: NonNullable<ScreenshotMeta["capture"]>;
+}
+
+export interface FeedbackReadCursorRow {
+  user_id: string;
+  feedback_id: string;
+  last_read_seq: number;
+  updated_at: string;
+}
+
+export type CancellationTaskStatus =
+  | "pending"
+  | "processing"
+  | "uncertain"
+  | "failed"
+  | "confirmed"
+  /** v12：停止派发——存量 pending/processing 由迁移置为 cancelled，行与审计保留。 */
+  | "cancelled";
+
+export interface KaneoCancellationTaskRow {
+  id: string;
+  feedback_id: string;
+  archive_round: number;
+  kaneo_task_id: string;
+  target_api_base: string;
+  target_project_id: string;
+  target_workspace_id: string;
+  status: CancellationTaskStatus;
+  attempts: number;
+  next_attempt_at: string | null;
+  last_error: string | null;
+  confirmed_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -292,6 +434,8 @@ export interface ScreenshotMeta {
     /** 最终 PNG 实际输出像素（线格式定稿命名）；旧记录可缺省。 */
     pixelWidth?: number;
     pixelHeight?: number;
+    /** 局部截图区域：0..1 归一化，相对原始捕获视口；旧记录缺省 = 整个视口。 */
+    region?: { x: number; y: number; width: number; height: number };
   } | null;
   created_at: string;
 }
@@ -352,6 +496,8 @@ export function contentHash(
   context: unknown,
   screenshot?: { sha256: string; releasePoint?: { x: number; y: number } } | null,
   logs?: Array<{ filename: string; sha256: string; source: "auto" | "manual" }> | null,
+  /** v12：有序图片列表摘要（逐项 sha256）；缺省/空数组时哈希算法与既有版本完全一致。 */
+  images?: Array<{ sha256: string }> | null,
 ): string {
   const payload: Record<string, unknown> = { appId, text, context: context ?? null };
   if (screenshot) {
@@ -359,6 +505,10 @@ export function contentHash(
     if (screenshot.releasePoint) {
       payload.releasePoint = screenshot.releasePoint;
     }
+  }
+  if (images && images.length > 0) {
+    // 顺序即内容：images 列表有序参与哈希，顺序或任一内容变化即视为新内容。
+    payload.images = images.map((i) => i.sha256);
   }
   if (logs && logs.length > 0) {
     payload.logs = logs.map((l) => ({
@@ -491,10 +641,17 @@ export function getDailyUsed(db: Db, userId: string, day: string): number {
   return row?.used ?? 0;
 }
 
-/** 读取账号当前额度（含服务端生成的北京时间日期与 resetAt）。 */
-export function getQuota(db: Db, user: Pick<UserRow, "id" | "daily_limit">, at: Date | number = Date.now()): Quota {
+/** 读取账号当前额度（含服务端生成的北京时间日期与 resetAt）；管理员不受每日次数限制。 */
+export function getQuota(
+  db: Db,
+  user: Pick<UserRow, "id" | "daily_limit" | "role">,
+  at: Date | number = Date.now(),
+): Quota {
   const day = beijingDay(at);
-  return makeQuota(user.daily_limit, getDailyUsed(db, user.id, day), beijingResetAt(at));
+  const used = getDailyUsed(db, user.id, day);
+  const resetAt = beijingResetAt(at);
+  if (user.role === "admin") return { unlimited: true, used, resetAt };
+  return makeQuota(user.daily_limit, used, resetAt);
 }
 
 // ---------- sessions ----------
@@ -638,6 +795,14 @@ export function insertApp(
     nameSource?: "client" | "admin";
     /** 自动发现来源（有则同时登记为待确认/已确认来源）。 */
     sources?: Array<{ origin: string; kind: AppSourceKind; status: AppSourceStatus; at?: string }>;
+    /**
+     * 默认归档目标（可选）：管理员创建时与 PUT 同语义写入完整规则；
+     * 缺省一律按「空规则」处理（自动发现等路径不传，与旧行为一致）。
+     */
+    kaneoColumnId?: string;
+    kaneoLabelIds?: string[];
+    kaneoAssigneeId?: string | null;
+    kaneoAssigneeName?: string | null;
   },
 ): AppRow {
   const now = nowIso();
@@ -652,10 +817,10 @@ export function insertApp(
     config_status: input.configStatus ?? "configured",
     archive_mode: "manual",
     rule_version: 0,
-    kaneo_column_id: "",
-    kaneo_label_ids: "[]",
-    kaneo_assignee_id: null,
-    kaneo_assignee_name: null,
+    kaneo_column_id: input.kaneoColumnId ?? "",
+    kaneo_label_ids: JSON.stringify(input.kaneoLabelIds ?? []),
+    kaneo_assignee_id: input.kaneoAssigneeId ?? null,
+    kaneo_assignee_name: input.kaneoAssigneeName ?? null,
     auto_enabled_at: null,
     auto_enabled_by: null,
     auto_operation_id: null,
@@ -1084,6 +1249,8 @@ export function insertFeedbackWithScreenshot(
     captureJson: string | null;
   } | null,
   logs?: LogInput[] | null,
+  /** v12：有序图片附件（与 screenshot 互斥，由路由保证）。 */
+  images?: FeedbackImageInput[] | null,
 ): FeedbackRow {
   const now = nowIso();
   const row: FeedbackRow = {
@@ -1131,6 +1298,10 @@ export function insertFeedbackWithScreenshot(
     mgmt_trashed_by: null,
     lifecycle_version: 0,
     resume_paused: 0,
+    issue_status: "open",
+    dialogue_version: 0,
+    archive_round: 1,
+    last_activity_at: now,
     created_at: now,
     updated_at: now,
   };
@@ -1139,6 +1310,7 @@ export function insertFeedbackWithScreenshot(
   try {
     insertFeedbackRow(db, row, screenshot ?? null, now);
     const insertedLogs = logs && logs.length > 0 ? insertFeedbackLogs(db, row.id, logs, now) : [];
+    const insertedImages = images && images.length > 0 ? insertFeedbackImages(db, row.id, images, now) : [];
     // Assist：反馈首次落库事件与业务写入同事务（未接入时为 no-op）。
     enqueueFeedbackCreatedInTx(db, {
       id: row.id,
@@ -1146,6 +1318,13 @@ export function insertFeedbackWithScreenshot(
       text: row.text,
       occurredAt: now,
       screenshot: screenshot ? { byteSize: screenshot.byteSize, sha256: screenshot.sha256 } : null,
+      images: insertedImages.map((i) => ({
+        id: i.id,
+        filename: i.filename,
+        mime: i.mime,
+        byteSize: i.byteSize,
+        sha256: i.sha256,
+      })),
       logs: insertedLogs,
     });
     db.exec("COMMIT");
@@ -1177,6 +1356,40 @@ function insertFeedbackLogs(
   return inserted;
 }
 
+/** 事务内插入有序图片附件（v12）：sort 即数组序，稳定 id 来自客户端描述符。 */
+function insertFeedbackImages(
+  db: Db,
+  feedbackId: string,
+  images: FeedbackImageInput[],
+  now: string,
+): { id: string; filename: string; mime: string; byteSize: number; sha256: string }[] {
+  const stmt = db.prepare(
+    `INSERT INTO feedback_images (id, feedback_id, sort, mime, filename, byte_size, sha256, bytes, width, height, capture_json, source, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const inserted: { id: string; filename: string; mime: string; byteSize: number; sha256: string }[] = [];
+  for (let i = 0; i < images.length; i++) {
+    const img = images[i]!;
+    stmt.run(
+      img.id,
+      feedbackId,
+      i,
+      img.mime,
+      img.filename,
+      img.byteSize,
+      img.sha256,
+      img.bytes,
+      img.width,
+      img.height,
+      img.captureJson,
+      img.source,
+      now,
+    );
+    inserted.push({ id: img.id, filename: img.filename, mime: img.mime, byteSize: img.byteSize, sha256: img.sha256 });
+  }
+  return inserted;
+}
+
 /** 事务内插入反馈与截图（不含 BEGIN/COMMIT，供原子提交函数复用）。 */
 function insertFeedbackRow(
   db: Db,
@@ -1194,8 +1407,10 @@ function insertFeedbackRow(
   db.prepare(
     `INSERT INTO feedbacks (id, app_row_id, app_id, user_id, text, context_json, idempotency_key, content_hash,
        status, title, processed_json, kaneo_task_id, kaneo_task_url, archive_stage, archive_data_json,
-       source_origin, attempt_count, last_error, error_summary, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'received', NULL, NULL, NULL, NULL, 'task_pending', NULL, ?, 0, NULL, NULL, ?, ?)`,
+       source_origin, attempt_count, last_error, error_summary,
+       issue_status, dialogue_version, archive_round, last_activity_at,
+       created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'received', NULL, NULL, NULL, NULL, 'task_pending', NULL, ?, 0, NULL, NULL, ?, ?, ?, ?, ?, ?)`,
   ).run(
     row.id,
     row.app_row_id,
@@ -1206,6 +1421,10 @@ function insertFeedbackRow(
     row.idempotency_key,
     row.content_hash,
     row.source_origin,
+    row.issue_status ?? "open",
+    row.dialogue_version ?? 0,
+    row.archive_round ?? 1,
+    row.last_activity_at ?? now,
     now,
     now,
   );
@@ -1233,7 +1452,7 @@ export type SubmitOutcome =
   | { kind: "replayed"; row: FeedbackRow; quota: Quota }
   | { kind: "conflict" }
   | { kind: "account_invalid" }
-  | { kind: "quota_exceeded"; quota: Quota }
+  | { kind: "quota_exceeded"; quota: LimitedQuota }
   | { kind: "purged" };
 
 /**
@@ -1315,6 +1534,8 @@ export function submitFeedbackAtomic(
   logs?: LogInput[] | null,
   /** 可控时钟（测试注入；生产默认系统时钟）。 */
   clock: () => number = Date.now,
+  /** v12：有序图片附件（与 screenshot 互斥，由路由层保证）。 */
+  images?: FeedbackImageInput[] | null,
 ): SubmitOutcome {
   db.exec("BEGIN IMMEDIATE");
   try {
@@ -1346,11 +1567,14 @@ export function submitFeedbackAtomic(
       return receipt.user_id === input.userId ? { kind: "purged" } : { kind: "conflict" };
     }
 
-    // 3. 当日额度（日期与 resetAt 均由服务端时钟产生）
+    // 3. 当日额度（日期与 resetAt 均由服务端时钟产生）；管理员不受每日次数限制
     const at = clock();
     const day = beijingDay(at);
-    const quota = makeQuota(user.daily_limit, getDailyUsed(db, user.id, day), beijingResetAt(at));
-    if (quota.remaining <= 0) {
+    const used = getDailyUsed(db, user.id, day);
+    const resetAt = beijingResetAt(at);
+    const quota: Quota =
+      user.role === "admin" ? { unlimited: true, used, resetAt } : makeQuota(user.daily_limit, used, resetAt);
+    if (quota.unlimited !== true && quota.remaining <= 0) {
       db.exec("ROLLBACK");
       return { kind: "quota_exceeded", quota };
     }
@@ -1411,11 +1635,16 @@ export function submitFeedbackAtomic(
       mgmt_trashed_by: null,
       lifecycle_version: 0,
       resume_paused: 0,
+      issue_status: "open",
+      dialogue_version: 0,
+      archive_round: 1,
+      last_activity_at: now,
       created_at: now,
       updated_at: now,
     };
     insertFeedbackRow(db, row, screenshot ?? null, now);
     const insertedLogs = logs && logs.length > 0 ? insertFeedbackLogs(db, row.id, logs, now) : [];
+    const insertedImages = images && images.length > 0 ? insertFeedbackImages(db, row.id, images, now) : [];
 
     // 6. 增加用量（同日 upsert）
     db.prepare(
@@ -1430,11 +1659,25 @@ export function submitFeedbackAtomic(
       text: row.text,
       occurredAt: now,
       screenshot: screenshot ? { byteSize: screenshot.byteSize, sha256: screenshot.sha256 } : null,
+      images: insertedImages.map((i) => ({
+        id: i.id,
+        filename: i.filename,
+        mime: i.mime,
+        byteSize: i.byteSize,
+        sha256: i.sha256,
+      })),
       logs: insertedLogs,
     });
 
     db.exec("COMMIT");
-    return { kind: "created", row, quota: makeQuota(user.daily_limit, quota.used + 1, quota.resetAt) };
+    return {
+      kind: "created",
+      row,
+      quota:
+        quota.unlimited === true
+          ? { unlimited: true, used: quota.used + 1, resetAt: quota.resetAt }
+          : makeQuota(user.daily_limit, quota.used + 1, quota.resetAt),
+    };
   } catch (err) {
     db.exec("ROLLBACK");
     throw err;
@@ -1529,6 +1772,112 @@ export function getFeedbackLog(db: Db, feedbackId: string, logId: string): Feedb
     | FeedbackLogRow
     | undefined;
   return row ?? null;
+}
+
+// ---------- v12：初始反馈有序图片附件 ----------
+
+export function getFeedbackImages(db: Db, feedbackId: string): FeedbackImageRow[] {
+  return db
+    .prepare("SELECT * FROM feedback_images WHERE feedback_id = ? ORDER BY sort ASC")
+    .all(feedbackId) as unknown as FeedbackImageRow[];
+}
+
+export function getFeedbackImagesMeta(db: Db, feedbackId: string): FeedbackImageMeta[] {
+  return db
+    .prepare(
+      "SELECT id, feedback_id, sort, mime, filename, byte_size, sha256, width, height, capture_json, source, created_at FROM feedback_images WHERE feedback_id = ? ORDER BY sort ASC",
+    )
+    .all(feedbackId) as unknown as FeedbackImageMeta[];
+}
+
+export function getFeedbackImage(db: Db, feedbackId: string, imageId: string): FeedbackImageRow | null {
+  const row = db.prepare("SELECT * FROM feedback_images WHERE feedback_id = ? AND id = ?").get(feedbackId, imageId) as
+    | FeedbackImageRow
+    | undefined;
+  return row ?? null;
+}
+
+/** 旧单图记录在统一图片视图中的稳定 id（与 feedback_screenshots 一一对应）。 */
+export const LEGACY_SCREENSHOT_IMAGE_ID = "screenshot";
+
+/**
+ * 统一有序图片列表（v12 契约）：初始反馈的全部图片按 sort 返回。
+ * - 新记录：feedback_images 按序；
+ * - 旧记录（无 images）：feedback_screenshots 兼容映射为单张 capture 图（不迁移旧数据）；
+ * - 两表都有行属于异常状态：新表在前、旧截图追加于尾部（完整呈现，不静默丢弃）。
+ */
+export function listUnifiedFeedbackImages(db: Db, feedbackId: string): UnifiedImageView[] {
+  const images = getFeedbackImagesMeta(db, feedbackId).map((img) => {
+    // 捕获元数据按需解析：解析失败只丢该字段（图片本体不受影响），不静默破坏列表。
+    let capture: NonNullable<ScreenshotMeta["capture"]> | undefined;
+    if (img.capture_json) {
+      try {
+        const parsed = JSON.parse(img.capture_json) as NonNullable<ScreenshotMeta["capture"]>;
+        if (parsed && typeof parsed === "object") capture = parsed;
+      } catch {
+        capture = undefined;
+      }
+    }
+    return {
+      id: img.id,
+      sort: img.sort,
+      source: img.source,
+      mime: img.mime,
+      filename: img.filename,
+      byteSize: img.byte_size,
+      sha256: img.sha256,
+      width: img.width,
+      height: img.height,
+      createdAt: img.created_at,
+      ...(capture ? { capture } : {}),
+    };
+  });
+  const shot = getFeedbackScreenshotMeta(db, feedbackId);
+  if (!shot) return images;
+  // 新表已含 id="screenshot" 的图片时不再重复混入旧截图（id 冲突取新表为准）。
+  if (images.some((i) => i.id === LEGACY_SCREENSHOT_IMAGE_ID)) return images;
+  images.push({
+    id: LEGACY_SCREENSHOT_IMAGE_ID,
+    sort: images.length,
+    source: "capture",
+    mime: "image/png",
+    filename: "screenshot.png",
+    byteSize: shot.byte_size,
+    sha256: shot.sha256,
+    width: shot.width,
+    height: shot.height,
+    createdAt: shot.created_at,
+    ...(shot.capture ? { capture: shot.capture } : {}),
+  });
+  return images;
+}
+
+/**
+ * 按统一图片 id 取回字节：先查新表；命中旧截图 id 时回退 feedback_screenshots。
+ * 返回 null 表示该反馈没有这张图片。
+ */
+export function getUnifiedFeedbackImage(
+  db: Db,
+  feedbackId: string,
+  imageId: string,
+): { bytes: Uint8Array; mime: string; byteSize: number; filename: string; sha256: string } | null {
+  const img = getFeedbackImage(db, feedbackId, imageId);
+  if (img) {
+    return { bytes: img.bytes, mime: img.mime, byteSize: img.byte_size, filename: img.filename, sha256: img.sha256 };
+  }
+  if (imageId === LEGACY_SCREENSHOT_IMAGE_ID) {
+    const shot = getFeedbackScreenshot(db, feedbackId);
+    if (shot) {
+      return {
+        bytes: shot.png_blob,
+        mime: "image/png",
+        byteSize: shot.byte_size,
+        filename: "screenshot.png",
+        sha256: shot.sha256,
+      };
+    }
+  }
+  return null;
 }
 
 export function updateFeedback(
@@ -1890,7 +2239,7 @@ export function authorizeArchiveInTx(
         return { kind: "rule_changed", reason: "归档规则已变更" };
       }
       const source = getAppSource(db, app.id, guard.sourceOrigin);
-      if (!source || source.status !== "confirmed") {
+      if (source?.status !== "confirmed") {
         db.exec("ROLLBACK");
         return { kind: "rule_changed", reason: "来源尚未确认" };
       }
@@ -2007,11 +2356,13 @@ export function listFeedbackAudit(db: Db, feedbackId: string, limit = 100): Feed
     .all(feedbackId, limit) as unknown as FeedbackAuditRow[];
 }
 
-/** 管理列表筛选（v9）：view=管理区域，q=关键词（标题/原文/反馈 ID），from/to=创建时间 UTC 半开区间。 */
+/** 管理列表筛选（v9/v11）：view=管理区域，q=关键词（标题/原文/反馈 ID），from/to=创建时间 UTC 半开区间，issueStatus=独立问题状态。 */
 export interface FeedbackListFilter {
   /** 管理区域：默认 inbox；all 表示 inbox+archived（兼容旧查询，**不含回收站**）。 */
   view?: MgmtState | "all";
   status?: FeedbackStatus;
+  issueStatus?: IssueStatus;
+  adminUserId?: string;
   appId?: string;
   q?: string;
   /** ISO-8601 UTC；created_at >= from（含边界）。 */
@@ -2049,6 +2400,10 @@ function feedbackFilterWhere(
   if (filter.status) {
     where.push("f.status = ?");
     params.push(filter.status);
+  }
+  if (filter.issueStatus) {
+    where.push("f.issue_status = ?");
+    params.push(filter.issueStatus);
   }
   if (filter.appId) {
     where.push("f.app_id = ?");
@@ -2089,6 +2444,7 @@ export function listFeedbacks(
     }
   }
   const w = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const adminId = filter.adminUserId ?? "";
   const rows = db
     .prepare(
       `SELECT f.*, u.username AS username,
@@ -2097,8 +2453,15 @@ export function listFeedbacks(
               a.deleted_at AS app_deleted_at,
               s.status AS source_status,
               SUBSTR(f.text, 1, 240) AS text_preview,
-              (SELECT 1 FROM feedback_screenshots sc WHERE sc.feedback_id = f.id) AS has_screenshot,
-              (SELECT COUNT(*) FROM feedback_logs l WHERE l.feedback_id = f.id) AS log_count
+              (SELECT 1 FROM feedback_screenshots sc WHERE sc.feedback_id = f.id
+                UNION ALL SELECT 1 FROM feedback_images i WHERE i.feedback_id = f.id LIMIT 1) AS has_screenshot,
+              (SELECT COUNT(*) FROM feedback_logs l WHERE l.feedback_id = f.id) AS log_count,
+              (SELECT COUNT(*) FROM feedback_messages m WHERE m.feedback_id = f.id) AS message_count,
+              (SELECT COUNT(*) FROM feedback_messages m
+               LEFT JOIN feedback_read_cursors rc ON rc.feedback_id = f.id AND rc.user_id = ?
+               WHERE m.feedback_id = f.id AND m.sender_type = 'user' AND m.seq > COALESCE(rc.last_read_seq, 0)) AS admin_unread_count,
+              (SELECT m.text FROM feedback_messages m WHERE m.feedback_id = f.id ORDER BY m.seq DESC LIMIT 1) AS latest_message_text,
+              (SELECT m.created_at FROM feedback_messages m WHERE m.feedback_id = f.id ORDER BY m.seq DESC LIMIT 1) AS latest_message_at
        FROM feedbacks f
        LEFT JOIN users u ON u.id = f.user_id
        LEFT JOIN apps a ON a.id = f.app_row_id
@@ -2106,7 +2469,7 @@ export function listFeedbacks(
        ${w}
        ORDER BY f.created_at DESC, f.id DESC LIMIT ?`,
     )
-    .all(...params, filter.limit + 1) as unknown as AdminFeedbackRow[];
+    .all(adminId, ...params, filter.limit + 1) as unknown as AdminFeedbackRow[];
   const hasMore = rows.length > filter.limit;
   const items = hasMore ? rows.slice(0, filter.limit) : rows;
   const last = items[items.length - 1];
@@ -2234,6 +2597,15 @@ export function toAdminListItem(r: AdminFeedbackRow) {
     archivedAt: r.mgmt_archived_at,
     trashedAt: r.mgmt_trashed_at,
     availableActions: lifecycleAvailableActions(r),
+    /** ---- v11：Issue 对话闭环与撤销 ---- */
+    issueStatus: r.issue_status ?? "open",
+    dialogueVersion: r.dialogue_version ?? 0,
+    archiveRound: r.archive_round ?? 1,
+    lastActivityAt: r.last_activity_at || r.created_at,
+    messageCount: Number(r.message_count ?? 0),
+    unread: Boolean(r.admin_unread_count && r.admin_unread_count > 0),
+    latestMessageText: r.latest_message_text ?? null,
+    latestMessageAt: r.latest_message_at ?? null,
   };
 }
 
@@ -2248,6 +2620,10 @@ export type AdminFeedbackRow = FeedbackRow & {
   app_archive_mode?: string | null;
   app_deleted_at?: string | null;
   source_status?: string | null;
+  message_count?: number;
+  admin_unread_count?: number;
+  latest_message_text?: string | null;
+  latest_message_at?: string | null;
 };
 
 /**
@@ -2271,7 +2647,7 @@ export function collectionStateFor(
   if (row.status === "archiving" || row.status === "archived" || row.status === "needs_review") {
     return "queued";
   }
-  if (!app || app.config_status !== "configured") return "waiting_configuration";
+  if (app?.config_status !== "configured") return "waiting_configuration";
   if (app.archive_mode === "automatic") {
     if (sourceStatus !== "confirmed") return "waiting_source_confirmation";
     // 配置类阻塞（规则不完整 / 目标失效）：需要管理员修正配置，等待而不是排队。
@@ -2351,6 +2727,19 @@ export function findAutoArchiveCandidates(db: Db, at: Date | number = Date.now()
  * 与 `findAutoArchiveCandidates` 使用同一套候选条件（只把“已到点”换成“尚未到点”），
  * 保证调度器只为真正会自动重试的记录安排定时器。
  */
+export function findNextCancellationRetryAt(db: Db): number | null {
+  const row = db
+    .prepare(
+      `SELECT next_attempt_at FROM kaneo_cancellation_tasks
+       WHERE status = 'uncertain' AND next_attempt_at IS NOT NULL
+       ORDER BY next_attempt_at ASC LIMIT 1`,
+    )
+    .get() as { next_attempt_at: string } | undefined;
+  if (!row?.next_attempt_at) return null;
+  const ms = Date.parse(row.next_attempt_at);
+  return Number.isFinite(ms) ? ms : null;
+}
+
 export function findNextAutoRetryAt(db: Db): number | null {
   const row = db
     .prepare(
@@ -2609,15 +2998,29 @@ export function applyLifecycleInTx(
       }
       case "purge": {
         if (row.mgmt_state !== "trash") return failState("仅回收站中的记录可彻底删除");
+        // 规则 T4：尚有远端撤销任务未完成时，阻止永久删除其恢复依据。
+        const pendingCancel = db
+          .prepare(
+            "SELECT 1 FROM kaneo_cancellation_tasks WHERE feedback_id = ? AND status IN ('pending', 'processing', 'uncertain')",
+          )
+          .get(id);
+        if (pendingCancel) {
+          return failState("该反馈存在未完成的 Kaneo 任务撤销，无法彻底删除其恢复依据");
+        }
         // 事务内：最小防重放凭据 + 反馈与关联 BLOB/审计一并清除。
-        // 截图/日志/审计带 ON DELETE CASCADE，这里仍显式删除（不依赖外键开关状态）。
+        // 截图/日志/审计/对话/附件带 ON DELETE CASCADE，这里仍显式删除（不依赖外键开关状态）。
         db.prepare(
           `INSERT INTO feedback_deletion_receipts
              (id, feedback_id, idempotency_key_hash, content_hash, user_id, deleted_at)
            VALUES (?, ?, ?, ?, ?, ?)`,
         ).run(randomUUID(), row.id, hashToken(row.idempotency_key), row.content_hash, row.user_id, at);
         db.prepare("DELETE FROM feedback_screenshots WHERE feedback_id = ?").run(id);
+        db.prepare("DELETE FROM feedback_images WHERE feedback_id = ?").run(id);
         db.prepare("DELETE FROM feedback_logs WHERE feedback_id = ?").run(id);
+        db.prepare("DELETE FROM feedback_messages WHERE feedback_id = ?").run(id);
+        db.prepare("DELETE FROM feedback_message_attachments WHERE feedback_id = ?").run(id);
+        db.prepare("DELETE FROM feedback_read_cursors WHERE feedback_id = ?").run(id);
+        db.prepare("DELETE FROM kaneo_cancellation_tasks WHERE feedback_id = ?").run(id);
         db.prepare("DELETE FROM feedback_audit WHERE feedback_id = ?").run(id);
         // 删除本地 outbox 中该反馈的正文副本；已发出的事件仅删除本地记录，
         // 不尝试撤回中枢已收到的事件。
@@ -2629,6 +3032,763 @@ export function applyLifecycleInTx(
         return { kind: "purged" };
       }
     }
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+}
+
+// ------------------------------------------------------------------ v11: Issue 对话与闭环仓储
+
+export function listFeedbackMessages(
+  db: Db,
+  feedbackId: string,
+): (FeedbackMessageRow & { attachments: FeedbackMessageAttachmentRow[] })[] {
+  const messages = db
+    .prepare("SELECT * FROM feedback_messages WHERE feedback_id = ? ORDER BY seq ASC, created_at ASC")
+    .all(feedbackId) as unknown as FeedbackMessageRow[];
+  if (messages.length === 0) return [];
+
+  const attachments = db
+    .prepare("SELECT * FROM feedback_message_attachments WHERE feedback_id = ? ORDER BY sort ASC, created_at ASC")
+    .all(feedbackId) as unknown as FeedbackMessageAttachmentRow[];
+
+  const attMap = new Map<string, FeedbackMessageAttachmentRow[]>();
+  for (const att of attachments) {
+    const list = attMap.get(att.message_id);
+    if (list) list.push(att);
+    else attMap.set(att.message_id, [att]);
+  }
+
+  return messages.map((m) => ({
+    ...m,
+    attachments: attMap.get(m.id) ?? [],
+  }));
+}
+
+export function getFeedbackMessage(db: Db, messageId: string): FeedbackMessageRow | null {
+  return (
+    (db.prepare("SELECT * FROM feedback_messages WHERE id = ?").get(messageId) as unknown as FeedbackMessageRow) ?? null
+  );
+}
+
+export function getMessageAttachment(db: Db, attachmentId: string): FeedbackMessageAttachmentRow | null {
+  return (
+    (db
+      .prepare("SELECT * FROM feedback_message_attachments WHERE id = ?")
+      .get(attachmentId) as unknown as FeedbackMessageAttachmentRow) ?? null
+  );
+}
+
+export interface AddFeedbackMessageInput {
+  feedbackId: string;
+  senderType: MessageSenderType;
+  senderId: string;
+  senderName: string;
+  text: string;
+  idempotencyKey?: string | null;
+  attachments?: Array<{
+    kind: MessageAttachmentKind;
+    filename: string;
+    /** kind='image' 时的 MIME 类型；其余 kind 忽略。 */
+    mime?: string | null;
+    byteSize: number;
+    sha256: string;
+    bytes: Uint8Array | Buffer;
+    width?: number | null;
+    height?: number | null;
+  }>;
+  newIssueStatus?: IssueStatus;
+  /** v12：管理员「标记已解决」等动作携带的处理说明（入库后对用户可见）。 */
+  resolutionNote?: string | null;
+  expectedDialogueVersion?: number;
+}
+
+/** 回复幂等附件摘要（v12 修复）：按消息内顺序比较 kind/filename/byteSize/sha256/mime。 */
+function attachmentDigestOf(
+  attachments: ReadonlyArray<{
+    kind: string;
+    filename: string;
+    mime?: string | null;
+    byte_size?: number;
+    byteSize?: number;
+    sha256: string;
+  }>,
+): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify(
+        attachments.map((a) => ({
+          kind: a.kind,
+          filename: a.filename,
+          mime: a.mime ?? null,
+          byteSize: a.byte_size ?? a.byteSize ?? 0,
+          sha256: a.sha256,
+        })),
+      ),
+    )
+    .digest("hex");
+}
+
+export type AddFeedbackMessageOutcome =
+  | {
+      kind: "created";
+      message: FeedbackMessageRow;
+      attachments: FeedbackMessageAttachmentRow[];
+      dialogueVersion: number;
+      issueStatus: IssueStatus;
+    }
+  | {
+      kind: "replayed";
+      message: FeedbackMessageRow;
+      attachments: FeedbackMessageAttachmentRow[];
+      dialogueVersion: number;
+      issueStatus: IssueStatus;
+    }
+  | { kind: "conflict"; reason: string }
+  | { kind: "version_conflict" }
+  | { kind: "not_found" }
+  | { kind: "archive_in_progress" }
+  | { kind: "readonly_trashed" };
+
+export function addFeedbackMessageAtomic(db: Db, input: AddFeedbackMessageInput): AddFeedbackMessageOutcome {
+  db.exec("BEGIN");
+  try {
+    const feedback = db.prepare("SELECT * FROM feedbacks WHERE id = ?").get(input.feedbackId) as unknown as
+      | FeedbackRow
+      | undefined;
+    if (!feedback) {
+      db.exec("ROLLBACK");
+      return { kind: "not_found" };
+    }
+    if (feedback.mgmt_state === "trash") {
+      db.exec("ROLLBACK");
+      return { kind: "readonly_trashed" };
+    }
+
+    // 幂等检查
+    if (input.idempotencyKey) {
+      const existing = db
+        .prepare("SELECT * FROM feedback_messages WHERE feedback_id = ? AND idempotency_key = ?")
+        .get(input.feedbackId, input.idempotencyKey) as unknown as FeedbackMessageRow | undefined;
+      if (existing) {
+        // v12 修复：回复幂等不只比对文本——必须同时比对附件摘要（有序）。
+        // 附件按 sort 排序（旧行已迁移回填 sort；缺省库按 rowid 兜底保序）。
+        const storedAtts = db
+          .prepare("SELECT * FROM feedback_message_attachments WHERE message_id = ? ORDER BY sort ASC, rowid ASC")
+          .all(existing.id) as unknown as FeedbackMessageAttachmentRow[];
+        const sameText = existing.text === input.text;
+        const sameAttachments = attachmentDigestOf(storedAtts) === attachmentDigestOf(input.attachments ?? []);
+        if (sameText && sameAttachments) {
+          db.exec("ROLLBACK");
+          return {
+            kind: "replayed",
+            message: existing,
+            attachments: storedAtts,
+            dialogueVersion: feedback.dialogue_version,
+            issueStatus: feedback.issue_status,
+          };
+        }
+        db.exec("ROLLBACK");
+        return { kind: "conflict", reason: "同键内容冲突（文本或附件不一致）" };
+      }
+    }
+
+    // 版本检查（管理端提交时可选传入）
+    if (input.expectedDialogueVersion !== undefined && feedback.dialogue_version !== input.expectedDialogueVersion) {
+      db.exec("ROLLBACK");
+      return { kind: "version_conflict" };
+    }
+
+    const now = nextFeedbackActivityAt(feedback.last_activity_at || feedback.created_at, nowIso());
+    let nextIssueStatus: IssueStatus = feedback.issue_status;
+    let nextMgmtState: MgmtState = feedback.mgmt_state;
+    let nextResumePaused = feedback.resume_paused;
+
+    if (input.senderType === "user") {
+      // 若处于归档中瞬时态，返回可重试 409
+      if (feedback.status === "archiving") {
+        db.exec("ROLLBACK");
+        return { kind: "archive_in_progress" };
+      }
+
+      // 用户回复：已解决或任意状态一律自动转 waiting_admin
+      nextIssueStatus = "waiting_admin";
+      // 撤销归档、回到收件箱讨论，暂停自动归档
+      nextMgmtState = "inbox";
+      nextResumePaused = 1;
+
+      // v12：用户回复不再触发 Kaneo 任务删除——不再登记撤销任务；
+      // 原 Kaneo 任务与链接保持不变（"已同步到 Kaneo" 不推断为"问题已解决"）。
+    } else if (input.senderType === "admin") {
+      if (input.newIssueStatus) {
+        nextIssueStatus = input.newIssueStatus;
+      }
+    }
+
+    // 计算下一个单调 seq
+    const maxRow = db
+      .prepare("SELECT COALESCE(MAX(seq), 0) AS max_seq FROM feedback_messages WHERE feedback_id = ?")
+      .get(input.feedbackId) as { max_seq: number };
+    const nextSeq = Number(maxRow?.max_seq ?? 0) + 1;
+    const messageId = randomUUID();
+
+    db.prepare(
+      `INSERT INTO feedback_messages (
+         id, feedback_id, seq, sender_type, sender_id, sender_name, text, idempotency_key, resolution_note, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      messageId,
+      input.feedbackId,
+      nextSeq,
+      input.senderType,
+      input.senderId,
+      input.senderName,
+      input.text,
+      input.idempotencyKey ?? null,
+      input.resolutionNote ?? null,
+      now,
+    );
+
+    const insertedAttachments: FeedbackMessageAttachmentRow[] = [];
+    if (input.attachments && input.attachments.length > 0) {
+      const attStmt = db.prepare(
+        `INSERT INTO feedback_message_attachments (
+           id, message_id, feedback_id, sort, kind, filename, mime, byte_size, sha256, bytes, width, height, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (let i = 0; i < input.attachments.length; i++) {
+        const att = input.attachments[i]!;
+        const attId = randomUUID();
+        attStmt.run(
+          attId,
+          messageId,
+          input.feedbackId,
+          i,
+          att.kind,
+          att.filename,
+          att.kind === "image" ? (att.mime ?? null) : null,
+          att.byteSize,
+          att.sha256,
+          att.bytes,
+          att.width ?? null,
+          att.height ?? null,
+          now,
+        );
+        insertedAttachments.push({
+          id: attId,
+          message_id: messageId,
+          feedback_id: input.feedbackId,
+          sort: i,
+          kind: att.kind,
+          filename: att.filename,
+          mime: att.kind === "image" ? (att.mime ?? null) : null,
+          byte_size: att.byteSize,
+          sha256: att.sha256,
+          bytes: att.bytes,
+          width: att.width ?? null,
+          height: att.height ?? null,
+          created_at: now,
+        });
+      }
+    }
+
+    const nextDialogueVer = feedback.dialogue_version + 1;
+    db.prepare(
+      `UPDATE feedbacks
+       SET issue_status = ?,
+           mgmt_state = ?,
+           resume_paused = ?,
+           dialogue_version = ?,
+           last_activity_at = ?,
+           updated_at = ?
+       WHERE id = ?`,
+    ).run(nextIssueStatus, nextMgmtState, nextResumePaused, nextDialogueVer, now, now, input.feedbackId);
+
+    // 发送者自身的已读游标自动推进到 nextSeq
+    if (input.senderId) {
+      db.prepare(
+        `INSERT INTO feedback_read_cursors (user_id, feedback_id, last_read_seq, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(user_id, feedback_id) DO UPDATE SET
+           last_read_seq = MAX(feedback_read_cursors.last_read_seq, excluded.last_read_seq),
+           updated_at = excluded.updated_at`,
+      ).run(input.senderId, input.feedbackId, nextSeq, now);
+    }
+
+    // 审计留痕
+    if (input.senderType === "admin") {
+      insertFeedbackAuditInTx(db, {
+        feedbackId: input.feedbackId,
+        actor: { id: input.senderId, username: input.senderName },
+        action: "admin_message",
+        detail: {
+          seq: nextSeq,
+          issueStatus: nextIssueStatus,
+          dialogueVersion: nextDialogueVer,
+        },
+      });
+    }
+
+    db.exec("COMMIT");
+
+    const message: FeedbackMessageRow = {
+      id: messageId,
+      feedback_id: input.feedbackId,
+      seq: nextSeq,
+      sender_type: input.senderType,
+      sender_id: input.senderId,
+      sender_name: input.senderName,
+      text: input.text,
+      idempotency_key: input.idempotencyKey ?? null,
+      resolution_note: input.resolutionNote ?? null,
+      created_at: now,
+    };
+
+    return {
+      kind: "created",
+      message,
+      attachments: insertedAttachments,
+      dialogueVersion: nextDialogueVer,
+      issueStatus: nextIssueStatus,
+    };
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+}
+
+export function markReadCursor(db: Db, userId: string, feedbackId: string, seq: number): number {
+  const now = nowIso();
+  db.prepare(
+    `INSERT INTO feedback_read_cursors (user_id, feedback_id, last_read_seq, updated_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(user_id, feedback_id) DO UPDATE SET
+       last_read_seq = MAX(feedback_read_cursors.last_read_seq, excluded.last_read_seq),
+       updated_at = excluded.updated_at`,
+  ).run(userId, feedbackId, Math.max(0, seq), now);
+
+  const row = db
+    .prepare("SELECT last_read_seq FROM feedback_read_cursors WHERE user_id = ? AND feedback_id = ?")
+    .get(userId, feedbackId) as { last_read_seq: number } | undefined;
+  return row?.last_read_seq ?? seq;
+}
+
+export function getReadCursor(db: Db, userId: string, feedbackId: string): number {
+  const row = db
+    .prepare("SELECT last_read_seq FROM feedback_read_cursors WHERE user_id = ? AND feedback_id = ?")
+    .get(userId, feedbackId) as { last_read_seq: number } | undefined;
+  return row?.last_read_seq ?? 0;
+}
+
+export function getUnreadSummaryForUser(
+  db: Db,
+  userId: string,
+  appId?: string,
+): { unreadFeedbacksCount: number; totalUnreadMessages: number } {
+  let appClause = "";
+  const params: (string | number)[] = [userId, userId];
+  if (appId) {
+    appClause = " AND f.app_id = ?";
+    params.push(appId);
+  }
+  const query = `
+    SELECT
+      COUNT(DISTINCT f.id) AS unread_feedbacks,
+      COUNT(m.id) AS unread_messages
+    FROM feedbacks f
+    JOIN feedback_messages m ON m.feedback_id = f.id
+    LEFT JOIN feedback_read_cursors rc ON rc.feedback_id = f.id AND rc.user_id = ?
+    WHERE f.user_id = ?
+      AND f.mgmt_state != 'trash'
+      AND m.sender_type IN ('admin', 'system')
+      AND m.seq > COALESCE(rc.last_read_seq, 0)
+      ${appClause}
+  `;
+  const res = db.prepare(query).get(...params) as { unread_feedbacks: number; unread_messages: number } | undefined;
+  return {
+    unreadFeedbacksCount: Number(res?.unread_feedbacks ?? 0),
+    totalUnreadMessages: Number(res?.unread_messages ?? 0),
+  };
+}
+
+export interface UserFeedbackItem {
+  id: string;
+  appId: string;
+  title: string | null;
+  text: string;
+  issueStatus: IssueStatus;
+  mgmtState: MgmtState;
+  createdAt: string;
+  updatedAt: string;
+  lastActivityAt: string;
+  unread: boolean;
+  messageCount: number;
+  /** 所属项目显示名；apps 表无对应行或已软删时为 null（前端回退显示 appId）。 */
+  appName: string | null;
+  /** 图片附件总数：feedback_images 与 feedback_screenshots 两表计数之和。 */
+  imageCount: number;
+  /** 日志附件总数：feedback_logs 计数。 */
+  logCount: number;
+  latestMessage: {
+    seq: number;
+    senderType: MessageSenderType;
+    text: string;
+    createdAt: string;
+  } | null;
+}
+
+function nextFeedbackActivityAt(previous: string, now: string): string {
+  const previousMs = Date.parse(previous);
+  const nowMs = Date.parse(now);
+  if (!Number.isFinite(previousMs) || nowMs > previousMs) return now;
+  return new Date(previousMs + 1).toISOString();
+}
+
+export function listUserFeedbacks(
+  db: Db,
+  userId: string,
+  options: {
+    appId?: string;
+    page?: number;
+    limit?: number;
+    issueStatus?: IssueStatus;
+  } = {},
+): { items: UserFeedbackItem[]; total: number; page: number; limit: number; unreadTotal: number } {
+  const page = Math.max(1, options.page ?? 1);
+  const limit = Math.min(100, Math.max(1, options.limit ?? 20));
+  const offset = (page - 1) * limit;
+
+  const where: string[] = ["f.user_id = ?", "f.mgmt_state != 'trash'"];
+  const params: (string | number)[] = [userId];
+
+  if (options.appId) {
+    where.push("f.app_id = ?");
+    params.push(options.appId);
+  }
+  if (options.issueStatus) {
+    where.push("f.issue_status = ?");
+    params.push(options.issueStatus);
+  }
+
+  const whereStr = where.join(" AND ");
+
+  const totalRow = db.prepare(`SELECT COUNT(*) AS total FROM feedbacks f WHERE ${whereStr}`).get(...params) as {
+    total: number;
+  };
+  const total = Number(totalRow?.total ?? 0);
+
+  const unreadSummary = getUnreadSummaryForUser(db, userId, options.appId);
+
+  const rows = db
+    .prepare(
+      `SELECT
+        f.id, f.app_id, f.title, f.text, f.issue_status, f.mgmt_state,
+        f.created_at, f.updated_at, f.last_activity_at,
+        CASE WHEN a.id IS NOT NULL AND a.deleted_at IS NULL THEN a.name END AS app_name,
+        (SELECT COUNT(*) FROM feedback_images i WHERE i.feedback_id = f.id)
+          + (SELECT COUNT(*) FROM feedback_screenshots sc WHERE sc.feedback_id = f.id) AS image_count,
+        (SELECT COUNT(*) FROM feedback_logs l WHERE l.feedback_id = f.id) AS log_count,
+        (SELECT COUNT(*) FROM feedback_messages m WHERE m.feedback_id = f.id) AS message_count,
+        (SELECT COUNT(*) FROM feedback_messages m
+         LEFT JOIN feedback_read_cursors rc ON rc.feedback_id = f.id AND rc.user_id = ?
+         WHERE m.feedback_id = f.id AND m.sender_type IN ('admin', 'system') AND m.seq > COALESCE(rc.last_read_seq, 0)) AS unread_count,
+        (SELECT m.seq FROM feedback_messages m WHERE m.feedback_id = f.id ORDER BY m.seq DESC LIMIT 1) AS last_msg_seq,
+        (SELECT m.sender_type FROM feedback_messages m WHERE m.feedback_id = f.id ORDER BY m.seq DESC LIMIT 1) AS last_msg_sender_type,
+        (SELECT m.text FROM feedback_messages m WHERE m.feedback_id = f.id ORDER BY m.seq DESC LIMIT 1) AS last_msg_text,
+        (SELECT m.created_at FROM feedback_messages m WHERE m.feedback_id = f.id ORDER BY m.seq DESC LIMIT 1) AS last_msg_at
+      FROM feedbacks f
+      LEFT JOIN apps a ON a.id = f.app_row_id
+      WHERE ${whereStr}
+      ORDER BY f.last_activity_at DESC, f.id DESC
+      LIMIT ? OFFSET ?`,
+    )
+    .all(userId, ...params, limit, offset) as Array<Record<string, unknown>>;
+
+  const items: UserFeedbackItem[] = rows.map((r) => ({
+    id: String(r.id),
+    appId: String(r.app_id),
+    title: r.title ? String(r.title) : null,
+    text: String(r.text),
+    issueStatus: (r.issue_status as IssueStatus) ?? "open",
+    mgmtState: (r.mgmt_state as MgmtState) ?? "inbox",
+    createdAt: String(r.created_at),
+    updatedAt: String(r.updated_at),
+    lastActivityAt: String(r.last_activity_at || r.created_at),
+    unread: Number(r.unread_count ?? 0) > 0,
+    messageCount: Number(r.message_count ?? 0),
+    appName: r.app_name == null ? null : String(r.app_name),
+    imageCount: Number(r.image_count ?? 0),
+    logCount: Number(r.log_count ?? 0),
+    latestMessage: r.last_msg_seq
+      ? {
+          seq: Number(r.last_msg_seq),
+          senderType: r.last_msg_sender_type as MessageSenderType,
+          text: String(r.last_msg_text ?? ""),
+          createdAt: String(r.last_msg_at ?? ""),
+        }
+      : null,
+  }));
+
+  return {
+    items,
+    total,
+    page,
+    limit,
+    unreadTotal: unreadSummary.unreadFeedbacksCount,
+  };
+}
+
+export function createCancellationTaskInTx(db: Db, feedback: FeedbackRow): KaneoCancellationTaskRow | null {
+  if (!feedback.kaneo_task_id) return null;
+
+  let apiBase = "";
+  let projectId = "";
+  let workspaceId = "";
+  if (feedback.archive_data_json) {
+    try {
+      const parsed = JSON.parse(feedback.archive_data_json);
+      if (parsed.target) {
+        apiBase = parsed.target.apiBase ?? "";
+        projectId = parsed.target.projectId ?? "";
+        workspaceId = parsed.target.workspaceId ?? "";
+      }
+    } catch {
+      // fallback
+    }
+  }
+
+  const now = nowIso();
+  const task: KaneoCancellationTaskRow = {
+    id: randomUUID(),
+    feedback_id: feedback.id,
+    archive_round: feedback.archive_round,
+    kaneo_task_id: feedback.kaneo_task_id,
+    target_api_base: apiBase,
+    target_project_id: projectId,
+    target_workspace_id: workspaceId,
+    status: "pending",
+    attempts: 0,
+    next_attempt_at: now,
+    last_error: null,
+    confirmed_at: null,
+    created_at: now,
+    updated_at: now,
+  };
+
+  db.prepare(
+    `INSERT INTO kaneo_cancellation_tasks (
+       id, feedback_id, archive_round, kaneo_task_id, target_api_base, target_project_id, target_workspace_id,
+       status, attempts, next_attempt_at, last_error, confirmed_at, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(feedback_id, archive_round) DO UPDATE SET
+       status = CASE WHEN kaneo_cancellation_tasks.status = 'confirmed' THEN 'confirmed' ELSE excluded.status END,
+       updated_at = excluded.updated_at`,
+  ).run(
+    task.id,
+    task.feedback_id,
+    task.archive_round,
+    task.kaneo_task_id,
+    task.target_api_base,
+    task.target_project_id,
+    task.target_workspace_id,
+    task.status,
+    task.attempts,
+    task.next_attempt_at,
+    task.last_error,
+    task.confirmed_at,
+    task.created_at,
+    task.updated_at,
+  );
+
+  return task;
+}
+
+export function getCancellationTask(
+  db: Db,
+  feedbackId: string,
+  archiveRound?: number,
+): KaneoCancellationTaskRow | null {
+  if (archiveRound !== undefined) {
+    return (
+      (db
+        .prepare("SELECT * FROM kaneo_cancellation_tasks WHERE feedback_id = ? AND archive_round = ?")
+        .get(feedbackId, archiveRound) as unknown as KaneoCancellationTaskRow) ?? null
+    );
+  }
+  return (
+    (db
+      .prepare("SELECT * FROM kaneo_cancellation_tasks WHERE feedback_id = ? ORDER BY archive_round DESC LIMIT 1")
+      .get(feedbackId) as unknown as KaneoCancellationTaskRow) ?? null
+  );
+}
+
+export function getPendingCancellationTasks(db: Db, limit = 20): KaneoCancellationTaskRow[] {
+  const now = nowIso();
+  return db
+    .prepare(
+      `SELECT * FROM kaneo_cancellation_tasks
+       WHERE status IN ('pending', 'uncertain')
+         AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+       ORDER BY created_at ASC LIMIT ?`,
+    )
+    .all(now, limit) as unknown as KaneoCancellationTaskRow[];
+}
+
+export function updateCancellationTaskStatus(
+  db: Db,
+  id: string,
+  update: {
+    status: CancellationTaskStatus;
+    nextAttemptAt?: string | null;
+    lastError?: string | null;
+    confirmedAt?: string | null;
+    incAttempts?: boolean;
+  },
+): void {
+  const now = nowIso();
+  const inc = update.incAttempts ? 1 : 0;
+  db.prepare(
+    `UPDATE kaneo_cancellation_tasks
+     SET status = ?,
+         next_attempt_at = ?,
+         last_error = ?,
+         confirmed_at = COALESCE(?, confirmed_at),
+         attempts = attempts + ?,
+         updated_at = ?
+     WHERE id = ?`,
+  ).run(
+    update.status,
+    update.nextAttemptAt ?? null,
+    update.lastError ?? null,
+    update.confirmedAt ?? null,
+    inc,
+    now,
+    id,
+  );
+}
+
+export function confirmCancellationInTx(db: Db, feedbackId: string, archiveRound: number, confirmedAt: string): void {
+  db.exec("BEGIN");
+  try {
+    db.prepare(
+      `UPDATE kaneo_cancellation_tasks
+       SET status = 'confirmed', confirmed_at = ?, updated_at = ?
+       WHERE feedback_id = ? AND archive_round = ?`,
+    ).run(confirmedAt, confirmedAt, feedbackId, archiveRound);
+
+    const fb = db.prepare("SELECT * FROM feedbacks WHERE id = ?").get(feedbackId) as FeedbackRow | undefined;
+    if (fb && fb.archive_round === archiveRound) {
+      db.prepare(
+        `UPDATE feedbacks
+         SET kaneo_task_id = NULL,
+             kaneo_task_url = NULL,
+             archive_stage = NULL,
+             archive_authorized_at = NULL,
+             archive_operation_id = NULL,
+             status = 'ready_to_archive',
+             archive_round = archive_round + 1,
+             updated_at = ?
+         WHERE id = ?`,
+      ).run(confirmedAt, feedbackId);
+
+      insertFeedbackAuditInTx(db, {
+        feedbackId,
+        actor: { id: "", username: "system" },
+        action: "kaneo_task_cancelled",
+        detail: {
+          round: archiveRound,
+          oldTaskId: fb.kaneo_task_id,
+          confirmedAt,
+        },
+      });
+    }
+    db.exec("COMMIT");
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+}
+
+export function updateIssueStatusInTx(
+  db: Db,
+  feedbackId: string,
+  newStatus: IssueStatus,
+  actor: { id: string; username: string },
+  expectedDialogueVersion?: number,
+  /** v12：处理说明（resolved 时必填，1..2000 字符；其余状态可选携带），对用户可见。 */
+  resolutionNote?: string | null,
+):
+  | { ok: true; dialogueVersion: number; issueStatus: IssueStatus; seq?: number }
+  | { ok: false; error: "not_found" | "version_conflict" | "invalid_state" } {
+  db.exec("BEGIN");
+  try {
+    const row = db.prepare("SELECT * FROM feedbacks WHERE id = ?").get(feedbackId) as FeedbackRow | undefined;
+    if (!row) {
+      db.exec("ROLLBACK");
+      return { ok: false, error: "not_found" };
+    }
+    if (row.mgmt_state === "trash") {
+      db.exec("ROLLBACK");
+      return { ok: false, error: "invalid_state" };
+    }
+    if (expectedDialogueVersion !== undefined && row.dialogue_version !== expectedDialogueVersion) {
+      db.exec("ROLLBACK");
+      return { ok: false, error: "version_conflict" };
+    }
+
+    const now = nextFeedbackActivityAt(row.last_activity_at || row.created_at, nowIso());
+    const nextVer = row.dialogue_version + 1;
+
+    // v12：处理说明以系统消息形式进入对话时间线（用户端可见）。
+    // 文本与时间线一致，resolution_note 另存结构化字段供两端渲染。
+    const note = typeof resolutionNote === "string" && resolutionNote.trim() !== "" ? resolutionNote.trim() : null;
+    let noteSeq: number | undefined;
+    if (note !== null) {
+      const maxRow = db
+        .prepare("SELECT COALESCE(MAX(seq), 0) AS max_seq FROM feedback_messages WHERE feedback_id = ?")
+        .get(feedbackId) as { max_seq: number };
+      noteSeq = Number(maxRow?.max_seq ?? 0) + 1;
+      db.prepare(
+        `INSERT INTO feedback_messages (
+           id, feedback_id, seq, sender_type, sender_id, sender_name, text, idempotency_key, resolution_note, created_at
+         ) VALUES (?, ?, ?, 'system', '', '', ?, NULL, ?, ?)`,
+      ).run(randomUUID(), feedbackId, noteSeq, note, note, now);
+      // 操作者（管理员）自身已读游标推进，避免自己刚发出的系统消息计入未读。
+      if (actor.id) {
+        db.prepare(
+          `INSERT INTO feedback_read_cursors (user_id, feedback_id, last_read_seq, updated_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(user_id, feedback_id) DO UPDATE SET
+             last_read_seq = MAX(feedback_read_cursors.last_read_seq, excluded.last_read_seq),
+             updated_at = excluded.updated_at`,
+        ).run(actor.id, feedbackId, noteSeq, now);
+      }
+    }
+
+    db.prepare(
+      `UPDATE feedbacks
+       SET issue_status = ?,
+           dialogue_version = ?,
+           last_activity_at = ?,
+           updated_at = ?
+       WHERE id = ?`,
+    ).run(newStatus, nextVer, now, now, feedbackId);
+
+    insertFeedbackAuditInTx(db, {
+      feedbackId,
+      actor,
+      action: "issue_status_change",
+      detail: {
+        from: row.issue_status,
+        to: newStatus,
+        dialogueVersion: nextVer,
+        ...(note !== null ? { resolutionNote: note, seq: noteSeq } : {}),
+      },
+    });
+
+    db.exec("COMMIT");
+    return { ok: true, dialogueVersion: nextVer, issueStatus: newStatus, ...(noteSeq ? { seq: noteSeq } : {}) };
   } catch (err) {
     db.exec("ROLLBACK");
     throw err;

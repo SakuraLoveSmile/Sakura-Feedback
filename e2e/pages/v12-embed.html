@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>E2E 跨源嵌入内容（不可绘制）</title>
+    <!-- e2e 专用：被 v12-app.html 以 127.0.0.1:5189 跨源 iframe 加载。
+         内容本身必须与断言无关——它注定无法进入 DOM 重绘截图，只有「检测到并提示」才是验收点。 -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: #ffe600;
+        font-family: system-ui, sans-serif;
+      }
+      p {
+        margin: 8px;
+        font-size: 14px;
+        color: #111111;
+      }
+    </style>
+  </head>
+  <body>
+    <p>CROSS-ORIGIN-EMBED-CANARY（正常情况下不会进入截图）</p>
+  </body>
+</html>

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createApp, type FeedbackApp } from "../src/app.ts";
@@ -36,6 +36,7 @@ export function makeProcessed(title = "整理后的标题"): ProcessedFeedback {
 
 export function makeMockAi(behavior: MockAiBehavior = {}): AiClient & {
   calls: number;
+  /** 最近一次整理调用的视觉证据（v12：有序图片列表 + 捕获元数据）。 */
   lastImage: Parameters<AiClient["organize"]>[1];
   lastLogs: Parameters<AiClient["organize"]>[2];
 } {
@@ -46,10 +47,10 @@ export function makeMockAi(behavior: MockAiBehavior = {}): AiClient & {
     lastLogs: null as Parameters<AiClient["organize"]>[2],
     async organize(
       _text: string,
-      image?: Parameters<AiClient["organize"]>[1],
+      visual?: Parameters<AiClient["organize"]>[1],
       logs?: Parameters<AiClient["organize"]>[2],
     ): Promise<ProcessedFeedback> {
-      ai.lastImage = image ?? null;
+      ai.lastImage = visual ?? null;
       ai.lastLogs = logs ?? null;
       const outcome = outcomes[Math.min(ai.calls, outcomes.length - 1)] ?? "ok";
       ai.calls++;
@@ -97,6 +98,8 @@ export interface MockKaneo extends KaneoClient {
   created: Array<{ projectId: string; columnSlug: string; title: string; description: string; userId?: string }>;
   comments: Array<{ taskId: string; content: string }>;
   uploads: Array<{ taskId: string; bytes: Buffer | Uint8Array }>;
+  /** 已删除的任务 ID（v12：断言用户回复不再触发远端删除）。 */
+  deleted: string[];
   finalizes: Array<{ taskId: string; key: string }>;
   assetUrlToBytes: Map<string, Buffer | Uint8Array>;
   /** 每 task 的预签名申请序号（生成唯一 key/地址）。 */
@@ -204,7 +207,7 @@ export function makeMockKaneo(opts: MockKaneoOptions = {}): MockKaneo {
         projects: [{ id: "proj-1", workspaceId: "ws-1", name: "测试项目", slug: "TST" }],
       };
     },
-    async listColumns(projectId: string) {
+    async listColumns(_projectId: string) {
       count();
       if (mock.testError !== null) throw new KaneoDefiniteError(mock.testError);
       if (mock.readError !== null) throwReadError(mock.readError);
@@ -331,6 +334,23 @@ export function makeMockKaneo(opts: MockKaneoOptions = {}): MockKaneo {
     async listComments(taskId) {
       count();
       return mock.comments.filter((c) => c.taskId === taskId).map((c, i) => ({ id: `comm-${i}`, content: c.content }));
+    },
+    async getTask(taskId) {
+      count();
+      if (taskId.includes("not-found")) return null;
+      return { taskId, taskUrl: `http://kaneo.test/task/${taskId}` };
+    },
+    deleted: [] as string[],
+    async deleteTask(taskId) {
+      countWrite();
+      if (taskId.includes("delete-fail")) {
+        throw new KaneoDefiniteError("模拟删除权限不足");
+      }
+      if (taskId.includes("delete-uncertain")) {
+        throw new KaneoUncertainError("模拟删除超时");
+      }
+      mock.deleted.push(taskId);
+      return { ok: true };
     },
     async downloadAsset(assetUrl: string): Promise<Uint8Array> {
       count();
@@ -827,12 +847,34 @@ export async function createTestPng(width = 100, height = 100): Promise<Buffer> 
     .toBuffer();
 }
 
+/** v12：生成指定格式的测试图片（png/jpeg/webp；webp 静态图）。 */
+export async function createTestImage(
+  width = 100,
+  height = 100,
+  format: "png" | "jpeg" | "webp" = "png",
+): Promise<Buffer> {
+  const { default: sharp } = await import("sharp");
+  const base = sharp({
+    create: {
+      width,
+      height,
+      channels: 4,
+      background: { r: 50, g: 100, b: 150, alpha: 1 },
+    },
+  });
+  if (format === "jpeg") return base.flatten({ background: "#ffffff" }).jpeg().toBuffer();
+  if (format === "webp") return base.webp().toBuffer();
+  return base.png().toBuffer();
+}
+
 export async function submitMultipartFeedback(
   feedbackApp: FeedbackApp,
   bearer: string,
   metadata: Record<string, unknown>,
   screenshotBuffer?: Buffer,
   logs?: Array<{ filename: string; buffer: Buffer; contentType?: string }>,
+  /** v12：有序图片部件（与 metadata.images 描述符按序对应）。 */
+  images?: Array<{ filename: string; buffer: Buffer; contentType?: string }>,
 ) {
   const boundary = `----FeedbackTestBoundary${Math.random().toString(36).slice(2)}`;
   const parts: Buffer[] = [];
@@ -853,6 +895,19 @@ export async function submitMultipartFeedback(
     );
     parts.push(screenshotBuffer);
     parts.push(Buffer.from("\r\n"));
+  }
+
+  if (images) {
+    for (const img of images) {
+      const ct = img.contentType ?? "image/png";
+      parts.push(
+        Buffer.from(
+          `--${boundary}\r\nContent-Disposition: form-data; name="images"; filename="${img.filename}"\r\nContent-Type: ${ct}\r\n\r\n`,
+        ),
+      );
+      parts.push(img.buffer);
+      parts.push(Buffer.from("\r\n"));
+    }
   }
 
   if (logs) {

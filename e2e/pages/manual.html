@@ -17,10 +17,10 @@
       版面（1280x800 视口，dpr=1，scale=1 → CSS 坐标 == PNG 像素坐标），
       与 mask.html 一致，便于复用同一套像素断言：
         #visible-block  (60,60)-(380,240)    纯绿 #00ff00   必须可见
-        #secret-card    (500,80)-(860,280)   纯品红 #ff00ff + [data-feedback-capture-mask]
-        #pw             (500,340)-(860,388)  纯青 #00ffff input[type=password]
+        #secret-card    (500,80)-(800,280)   纯品红 #ff00ff + [data-feedback-capture-mask]
+        #pw             (500,340)-(800,388)  纯青 #00ffff input[type=password]
         #footer-block   (60,400)-(380,520)   纯蓝 #0000ff   必须可见
-      面板固定在右侧 400px（x 从 1280-16-400=864 起），两个敏感区都在其左侧，
+      面板固定在右侧 440px（x 从 1280-16-440=824 起），两个敏感区都在其左侧，
       因此「面板不在截图里」与「敏感区被遮挡」两类断言互不干扰。
 
       侧边组件默认形态：未声明 launcher-mode → 贴边标签（tab）；未声明 side → right。
@@ -56,7 +56,7 @@
       #secret-card {
         left: 500px;
         top: 80px;
-        width: 360px;
+        width: 300px;
         height: 200px;
         background: #ff00ff;
         color: #ffff00;
@@ -65,7 +65,7 @@
         position: absolute;
         left: 500px;
         top: 340px;
-        width: 360px;
+        width: 300px;
         height: 48px;
         background: #00ffff;
         border: 0;

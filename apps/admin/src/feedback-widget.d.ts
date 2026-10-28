@@ -6,7 +6,12 @@ declare global {
   const __ADMIN_VERSION__: string;
 }
 
-/** 让 JSX 认识 <feedback-widget> 元素及其全部受支持 attributes。 */
+/**
+ * 让 JSX 认识 <feedback-widget> 元素及其全部受支持 attributes。
+ * 注：诊断日志走 property 而非 attribute——`widget.logProvider` 由
+ * feedback-host.ts 的 bindFeedbackDiagnostics 在会话生命周期内绑定，
+ * 组件按会话身份 key 化（App.tsx），退出/换账号重建实例。
+ */
 type FeedbackWidgetAttributes = React.DetailedHTMLProps<
   React.HTMLAttributes<FeedbackWidget> & {
     "api-base"?: string;

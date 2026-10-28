@@ -190,6 +190,8 @@ export interface CreatedEventInput {
   text: string;
   occurredAt: string;
   screenshot: { byteSize: number; sha256: string } | null;
+  /** v12：有序图片附件（与 screenshot 互斥）；id 对应回连路由 /attachments/images/:imageId。 */
+  images?: { id: string; filename: string; mime: string; byteSize: number; sha256: string }[];
   logs: { id: string; filename: string; byteSize: number; sha256: string }[];
 }
 
@@ -210,6 +212,16 @@ export function enqueueFeedbackCreatedInTx(db: Db, input: CreatedEventInput): vo
       mime: "image/png",
       byteSize: input.screenshot.byteSize,
       sha256: input.screenshot.sha256,
+    });
+  }
+  for (const img of input.images ?? []) {
+    attachments.push({
+      id: `images/${img.id}`,
+      kind: "image",
+      filename: img.filename,
+      mime: img.mime,
+      byteSize: img.byteSize,
+      sha256: img.sha256,
     });
   }
   for (const l of input.logs) {

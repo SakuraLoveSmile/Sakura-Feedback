@@ -1,7 +1,14 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, useTemplateRef } from 'vue';
 // openFeedback：确保元素存在并调用 open()；导入本身也自动注册元素。
-import { openFeedback, type FeedbackSubmittedDetail, type FeedbackWidget } from '@feedback/web';
+import {
+  FeedbackDiagnosticsRecorder,
+  FeedbackErrorCapture,
+  openFeedback,
+  wrapFetch,
+  type FeedbackSubmittedDetail,
+  type FeedbackWidget,
+} from '@feedback/web';
 
 const last = ref<string | null>(null);
 /** 主题：与站点一致的深色模式（system | light | dark）。 */
@@ -9,6 +16,19 @@ const theme = ref<'system' | 'light' | 'dark'>('light');
 
 /** 模板 ref：直接持有真实的 DOM 元素实例（不再用 document.querySelector 全局查找）。 */
 const widget = useTemplateRef<FeedbackWidget>('widget');
+
+// ---- v12 诊断日志（§5.6）：三步接入 ----
+// 1) 创建记录器：内存环形缓冲（200 条 / 256KiB），白名单字段，不记 URL/正文/凭据。
+const diagnostics = new FeedbackDiagnosticsRecorder({ pageLabel: 'home' });
+// 2) 宿主自身请求经 wrapFetch 记录（不替换全局 fetch）；
+//    FeedbackErrorCapture 显式启用未捕获异常监听（可卸载、保留宿主处理）。
+const diagnosticsFetch = wrapFetch(diagnostics);
+const errorCapture = new FeedbackErrorCapture(diagnostics);
+
+/** 演示：宿主自己的请求也走 wrapFetch（点「调用宿主接口」可见记录）。 */
+function callHostApi() {
+  void diagnosticsFetch('http://localhost:8787/healthz').catch(() => undefined);
+}
 
 function onSubmitted(ev: Event) {
   const detail = (ev as CustomEvent<FeedbackSubmittedDetail>).detail;
@@ -42,10 +62,24 @@ function openViaModuleHelper() {
 onMounted(() => {
   // 事件在元素实例上派发（bubbles + composed）；这里挂上，卸载时移除，避免泄漏。
   widget.value?.addEventListener('feedback-submitted', onSubmitted);
+  errorCapture.install();
+  // 3) 注入组件：组件请求经 recorder 记录；logProvider 让诊断文件随提交附加。
+  if (widget.value) {
+    widget.value.diagnosticsRecorder = diagnostics;
+    widget.value.logProvider = async () => {
+      const file = diagnostics.toLogFile();
+      return file ? [file] : [];
+    };
+  }
 });
 
 onBeforeUnmount(() => {
   widget.value?.removeEventListener('feedback-submitted', onSubmitted);
+  errorCapture.uninstall();
+  if (widget.value) {
+    widget.value.diagnosticsRecorder = undefined;
+    widget.value.logProvider = undefined;
+  }
 });
 </script>
 
@@ -83,6 +117,7 @@ onBeforeUnmount(() => {
       <button @click="openPanel">元素 ref：open()（纯文本，不截图）</button>
       <button @click="captureAndOpen">元素 ref：captureAndOpen()（截图并打开）</button>
       <button @click="openViaModuleHelper">openFeedback()（仅打开面板，不截图）</button>
+      <button @click="callHostApi">调用宿主接口（写入诊断）</button>
     </div>
     <p style="font-size: 13px; color: #64748b; margin: 0 0 20px 0">
       注意：<code>openFeedback()</code> 内部只调 <code>open()</code>，不会截图；要"截图 + 打开"请用

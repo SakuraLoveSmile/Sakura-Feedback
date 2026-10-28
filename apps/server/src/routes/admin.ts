@@ -6,7 +6,7 @@ import { encryptSecret } from "../crypto/secret.ts";
 import {
   type AdminFeedbackRow,
   type AppRow,
-  type AppSourceRow,
+  addFeedbackMessageAtomic,
   applyLifecycleInTx,
   authorizeArchiveInTx,
   type ClassificationPatch,
@@ -24,6 +24,7 @@ import {
   getApp,
   getAppByAppId,
   getAppSource,
+  getCancellationTask,
   getDeletionReceiptByFeedbackId,
   getFeedback,
   getFeedbackLog,
@@ -31,9 +32,12 @@ import {
   getFeedbackScreenshot,
   getFeedbackScreenshotMeta,
   getQuota,
+  getReadCursor,
   getSetting,
+  getUnifiedFeedbackImage,
   getUserById,
   getUserByUsername,
+  type IssueStatus,
   insertApp,
   insertFeedbackAudit,
   isAppRuleComplete,
@@ -44,9 +48,12 @@ import {
   listAppsWithStats,
   listFeedbackAppOptions,
   listFeedbackAudit,
+  listFeedbackMessages,
   listFeedbacks,
   listOrdinaryUsers,
+  listUnifiedFeedbackImages,
   type MgmtState,
+  markReadCursor,
   parseAppLabelIds,
   parseClassification,
   registerConfirmedSources,
@@ -60,6 +67,8 @@ import {
   type UserRow,
   updateAdminCredentialsInTx,
   updateApp,
+  updateCancellationTaskStatus,
+  updateIssueStatusInTx,
   updateUser,
 } from "../db/repos.ts";
 import type { ServerConfig } from "../env.ts";
@@ -74,19 +83,10 @@ import {
   requireAdminCookie,
   sessionUser,
 } from "../http.ts";
-import {
-  type ArchiveDataNext,
-  type ArchiveLabelRecord,
-  ArchiveVersionConflictError,
-  loadArchiveData,
-  normalizeToV3,
-  parseArchiveData,
-  saveArchiveData,
-  writeArchiveSnapshot,
-} from "../pipeline/archive-data.ts";
+import { ArchiveVersionConflictError, parseArchiveData, writeArchiveSnapshot } from "../pipeline/archive-data.ts";
 import type { Worker } from "../pipeline/worker.ts";
 import type { AiClient } from "../services/ai.ts";
-import { ArchiveTargetInvalidError, resolveArchiveTarget } from "../services/archive-target.ts";
+import { resolveArchiveTarget } from "../services/archive-target.ts";
 import type { KaneoClient } from "../services/kaneo.ts";
 import { normalizeKaneoApiBase } from "../services/kaneo-http.ts";
 import type { PublicApp } from "../types.ts";
@@ -342,7 +342,8 @@ export function adminRoutes(deps: AdminDeps): Hono {
       enabled: u.enabled === 1,
       dailyLimit: u.daily_limit,
       used: quota.used,
-      remaining: quota.remaining,
+      // 本页只管理普通账号：unlimited 形态不可达，兜底折算保持响应结构为数值。
+      remaining: quota.unlimited === true ? Math.max(0, u.daily_limit - quota.used) : quota.remaining,
       resetAt: quota.resetAt,
       createdAt: u.created_at,
     };
@@ -435,15 +436,30 @@ export function adminRoutes(deps: AdminDeps): Hono {
     return c.json({ apps: listApps(db).map((a) => publicApp(a, stats.get(a.id))) });
   });
 
+  /**
+   * 登记软件：与 PUT 相同的默认目标校验——字段缺失按清空、类型非法按 400，
+   * 完整规则（项目 + 列 ID + 工作区标签 + 可选负责人）随创建一并写入，
+   * 否则回读 ruleComplete=false 会误报缺项（创建即配置的管理员流程）。
+   */
   routes.post("/apps", async (c) => {
     const body = await readJson<Record<string, unknown>>(c);
     if (isErr(body)) return fail(c, body);
     const v = validateAppInput(body, true);
     if ("status" in v) return fail(c, v);
+    const defaults = validateAppDefaults(body);
+    if ("status" in defaults) return fail(c, defaults);
     if (getAppByAppId(db, v.appId)) return fail(c, err("app_exists", "该 appId 已存在", 409));
     // 管理员显式填写的允许来源直接登记为**已确认**来源（管理员已确认过这些来源）。
     const row = insertApp(db, {
-      ...v,
+      appId: v.appId,
+      name: v.name,
+      allowedOrigins: v.allowedOrigins,
+      kaneoProjectId: defaults.projectId,
+      kaneoColumnSlug: defaults.columnSlug,
+      kaneoColumnId: defaults.columnId,
+      kaneoLabelIds: defaults.labelIds,
+      kaneoAssigneeId: defaults.assigneeId,
+      kaneoAssigneeName: defaults.assigneeName,
       sources: v.allowedOrigins.map((origin) => ({
         origin,
         kind: "browser" as const,
@@ -823,6 +839,25 @@ export function adminRoutes(deps: AdminDeps): Hono {
     if (!parsed.projectId || !parsed.columnId || parsed.labelIds.length === 0) {
       return fail(c, err("incomplete_classification", "归档前必须选择项目、目标列与至少一个工作区标签", 422));
     }
+
+    // T4：确认旧任务已删除或确实不存在前，禁用重新归档
+    const cancelTask = getCancellationTask(db, id);
+    if (cancelTask && cancelTask.status !== "confirmed") {
+      return fail(
+        c,
+        err(
+          "cancellation_in_progress",
+          `旧 Kaneo 任务尚未确认删除（当前状态: ${cancelTask.status}），请先核对或等待删除完成`,
+          409,
+        ),
+      );
+    }
+
+    // T4：管理员重新归档前看到完整讨论快照；授权时若有用户新补充，旧快照不能继续归档
+    if (typeof body.expectedDialogueVersion === "number" && body.expectedDialogueVersion !== row.dialogue_version) {
+      return fail(c, err("version_conflict", "在归档授权前收到了新的用户补充消息，请刷新查看最新快照后重试", 409));
+    }
+
     const baseUrl = getSetting(db, "kaneo.baseUrl");
     if (!baseUrl) return fail(c, err("kaneo_unavailable", "Kaneo 连接未配置", 502));
 
@@ -955,8 +990,14 @@ export function adminRoutes(deps: AdminDeps): Hono {
     const to = parseDateBoundary(c.req.query("to"), "to");
     if ("code" in to) return fail(c, to);
     const limit = Math.min(100, Math.max(1, Number(c.req.query("limit") ?? 50) || 50));
+    const issueStatus = parseIssueStatusParam(c.req.query("issueStatus"));
+    if ("code" in issueStatus) return fail(c, issueStatus);
+    const actor = adminActor(db, c);
+    const adminUserId = actor instanceof Response ? undefined : actor.id;
     const r = listFeedbacks(db, {
       status,
+      issueStatus: issueStatus.value,
+      adminUserId,
       appId: c.req.query("appId") || undefined,
       cursor: c.req.query("cursor") || undefined,
       limit,
@@ -983,9 +1024,12 @@ export function adminRoutes(deps: AdminDeps): Hono {
     if ("code" in from) return fail(c, from);
     const to = parseDateBoundary(c.req.query("to"), "to");
     if ("code" in to) return fail(c, to);
+    const issueStatus = parseIssueStatusParam(c.req.query("issueStatus"));
+    if ("code" in issueStatus) return fail(c, issueStatus);
     return c.json(
       countFeedbacksByMgmt(db, {
         status,
+        issueStatus: issueStatus.value,
         appId: c.req.query("appId") || undefined,
         q,
         from: from.value,
@@ -1116,6 +1160,8 @@ export function adminRoutes(deps: AdminDeps): Hono {
             createdAt: screenshotMeta.created_at,
           }
         : null,
+      // v12：统一有序图片列表（新图片表 + 旧截图兼容行 id="screenshot"）。
+      images: listUnifiedFeedbackImages(db, row.id),
       logs: logsMeta.map((l) => ({
         id: l.id,
         feedbackId: l.feedback_id,
@@ -1126,7 +1172,253 @@ export function adminRoutes(deps: AdminDeps): Hono {
         sha256: l.sha256,
         createdAt: l.created_at,
       })),
+      cancellation: getCancellationTask(db, row.id),
     });
+  });
+
+  // ========================================================================= v11: 管理端对话 API
+  routes.get("/feedback/:id/dialogue", (c) => {
+    const id = c.req.param("id");
+    const fb = getFeedback(db, id);
+    if (!fb) {
+      const receipt = getDeletionReceiptByFeedbackId(db, id);
+      if (receipt) return fail(c, err("feedback_purged", "该反馈已被彻底删除", 410));
+      return fail(c, err("not_found", "反馈不存在", 404));
+    }
+    const actor = adminActor(db, c);
+    const adminUserId = actor instanceof Response ? "" : actor.id;
+    const messages = listFeedbackMessages(db, id);
+    const lastReadSeq = getReadCursor(db, adminUserId, id);
+    const cancellation = getCancellationTask(db, id);
+
+    return c.json({
+      feedback: {
+        id: fb.id,
+        appId: fb.app_id,
+        title: fb.title,
+        text: fb.text,
+        status: fb.status,
+        issueStatus: fb.issue_status,
+        dialogueVersion: fb.dialogue_version,
+        archiveRound: fb.archive_round,
+        mgmtState: fb.mgmt_state,
+        createdAt: fb.created_at,
+        updatedAt: fb.updated_at,
+        lastActivityAt: fb.last_activity_at || fb.created_at,
+        kaneoTaskId: fb.kaneo_task_id,
+        kaneoTaskUrl: fb.kaneo_task_url,
+        // v12：统一有序图片列表。
+        images: listUnifiedFeedbackImages(db, fb.id),
+      },
+      messages: messages.map((m) => ({
+        id: m.id,
+        seq: m.seq,
+        senderType: m.sender_type,
+        senderId: m.sender_id,
+        senderName: m.sender_name,
+        text: m.text,
+        resolutionNote: m.resolution_note,
+        createdAt: m.created_at,
+        attachments: m.attachments.map((a) => ({
+          id: a.id,
+          kind: a.kind,
+          mime: a.mime,
+          filename: a.filename,
+          byteSize: a.byte_size,
+          sha256: a.sha256,
+          width: a.width,
+          height: a.height,
+          createdAt: a.created_at,
+        })),
+      })),
+      lastReadSeq,
+      cancellation,
+    });
+  });
+
+  routes.post("/feedback/:id/messages", async (c) => {
+    const actor = adminActor(db, c);
+    if (actor instanceof Response) return actor;
+    const id = c.req.param("id");
+    const fb = getFeedback(db, id);
+    if (!fb) return fail(c, err("not_found", "反馈不存在", 404));
+    if (fb.mgmt_state === "trash") {
+      return fail(c, err("readonly_trashed", "回收站中的反馈只读，无法发送回复", 403));
+    }
+
+    const body = await readJson<{
+      text?: unknown;
+      issueStatusAction?: unknown;
+      expectedDialogueVersion?: unknown;
+      /** v12：处理说明（resolve 时必填 1..2000；request_info/reply 可选携带），对用户可见。 */
+      resolutionNote?: unknown;
+    }>(c);
+    if (isErr(body)) return fail(c, body);
+
+    const text = typeof body.text === "string" ? body.text.trim() : "";
+    if (!text) return fail(c, err("invalid_request", "回复内容不可为空", 400));
+    if (text.length > 10_000) return fail(c, err("text_too_long", "回复文本不能超过 10,000 字", 400));
+
+    let newIssueStatus: IssueStatus | undefined;
+    if (body.issueStatusAction === "request_info") {
+      newIssueStatus = "waiting_user";
+    } else if (body.issueStatusAction === "resolve") {
+      newIssueStatus = "resolved";
+    } else if (body.issueStatusAction === "reply") {
+      // 保持或转为 waiting_user，根据产品规则：普通管理员回复不自动解决，若之前是 waiting_admin，回复后通常变 waiting_user
+      newIssueStatus = "waiting_user";
+    }
+
+    // v12：标记已解决必须填写处理说明（1..2000 字符），随消息入库并对用户可见。
+    const resolutionNote =
+      typeof body.resolutionNote === "string" && body.resolutionNote.trim() !== "" ? body.resolutionNote.trim() : null;
+    if (body.issueStatusAction === "resolve" && !resolutionNote) {
+      return fail(c, err("invalid_request", "标记已解决必须填写处理说明（resolutionNote）", 400));
+    }
+    if (resolutionNote !== null && (resolutionNote.length < 1 || resolutionNote.length > 2000)) {
+      return fail(c, err("invalid_request", "处理说明长度必须为 1..2000 字符", 400));
+    }
+
+    const expVer =
+      typeof body.expectedDialogueVersion === "number" && Number.isInteger(body.expectedDialogueVersion)
+        ? body.expectedDialogueVersion
+        : undefined;
+
+    const outcome = addFeedbackMessageAtomic(db, {
+      feedbackId: id,
+      senderType: "admin",
+      senderId: actor.id,
+      senderName: actor.username,
+      text,
+      newIssueStatus,
+      resolutionNote,
+      expectedDialogueVersion: expVer,
+    });
+
+    if (outcome.kind === "version_conflict") {
+      return fail(c, err("version_conflict", "对话已被其他人更新，请刷新后重试", 409));
+    }
+    if (outcome.kind === "not_found") return fail(c, err("not_found", "反馈不存在", 404));
+    if (outcome.kind === "readonly_trashed") {
+      return fail(c, err("readonly_trashed", "回收站中的反馈只读", 403));
+    }
+    if (outcome.kind !== "created") {
+      return fail(c, err("internal", "发送回复失败", 500));
+    }
+
+    return c.json(
+      {
+        ok: true,
+        message: {
+          id: outcome.message.id,
+          seq: outcome.message.seq,
+          senderType: outcome.message.sender_type,
+          senderId: outcome.message.sender_id,
+          senderName: outcome.message.sender_name,
+          text: outcome.message.text,
+          resolutionNote: outcome.message.resolution_note,
+          createdAt: outcome.message.created_at,
+          attachments: [],
+        },
+        dialogueVersion: outcome.dialogueVersion,
+        issueStatus: outcome.issueStatus,
+      },
+      201,
+    );
+  });
+
+  routes.post("/feedback/:id/issue-status", async (c) => {
+    const actor = adminActor(db, c);
+    if (actor instanceof Response) return actor;
+    const id = c.req.param("id");
+    const body = await readJson<{
+      issueStatus?: unknown;
+      expectedDialogueVersion?: unknown;
+      /** v12：issueStatus=resolved 时必填（1..2000 字符），对用户可见。 */
+      resolutionNote?: unknown;
+    }>(c);
+    if (isErr(body)) return fail(c, body);
+
+    if (!ISSUE_STATUSES.includes(body.issueStatus as string)) {
+      return fail(c, err("invalid_request", "issueStatus 必须是 open/waiting_user/waiting_admin/resolved 之一", 400));
+    }
+    const newStatus = body.issueStatus as IssueStatus;
+    const resolutionNote =
+      typeof body.resolutionNote === "string" && body.resolutionNote.trim() !== "" ? body.resolutionNote.trim() : null;
+    // v12：标记已解决必须填写处理说明（1..2000 字符）。
+    if (newStatus === "resolved" && !resolutionNote) {
+      return fail(c, err("invalid_request", "标记已解决必须填写处理说明（resolutionNote）", 400));
+    }
+    if (resolutionNote !== null && (resolutionNote.length < 1 || resolutionNote.length > 2000)) {
+      return fail(c, err("invalid_request", "处理说明长度必须为 1..2000 字符", 400));
+    }
+    const expVer =
+      typeof body.expectedDialogueVersion === "number" && Number.isInteger(body.expectedDialogueVersion)
+        ? body.expectedDialogueVersion
+        : undefined;
+
+    const res = updateIssueStatusInTx(db, id, newStatus, actor, expVer, resolutionNote);
+    if (!res.ok) {
+      if (res.error === "version_conflict") {
+        return fail(c, err("version_conflict", "状态已被更新，请刷新后重试", 409));
+      }
+      if (res.error === "not_found") return fail(c, err("not_found", "反馈不存在", 404));
+      return fail(c, err("invalid_state", "无法更新状态", 409));
+    }
+
+    return c.json({ ok: true, issueStatus: res.issueStatus, dialogueVersion: res.dialogueVersion });
+  });
+
+  routes.post("/feedback/:id/read", async (c) => {
+    const actor = adminActor(db, c);
+    if (actor instanceof Response) return actor;
+    const id = c.req.param("id");
+    const fb = getFeedback(db, id);
+    if (!fb) return fail(c, err("not_found", "反馈不存在", 404));
+
+    const body = await readJson<{ lastReadSeq?: unknown }>(c);
+    if (isErr(body)) return fail(c, body);
+    const lastReadSeq = typeof body.lastReadSeq === "number" ? Math.floor(body.lastReadSeq) : 0;
+    if (lastReadSeq < 0) return fail(c, err("invalid_request", "lastReadSeq 必须为非负整数", 400));
+
+    const recorded = markReadCursor(db, actor.id, id, lastReadSeq);
+    return c.json({ ok: true, lastReadSeq: recorded });
+  });
+
+  routes.post("/feedback/:id/cancellation/retry", (c) => {
+    const actor = adminActor(db, c);
+    if (actor instanceof Response) return actor;
+    const id = c.req.param("id");
+    const task = getCancellationTask(db, id);
+    if (!task) return fail(c, err("not_found", "没有关联的 Kaneo 撤销任务", 404));
+    // v12：此入口仅用于存量 uncertain/failed 的人工核对重试；
+    // pending/processing 已停止派发（迁移置 cancelled），cancelled/confirmed 均为终态。
+    if (task.status === "confirmed") {
+      return fail(c, err("already_confirmed", "旧任务已确认删除", 409));
+    }
+    if (task.status === "cancelled") {
+      return fail(c, err("invalid_state", "v12 起用户回复不再触发撤销派发，已取消的任务不再重试", 409));
+    }
+    if (task.status !== "uncertain" && task.status !== "failed") {
+      return fail(c, err("invalid_state", `撤销任务状态 ${task.status} 不允许人工重试`, 409));
+    }
+
+    updateCancellationTaskStatus(db, task.id, {
+      status: "pending",
+      nextAttemptAt: new Date().toISOString(),
+    });
+
+    insertFeedbackAudit(db, {
+      feedbackId: id,
+      actor,
+      action: "kaneo_cancellation_manual_retry",
+      detail: { taskId: task.kaneo_task_id, round: task.archive_round },
+    });
+
+    // 唤醒 worker
+    deps.worker.scanAutoArchive();
+
+    return c.json({ ok: true, status: "pending" });
   });
 
   routes.get("/feedback/:id/screenshot", (c) => {
@@ -1138,6 +1430,21 @@ export function adminRoutes(deps: AdminDeps): Hono {
         "content-type": "image/png",
         "cache-control": "no-store",
         "content-length": String(screenshot.byte_size),
+      },
+    });
+  });
+
+  // v12：管理员查看初始反馈的某张图片（统一图片 id；旧截图以 id="screenshot" 命中）。
+  routes.get("/feedback/:id/images/:imageId", (c) => {
+    const img = getUnifiedFeedbackImage(db, c.req.param("id"), c.req.param("imageId"));
+    if (!img) return fail(c, err("not_found", "图片不存在", 404));
+    return new Response(img.bytes as unknown as BodyInit, {
+      status: 200,
+      headers: {
+        "content-type": img.mime,
+        "cache-control": "no-store",
+        "content-length": String(img.byteSize),
+        "content-disposition": `inline; filename="${encodeURIComponent(img.filename)}"`,
       },
     });
   });
@@ -1302,6 +1609,16 @@ function adminRowWithApp(db: Db, row: FeedbackRow): AdminFeedbackRow {
 }
 
 const STATUSES: string[] = FEEDBACK_STATUSES;
+
+/** 全部工单状态（issueStatus 筛选与状态迁移校验的唯一来源）。 */
+const ISSUE_STATUSES: string[] = ["open", "waiting_user", "waiting_admin", "resolved"];
+
+/** 工单状态筛选参数：省略或空值=不过滤；非法非空值返回可直接下发的 400。 */
+function parseIssueStatusParam(raw: string | undefined): { value?: IssueStatus } | Err {
+  if (raw === undefined || raw === "") return { value: undefined };
+  if (ISSUE_STATUSES.includes(raw)) return { value: raw as IssueStatus };
+  return err("invalid_request", "issueStatus 参数非法，必须是 open/waiting_user/waiting_admin/resolved 之一", 400);
+}
 
 /** 管理视图参数：缺省收件箱；`all` 为兼容查询（收件箱 + 已归档，不含回收站）。 */
 function parseViewParam(raw: string | undefined): MgmtState | "all" | undefined | null {

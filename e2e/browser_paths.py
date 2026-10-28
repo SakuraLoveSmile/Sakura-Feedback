@@ -33,6 +33,7 @@ import math
 import os
 import re
 import time
+import traceback
 import urllib.parse
 
 import png_probe
@@ -230,8 +231,15 @@ def b64_to_bytes(b64: str) -> bytes:
     return base64.b64decode(b64)
 
 
-def drag_orb(page, drag_to=None, timeout=60000) -> dict:
-    """真实鼠标操作灵感球：drag_to=None → 点击呼出（capture-mode=viewport 先截图后开面板）。"""
+def drag_orb(page, drag_to=None, timeout=60000, expect="panel") -> dict:
+    """真实鼠标操作灵感球。
+
+    drag_to=None → 点击呼出（capture-mode=viewport 先截图后开面板）。
+    drag_to=(x,y) → 真实拖拽；本轮 T1 起拖拽松手进入**局部选区覆盖层**
+    （.fb-region-overlay），面板此时尚未打开——expect="region" 时等待覆盖层，
+    由调用方决定「使用此区域 / 截取整个窗口 / 取消」后再等面板。
+    expect="panel" 保留旧行为（等待 .fb-panel，供点击路径使用）。
+    """
     orb = page.locator(".fb-orb")
     box = orb.bounding_box()
     page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
@@ -243,7 +251,10 @@ def drag_orb(page, drag_to=None, timeout=60000) -> dict:
             "() => !!document.querySelector('feedback-widget').shadowRoot.querySelector('.fb-orb.is-dragging')"
         )
     page.mouse.up()
-    page.locator(".fb-panel").wait_for(state="visible", timeout=timeout)
+    if drag_to and expect == "region":
+        page.locator(".fb-region-overlay").wait_for(state="visible", timeout=timeout)
+    else:
+        page.locator(".fb-panel").wait_for(state="visible", timeout=timeout)
     return {"orbBox": box, "dragging": dragging}
 
 
@@ -400,9 +411,38 @@ def p1_orb_drag(deps):
     check("P1 贴边标签在 orb 模式下隐藏（文档化样式 styles.ts:260）", not page.locator(".fb-fab").is_visible())
 
     tx, ty = 256, 192  # 红色 landmark (100,100)-(340,260) 内 → 归一化 0.2 / 0.24
-    info = drag_orb(page, drag_to=(tx, ty))
+    info = drag_orb(page, drag_to=(tx, ty), expect="region")
     check("P1 拖动中灵感球进入 is-dragging 态（真实指针事件）", info["dragging"] is True, str(info))
-    check("P1 释放后反馈面板打开", page.locator(".fb-panel").is_visible())
+
+    # T1 新流程：松手 → 局部选区覆盖层（面板此时尚未打开、草稿未写入）
+    check("P1 松手后出现局部选区覆盖层", page.locator(".fb-region-overlay").is_visible())
+    check(
+        "P1 覆盖层三按钮齐全（使用此区域/截取整个窗口/取消）",
+        page.locator(".fb-region-use").is_visible()
+        and page.locator(".fb-region-all").is_visible()
+        and page.locator(".fb-region-cancel").is_visible(),
+    )
+    check("P1 覆盖层打开时面板尚未打开（草稿未写入）", not page.locator(".fb-panel").is_visible())
+    frame = page.locator(".fb-region-frame").bounding_box()
+    check(
+        "P1 初始选区 = min(400,80vw)×min(260,40vh) = 400×260",
+        frame is not None and round(frame["width"]) == 400 and round(frame["height"]) == 260,
+        str(frame),
+    )
+    if frame:
+        fcx, fcy = frame["x"] + frame["width"] / 2, frame["y"] + frame["height"] / 2
+        check(
+            "P1 初始选区中心 = 松手点 (256,192)",
+            abs(fcx - tx) <= 2 and abs(fcy - ty) <= 2,
+            f"center=({fcx:.1f},{fcy:.1f})",
+        )
+    page.screenshot(path=os.path.join(deps["shots_dir"], "P1-region-overlay.png"))
+
+    # 本路径改走「截取整个窗口」以保留后续「截图就是宿主视口」的全套像素断言；
+    # 「使用此区域」的裁剪一致性由 P1R 覆盖。
+    page.locator(".fb-region-all").click()
+    page.locator(".fb-panel").wait_for(state="visible", timeout=30000)
+    check("P1 释放并确认后反馈面板打开", page.locator(".fb-panel").is_visible())
     page.locator(".fb-screenshot-wrap").wait_for(state="visible", timeout=30000)
     check("P1 截图写入草稿（缩略图可见）", page.locator(".fb-screenshot-wrap").is_visible())
     after = orb_rect(page)
@@ -1739,6 +1779,395 @@ def p10_server_override(deps):
         ctx.close()
 
 
+def p1r_region_flow(deps):
+    """P1R 局部截图选区（T1 验收）：中央/四角/侧栏/弹窗拖放、选区移动与缩放、
+    「使用此区域」后上传图与预览一致、取消不覆盖草稿、失败不回退整屏。"""
+    step, check = deps["step"], deps["check"]
+    step("P1R 局部选区：中央拖放 → 移动/缩放 → 使用此区域（裁剪一致）→ 取消 → 四角 → 侧栏/弹窗")
+
+    def frame_box(p):
+        return p.locator(".fb-region-frame").bounding_box()
+
+    def thumb_png(p):
+        b64 = p.evaluate(
+            """async () => {
+                const sr = document.querySelector('feedback-widget').shadowRoot;
+                const img = sr.querySelector('img.fb-screenshot-thumb');
+                if (!img || !img.getAttribute('src')) return null;
+                const res = await fetch(img.getAttribute('src'));
+                const buf = new Uint8Array(await res.arrayBuffer());
+                let s = ''; for (const b of buf) s += String.fromCharCode(b);
+                return btoa(s);
+            }"""
+        )
+        if not b64:
+            return None, None
+        raw = b64_to_bytes(b64)
+        return raw, png_probe.decode(raw)
+
+    def wait_thumb(p):
+        p.locator(".fb-screenshot-wrap").wait_for(state="visible", timeout=30000)
+
+    def remove_capture(p):
+        btn = p.locator(".fb-btn-remove")
+        if btn.count() and btn.first.is_visible():
+            btn.first.click()
+            p.wait_for_timeout(300)
+
+    def status_text(p):
+        return p.evaluate(
+            "() => { const sr = document.querySelector('feedback-widget').shadowRoot;"
+            " const el = sr.querySelector('.fb-status');"
+            " return el ? (el.textContent || '').trim() : ''; }"
+        )
+
+    def vr(p, el_id):
+        return p.evaluate(
+            "(id) => { const b = document.getElementById(id).getBoundingClientRect();"
+            " return {x: b.x, y: b.y, width: b.width, height: b.height}; }",
+            el_id,
+        )
+
+    def intersect(a, b):
+        x1, y1 = max(a["x"], b["x"]), max(a["y"], b["y"])
+        x2, y2 = min(a["x"] + a["width"], b["x"] + b["width"]), min(a["y"] + a["height"], b["y"] + b["height"])
+        return {"x": x1, "y": y1, "width": max(0.0, x2 - x1), "height": max(0.0, y2 - y1)}
+
+    page = new_page(deps, f"{deps['pages']}/orb.html")
+
+    # ---------- 中央拖放 + 选区几何 ----------
+    drag_orb(page, drag_to=(640, 400), expect="region")
+    fb = frame_box(page)
+    check(
+        "P1R 中央：初始选区400×260、中心=(640,400)",
+        fb is not None
+        and round(fb["width"]) == 400
+        and round(fb["height"]) == 260
+        and abs(fb["x"] + fb["width"] / 2 - 640) <= 2
+        and abs(fb["y"] + fb["height"] / 2 - 400) <= 2,
+        str(fb),
+    )
+    if fb is None:
+        check("P1R 覆盖层选区帧可测量", False, ".fb-region-frame bounding_box() 为 None")
+        page.close()
+        return
+    handles = page.locator(".fb-region-handle").count()
+    check("P1R 选区带八个缩放控制点", handles == 8, f"handles={handles}")
+
+    # 移动：框内按下拖动
+    cx, cy = fb["x"] + fb["width"] / 2, fb["y"] + fb["height"] / 2
+    page.mouse.move(cx, cy)
+    page.mouse.down()
+    page.mouse.move(cx + 80, cy + 60, steps=8)
+    page.mouse.up()
+    fb2 = frame_box(page)
+    check(
+        "P1R 选区可移动（位移≈(+80,+60)、尺寸不变、仍在视口内）",
+        fb2 is not None
+        and abs((fb2["x"] + fb2["width"] / 2) - (cx + 80)) <= 4
+        and abs((fb2["y"] + fb2["height"] / 2) - (cy + 60)) <= 4
+        and round(fb2["width"]) == round(fb["width"])
+        and fb2["x"] >= -1
+        and fb2["y"] >= -1
+        and fb2["x"] + fb2["width"] <= 1281
+        and fb2["y"] + fb2["height"] <= 801,
+        f"{fb} → {fb2}",
+    )
+
+    # 缩放：SE 控制点
+    se = page.locator('.fb-region-handle[data-handle="se"]').bounding_box()
+    fb3 = None
+    if se is None:
+        check("P1R SE 控制点可测量", False, "handle bounding_box() 为 None")
+        fb3 = fb2
+    else:
+        page.mouse.move(se["x"] + se["width"] / 2, se["y"] + se["height"] / 2)
+        page.mouse.down()
+        page.mouse.move(se["x"] + se["width"] / 2 + 60, se["y"] + se["height"] / 2 + 40, steps=8)
+        page.mouse.up()
+        fb3 = frame_box(page)
+        check(
+            "P1R 选区可缩放（宽高各 +≈60/+≈40）",
+            fb2 is not None
+            and fb3 is not None
+            and abs(fb3["width"] - (fb2["width"] + 60)) <= 5
+            and abs(fb3["height"] - (fb2["height"] + 40)) <= 5,
+            f"{fb2} → {fb3}",
+        )
+    check(
+        "P1R 松手后选区仍处于待确认态（覆盖层与边框持续可见）",
+        page.locator(".fb-region-overlay").is_visible() and page.locator(".fb-region-frame").is_visible(),
+    )
+    page.screenshot(path=os.path.join(deps["shots_dir"], "P1R-region-adjusted.png"))
+
+    # ---------- 取消不覆盖草稿、不报失败（此阶段面板从未打开，球可见） ----------
+    page.locator(".fb-region-cancel").click()
+    page.wait_for_timeout(300)
+    check("P1R 取消后覆盖层关闭", not page.locator(".fb-region-overlay").is_visible())
+    b64_after_cancel = page.evaluate("() => window.__fbE2E.blobBase64 && window.__fbE2E.blobBase64()")
+    check("P1R 取消后草稿没有写入截图字节", not b64_after_cancel, str(b64_after_cancel)[:40])
+    st = status_text(page)
+    check("P1R 取消不是失败（状态区无截图失败提示）", "截图未完成" not in st, st)
+
+    # ---------- 其余四角：几何合法性（拖放 → 检查 → 取消，均不打开面板） ----------
+    for tx2, ty2, name in ((40, 40, "左上"), (1240, 40, "右上"), (40, 760, "左下"), (1240, 760, "右下")):
+        drag_orb(page, drag_to=(tx2, ty2), expect="region")
+        f = frame_box(page)
+        check(
+            f"P1R {name}({tx2},{ty2}) 选区整体在视口内且为初始尺寸",
+            f is not None
+            and round(f["width"]) == 400
+            and round(f["height"]) == 260
+            and f["x"] >= -1
+            and f["y"] >= -1
+            and f["x"] + f["width"] <= 1281
+            and f["y"] + f["height"] <= 801,
+            str(f),
+        )
+        page.locator(".fb-region-cancel").click()
+        page.wait_for_timeout(250)
+
+    # ---------- 使用此区域：上传图与预览一致（此步才打开面板） ----------
+    drag_orb(page, drag_to=(640, 400), expect="region")
+    fbc2 = frame_box(page)
+    page.locator(".fb-region-use").click()
+    page.locator(".fb-panel").wait_for(state="visible", timeout=30000)
+    wait_thumb(page)
+    raw, arr = thumb_png(page)
+    check("P1R 使用此区域后草稿写入截图", arr is not None)
+    if arr is not None and fbc2 is not None:
+        w, h = png_probe.size(arr)
+        exp = (int(round(fbc2["width"])), int(round(fbc2["height"])))  # dpr=1 → CSS 像素 == PNG 像素
+        check("P1R 上传图尺寸 == 最终选区尺寸（结果与预览一致）", (w, h) == exp, f"{w}x{h} vs {exp}")
+        png_probe.save(arr, None, os.path.join(deps["shots_dir"], "P1R-region-client.png"))
+        natural = page.evaluate(
+            "() => { const t = document.querySelector('feedback-widget').shadowRoot"
+            ".querySelector('img.fb-screenshot-thumb'); return t ? t.naturalWidth : 0; }"
+        )
+        check("P1R 缩略图预览 naturalWidth == 位图宽", natural == w, f"natural={natural} w={w}")
+        accent = png_probe.color_count(arr, ACCENT_RGBA)
+        check("P1R 裁剪图不含组件 UI（强调色像素为 0）", accent == 0, f"count={accent}")
+
+    # 面板开着时球被隐藏：先移除截图再关闭面板（草稿清空后球才可用于后续拖放）
+    remove_capture(page)
+    page.locator('.fb-panel .fb-close[aria-label="关闭反馈面板"]').click()
+    page.locator(".fb-panel").wait_for(state="hidden", timeout=8000)
+
+    # ---------- 侧栏 / 弹窗上下文：选区裁剪包含对应内容 ----------
+    step("P1R 侧栏与弹窗上下文的选区裁剪")
+    page2 = new_page(deps, f"{deps['pages']}/v12-app.html")
+    page2.locator("#open-overlays").click()
+    page2.wait_for_timeout(400)
+
+    nav = vr(page2, "nav")
+    drag_orb(page2, drag_to=(nav["x"] + nav["width"] / 2, nav["y"] + nav["height"] / 2), expect="region")
+    fbv = frame_box(page2)
+    page2.locator(".fb-region-use").click()
+    wait_thumb(page2)
+    _, arr_v = thumb_png(page2)
+    if arr_v is not None and fbv is not None:
+        wv, hv = png_probe.size(arr_v)
+        check(
+            "P1R 侧栏选区裁剪尺寸正确",
+            (wv, hv) == (int(round(fbv["width"])), int(round(fbv["height"]))),
+            f"{wv}x{hv} vs {fbv}",
+        )
+        inter = intersect(nav, fbv)
+        rect_crop = {
+            "x": inter["x"] - fbv["x"],
+            "y": inter["y"] - fbv["y"],
+            "width": inter["width"],
+            "height": inter["height"],
+        }
+        png_probe.save(arr_v, None, os.path.join(deps["shots_dir"], "P1R-region-sidebar.png"))
+        if rect_crop["width"] > 4 and rect_crop["height"] > 4:
+            visible_probe("P1R 侧栏内容落在选区内并入图", arr_v, rect_crop, (0, 200, 83, 255), deps, "P1R")
+        else:
+            check("P1R 侧栏与选区相交", False, str(rect_crop))
+    else:
+        check("P1R 侧栏路径产出截图", False, "无图")
+    # 面板开着球隐藏：先移除截图、关闭面板，再做弹窗拖放
+    remove_capture(page2)
+    page2.locator('.fb-panel .fb-close[aria-label="关闭反馈面板"]').click()
+    page2.locator(".fb-panel").wait_for(state="hidden", timeout=8000)
+
+    modal = vr(page2, "modal")
+    drag_orb(page2, drag_to=(modal["x"] + modal["width"] / 2, modal["y"] + modal["height"] / 2), expect="region")
+    fbb = frame_box(page2)
+    page2.locator(".fb-region-use").click()
+    wait_thumb(page2)
+    _, arr_m = thumb_png(page2)
+    if arr_m is not None and fbb is not None:
+        wm, hm = png_probe.size(arr_m)
+        check(
+            "P1R 弹窗选区裁剪尺寸正确",
+            (wm, hm) == (int(round(fbb["width"])), int(round(fbb["height"]))),
+            f"{wm}x{hm} vs {fbb}",
+        )
+        inter2 = intersect(modal, fbb)
+        rect_crop2 = {
+            "x": inter2["x"] - fbb["x"],
+            "y": inter2["y"] - fbb["y"],
+            "width": inter2["width"],
+            "height": inter2["height"],
+        }
+        png_probe.save(arr_m, None, os.path.join(deps["shots_dir"], "P1R-region-modal.png"))
+        if rect_crop2["width"] > 4 and rect_crop2["height"] > 4:
+            visible_probe("P1R 弹窗内容落在选区内并入图", arr_m, rect_crop2, (0, 176, 255, 255), deps, "P1R")
+        else:
+            check("P1R 弹窗与选区相交", False, str(rect_crop2))
+    else:
+        check("P1R 弹窗路径产出截图", False, "无图")
+
+    page.close()
+    page2.close()
+
+
+def p11_editor_mask_crop(deps):
+    """P11 编辑器（T2 验收）：遮挡 → 裁剪选区持续可见 + 结果预览/输出尺寸 →
+    未应用选区禁保存 → 应用裁剪 → 撤销 → 保存；导出图保留实色遮挡，
+    选区边框/控制点等辅助元素不写入图片。"""
+    step, check = deps["step"], deps["check"]
+    step("P11 编辑器：遮挡 → 裁剪（持续可见+预览） → 应用 → 撤销 → 保存（像素断言）")
+
+    def sr_eval(p, js):
+        return p.evaluate(js)
+
+    def tool(p, text):
+        p.locator(".fb-editor-tool", has_text=text).first.click()
+        p.wait_for_timeout(150)
+
+    def canvas_box(p):
+        return p.locator(".fb-editor-canvas").bounding_box()
+
+    def img_to_screen(box, ix, iy, iw=1280, ih=800):
+        return (box["x"] + ix / iw * box["width"], box["y"] + iy / ih * box["height"])
+
+    def drag_img(p, box, x0, y0, x1, y1):
+        sx0, sy0 = img_to_screen(box, x0, y0)
+        sx1, sy1 = img_to_screen(box, x1, y1)
+        p.mouse.move(sx0, sy0)
+        p.mouse.down()
+        p.mouse.move((sx0 + sx1) / 2, (sy0 + sy1) / 2, steps=6)
+        p.mouse.move(sx1, sy1, steps=6)
+        p.mouse.up()
+        p.wait_for_timeout(250)
+
+    def canvas_size(p):
+        return p.evaluate(
+            "() => { const c = document.querySelector('feedback-widget').shadowRoot"
+            ".querySelector('.fb-editor-canvas'); return c ? [c.width, c.height] : [0, 0]; }"
+        )
+
+    def thumb_png(p):
+        b64 = p.evaluate(
+            """async () => {
+                const sr = document.querySelector('feedback-widget').shadowRoot;
+                const img = sr.querySelector('img.fb-screenshot-thumb');
+                if (!img || !img.getAttribute('src')) return null;
+                const res = await fetch(img.getAttribute('src'));
+                const buf = new Uint8Array(await res.arrayBuffer());
+                let s = ''; for (const b of buf) s += String.fromCharCode(b);
+                return btoa(s);
+            }"""
+        )
+        if not b64:
+            return None, None
+        raw = b64_to_bytes(b64)
+        return raw, png_probe.decode(raw)
+
+    page = new_page(deps, f"{deps['pages']}/manual.html")
+    # off 模式：点入口只开面板，随后手动「截取当前页面」（截图已含自动遮挡的 secret/pw）
+    page.locator(".fb-fab").click()
+    page.locator(".fb-panel").wait_for(state="visible", timeout=15000)
+    page.locator(".fb-btn-capture").click()
+    page.locator(".fb-screenshot-wrap").wait_for(state="visible", timeout=30000)
+    check("P11 手动截图入草稿（含自动遮挡）", page.locator(".fb-screenshot-wrap").is_visible())
+
+    # 打开编辑器
+    page.locator(".fb-thumb-edit").first.click()
+    page.locator(".fb-editor").wait_for(state="visible", timeout=10000)
+    base_size = canvas_size(page)
+    check("P11 编辑器打开，画布 = 原图1280×800", base_size == [1280, 800], str(base_size))
+    page.screenshot(path=os.path.join(deps["shots_dir"], "P11-editor-open.png"))
+
+    # 1) 遮挡：在白色区域 (600,600)-(700,700) 画一块实色遮挡
+    box = canvas_box(page)
+    tool(page, "遮挡")
+    drag_img(page, box, 600, 600, 700, 700)
+
+    # 2) 裁剪：画选区 (560,560)-(760,760) → 松手后选区持续可见 + 结果预览 + 输出尺寸
+    tool(page, "裁剪")
+    box = canvas_box(page)
+    drag_img(page, box, 560, 560, 760, 760)
+    check("P11 裁剪选区松手后仍可见（待确认条未隐藏）",
+          page.locator(".fb-editor-cropbar").is_visible())
+    check("P11 独立「裁剪结果」预览存在且可见",
+          page.locator(".fb-editor-preview").is_visible()
+          and page.locator(".fb-editor-result-title").is_visible())
+    size_text = page.locator(".fb-editor-result-size").inner_text()
+    check("P11 结果预览显示输出尺寸（≈200×200）",
+          "200" in size_text, size_text)
+    # 辅助元素只在显示层：预览画布尺寸 = 输出尺寸（像素域）
+    preview_px = page.evaluate(
+        "() => { const c = document.querySelector('feedback-widget').shadowRoot"
+        ".querySelector('.fb-editor-preview'); return c ? [c.width, c.height] : [0, 0]; }"
+    )
+    check("P11 结果预览画布像素 = 选区输出尺寸", abs(preview_px[0] - 200) <= 2 and abs(preview_px[1] - 200) <= 2,
+          str(preview_px))
+    page.screenshot(path=os.path.join(deps["shots_dir"], "P11-editor-crop-pending.png"))
+
+    # 3) 未应用选区 → 保存禁用且说明原因
+    save_btn = page.locator(".fb-editor-actions .fb-editor-btn.is-primary", has_text="保存")
+    check("P11 存在未应用选区时保存被禁用", save_btn.is_disabled())
+    hint = page.locator(".fb-editor-save-hint").inner_text()
+    check("P11 禁用保存有原因说明", "应用裁剪" in hint, hint)
+
+    # 4) 应用裁剪 → 主画布显示裁剪结果；5) 撤销 → 回到原图（遮挡仍在）
+    page.locator(".fb-editor-cropbar .fb-editor-btn.is-primary", has_text="应用裁剪").click()
+    page.wait_for_timeout(300)
+    applied = canvas_size(page)
+    check("P11 应用裁剪后主画布 = 输出尺寸", abs(applied[0] - 200) <= 2 and abs(applied[1] - 200) <= 2, str(applied))
+    check("P11 应用后待确认条收起", not page.locator(".fb-editor-cropbar").is_visible())
+    check("P11 应用后保存恢复可用", not save_btn.is_disabled())
+
+    tool(page, "撤销")
+    undone = canvas_size(page)
+    check("P11 撤销裁剪回到原图尺寸", undone == [1280, 800], str(undone))
+
+    # 6) 保存 → 导出图保留实色遮挡，辅助元素不入图
+    save_btn.click()
+    page.locator(".fb-editor").wait_for(state="hidden", timeout=15000)
+    page.locator(".fb-screenshot-wrap").wait_for(state="visible", timeout=15000)
+    check("P11 保存后面板回到图片预览", page.locator(".fb-screenshot-wrap").is_visible())
+    meta_text = page.evaluate(
+        "() => { const sr = document.querySelector('feedback-widget').shadowRoot;"
+        " const el = sr.querySelector('.fb-screenshot-badge');"
+        " return el ? (el.textContent || '').trim() : ''; }"
+    )
+    check("P11 保存后缩略图角标含「已编辑」", "已编辑" in meta_text, meta_text)
+
+    raw, arr = thumb_png(page)
+    check("P11 保存产出可解码图片", arr is not None)
+    if arr is not None:
+        w, h = png_probe.size(arr)
+        check("P11 保存结果尺寸 = 原图（撤销后）", (w, h) == (1280, 800), f"{w}x{h}")
+        png_probe.save(arr, None, os.path.join(deps["shots_dir"], "P11-editor-saved.png"))
+        # 自动遮挡（捕获时已写入）仍然完好
+        probe("P11 保存图：自动遮挡区仍为不透明遮罩", arr, {"x": 500, "y": 80, "width": 300, "height": 200},
+              MASK_RGBA, 3, deps, "P11")
+        # 手工遮挡块仍然存在（遮挡→裁剪→撤销→保存 全链路不丢类型）
+        probe("P11 保存图：手工遮挡块仍为不透明遮罩", arr, {"x": 605, "y": 605, "width": 90, "height": 90},
+              MASK_RGBA, 3, deps, "P11")
+        # 选区边框 / 控制点等辅助元素不得写入图片（选区角落保持纯背景）
+        probe("P11 保存图：选区角落无辅助描边（纯白）", arr, {"x": 563, "y": 563, "width": 30, "height": 30},
+              WHITE_RGBA, 2, deps, "P11")
+        probe("P11 保存图：选区外角落无辅助描边（纯白）", arr, {"x": 765, "y": 765, "width": 30, "height": 30},
+              WHITE_RGBA, 2, deps, "P11")
+
+    page.close()
+
+
 # ---------------- 入口 ----------------
 
 
@@ -1746,12 +2175,14 @@ def run(deps):
     deps.setdefault("pixel_results", [])
     paths = [
         ("P1 灵感球拖动路径", p1_orb_drag),
+        ("P1R 局部选区路径", p1r_region_flow),
         ("P2 遮罩像素路径", p2_mask_pixels),
         ("P3 遮挡失败规则路径", p3_mask_failure),
         ("P4 登录握手路径", p4_login_handshake),
         ("P5 登录期间关闭/重新打开路径", p5_login_close_reopen),
         ("P8 慢会话关闭/重开补发路径", p8_slow_session_close_reopen),
         ("P6 默认 off 模式手动截图路径", p6_manual_capture),
+        ("P11 编辑器裁剪与遮挡路径", p11_editor_mask_crop),
         ("P7 窄屏 + 键盘手动截图路径", p7_manual_capture_narrow_keyboard),
         ("P9 多 DPR/视口/滚动遮罩矩阵路径", p9_masking_dpr),
         ("P10 自定义服务器覆盖路径", p10_server_override),
@@ -1766,5 +2197,9 @@ def run(deps):
         try:
             fn(deps)
         except Exception as exc:  # 单条路径失败不掩盖其余路径
-            deps["record"](f"{name}：后续断言未执行（{str(exc)[:180]}）", False, "路径中断")
+            tb = traceback.format_exc().strip().splitlines()
+            tail = tb[-2] if len(tb) >= 2 else ""
+            deps["record"](
+                f"{name}：后续断言未执行（{str(exc)[:140]} @ {tail[-160:]}）", False, "路径中断"
+            )
         time.sleep(0.3)

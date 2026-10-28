@@ -38,12 +38,19 @@ describe("认证", () => {
     expect(r.status).toBe(200);
     expect(typeof r.data.token).toBe("string");
     expect(r.data.user).toMatchObject({ username: "admin", role: "admin" });
-    expect(r.data.quota).toMatchObject({ dailyLimit: 3, used: 0, remaining: 3 });
+    // 管理员不受每日次数限制：quota 为不限形态（无 dailyLimit / remaining 数值）。
+    expect(r.data.quota).toMatchObject({ unlimited: true, used: 0 });
+    expect(r.data.quota.dailyLimit).toBeUndefined();
+    expect(r.data.quota.remaining).toBeUndefined();
     const s = await jsonReq(t.app, "GET", "/api/auth/session", { bearer: r.data.token });
     expect(s.data.kind).toBe("client");
     expect(s.data.clientLabel).toBe("flutter-android");
     expect(s.data.user.username).toBe("admin");
-    expect(s.data.quota.remaining).toBe(3);
+    expect(s.data.quota.unlimited).toBe(true);
+    expect(s.data.quota.used).toBe(0);
+    // 新登录必须立即声明追踪能力；纯文字提交不会再触发图片能力探测。
+    expect(r.data.capabilities).toEqual({ dialogue: true, images: 5 });
+    expect(r.data.capabilities).toEqual(s.data.capabilities);
   });
 
   it("令牌登录（T1）：只查 appId 格式；任意合法来源与任意未登记软件都能登录", async () => {
@@ -196,6 +203,11 @@ describe("认证", () => {
 
     const s = await jsonReq(t.app, "GET", "/api/auth/session", { bearer: good.data.accessToken });
     expect(s.data.kind).toBe("handshake");
+    // 握手令牌绑定当前管理员：quota 为不限形态（无 dailyLimit / remaining）。
+    expect(s.data.user).toMatchObject({ username: "admin", role: "admin" });
+    expect(s.data.quota).toMatchObject({ unlimited: true });
+    expect(s.data.quota.dailyLimit).toBeUndefined();
+    expect(s.data.quota.remaining).toBeUndefined();
   });
 
   it("无握手 cookie 时 handshake 401", async () => {

@@ -188,6 +188,10 @@ class FakeCtx {
   globalCompositeOperation = 'source-over';
   private _fillStyle: Rgba = [0, 0, 0, 0];
   private _styleRaw = '';
+  private _strokeStyle: Rgba = [0, 0, 0, 0];
+  private _strokeRaw = '';
+  lineWidth = 1;
+  private _lineDash: number[] = [];
   private _tx: TxMatrix = { ...TX_IDENTITY };
   private _stack: CtxSavedState[] = [];
 
@@ -201,6 +205,22 @@ class FakeCtx {
     this._fillStyle = parseCssColor(v);
   }
 
+  get strokeStyle(): string {
+    return this._strokeRaw;
+  }
+  set strokeStyle(v: string) {
+    this._strokeRaw = v;
+    this._strokeStyle = parseCssColor(v);
+  }
+
+  setLineDash(segments: number[]): void {
+    this._lineDash = Array.isArray(segments) ? [...segments] : [];
+  }
+
+  getLineDash(): number[] {
+    return [...this._lineDash];
+  }
+
   /** 画布尺寸被重新设置时清空绘制状态（真实 canvas 行为）。 */
   resetState(): void {
     this._tx = { ...TX_IDENTITY };
@@ -209,6 +229,10 @@ class FakeCtx {
     this.globalCompositeOperation = 'source-over';
     this._fillStyle = [0, 0, 0, 0];
     this._styleRaw = '';
+    this._strokeStyle = [0, 0, 0, 0];
+    this._strokeRaw = '';
+    this.lineWidth = 1;
+    this._lineDash = [];
   }
 
   save(): void {
@@ -307,20 +331,73 @@ class FakeCtx {
     return { data: out, width: w, height: h };
   }
 
-  /** 仅支持 drawImage(src, 0,0, dw, dh)（scaleCanvas 用法），最近邻采样。 */
-  drawImage(src: unknown, _dx: number, _dy: number, dw?: number, dh?: number): void {
-    const s = src as FakeCanvas;
-    const W = dw ?? this.canvas.width;
-    const H = dh ?? this.canvas.height;
-    for (let y = 0; y < H; y++) {
-      for (let x = 0; x < W; x++) {
-        const sx = Math.min(s.width - 1, Math.floor((x * s.width) / W));
-        const sy = Math.min(s.height - 1, Math.floor((y * s.height) / H));
-        const si = (sy * s.width + sx) * 4;
-        const di = (y * W + x) * 4;
-        out4(this.canvas.data, di, s.data.subarray(si, si + 4));
+  /**
+   * 支持两种常用签名（轴对齐场景，忽略当前变换）：
+   *  - drawImage(src, dx, dy[, dw, dh])      —— 整图贴到 (dx,dy)
+   *  - drawImage(src, sx, sy, sw, sh, dx, dy, dw, dh) —— 源矩形裁剪缩放（编辑器 crop）
+   * 最近邻采样；绘制阶段尊重 globalAlpha（source-over 近似）。
+   */
+  drawImage(src: unknown, ...args: number[]): void {
+    // 源可以是 FakeCanvas 或经 stubCreateElementCanvas 包装的真实 canvas 元素
+    const s = ((src as { __fake?: FakeCanvas }).__fake ?? src) as FakeCanvas;
+    let sx = 0;
+    let sy = 0;
+    let sw = s.width;
+    let sh = s.height;
+    let dx = 0;
+    let dy = 0;
+    let dw = s.width;
+    let dh = s.height;
+    if (args.length >= 8) {
+      sx = args[0]!; sy = args[1]!; sw = args[2]!; sh = args[3]!;
+      dx = args[4]!; dy = args[5]!; dw = args[6]!; dh = args[7]!;
+    } else if (args.length >= 2) {
+      dx = args[0]!; dy = args[1]!;
+      dw = args[2] ?? s.width; dh = args[3] ?? s.height;
+    }
+    const alpha = Math.max(0, Math.min(1, this.globalAlpha));
+    const dwi = Math.max(0, Math.round(dw));
+    const dhi = Math.max(0, Math.round(dh));
+    for (let y = 0; y < dhi; y++) {
+      for (let x = 0; x < dwi; x++) {
+        const px = Math.floor(x * (sw / dwi)) + sx;
+        const py = Math.floor(y * (sh / dhi)) + sy;
+        if (px < 0 || py < 0 || px >= s.width || py >= s.height) continue;
+        const txx = Math.floor(dx) + x;
+        const tyy = Math.floor(dy) + y;
+        if (txx < 0 || tyy < 0 || txx >= this.canvas.width || tyy >= this.canvas.height) continue;
+        const si = (py * s.width + px) * 4;
+        const di = (tyy * this.canvas.width + txx) * 4;
+        const sa = (s.data[si + 3]! / 255) * alpha;
+        if (sa >= 1) {
+          out4(this.canvas.data, di, s.data.subarray(si, si + 4));
+        } else if (sa > 0) {
+          this.canvas.data[di] = Math.round(s.data[si]! * sa + this.canvas.data[di]! * (1 - sa));
+          this.canvas.data[di + 1] = Math.round(s.data[si + 1]! * sa + this.canvas.data[di + 1]! * (1 - sa));
+          this.canvas.data[di + 2] = Math.round(s.data[si + 2]! * sa + this.canvas.data[di + 2]! * (1 - sa));
+          this.canvas.data[di + 3] = Math.round(255 * (sa + (this.canvas.data[di + 3]! / 255) * (1 - sa)));
+        }
       }
     }
+  }
+
+  /** 描边矩形：按 lineWidth 分别填充四条边（与真实 strokeRect 等价于 4 个 fillRect）。
+   *  坐标先吸附到像素网格：选区辅助边框习惯用 `x+0.5` 的半像素坐标画 1px 线，
+   *  真实画布会把它栅格化到相邻像素；夹具若直接用小数坐标写入 TypedArray，
+   *  索引会错位污染邻近像素（表现为与边框无关的颜色），因此先取整。 */
+  strokeRect(x: number, y: number, w: number, h: number): void {
+    if (this.canvas.state.paint === false) return;
+    const rx = Math.round(x);
+    const ry = Math.round(y);
+    const rw = Math.round(w);
+    const rh = Math.round(h);
+    const lw = Math.max(1, Math.round(this.lineWidth));
+    const half = Math.floor(lw / 2);
+    const r = lw - half;
+    this.canvas.fillRectPixels(rx - half, ry - half, rw + lw, lw, this._strokeStyle); // 上
+    this.canvas.fillRectPixels(rx - half, ry + rh - r, rw + lw, lw, this._strokeStyle); // 下
+    this.canvas.fillRectPixels(rx - half, ry - half, lw, rh + lw, this._strokeStyle); // 左
+    this.canvas.fillRectPixels(rx + rw - r, ry - half, lw, rh + lw, this._strokeStyle); // 右
   }
 }
 
@@ -360,6 +437,11 @@ export class FakeCanvas {
 
   getContext(type?: string): FakeCtx | null {
     return type === '2d' ? this.ctx : null;
+  }
+
+  /** 测试替身需要：ImageBitmap.close() 同形空实现。 */
+  close(): void {
+    /* no-op */
   }
 
   fillRectPixels(x: number, y: number, w: number, h: number, color: Rgba): void {
@@ -441,13 +523,45 @@ export function createFakeRenderer(state: FakeRenderState) {
   };
 }
 
-/** document.createElement('canvas') 返回 FakeCanvas（scaleCanvas 重编码路径需要）。 */
+/**
+ * document.createElement('canvas') 返回**真实 DOM canvas 元素**，但其
+ * width/height/getContext/toBlob 委托给内存 FakeCanvas——
+ * 既保留真实像素读写（scaleCanvas 重编码 / 编辑器位图断言），
+ * 又能正常挂载进 DOM、收指针事件（编辑器覆盖层需要）。
+ */
 export function stubCreateElementCanvas(state: FakeRenderState): void {
   const orig = document.createElement.bind(document);
   vi.spyOn(document, 'createElement').mockImplementation(((tag: string, opts?: unknown) => {
-    if (String(tag).toLowerCase() === 'canvas') return new FakeCanvas(state) as unknown as HTMLCanvasElement;
+    if (String(tag).toLowerCase() === 'canvas') {
+      const real = orig('canvas', opts as never) as HTMLCanvasElement;
+      const inner = new FakeCanvas(state);
+      Object.defineProperty(real, 'width', {
+        get: () => inner.width,
+        set: (v: number) => { inner.width = v; },
+        configurable: true,
+      });
+      Object.defineProperty(real, 'height', {
+        get: () => inner.height,
+        set: (v: number) => { inner.height = v; },
+        configurable: true,
+      });
+      // 像素缓冲直出：断言可用 canvasAsPixel(real).pixel(x, y)
+      Object.defineProperty(real, '__fake', { value: inner, configurable: true });
+      (real as unknown as { getContext: (t?: string) => FakeCtx | null }).getContext =
+        (t?: string) => inner.getContext(t);
+      (real as unknown as { toBlob: (cb: (b: Blob | null) => void, mime?: string) => void }).toBlob =
+        (cb: (b: Blob | null) => void, mime?: string) => inner.toBlob(cb, mime);
+      return real;
+    }
     return orig(tag as 'canvas', opts as never) as unknown as HTMLElement;
   }) as typeof document.createElement);
+}
+
+/** 从打桩 canvas 元素取回内存 FakeCanvas（读取像素用）。 */
+export function canvasAsPixel(el: unknown): FakeCanvas {
+  const inner = (el as { __fake?: FakeCanvas }).__fake;
+  if (!inner) throw new Error('该 canvas 未经过 stubCreateElementCanvas 打桩');
+  return inner;
 }
 
 // ---------- 布局几何打桩（happy-dom 无布局） ----------
@@ -504,8 +618,13 @@ export function installGeometryPatch(): () => void {
 
   (window as unknown as { getComputedStyle: typeof window.getComputedStyle }).getComputedStyle =
     ((el: Element, pseudo?: string | null) => {
+      // 内联 display:none 也参与可见性判定（countUndrawableContent 依赖）
+      const inlineDisplay = (el as HTMLElement).style?.display;
+      if (inlineDisplay === 'none') {
+        return { visibility: 'visible', display: 'none' } as CSSStyleDeclaration;
+      }
       const inline = (el as HTMLElement).style?.visibility;
-      if (inline) return { visibility: inline } as CSSStyleDeclaration;
+      if (inline) return { visibility: inline, display: '' } as CSSStyleDeclaration;
       const vis = el.getAttribute?.('data-fb-vis');
       if (vis) return { visibility: vis } as CSSStyleDeclaration;
       if (el.getAttribute?.('data-fake-rect') !== null && el.getAttribute?.('data-fake-rect') !== undefined) {

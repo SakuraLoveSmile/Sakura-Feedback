@@ -421,7 +421,14 @@ def main() -> int:
                     check("面板内提供手动截图入口", False, "capture 按钮不可见", soft=True)
                 # 手动附加日志文件（组件用隐藏 input[type=file]，Playwright 直接投喂字节）
                 with page.expect_file_chooser() as fc_info:
-                    page.locator(".fb-btn-add-log").click()
+                    # 本轮 T4：「重新采集」复用同一基础类，.fb-btn-add-log 会命中 2 个元素
+                    # （Playwright 严格模式报错）→ 按 aria-label 精确定位「手动添加日志文件」。
+                    # 本轮 T4：日志区默认折叠（仅摘要 + 开关）→ 先展开再添加文件。
+                    logs_toggle = page.locator(".fb-logs-toggle")
+                    if logs_toggle.count() and logs_toggle.first.get_attribute("aria-expanded") != "true":
+                        logs_toggle.first.click()
+                        page.wait_for_timeout(250)
+                    page.get_by_label("手动添加日志文件").click()
                 fc_info.value.set_files(
                     {
                         "name": "app.log",
