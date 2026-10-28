@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
@@ -8,6 +9,26 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+
+/// 源码守卫用例要读 lib/ 下的实现，但测试进程的 CWD 不固定：组件包里是
+/// flutter/feedback，存储矩阵宿主只复制 test/ 后在 tools/flutter-storage-matrix
+/// 下执行。统一向上找到仓库根再定位组件源码。
+String readComponentSource(String relativePath) {
+  Directory directory = Directory.current.absolute;
+  while (true) {
+    final File candidate =
+        File('${directory.path}/flutter/feedback/$relativePath');
+    if (candidate.existsSync()) {
+      return candidate.readAsStringSync();
+    }
+    final Directory parent = directory.parent;
+    if (parent.path == directory.path) {
+      throw StateError('未能从 ${Directory.current.path} 向上定位组件源码 '
+          'flutter/feedback/$relativePath');
+    }
+    directory = parent;
+  }
+}
 
 /// 测试共用：宿主 MockClient（面板不做真实网络请求）。
 http.Client captureMockClient() => MockClient((request) async {

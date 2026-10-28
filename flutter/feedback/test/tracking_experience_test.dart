@@ -47,18 +47,25 @@ Map<String, Object?> _dialogue(String id,
     };
 
 Map<String, Object?> _message(int seq,
-        {String sender = 'admin', String? note}) =>
-    {
-      'id': 'm$seq',
-      'seq': seq,
-      'senderType': sender,
-      'senderName': sender == 'admin' ? '支持人员' : '',
-      'senderId': 'u',
-      'text': '第 $seq 条动态',
-      'createdAt': _time,
-      'attachments': <Object?>[],
-      if (note != null) 'resolutionNote': note,
-    };
+    {String sender = 'admin', String? note}) {
+  // 这份用例还会被 tools/flutter-storage-matrix 以 Dart >=3.8 复用分析，
+  // 那里的 lint 会要求 `if (x != null)` 元素改写成 null-aware 元素，而组件包
+  // 自身是 sdk ^3.6.0、尚未开启该语言特性。用语句式赋值两边都成立。
+  final Map<String, Object?> message = <String, Object?>{
+    'id': 'm$seq',
+    'seq': seq,
+    'senderType': sender,
+    'senderName': sender == 'admin' ? '支持人员' : '',
+    'senderId': 'u',
+    'text': '第 $seq 条动态',
+    'createdAt': _time,
+    'attachments': <Object?>[],
+  };
+  if (note != null) {
+    message['resolutionNote'] = note;
+  }
+  return message;
+}
 
 PanelServer _server(
     {bool dialogue = true,

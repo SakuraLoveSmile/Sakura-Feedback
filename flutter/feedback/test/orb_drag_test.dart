@@ -1,4 +1,3 @@
-import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:feedback_widget/feedback_widget.dart';
@@ -448,8 +447,7 @@ void main() {
   });
 
   test('源码守卫：只有一个 AnimationController，回弹不新增 Timer', () {
-    final String source = File('${Directory.current.path}/lib/src/widget.dart')
-        .readAsStringSync();
+    final String source = readComponentSource('lib/src/widget.dart');
     expect(RegExp(r'AnimationController\(').allMatches(source).length, 1);
     expect(RegExp(r'\bTimer(?:\.periodic)?\(').allMatches(source), isEmpty);
     expect(RegExp(r'TweenAnimationBuilder<').allMatches(source).length, 3);

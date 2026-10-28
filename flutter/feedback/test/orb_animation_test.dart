@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'package:feedback_widget/feedback_widget.dart';
 import 'package:feedback_widget/src/orb.dart';
 import 'package:feedback_widget/src/test_env.dart';
@@ -235,8 +233,8 @@ void main() {
   });
 
   test('源码只有一个 10s 控制器，没有呼吸 Timer', () {
-    final String widgetSource = File('lib/src/widget.dart').readAsStringSync();
-    final String orbSource = File('lib/src/orb.dart').readAsStringSync();
+    final String widgetSource = readComponentSource('lib/src/widget.dart');
+    final String orbSource = readComponentSource('lib/src/orb.dart');
     expect(RegExp(r'AnimationController\(').allMatches(widgetSource).length, 1);
     expect(RegExp(r'AnimationController\(').allMatches(orbSource), isEmpty);
     expect(widgetSource, contains('duration: kFeedbackOrbSweepDuration'));
