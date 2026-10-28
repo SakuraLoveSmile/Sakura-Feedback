@@ -8,7 +8,7 @@
 | --- | --- | --- | --- |
 | 1 | 多指 / 非主键过滤（Flutter 追平 Web） | 4 | 已完成 |
 | 2 | 回弹结束的 `breathWeight` 过渡 | 6 | 已完成 |
-| 3 | `forced-colors` 焦点环可见性 | 5 | 未开始 |
+| 3 | `forced-colors` 焦点环可见性 | 5 | 已完成（结论：无需改实现，补验证） |
 | 4 | 对比度保持率 `≥ 0.85` 自动化 | 3 | 未开始 |
 
 不在范围内：T4 §10.3「不是缺陷」一节的全部条目（深色色散等设计推导值）。
@@ -113,7 +113,59 @@ Flutter 3.41.3，组件包：`flutter analyze` 干净；`flutter test` **365 pas
 - 未做视觉复核：权重渐入的观感差异在 ±2% 幅度内，截图矩阵分辨不出，只有数值断言。
 - Web 侧零改动，未重跑 Web 用例。
 
-## 4 片 3–4
+## 4 片 3：forced-colors 焦点环（已完成，结论是不改实现）
+
+### 4.1 结论
+
+**强制调色模式下焦点环本来就可见，不需要新增 CSS 规则。** 原担忧（「自绘层用作者颜色 `--fb-accent`，强制调色下环读不出来」）实测不成立：UA 会把 `border-color` 强制映射成系统前景色 `CanvasText`，Chrome 实测与 `Canvas` 背景 **21:1**。
+
+我一度加了 `@media (forced-colors: active) { border-color: Highlight; }`，变异检查把它判了死刑——**去掉该规则后全部断言照旧全绿**，因为 UA 映射已经把事情做完了。进一步看，`Highlight` 与 `Canvas` 并非规范保证成对的对比色，而 `CanvasText` / `Canvas` 是；在自定义高对比主题下我那条规则可能**更差**。因此该 CSS 改动已回退，`packages/web/src/styles.ts` 零改动。
+
+真正要守的回归是**别把映射关掉**：环及其祖先一律不得声明 `forced-color-adjust: none` / `-ms-high-contrast-adjust: none`，否则环停在 `--fb-accent`，在高对比深色主题下只有 2.9:1，低于 WCAG 非文本的 3:1。契约写入 `docs/orb-spec.md` §5 焦点环段。
+
+Flutter 侧不做改动：Flutter 没有 forced-colors 概念，`MediaQueryData.highContrast` 只在 iOS / macOS 由系统「增强对比度」提供且不改写应用颜色。平台能力差异，不是契约差异。
+
+### 4.2 交付物
+
+新增 `e2e/run_orb_forced_colors_web.py`。跑法：
+
+```
+uv run --with playwright --with pillow --with numpy python e2e/run_orb_forced_colors_web.py
+```
+
+三层断言（Chrome，`forced_colors` 各跑 `none` / `active` 两遍）：
+
+1. **计算样式**：Tab 后进入 `:focus-visible`、环 `opacity=1`、环宽 2px、外径 64 = 视觉直径 + 8、与球同心、两种模式都没有 UA outline（不出现双环）；
+2. **实际像素**：从截图里取环所在圆环带算主色，强制调色下与紧邻球外背景的 WCAG 非文本对比度 ≥ 3:1。只看计算样式会漏掉「环被别的层盖住」；
+3. **源码扫描**：`styles.ts` 里不得出现 `forced-color-adjust: none` / `-ms-high-contrast-adjust: none`。
+
+### 4.3 验证
+
+**21/21 PASS**（Chrome，Pillow 10.4.0 + numpy 2.2.6，bundle 由仓库钉住的 pnpm 11.23.0 + `--frozen-lockfile` 构建）。关键实测值：
+
+| 模式 | 环声明色 | 环像素 | 紧邻背景 | 对比度 |
+| --- | --- | --- | --- | --- |
+| `none` | `rgb(0, 113, 227)` | `(0, 113, 227)` | `(204, 201, 198)` | 2.849:1（`[DATA]`，非门槛） |
+| `active` | `rgb(0, 0, 0)` | `(0, 0, 0)` | `(255, 255, 255)` | **21.0:1** |
+
+**变异检查（1 项，红）**：给 `.fb-orb-focus-ring` 加 `forced-color-adjust: none` → 两条断言转红（强制调色下环色仍是 `rgb(0, 113, 227)`；源码扫描命中）。
+
+对比度 ≥3:1 只在强制调色下作门槛。非强制模式下环色是作者强调色，对比度取决于宿主背景，不是本卡能定的门槛，只打 `[DATA]`。
+
+### 4.4 顺带发现（新遗留项）
+
+**`--fb-accent` 焦点环在中性灰背景上只有 2.849:1，低于 WCAG 1.4.11 非文本的 3:1。** 实测于出图夹具的 `#c9c9c9` 背景（`rgb(0, 113, 227)` vs `(204, 201, 198)`）。
+
+- 不在本卡处理：`--fb-accent` 是全组件强调色，改它影响面远超灵感球；而且是否达标取决于宿主页背景（白底上约 3.9:1，深底更高），需要产品裁决「焦点环是否该与背景解耦」。
+- 可选解法（未实施、未裁决）：给焦点环加一圈对比描边（内浅外深的双色环），使其在任意背景上都达标；代价是改动 spec §5 钉住的 2px 环宽 + 2px 间隙几何。
+
+### 4.5 未验证
+
+- **真实 Windows 高对比主题未体验**：以上全部是 Chrome 的 `forced-colors` 模拟。模拟能证明 UA 映射与我们的 CSS 不打架，但证明不了各家系统主题的实际配色。真机复核需要局域网的 Win11 机器，**记为待体验，不是已验证**。
+- 截图落在 `e2e/shots/orb-forced-colors/`，按既有规则**仅本地证据、不入库**。
+
+## 5 片 4
 
 未开始。
+
 

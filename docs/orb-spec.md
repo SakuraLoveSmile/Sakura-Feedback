@@ -130,7 +130,11 @@
 
 **焦点环几何（2026-10-28 修订，T7g）**：焦点环始终贴合**当前视觉直径**——每侧在球沿外留 2px 间隙，再画 2px `--fb-accent` 环宽，因此 `环外径 = 当前视觉直径 + 8`。56 直径对应外径 64，drag 的 84 直径对应外径 92；环与球同心、始终为正圆，不参与方向拉伸、badge 变换或扫光旋转。idle 呼吸的 ±2% 不叠加到环，避免静止态环随呼吸抖动。两端同一契约（Flutter 拖动时环随 84 布局盒外扩到 92，Web 由独立焦点环层按 `--fb-orb-state-scale` 换算）。焦点环自身不新增过渡：显隐瞬时切换；球体尺寸过渡期间环按同一实时视觉直径跟随，不另加缓动。
 
-**焦点环颜色（T10 记录）**：Web 取 `--fb-accent`；Flutter 取 `Theme.of(context).colorScheme.primary`，不新增独立 Flutter 令牌。两者都是入口强调色，不改变主题 API；若宿主主题让两者不一致，以各自平台既有强调色为准。Web 用独立 `.fb-orb-focus-ring` 层绘制，不再使用 `outline`；因此 `forced-colors` 下不会自动继承系统高对比环，该场景留待后续卡验证（见任务记录 §9.5）。
+**焦点环颜色（T10 记录）**：Web 取 `--fb-accent`；Flutter 取 `Theme.of(context).colorScheme.primary`，不新增独立 Flutter 令牌。两者都是入口强调色，不改变主题 API；若宿主主题让两者不一致，以各自平台既有强调色为准。Web 用独立 `.fb-orb-focus-ring` 层绘制，不再使用 `outline`。
+
+**`forced-colors` 行为（2026-10-29 实测定稿）**：强制调色模式下**不需要任何额外规则**，环照旧可见。自绘层用的是 `border-color`，UA 会把它强制映射成系统前景色 `CanvasText`，Chrome 实测与 `Canvas` 背景 **21:1**；而 `CanvasText` / `Canvas` 是规范保证成对的对比色，比自行挑 `Highlight`（与 `Canvas` 并非保证成对）更稳，所以**不得**为此改成 `Highlight` 或加宽环。真正的禁止项是**不许关掉这条映射**：环及其祖先一律不得声明 `forced-color-adjust: none` 或 `-ms-high-contrast-adjust: none`，否则环停在 `--fb-accent`，在高对比深色主题下只有 2.9:1，低于 WCAG 非文本的 3:1。该契约由 `e2e/run_orb_forced_colors_web.py` 守卫（计算样式 + 像素对比度 + 源码扫描三层，已做变异验证）。
+
+Flutter 侧无对应模式：Flutter 没有 forced-colors 概念，`MediaQueryData.highContrast` 只在 iOS / macOS 由系统「增强对比度」提供，且不会改写应用颜色。因此 Flutter 环色仍由宿主主题的 `colorScheme.primary` 决定，本项不做平台改动——这是平台能力差异，不是契约差异。
 
 **键盘激活与焦点回归（2026-10-28 T7 定稿）**：球可获得键盘焦点；Space / Enter / 小键盘 Enter 各触发一次与点按等价的 `_handleLauncherTap()`，忽略长按重复（`includeRepeats: false`）。Web 使用原生 `:focus-visible` 与按钮激活；Flutter 3.47.7 的 `FocusableActionDetector` 不带默认快捷键，故在球局部映射这三个键，不改宿主全局快捷键——这是平台差异，不是契约差异。面板 open → closed（含 `controller.close()` 与程序化开合）一律把焦点还给球；焦点环只在**最近一次输入是键盘**时点亮。指针关闭会抑制下一次环显示，随后任意按键 / Tab 重新点亮。选区覆盖层打开期间球退出焦点链（`enabled: false`），Space / Enter 不再落回球。焦点环使用 `IgnorePointer`，不改变 56 / 84 布局与命中区；hidden 时随入口移除，并同步清除锁存的环与 releasing / hover / pressed 残留。
 
@@ -315,7 +319,7 @@ e2e/shots/orb-hyperos4/<web|flutter>/<light|dark>-<idle|hover|pressed|dragging|r
 | dragging | 从球心拖动到 `(dx, dy) = (80, 0)` 并保持，尺寸进入 220ms 后截图；基础直径 84，水平轮廓 87.36px、垂直轮廓 84px；pull 1、glowOffset `(-4, 0)` |
 | releasing | 在组件视觉测试夹具中触发 releasing，于 460ms 的中点 230ms 截图；验证回弹中间帧和方向拉伸复位。真实业务 E2E 另行验证松手后的捕获流程，不得为截图推迟或改写捕获 |
 
-Web 端出图与动效回归使用 Playwright；系统 `python3` 不自带该包，统一用 `uv run --with playwright python e2e/run_orb_shots_web.py`（动效为 `e2e/run_orb_motion_browser.py`）。脚本只读 `packages/web/dist`，不改源码；Chrome 156 实测。
+Web 端出图与动效回归使用 Playwright；系统 `python3` 不自带该包，统一用 `uv run --with playwright python e2e/run_orb_shots_web.py`（动效为 `e2e/run_orb_motion_browser.py`，`forced-colors` 焦点环为 `e2e/run_orb_forced_colors_web.py`，后者还需 `--with pillow --with numpy` 做像素统计）。脚本只读 `packages/web/dist`，不改源码；Chrome 156 实测。
 
 另需保留 focus-visible、hidden、reduced-motion 的行为断言；它们不替代上述 20 张必交截图。**2026-10-28 用户已对照官网「找同款 2.50s」「记日程 2.50s」完成视觉确认**（清玻璃透字、径向白环、双极色散、无投影、七态截图均通过）。官方四段演示只有浅色背景；深色主题的色散 RGB 仍为按亮度中性原理推导、非官方数据。idle 呼吸、扫光、方向拉伸、glow lag 与回弹曲线仍不得标记为“官方已验证”。
 
