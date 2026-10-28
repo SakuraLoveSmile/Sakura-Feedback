@@ -3,8 +3,9 @@ import 'dart:math' as math;
 import 'dart:ui' as ui show Image, ImageByteFormat, Picture, PictureRecorder;
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/gestures.dart' show GestureBinding;
+import 'package:flutter/gestures.dart' show GestureBinding, kPrimaryButton;
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart' show SchedulerBinding, SchedulerPhase;
 import 'package:flutter/rendering.dart'
     show MatrixUtils, RenderEditable, RenderRepaintBoundary;
 import 'package:flutter/services.dart'
@@ -243,6 +244,10 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   double _orbReleaseAngle = 0.0;
   bool _orbPointerCancelled = false;
 
+  /// 当前被灵感球接受的指针 id；非空表示已有活跃指针，第二指一律忽略。
+  /// 与 Web 的 `orbPointerId` 守卫同一口径（spec 5.2）。
+  int? _orbPointer;
+
   /// 灵感球键盘焦点节点：由 Tab 聚焦，鼠标点击不请求焦点。
   final FocusNode _orbFocusNode = FocusNode(debugLabel: 'feedback-orb');
 
@@ -265,6 +270,30 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
       // 保留刚退出 pressed 的 140ms 窗口，对齐 Web 的 is-unpressing。
       _orbPressTransition = !_isDragging && (_orbPressed || pressed);
       _orbPressed = pressed;
+    });
+  }
+
+  /// 拖动清理专用的状态提交。
+  ///
+  /// `onPanCancel` 有两条来源：正常的手势取消（指针事件路径，调度相位是 idle），
+  /// 以及**入口在拖动中被隐藏**——此时 `RawGestureDetectorState.dispose` 会在
+  /// 卸载过程中 reject 手势并回调过来，而那一刻 widget 树是锁定的，直接
+  /// `setState` 会抛 `widget tree was locked`（球在拖动中打开面板即可复现）。
+  /// 所以这里按调度相位分流：idle 走同步 setState 保持既有同帧语义，帧内被回调
+  /// 则先落字段、推迟一帧再通知，状态结果一致。
+  ///
+  /// 这里**不**释放 `_orbPointer`：手势取消不等于指针抬起（pan 输掉竞争时指针
+  /// 仍按着），清掉会让第二指被当成首指放进来。释放只走 `onPointerUp` /
+  /// `onPointerCancel`——入口在按下期间被隐藏也不例外，Flutter 按指针保留按下时
+  /// 的命中路径，抬起仍会派发到已 detach 的 `Listener`。
+  void _cleanUpOrbPan(VoidCallback mutate) {
+    if (SchedulerBinding.instance.schedulerPhase == SchedulerPhase.idle) {
+      setState(mutate);
+      return;
+    }
+    mutate();
+    WidgetsBinding.instance.addPostFrameCallback((Duration _) {
+      if (mounted) setState(() {});
     });
   }
 
@@ -1368,15 +1397,32 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
             ? orbDragAngle(_dragOffset)
             : (_orbReleasing ? _orbReleaseAngle : 0.0));
     final bool pressTransition = _orbPressed || _orbPressTransition;
+    // 状态过渡时长 / 曲线：stateScale 与呼吸权重共用，对齐 Web 把两个
+    // registered number 写进同一条 transition 的做法。
+    final Duration stateDuration = reduceMotion
+        ? Duration.zero
+        : (_orbReleasing
+            ? kFeedbackOrbReleaseDuration
+            : (pressTransition
+                ? kFeedbackOrbPressDuration
+                : kFeedbackOrbSizeDuration));
+    final Curve stateCurve = _orbReleasing
+        ? kFeedbackOrbReleaseCurve
+        : (pressTransition ? kFeedbackOrbPressCurve : kFeedbackOrbStateCurve);
+    // 呼吸权重目标（spec 7）：hover / pressed / dragging 压到 0，其余为 1。
+    // `releasing` 刻意不压 0——Web 的 `.is-releasing` 不设该变量、回落到基值 1，
+    // 所以回弹是把权重在 460ms 内从 0 拉回 1，而不是结束瞬间阶跃接上呼吸。
+    // 同理回弹期间 hover 不参与（Web 的 hover 规则带 :not(.is-releasing)）。
+    final double breathWeightTarget = _orbReleasing
+        ? 1.0
+        : ((_isDragging || _orbPressed || _orbHovered) ? 0.0 : 1.0);
     final Brightness brightness = Theme.of(context).brightness;
-    OrbPainter orbPainter(double flow, double stateScale, double pull) =>
+    OrbPainter orbPainter(
+            double flow, double stateScale, double pull, double breathWeight) =>
         OrbPainter(
           flow: flow,
           breath: orbBreath(flow),
-          breathWeight:
-              (_isDragging || _orbPressed || _orbHovered || _orbReleasing)
-                  ? 0.0
-                  : 1.0,
+          breathWeight: breathWeight,
           stateScale: stateScale,
           dragAngle: angle,
           pull: pull,
@@ -1392,45 +1438,45 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
       width: diameter,
       height: diameter,
       child: TweenAnimationBuilder<double>(
-        tween: Tween<double>(begin: 1.0, end: target),
-        duration: reduceMotion
-            ? Duration.zero
-            : (_orbReleasing
-                ? kFeedbackOrbReleaseDuration
-                : (pressTransition
-                    ? kFeedbackOrbPressDuration
-                    : kFeedbackOrbSizeDuration)),
-        curve: _orbReleasing
-            ? kFeedbackOrbReleaseCurve
-            : (pressTransition
-                ? kFeedbackOrbPressCurve
-                : kFeedbackOrbStateCurve),
-        onEnd: () {
-          _orbPressTransition = false;
-        },
-        builder: (BuildContext context, double stateScale, Widget? child) =>
+        tween: Tween<double>(begin: 1.0, end: breathWeightTarget),
+        duration: stateDuration,
+        curve: stateCurve,
+        builder: (BuildContext context, double breathWeight, Widget? child) =>
             TweenAnimationBuilder<double>(
-          tween: Tween<double>(begin: 0.0, end: pull),
-          duration: _orbReleasing ? kFeedbackOrbReleaseDuration : Duration.zero,
-          curve: kFeedbackOrbReleaseCurve,
-          builder: (BuildContext context, double value, Widget? child) {
-            // 回弹过冲会产生负 pull，必须钳制以免 stretch<1、glow 反向。
-            final double safePull =
-                (_orbReleasing ? value : pull).clamp(0.0, 1.0).toDouble();
-            return glow == null
-                ? CustomPaint(painter: orbPainter(0.0, stateScale, safePull))
-                : AnimatedBuilder(
-                    animation: glow,
-                    builder: (BuildContext context, Widget? child) =>
-                        CustomPaint(
-                      painter: orbPainter(
-                        reduceMotion ? 0.0 : glow.value,
-                        stateScale,
-                        safePull,
-                      ),
-                    ),
-                  );
+          tween: Tween<double>(begin: 1.0, end: target),
+          duration: stateDuration,
+          curve: stateCurve,
+          onEnd: () {
+            _orbPressTransition = false;
           },
+          builder: (BuildContext context, double stateScale, Widget? child) =>
+              TweenAnimationBuilder<double>(
+            tween: Tween<double>(begin: 0.0, end: pull),
+            duration:
+                _orbReleasing ? kFeedbackOrbReleaseDuration : Duration.zero,
+            curve: kFeedbackOrbReleaseCurve,
+            builder: (BuildContext context, double value, Widget? child) {
+              // 回弹过冲会产生负 pull，必须钳制以免 stretch<1、glow 反向。
+              final double safePull =
+                  (_orbReleasing ? value : pull).clamp(0.0, 1.0).toDouble();
+              return glow == null
+                  ? CustomPaint(
+                      painter:
+                          orbPainter(0.0, stateScale, safePull, breathWeight))
+                  : AnimatedBuilder(
+                      animation: glow,
+                      builder: (BuildContext context, Widget? child) =>
+                          CustomPaint(
+                        painter: orbPainter(
+                          reduceMotion ? 0.0 : glow.value,
+                          stateScale,
+                          safePull,
+                          breathWeight,
+                        ),
+                      ),
+                    );
+            },
+          ),
         ),
       ),
     );
@@ -1519,7 +1565,18 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
           button: true,
           label: '灵感球',
           child: Listener(
-            onPointerDown: (_) {
+            onPointerDown: (PointerDownEvent event) {
+              // 与 Web 同一口径（element.ts 的 `ev.button !== 0` 与
+              // `orbPointerId` 守卫）：只认主键，且同一时刻只认一根指针。
+              // 不过滤时右键按下会亮起 pressed 态；更要紧的是第二指按下会把
+              // _dragOffset 清零，让正在拖动的球瞬间跳回原位。
+              if (event.buttons != kPrimaryButton) {
+                return;
+              }
+              if (_orbPointer != null) {
+                return;
+              }
+              _orbPointer = event.pointer;
               setState(() {
                 _orbReleasing = false;
                 _orbPointerCancelled = false;
@@ -1527,8 +1584,18 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
               });
               _setOrbPressed(true);
             },
-            onPointerUp: (_) => _setOrbPressed(false),
-            onPointerCancel: (_) {
+            onPointerUp: (PointerUpEvent event) {
+              if (_orbPointer != event.pointer) {
+                return;
+              }
+              _orbPointer = null;
+              _setOrbPressed(false);
+            },
+            onPointerCancel: (PointerCancelEvent event) {
+              if (_orbPointer != event.pointer) {
+                return;
+              }
+              _orbPointer = null;
               // 已接受的 Flutter pan 在 PointerCancel 时也调用 onPanEnd。
               _orbPointerCancelled = true;
               _setOrbPressed(false);
@@ -1579,7 +1646,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
               onPanCancel: () {
                 final bool dragged = _isDragging;
                 final double releaseAngle = orbDragAngle(_dragOffset);
-                setState(() {
+                _cleanUpOrbPan(() {
                   _orbReleaseAngle = releaseAngle;
                   _orbReleasing = dragged && !reduceMotion;
                   _orbPressTransition =

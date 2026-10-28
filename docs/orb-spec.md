@@ -130,7 +130,11 @@
 
 **焦点环几何（2026-10-28 修订，T7g）**：焦点环始终贴合**当前视觉直径**——每侧在球沿外留 2px 间隙，再画 2px `--fb-accent` 环宽，因此 `环外径 = 当前视觉直径 + 8`。56 直径对应外径 64，drag 的 84 直径对应外径 92；环与球同心、始终为正圆，不参与方向拉伸、badge 变换或扫光旋转。idle 呼吸的 ±2% 不叠加到环，避免静止态环随呼吸抖动。两端同一契约（Flutter 拖动时环随 84 布局盒外扩到 92，Web 由独立焦点环层按 `--fb-orb-state-scale` 换算）。焦点环自身不新增过渡：显隐瞬时切换；球体尺寸过渡期间环按同一实时视觉直径跟随，不另加缓动。
 
-**焦点环颜色（T10 记录）**：Web 取 `--fb-accent`；Flutter 取 `Theme.of(context).colorScheme.primary`，不新增独立 Flutter 令牌。两者都是入口强调色，不改变主题 API；若宿主主题让两者不一致，以各自平台既有强调色为准。Web 用独立 `.fb-orb-focus-ring` 层绘制，不再使用 `outline`；因此 `forced-colors` 下不会自动继承系统高对比环，该场景留待后续卡验证（见任务记录 §9.5）。
+**焦点环颜色（T10 记录）**：Web 取 `--fb-accent`；Flutter 取 `Theme.of(context).colorScheme.primary`，不新增独立 Flutter 令牌。两者都是入口强调色，不改变主题 API；若宿主主题让两者不一致，以各自平台既有强调色为准。Web 用独立 `.fb-orb-focus-ring` 层绘制，不再使用 `outline`。
+
+**`forced-colors` 行为（2026-10-29 实测定稿）**：强制调色模式下**不需要任何额外规则**，环照旧可见。自绘层用的是 `border-color`，UA 会把它强制映射成系统前景色 `CanvasText`，Chrome 实测与 `Canvas` 背景 **21:1**；而 `CanvasText` / `Canvas` 是规范保证成对的对比色，比自行挑 `Highlight`（与 `Canvas` 并非保证成对）更稳，所以**不得**为此改成 `Highlight` 或加宽环。真正的禁止项是**不许关掉这条映射**：环及其祖先一律不得声明 `forced-color-adjust: none` 或 `-ms-high-contrast-adjust: none`，否则环停在 `--fb-accent`，在高对比深色主题下只有 2.9:1，低于 WCAG 非文本的 3:1。该契约由 `e2e/run_orb_forced_colors_web.py` 守卫（计算样式 + 像素对比度 + 源码扫描三层，已做变异验证）。
+
+Flutter 侧无对应模式：Flutter 没有 forced-colors 概念，`MediaQueryData.highContrast` 只在 iOS / macOS 由系统「增强对比度」提供，且不会改写应用颜色。因此 Flutter 环色仍由宿主主题的 `colorScheme.primary` 决定，本项不做平台改动——这是平台能力差异，不是契约差异。
 
 **键盘激活与焦点回归（2026-10-28 T7 定稿）**：球可获得键盘焦点；Space / Enter / 小键盘 Enter 各触发一次与点按等价的 `_handleLauncherTap()`，忽略长按重复（`includeRepeats: false`）。Web 使用原生 `:focus-visible` 与按钮激活；Flutter 3.47.7 的 `FocusableActionDetector` 不带默认快捷键，故在球局部映射这三个键，不改宿主全局快捷键——这是平台差异，不是契约差异。面板 open → closed（含 `controller.close()` 与程序化开合）一律把焦点还给球；焦点环只在**最近一次输入是键盘**时点亮。指针关闭会抑制下一次环显示，随后任意按键 / Tab 重新点亮。选区覆盖层打开期间球退出焦点链（`enabled: false`），Space / Enter 不再落回球。焦点环使用 `IgnorePointer`，不改变 56 / 84 布局与命中区；hidden 时随入口移除，并同步清除锁存的环与 releasing / hover / pressed 残留。
 
@@ -141,9 +145,20 @@
 - **基准命中区 = 静止态 56dp**，已高于 Material 的 48dp 与 Apple 的 44pt 最小可点尺寸，不需要靠放大来保证可达性。
 - **视觉缩放一律不改命中区**：hover `1.04`、pressed `0.94`、呼吸 `±2%`、方向拉伸都只作用于绘制，不改变可点区域。两端现状已满足（Flutter 的 `stateScale` 只进 painter，Web 的 `--fb-orb-state-scale` 只进 `pointer-events: none` 的视觉层）。
 - **`dragging` 的 84dp 是视觉直径**。两端实现路径不同：Flutter 用 `AnimatedContainer` 的布局尺寸实现放大，所以拖动期间命中盒恰好也是 84；Web 的 `.fb-orb` 根元素恒为 56 且 `transform` 只留给 1:1 指针平移，放大由四个视觉层承担，所以命中区恒为 56。**这不构成可观察差异**：进入 `dragging` 的前提是已越过 8px 阈值、指针已被 pan 手势捕获，更大的命中盒对该指针不起任何作用。
-- 唯一能观察到上述差异的路径是**第二根手指落在 56–84 环带**。该行为归入既有的「多指 / 非主键过滤」待办统一处理，不靠「命中区更大」来掩盖。
+- 唯一能观察到上述差异的路径是**第二根手指落在 56–84 环带**。已由 §5.2 的第二指过滤收口：Flutter 命中但被忽略，Web 根本不命中，两端结果一致（都是「无反应」），差异不再可观察。
 - 因此**不做改动**：不给 Flutter 加固定 56 命中盒（会与第 7 节 56/84 布局契约和既有断言冲突，换不到可观察收益），也不给 Web 根元素加放大（会破坏 1:1 指针平移与 badge 的 1:1 要求）。
 - 装饰层的负 inset 同样不得扩大命中区（见第 4 节图层约束第 4 条）；`hidden` 时整棵入口不可命中（见下表）。
+- **拖动期间命中盒不随 1:1 平移移动**（2026-10-29 实测记录）：Flutter 把业务位移的 `Transform` 放在手势盒内部，所以视觉已偏移时命中盒仍停在停靠位。同样**不可观察**——该指针已被 pan 捕获，第二指按 §5.2 一律忽略，松手后 `releasing` 把位移归零。记录在此是为了说明测试里第二指取点必须按命中盒（`feedback-orb`）而不是视觉（`feedback-orb-body`）。
+
+### 5.2 指针准入契约（2026-10-29 加固）
+
+**同一时刻只接受一根指针、只接受主键。**
+
+- **只认主键**：Web 为 `ev.button !== 0` 直接返回；Flutter 为 `event.buttons != kPrimaryButton` 直接返回。右键 / 中键 / 侧键按下不进入 `pressed`、不起拖动；鼠标停在球上的 `hover` 不受影响（右键按下时仍是 `1.04`，不是 `0.94`）。
+- **只认首指**：首次被接受的指针 id 锁存（Web 的 `orbPointerId`、Flutter 的 `_orbPointer`）；在它释放前，任何其他指针的按下一律忽略。后续 `up` / `cancel` 也只认同一 id，避免第二指抬起提前结束首指的按压语义。
+  - 不过滤时 Flutter 会在第二指按下时把 `_dragOffset` 清零，正在拖动的球**瞬间跳回停靠位**——这是该项加固的实际收益，不只是整洁。
+- **活跃指针的释放**只走 `up` / `cancel`。入口在按下期间变 `hidden` 不需要额外补偿：Flutter 按指针保留按下时的命中路径，抬起仍会派发到已 detach 的 `Listener`。**不要**在 `build` 里按 hidden 条件清空活跃指针（不可达的防御代码），也不要在手势取消回调里清空（pan 输掉竞争时指针仍按着，清空会放第二指进来）。
+- **手势取消的状态提交必须按调度相位分流**：入口在拖动中被隐藏时，`RawGestureDetectorState.dispose` 会在**锁定的 widget 树**里 reject 手势并回调 `onPanCancel`，此刻裸 `setState` 抛 `widget tree was locked`。idle 相位走同步 `setState` 保持同帧语义，帧内被回调则先落字段、推迟一帧再通知。
 
 呼吸计算统一为：
 
@@ -164,7 +179,7 @@ bloomWhiteAlpha = themeBloomWhiteAlpha × (1 + 0.08 × breath)
 | `focus-visible` | 键盘等输入触发 `:focus-visible`，且无更高优先级主状态 | 基础直径 56；`scale = breathScale`；2px `--fb-accent` 焦点环贴合当前视觉直径（每侧 2px 间隙 + 2px 环宽，外径 = 视觉直径 + 8：56 → 64，拖动 84 → 92；呼吸 ±2% 不改变环半径），与球同心；扫光与 bloom 呼吸运行 | 焦点环不做自身过渡：显隐瞬时，尺寸随视觉直径同步（拖动按同一 220ms 状态过渡跟随）；失焦立即移除；pressed / dragging 时保留，hidden 时随整棵入口消失 |
 | `pressed` | 指针或键盘按下，累计位移尚未超过拖动阈值 | 基础直径 56；固定 `scale = 0.94`；焦点环按上述规则保留 | 进入和退出均 140ms `ease-out`；退出到 hover 或当前 `breathScale` |
 | `dragging` | 同一指针累计位移 `hypot(dx, dy) > 8px` | 基础直径 84；Web 固定基础 `scale = 1.5`，Flutter 直接 diameter 84；沿拖动轴 `stretch = 1 + 0.04 × pull`，垂直轴为 1；位置 1:1 跟随；更新 glow 反向位移 | 跨过阈值后的尺寸进入为 220ms；指针平移、pull、glow 位移和 stretch 不加延迟或平滑 |
-| `releasing` | 拖动松手或拖动取消后的视觉复位阶段 | 基础 scale 从 1.5 过渡到当前 `breathScale`；方向拉伸回到 1；平移回到既有停靠位置；glow 反向位移回到 0 | 统一 460ms `cubic-bezier(0.2, 1.35, 0.32, 1)`；结束后进入 idle / hover / focus-visible |
+| `releasing` | 拖动松手或拖动取消后的视觉复位阶段 | 基础 scale 从 1.5 过渡到当前 `breathScale`；呼吸权重同步从 0 回到 1（不是结束瞬间接上）；方向拉伸回到 1；平移回到既有停靠位置；glow 反向位移回到 0 | 统一 460ms `cubic-bezier(0.2, 1.35, 0.32, 1)`；结束后进入 idle / hover / focus-visible |
 | `hidden` | 既有 launcher-mode、面板或捕获遮挡规则要求隐藏 | 整棵入口（含 badge）不可见、不可命中；扫光与 breath 停止；不得仅将 opacity 设为 0 后继续运行动画 | 立即生效；恢复可见时从 `flow = 0`、`breath = 0` 开始，不补算隐藏期间相位 |
 
 `releasing` 只描述视觉复位，不推迟、替换或取消既有点击 / 拖动松手业务流程。若同一时刻业务规则要求 hidden，hidden 优先，不输出可见回弹，也不增加胶囊中间态。
@@ -240,13 +255,16 @@ bloomWhiteAlpha = themeBloomWhiteAlpha × (1 + 0.08 × breath)
 | --- | --- |
 | `flow` | `double`，0..1；只表示白色扫光相位 |
 | `breath` | `double`，0..1 |
+| `breathWeight` | `double`，0..1（回弹曲线过冲时可短暂略超 1）；呼吸幅度权重，见下 |
 | `stateScale` | `double`，0.94..1.04；hover/pressed/idle/releasing 的连续视觉缩放 |
 | `dragAngle` | `double`，弧度；无位移时为 0 |
 | `pull` | `double`，0..1 |
 
 布尔 pressed 无法表达 140ms 过渡，Flutter 用连续 stateScale 承载，七态语义不变，对应 Web 的 `--fb-orb-state-scale`。
 
-`shouldRepaint` 必须逐项覆盖上述全部入参：任意一项变化都返回 true；五项均不变且没有其他绘制字段变化时返回 false。实现若另加主题、透明度或其他绘制字段，也必须纳入 `shouldRepaint`，不得以“字段表已列完”为由漏比较。
+**呼吸权重过渡（2026-10-29 加固）**：`breathWeight` 对应 Web 的 `--fb-orb-breath-weight`，目标值 hover / pressed / dragging 为 0、其余为 1，`releasing` **不压 0**（Web 的 `.is-releasing` 不设该变量、回落到基值 1，hover 规则带 `:not(.is-releasing)`）。它必须与 `stateScale` **共用同一时长与曲线**——状态切换 220ms、pressed 进出 140ms、回弹 460ms——不得作为布尔阶跃传入，否则 hover / press 切换与回弹结束会出现 ±2% 呼吸的整段跳变。Flutter 用一层 `TweenAnimationBuilder<double>` 承载，不新增控制器或 Timer（§7.2 约束不变）。回弹曲线会过冲，两端都不钳制权重：`0.02 × 过冲量` 只让呼吸幅度短暂略超 ±2%。
+
+`shouldRepaint` 必须逐项覆盖上述全部入参：任意一项变化都返回 true；上表各项均不变且没有其他绘制字段变化时返回 false。实现若另加主题、透明度或其他绘制字段，也必须纳入 `shouldRepaint`，不得以“字段表已列完”为由漏比较。
 
 ## 8. Reduced-motion 独立契约
 
@@ -301,7 +319,7 @@ e2e/shots/orb-hyperos4/<web|flutter>/<light|dark>-<idle|hover|pressed|dragging|r
 | dragging | 从球心拖动到 `(dx, dy) = (80, 0)` 并保持，尺寸进入 220ms 后截图；基础直径 84，水平轮廓 87.36px、垂直轮廓 84px；pull 1、glowOffset `(-4, 0)` |
 | releasing | 在组件视觉测试夹具中触发 releasing，于 460ms 的中点 230ms 截图；验证回弹中间帧和方向拉伸复位。真实业务 E2E 另行验证松手后的捕获流程，不得为截图推迟或改写捕获 |
 
-Web 端出图与动效回归使用 Playwright；系统 `python3` 不自带该包，统一用 `uv run --with playwright python e2e/run_orb_shots_web.py`（动效为 `e2e/run_orb_motion_browser.py`）。脚本只读 `packages/web/dist`，不改源码；Chrome 156 实测。
+Web 端出图与动效回归使用 Playwright；系统 `python3` 不自带该包，统一用 `uv run --with playwright python e2e/run_orb_shots_web.py`（动效为 `e2e/run_orb_motion_browser.py`，`forced-colors` 焦点环为 `e2e/run_orb_forced_colors_web.py`，12.3.1 对比度保持率为 `e2e/run_orb_contrast_web.py`，后两者还需 `--with pillow --with numpy` 做像素统计）。脚本只读 `packages/web/dist`，不改源码；Chrome 156 实测。
 
 另需保留 focus-visible、hidden、reduced-motion 的行为断言；它们不替代上述 20 张必交截图。**2026-10-28 用户已对照官网「找同款 2.50s」「记日程 2.50s」完成视觉确认**（清玻璃透字、径向白环、双极色散、无投影、七态截图均通过）。官方四段演示只有浅色背景；深色主题的色散 RGB 仍为按亮度中性原理推导、非官方数据。idle 呼吸、扫光、方向拉伸、glow lag 与回弹曲线仍不得标记为“官方已验证”。
 
@@ -375,6 +393,19 @@ FIND-SAME 实测白色叠加 alpha 随归一化半径变化（峰值在 `0.95R`�
 - 局限：官方球内外落在不同字形上，std 不是完全受控对比；但 2 倍差距远超字形差异可解释的范围，且 p5 的一致性（97 对 99）与之互证。官方球内 min 59 对球外 min 15 说明极暗笔画仍有衰减，故结论是「接近清玻璃」，不是「完全无衰减」。
 - **硬性验收指标（取代 12.3 原先的「实现自选」）**：在带文字背景的截图上，`对比度保持率 ≥ 0.85`。同时保留 12.3 的亮度约束（球心不得比同位置背景更暗）——亮度与对比度两项必须同时满足，只测亮度会漏掉纯模糊造成的缺陷。
 - 两端一致：Flutter 侧 `ImageFilter.blur` 的 sigma 受同一指标约束，不得各自取值。
+
+**自动化与实测值（2026-10-29）**：该指标已固化为两端共用口径的回归用例，不再只有人工测量。
+
+| 端 | 载体 | light 保持率 | dark 保持率 | 球外 std |
+| --- | --- | --- | --- | --- |
+| Flutter | `flutter/feedback/test/orb_contrast_test.dart`（普通 `flutter test`，走 `OrbPainter` 直绘） | **0.8991** | **0.8990** | 76.50 / 92.00 |
+| Web | `e2e/run_orb_contrast_web.py`（Playwright，`uv run --with playwright --with pillow --with numpy`） | **0.8997** | **0.8988** | 76.50 / 92.00 |
+
+- 两端差 < 0.001，采样数完全相同（球内 2738、球外 9206 设备像素）。浅色亮度约束同时满足（球内均值 137.8 对背景 124.5，更亮不更暗）。
+- `0.899 ≈ 1 − 0.10` 与第 4 节图层 4 的「`0.45R` 以内白色叠加 alpha 上限 `0.11`」互相印证：清玻璃核心的保持率上限由该 alpha 决定，不是由模糊决定。
+- **背景用周期性竖条纹，不用真实文字**：本节上面已写明官方测量的局限是「球内外落在不同字形上，std 不是完全受控对比」。条纹（周期 8 设备像素、50% 占空比、关于球心对称）把这个变量消掉，球内外的理论 std 相同；用例先自检 `fixtureRatio`（只有背景时球内外 std 之比，实测 1.0000），再算保持率，并另算一条受控保持率（同区域「有球 / 只有背景」之比）。这比用真实文字更严，不是更松。
+- 变异验证：Flutter 把核心白 alpha 从 `0.11` 提到 `0.30` → 0.832 / 0.834 转红；Web 给 `.fb-orb-core` 加 `backdrop-filter: blur(3px)` → 0.055 / 0.045 转红。
+- 条纹夹具的数字与官方帧的 `1.038` 不可直接比（背景构造不同）；官方帧那一行仍是唯一的官方参照，不得用条纹实测值替换它。
 
 
 ### 12.4 内部没有独立高光点
