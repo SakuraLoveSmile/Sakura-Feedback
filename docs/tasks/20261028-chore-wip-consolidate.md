@@ -183,12 +183,52 @@ scripts/start-local.sh                          scripts/stop-local.sh
 | 阶段 1 移植并全绿 | 已完成 |
 | 阶段 2 切片提交 | 已完成（9 片） |
 | 阶段 3 脱敏收口 | 已完成 |
-| 阶段 4 推分支与 PR | 实现中 |
+| 阶段 4 推分支与 PR | 已完成（PR #3） |
+| 阶段 5 清理旧分支与 worktree | 已完成 |
 
 整体状态：**待体验**。自动检查与静态检查已完成；浏览器端用户流程、真实 AI / Kaneo、
 Flutter 各平台原生与部署未在本任务验证，需用户确认后才能转「已验收」。
 
 状态口径：未开始 / 实现中 / 待体验 / 已验收。
+
+## 10 清理记录
+
+### 10.1 旧分支
+
+| 分支 | 处置 | 依据 |
+| --- | --- | --- |
+| `archive/local-main-7a82ebd` | 已删 | 与 `wip/local-consolidated` 同指 `7a82ebd`，无 worktree 占用 |
+| `wip/local-consolidated` | 已删 | 主工作区先切到 `main`，再删 |
+
+删除前核对：`backup/wip-20261028` 的父提交就是 `7a82ebd`，因此原 65 个提交经该 tag
+的祖先链仍完整可达（tag 可达提交数 66），删分支不丢任何提交。该 tag 已同时推送到远端，
+恢复不只依赖本机。
+
+主工作区的未提交状态（89 个已跟踪改动 + 71 个未跟踪源码/文档）在清理前逐文件核对：
+**160/160 在 tag 内有字节一致副本**（`e2e/pages/sdk` 为符号链接，确认在册）。
+
+**清理过程拦下的险情**：按常规该用 `git clean -fd` 收尾，但预演（`git clean -nd`）显示它会
+删掉全部 941 张截图——`e2e/shots/` 的忽略规则在新分支上，而主工作区已切回 `main`，那里
+没有这条规则，截图于是变成「未跟踪且未忽略」。改为按 `/tmp/wip-untracked-nonshot.txt`
+清单只删 71 个源码文件；截图数量删前删后均为 1080 个文件（91 MB），核对一致。
+
+教训：跨分支做清理时，忽略规则属于分支内容，不随操作意图走。`git clean` 的作用域必须
+按当前 HEAD 的 `.gitignore` 重新评估，不能沿用另一分支上的结论。
+
+### 10.2 本任务 worktree
+
+`<WORKTREE_ROOT>/personal-feedback/20261028-chore-wip-consolidate/` 已移除。移除前核对：
+
+| 检查 | 结果 |
+| --- | --- |
+| 工作区是否干净 | 干净，无改动与未跟踪文件 |
+| 提交是否全部推送 | 本地与 `origin/chore/20261028-wip-consolidate` 同为 `58d6f8c` |
+| 是否有独有未保存成果 | 无。测试生成的 `e2e/shots/orb-hyperos4/flutter/` 10 张 PNG 与主工作区逐字节相同，仅 `manifest.json` 的 `generatedAt` 时间戳不同；主工作区另有更完整的 `web/` 一份 |
+| 其余被忽略内容 | `node_modules`（223 MB）、各 `dist/`、`.dart_tool/`、`pubspec.lock`、`__pycache__` 均为可重新生成的产物 |
+
+说明：移除 worktree 不删分支，`chore/20261028-wip-consolidate` 仍在本地与远端。PR #3
+此时为 OPEN；若 review 需要改动，重新建 worktree 即可，但注意依赖安装可能再次遇到
+`@img/sharp-libvips-darwin-arm64` 与 `@biomejs/cli-darwin-arm64` 的下载失败（见 §9 环境处置）。
 
 ## 9 阶段 1 验证结果
 
