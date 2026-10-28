@@ -147,6 +147,13 @@ Map<String, Object?> quotaJson({
       'resetAt': resetAt,
     };
 
+/// 不限额度 JSON（管理员账号契约形态：无 dailyLimit / remaining 数值）。
+Map<String, Object?> unlimitedQuotaJson({
+  int used = 0,
+  String resetAt = '2030-01-01T16:00:00Z',
+}) =>
+    <String, Object?>{'unlimited': true, 'used': used, 'resetAt': resetAt};
+
 /// 会话响应体。
 Map<String, Object?> sessionJson(Map<String, Object?> quota) =>
     <String, Object?>{
@@ -177,15 +184,18 @@ Future<void> pumpPanel(
   await tester.binding.setSurfaceSize(surface);
   addTearDown(() => tester.binding.setSurfaceSize(null));
   await tester.pumpWidget(MaterialApp(
-    home: FeedbackPanel(
-      config: config ??
-          FeedbackConfig('https://svc.test', 'com.example.app',
-              appVersion: '9.9.9', pageLabel: 'home'),
-      tokenStore: tokenStore,
-      tokenStoreFactory: tokenStoreFactory,
-      serverPrefStore: serverPrefStore ?? MemoryServerPrefStore(),
-      httpClient: server.client,
-      visible: visible,
+    // Scaffold 提供 ScaffoldMessenger 目标：面板内提示与真实挂载一致。
+    home: Scaffold(
+      body: FeedbackPanel(
+        config: config ??
+            FeedbackConfig('https://svc.test', 'com.example.app',
+                appVersion: '9.9.9', pageLabel: 'home'),
+        tokenStore: tokenStore,
+        tokenStoreFactory: tokenStoreFactory,
+        serverPrefStore: serverPrefStore ?? MemoryServerPrefStore(),
+        httpClient: server.client,
+        visible: visible,
+      ),
     ),
   ));
   await tester.pump();

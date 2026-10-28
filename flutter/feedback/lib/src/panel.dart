@@ -12,6 +12,8 @@ import 'package:url_launcher/url_launcher.dart';
 import 'api_client.dart';
 import 'config.dart';
 import 'idempotency.dart';
+import 'image_editor.dart';
+import 'images.dart';
 import 'platform.dart';
 import 'server_pref.dart';
 import 'token_coordination.dart';
@@ -19,6 +21,9 @@ import 'token_store.dart';
 
 /// 反馈正文最大长度（按 Unicode 码点 / runes 计，与契约 1..10000 一致）。
 const int kFeedbackMaxTextRunes = 10000;
+
+/// 组件统一动效时长（冻结视觉规格：160–220ms）。
+const Duration kFeedbackMotion = Duration(milliseconds: 180);
 
 /// 日志附件最大数量。
 const int kFeedbackMaxLogFiles = 3;
@@ -44,6 +49,12 @@ String _formatBytes(int bytes) {
   if (bytes < 1024) return '$bytes B';
   if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
   return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+}
+
+/// 面板导航标签。
+enum _PanelTab {
+  compose,
+  history,
 }
 
 /// 面板主视图阶段。
@@ -77,15 +88,15 @@ enum FeedbackStage {
 }
 
 /// 结果未知（[FeedbackStage.notSent]）提交冻结的完整快照：
-/// 正文 + 截图字节 + 截图元数据 + 日志列表。
+/// 正文 + 图片列表（v12，含自动截图）+ 截图元数据 + 日志列表。
 ///
 /// 复用同一幂等键的前提是快照**完全一致**（服务契约要求同 key 必须同字节，
 /// 同 key 不同内容会被判为 409 冲突）。因此改文案、重拍（新截图字节）、移除
-/// 截图或修改日志都属于新快照，必须换新 key 重新提交。
+/// 或编辑图片、修改日志都属于新快照，必须换新 key 重新提交。
 class _FrozenSubmit {
   const _FrozenSubmit({
     required this.text,
-    this.screenshotBytes,
+    this.images = const <FeedbackImageFile>[],
     this.captureInfo,
     this.logs = const <FeedbackLogFile>[],
   });
@@ -93,8 +104,8 @@ class _FrozenSubmit {
   /// 提交时的正文。
   final String text;
 
-  /// 提交时的截图字节（无截图为 null）。
-  final Uint8List? screenshotBytes;
+  /// 提交时的有序图片列表（v12；单图模式为至多 1 张）。
+  final List<FeedbackImageFile> images;
 
   /// 提交时的截图元数据（无截图为 null）。
   final FeedbackCaptureInfo? captureInfo;
@@ -103,13 +114,20 @@ class _FrozenSubmit {
   final List<FeedbackLogFile> logs;
 
   /// 与 [other] 是否属于同一份提交快照：
-  /// 正文逐字符、截图逐字节、元数据按序列化结果比较、日志逐项逐字节比较。
+  /// 正文逐字符、图片列表有序逐项逐字节、元数据按序列化结果、日志逐项比较。
   bool sameAs(_FrozenSubmit other) {
     if (text != other.text) return false;
-    if (!listEquals(screenshotBytes, other.screenshotBytes)) return false;
     if (_captureSignature(captureInfo) !=
         _captureSignature(other.captureInfo)) {
       return false;
+    }
+    if (images.length != other.images.length) return false;
+    for (int i = 0; i < images.length; i++) {
+      if (images[i].id != other.images[i].id) return false;
+      if (images[i].mime != other.images[i].mime) return false;
+      if (images[i].filename != other.images[i].filename) return false;
+      if (images[i].source != other.images[i].source) return false;
+      if (!listEquals(images[i].bytes, other.images[i].bytes)) return false;
     }
     if (logs.length != other.logs.length) return false;
     for (int i = 0; i < logs.length; i++) {
@@ -122,6 +140,16 @@ class _FrozenSubmit {
 
   static String? _captureSignature(FeedbackCaptureInfo? info) =>
       info == null ? null : jsonEncode(info.toJson());
+}
+
+/// 当前会话内每条问题的补充草稿，返回列表后仍可恢复。
+class _ReplyDraft {
+  const _ReplyDraft(this.text, this.images, this.logs, this.offset, this.error);
+  final String text;
+  final List<FeedbackImageFile> images;
+  final List<FeedbackLogFile> logs;
+  final double offset;
+  final String? error;
 }
 
 /// 按 runes 限制输入长度的格式化器（契约按码点计数，
@@ -162,16 +190,21 @@ class FeedbackPanel extends StatefulWidget {
     this.onRetakeScreenshot,
     this.logProvider,
     this.filePicker,
+    this.imagePicker,
     this.httpClient,
     this.tokenStore,
     this.tokenStoreFactory,
     this.serverPrefStore,
     this.onEffectiveApiBaseChange,
+    this.onUnreadCountChange,
     this.visible,
   });
 
   /// 连接与展示配置。
   final FeedbackConfig config;
+
+  /// 未读数变化回调（通知外层悬浮入口更新红点徽标）。
+  final ValueChanged<int>? onUnreadCountChange;
 
   /// 请求关闭面板（关闭按钮触发）。
   final VoidCallback? onRequestClose;
@@ -184,6 +217,9 @@ class FeedbackPanel extends StatefulWidget {
 
   /// 手动日志文件选择器（可选，优先于 config.filePicker）。
   final FeedbackFilePicker? filePicker;
+
+  /// 手动图片选择器（可选，优先于 config.imagePicker；v12）。
+  final FeedbackImagePicker? imagePicker;
 
   /// 注入的 HTTP 客户端（主要面向测试）。
   final http.Client? httpClient;
@@ -265,22 +301,71 @@ class FeedbackPanelState extends State<FeedbackPanel>
     _usernameFocus,
     _passwordFocus,
     _serverInputFocus,
+    _replyFocus,
   ];
 
-  Uint8List? _screenshotBytes;
+  /// v12：撰写页有序图片列表（≤[kFeedbackMaxImages]，截图与手动并存）。
+  /// 自动截图为 `source='capture'` 的一张；手动添加为 `manual`；
+  /// 经编辑器保存后标记 `edited`（替换内容不占新名额，id 复用）。
+  final List<FeedbackImageFile> _images = <FeedbackImageFile>[];
   FeedbackCaptureInfo? _captureInfo;
+
+  /// 最近一次截图预览提示：宿主存在不可绘制内容（PlatformView/Texture）。
+  bool _undrawableNotice = false;
 
   /// 最近一次接受的截图交付所属捕获序号（null 表示无会化交付）。
   int? _lastCaptureSeq;
 
+  /// 服务端能力（v12）：images 缺失 → 单图模式 + 升级提示。
+  FeedbackCapabilities? _capabilities;
+  bool _capabilitiesLoaded = false;
+
+  /// 最大图片数（缺省按契约 5；服务端缺失 capabilities.images 时为 1）。
+  int get _maxImages =>
+      (_capabilities?.images ?? 1).clamp(1, kFeedbackMaxImages);
+
+  /// 能力降级：已探测且服务端不支持多图。
+  bool get _singleImageMode =>
+      _capabilitiesLoaded && (_capabilities?.images ?? 0) < 2;
+
+  /// 当前截图（自动捕获）槽位：列表中 source='capture' 的一张。
+  int get _captureIndex =>
+      _images.indexWhere((FeedbackImageFile i) => i.source == 'capture');
+
   /// 当前截图数据（若有）。
-  Uint8List? get screenshotBytes => _screenshotBytes;
+  Uint8List? get screenshotBytes =>
+      _captureIndex >= 0 ? _images[_captureIndex].bytes : null;
 
   /// 面板是否持有草稿文本（只读；父组件据此判断行为，不得直接改写草稿）。
   bool get hasDraft => _draft.text.trim().isNotEmpty;
 
   /// 面板是否持有当前截图（只读）。
-  bool get hasScreenshot => _screenshotBytes != null;
+  bool get hasScreenshot => _captureIndex >= 0;
+
+  /// 面板是否持有任意图片附件（只读）。
+  bool get hasImages => _images.isNotEmpty;
+
+  /// 图片上限（T1.4 捕获前置检查用）：能力未知时按契约上限 5 张判断，
+  /// 已探测后按服务端能力（缺省单图）判断。
+  int get captureImageLimit =>
+      _capabilitiesLoaded ? _maxImages : kFeedbackMaxImages;
+
+  /// 是否还能接纳一张新截图（只读）：已持有截图（可替换）或未达图片上限。
+  /// 达到上限且无可替换截图时，宿主必须先提示整理附件、不发起捕获。
+  bool get canAcceptCapture =>
+      hasScreenshot || _images.length < captureImageLimit;
+
+  /// 宿主在撰写视图展示一条提示（如「截图失败可重试」「请先整理附件」）。
+  /// 不改写草稿、不清除已有截图与图片。
+  void showComposeNotice(String message) {
+    if (!mounted) return;
+    setState(() {
+      _panelTab = _PanelTab.compose;
+      _selectedDialogueId = null;
+      _stage = FeedbackStage.compose;
+      _composeError = message;
+    });
+  }
 
   /// 当前截图的捕获元数据（若有；只读）。
   FeedbackCaptureInfo? get captureInfo => _captureInfo;
@@ -290,6 +375,10 @@ class FeedbackPanelState extends State<FeedbackPanel>
   bool _logsCollected = false;
   String? _logError;
   int _logsSeq = 0;
+
+  /// T4：日志区折叠状态——默认只显示「已附诊断日志／暂无日志」摘要，
+  /// 展开后可查看文件、预览、移除、重新采集。
+  bool _logsExpanded = false;
 
   /// 当前日志列表（测试/只读）。
   List<FeedbackLogFile> get logs => List<FeedbackLogFile>.unmodifiable(_logs);
@@ -323,15 +412,18 @@ class FeedbackPanelState extends State<FeedbackPanel>
     });
   }
 
-  /// 设置当前截图数据。
+  /// 设置当前截图数据（v12：写入 / 替换有序图片列表中的 capture 槽位，
+  /// 复用稳定 id；bytes 为 null 时仅移除该槽位）。
   ///
   /// [captureSeq] 为捕获会话序号（由 [FeedbackWidget] 分配）。序号低于
   /// 已接受交付的调用视为过期结果（如 post-frame 回调写入旧捕获），
-  /// 直接丢弃，防止覆盖新状态。
+  /// 直接丢弃，防止覆盖新状态。[containsUndrawable] 标记捕获时检测到
+  /// 宿主存在不可绘制内容（PlatformView/Texture），在预览旁提示用户。
   void setScreenshot(
     Uint8List? bytes,
     FeedbackCaptureInfo? captureInfo, {
     int? captureSeq,
+    bool containsUndrawable = false,
   }) {
     if (captureSeq != null &&
         _lastCaptureSeq != null &&
@@ -340,7 +432,26 @@ class FeedbackPanelState extends State<FeedbackPanel>
     }
     _lastCaptureSeq = captureSeq ?? _lastCaptureSeq;
     setState(() {
-      _screenshotBytes = bytes;
+      _undrawableNotice = containsUndrawable;
+      final int idx = _captureIndex;
+      if (bytes == null) {
+        if (idx >= 0) _images.removeAt(idx);
+        _captureInfo = null;
+        return;
+      }
+      final FeedbackImageFile image = FeedbackImageFile(
+        id: idx >= 0 ? _images[idx].id : generateFeedbackIdempotencyKey(),
+        filename: 'screenshot.png',
+        bytes: bytes,
+        mime: 'image/png',
+        source: 'capture',
+        sha256: null, // 提交时计算（内容变化后旧摘要作废）。
+      );
+      if (idx >= 0) {
+        _images[idx] = image; // 重拍/重新捕获替换原槽位，不占新名额
+      } else {
+        _images.insert(0, image); // 截图排首位（呼出时即存在）
+      }
       _captureInfo = captureInfo;
     });
   }
@@ -427,6 +538,90 @@ class FeedbackPanelState extends State<FeedbackPanel>
   /// 异常 / 超远时间不直接交给宿主定时器（避免排一个无意义的超长定时器）。
   static const Duration _quotaMaxDelay = Duration(hours: 24);
 
+  /// v11 标签、未读数与历史对话状态
+  _PanelTab _panelTab = _PanelTab.compose;
+  int _unreadCount = 0;
+  Timer? _summaryTimer;
+
+  bool _historyLoading = false;
+  String? _historyError;
+  List<UserFeedbackListItem> _myFeedbacks = <UserFeedbackListItem>[];
+
+  /// v12：历史分页与状态筛选。
+  int _historyPage = 1;
+  int _historyTotal = 0;
+  final int _historyLimit = 10;
+  IssueStatus? _historyFilter;
+
+  String? _selectedDialogueId;
+  bool _dialogueLoading = false;
+  String? _dialogueError;
+  FeedbackDialogueResponse? _dialogueData;
+  Timer? _dialogueTimer;
+
+  /// 对话列表滚动控制器：轮询增量刷新不强制跳滚动——仅当用户本已在底部
+  /// 时才跟随新消息滚到底。
+  final ScrollController _dialogueScroll = ScrollController();
+
+  final TextEditingController _replyController = TextEditingController();
+  final FocusNode _replyFocus = FocusNode();
+
+  /// v12：回复图片列表（≤_maxImages，可与日志并存）。
+  final List<FeedbackImageFile> _replyImages = <FeedbackImageFile>[];
+  final List<FeedbackLogFile> _replyLogs = <FeedbackLogFile>[];
+  bool _replySending = false;
+  String? _replyError;
+  int _trackingSession = 0;
+  int _historyRequest = 0;
+  int _dialogueRequest = 0;
+  int _dialogueVisit = 0;
+  int? _dialogueFlight;
+  int? _dialogueFlightVisit;
+  final Map<String, _ReplyDraft> _replyDrafts = <String, _ReplyDraft>{};
+  final Set<String> _sendingReplies = <String>{};
+
+  bool _trackingValid(int session, ApiClient api) =>
+      mounted &&
+      _signedIn &&
+      session == _trackingSession &&
+      identical(_api, api);
+
+  void _clearTrackingSession() {
+    ++_trackingSession;
+    ++_dialogueVisit;
+    ++_historyRequest;
+    ++_dialogueRequest;
+    _replyDrafts.clear();
+    _sendingReplies.clear();
+    _selectedDialogueId = null;
+    _dialogueData = null;
+    _dialogueLoading = false;
+    _dialogueError = null;
+    _historyLoading = false;
+    _historyError = null;
+    _historyTotal = 0;
+    _historyPage = 1;
+    _historyFilter = null;
+    _myFeedbacks = <UserFeedbackListItem>[];
+    _replyController.clear();
+    _replyImages.clear();
+    _replyLogs.clear();
+    _replySending = false;
+    _replyError = null;
+  }
+
+  void _saveReplyDraft() {
+    final String? id = _selectedDialogueId;
+    if (id == null) return;
+    _replyDrafts[id] = _ReplyDraft(
+      _replyController.text,
+      List<FeedbackImageFile>.from(_replyImages),
+      List<FeedbackLogFile>.from(_replyLogs),
+      _dialogueScroll.hasClients ? _dialogueScroll.offset : 0,
+      _replyError,
+    );
+  }
+
   /// 面板当前是否由用户打开（[FeedbackPanel.visible] 为 null 时视为可见）。
   bool get _panelVisible => widget.visible ?? true;
 
@@ -447,6 +642,22 @@ class FeedbackPanelState extends State<FeedbackPanel>
 
   /// 当前面板阶段（测试可见）。
   FeedbackStage get stage => _stage;
+
+  /// 未读摘要轮询是否激活（测试可见；30s 周期）。
+  @visibleForTesting
+  bool get summaryPollingActive => _summaryTimer?.isActive ?? false;
+
+  /// 对话详情轮询是否激活（测试可见；10s 周期）。
+  @visibleForTesting
+  bool get dialoguePollingActive => _dialogueTimer?.isActive ?? false;
+
+  /// 当前撰写图片数（测试可见）。
+  @visibleForTesting
+  int get imageCount => _images.length;
+
+  /// 是否处于单图降级模式（测试可见）。
+  @visibleForTesting
+  bool get singleImageMode => _singleImageMode;
 
   /// 当前服务器覆盖（规范化地址；测试可见，null = 未覆盖）。
   String? get serverOverride => _serverOverride;
@@ -493,6 +704,7 @@ class FeedbackPanelState extends State<FeedbackPanel>
   /// [_finishIdentitySwitch] 完成重建与会话恢复。
   void _beginIdentitySwitch() {
     _identitySeq++;
+    _clearTrackingSession();
     _settingsOpSeq++;
     _pollTimer?.cancel();
     _pollTimer = null;
@@ -505,9 +717,30 @@ class FeedbackPanelState extends State<FeedbackPanel>
     _logsCollected = false;
     _logs = <FeedbackLogFile>[];
     _logError = null;
-    _screenshotBytes = null;
+    _images.clear();
     _captureInfo = null;
+    _undrawableNotice = false;
     _lastCaptureSeq = null;
+    _capabilities = null;
+    _capabilitiesLoaded = false;
+    _cancelDialogueTimer();
+    _cancelSummaryTimer();
+    _selectedDialogueId = null;
+    _dialogueData = null;
+    _dialogueError = null;
+    _dialogueLoading = false;
+    _replyController.clear();
+    _replyImages.clear();
+    _replyLogs.clear();
+    _replySending = false;
+    _myFeedbacks = <UserFeedbackListItem>[];
+    _historyError = null;
+    _historyLoading = false;
+    _historyPage = 1;
+    _historyTotal = 0;
+    _historyFilter = null;
+    _unreadCount = 0;
+    widget.onUnreadCountChange?.call(0);
     _draft.clear();
     _username.clear();
     _ticketId = null;
@@ -614,12 +847,18 @@ class FeedbackPanelState extends State<FeedbackPanel>
       // 同时清除「待立即刷新」意图（重新打开时按当前状态重新登记）。
       _invalidateLogin();
       _invalidateQuotaRefresh();
+      _cancelSummaryTimer();
+      _cancelDialogueTimer();
       _quotaRefreshPending = false;
       ++_logsSeq;
       _logsCollecting = false;
     } else if (!wasVisible && nowVisible) {
       // 重新打开：必须实际调用刷新（不能只请求输入焦点）。
       _onPanelOpened();
+      _startSummaryPolling();
+      if (_selectedDialogueId != null) {
+        _startDialoguePolling();
+      }
     }
   }
 
@@ -668,9 +907,15 @@ class FeedbackPanelState extends State<FeedbackPanel>
       _foreground = true;
       _quotaRefreshFailed = false;
       unawaited(_refreshQuota());
+      _startSummaryPolling();
+      if (_selectedDialogueId != null) {
+        _startDialoguePolling();
+      }
     } else {
       _foreground = false;
       _invalidateQuotaRefresh();
+      _cancelSummaryTimer();
+      _cancelDialogueTimer();
       _quotaRefreshPending = false; // 退后台清除补发意图；回前台重新登记
     }
   }
@@ -692,8 +937,42 @@ class FeedbackPanelState extends State<FeedbackPanel>
       _signedIn = token != null && token.isNotEmpty;
       _authReady = true;
     });
-    if (_signedIn) unawaited(_refreshQuota());
+    if (_signedIn) {
+      unawaited(_refreshQuota());
+      _startSummaryPolling();
+      unawaited(_fetchSummary());
+      unawaited(_refreshCapabilities());
+    }
     _focusFirstField();
+  }
+
+  /// v12 能力探测：`session.capabilities` 由 [_refreshQuota] 合并；
+  /// 缺失时再探测 `GET /api/features`（无需登录）。旧服务一律按
+  /// `capabilities.images` 缺失处理——单图模式 + 升级提示，不静默丢图。
+  Future<void> _refreshCapabilities() async {
+    final int idSeq = _identitySeq;
+    // session 已带回能力时无需额外请求（不重复 fetchSession：额度/会话
+    // 请求计数是许多测试的断言面）。
+    if (_capabilities?.images != null) {
+      return;
+    }
+    FeedbackCapabilities? caps = _capabilities;
+    try {
+      final FeedbackCapabilities? features = await _api.fetchCapabilities();
+      if (features != null) {
+        caps = FeedbackCapabilities(
+          dialogue: features.dialogue || (caps?.dialogue ?? false),
+          images: features.images ?? caps?.images,
+        );
+      }
+    } catch (_) {
+      // 探测失败：保持现状（缺省即单图模式）。
+    }
+    if (!mounted || idSeq != _identitySeq) return;
+    setState(() {
+      _capabilities = caps;
+      _capabilitiesLoaded = true;
+    });
   }
 
   void _focusFirstField() {
@@ -720,6 +999,8 @@ class FeedbackPanelState extends State<FeedbackPanel>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _pollTimer?.cancel();
+    _cancelSummaryTimer();
+    _cancelDialogueTimer();
     // 销毁：使在途登录与额度查询失效并取消额度定时查询。
     _invalidateLogin();
     _invalidateQuotaRefresh();
@@ -734,6 +1015,9 @@ class FeedbackPanelState extends State<FeedbackPanel>
     _passwordFocus.dispose();
     _serverInputFocus.dispose();
     _serverInput.dispose();
+    _replyController.dispose();
+    _replyFocus.dispose();
+    _dialogueScroll.dispose();
     super.dispose();
   }
 
@@ -741,7 +1025,12 @@ class FeedbackPanelState extends State<FeedbackPanel>
 
   void _onUnauthorized() {
     if (!mounted) return;
+    _clearTrackingSession();
     _pollTimer?.cancel();
+    _cancelSummaryTimer();
+    _cancelDialogueTimer();
+    _unreadCount = 0;
+    widget.onUnreadCountChange?.call(0);
     // 401：回到需要登录态并停止额度定时查询；同时清除补发意图，
     // 避免对已失效会话的补发循环（重新登录后由登录流程重新调度）。
     _invalidateQuotaRefresh();
@@ -810,9 +1099,11 @@ class FeedbackPanelState extends State<FeedbackPanel>
       delay = _quotaRetryDelay;
     } else {
       final Quota? q = _quota;
-      if (q == null) return;
+      // 不限形态（管理员）没有数值额度：不参与用尽轮询，显示也不依赖定时刷新。
+      if (q == null || q.unlimited) return;
+      final int remaining = q.remaining ?? 0;
       final Duration? until = q.resetAt?.difference(DateTime.now());
-      if (q.remaining <= 0) {
+      if (remaining <= 0) {
         delay =
             (until != null && until > Duration.zero && until < _quotaRetryDelay)
                 ? until
@@ -856,6 +1147,11 @@ class FeedbackPanelState extends State<FeedbackPanel>
         _quota = info.quota ?? _quota;
         _user = info.user ?? _user;
         _quotaRefreshFailed = false;
+        // v12：session 已带 capabilities 时直接采用（images 缺失才另行探测）。
+        if (info.capabilities != null) {
+          _capabilities = info.capabilities;
+          _capabilitiesLoaded = true;
+        }
       });
     } on ApiException {
       // 401 已由 ApiClient 触发 onUnauthorized；其它错误保留旧额度、30 秒后重试。
@@ -967,6 +1263,9 @@ class FeedbackPanelState extends State<FeedbackPanel>
       });
       _invalidateQuotaRefresh();
       _consumeQuotaRefreshIntent(); // 登录忙碌结束：补发被挡下的刷新
+      _startSummaryPolling();
+      unawaited(_fetchSummary());
+      unawaited(_refreshCapabilities());
       _focusFirstField();
       if (thenSubmit && _draft.text.trim().isNotEmpty) {
         await _submit(); // 登录成功后只提交一次
@@ -1004,10 +1303,14 @@ class FeedbackPanelState extends State<FeedbackPanel>
   bool get _retryingUnknown =>
       _stage == FeedbackStage.notSent && _pendingSubmit != null;
 
-  /// 额度用尽：禁止新提交（但允许上面的同键重试）。
+  /// 额度用尽：禁止新提交（但允许上面的同键重试）；管理员不限次数。
   bool get _quotaBlocked {
     final Quota? q = _quota;
-    return _signedIn && q != null && q.remaining <= 0 && !_retryingUnknown;
+    return _signedIn &&
+        q != null &&
+        !q.unlimited &&
+        (q.remaining ?? 0) <= 0 &&
+        !_retryingUnknown;
   }
 
   bool get _canSubmit {
@@ -1031,14 +1334,19 @@ class FeedbackPanelState extends State<FeedbackPanel>
     // 防御：Class B（服务端已接收、后台处理失败）绝不重新 POST——重发只会
     // 产生重复工单；该视图只提供刷新状态 / 复制反馈 ID / 返回编辑开新反馈。
     if (_stage == FeedbackStage.failed) return;
+    // v12：有图片但能力未知时先探测一次，决定 images/单图旧字段路径。
+    if (_images.isNotEmpty && !_capabilitiesLoaded) {
+      await _refreshCapabilities();
+      if (!mounted) return;
+    }
     // T7：捕获身份世代——服务切换后迟到的提交结果一律丢弃。
     final int idSeq = _identitySeq;
     final String text = _draft.text;
-    // 冻结本次提交的完整快照（正文 + 截图字节 + 元数据）：既要保证请求发出
+    // 冻结本次提交的完整快照（正文 + 图片列表 + 元数据）：既要保证请求发出
     // 后草稿变化不影响本次字节，也要作为"能否复用旧幂等键"的比较依据。
     final _FrozenSubmit snapshot = _FrozenSubmit(
       text: text,
-      screenshotBytes: _screenshotBytes,
+      images: List<FeedbackImageFile>.from(_images),
       captureInfo: _captureInfo,
       logs: List<FeedbackLogFile>.from(_logs),
     );
@@ -1061,17 +1369,25 @@ class FeedbackPanelState extends State<FeedbackPanel>
         idempotencyKey: _idempotencyKey!,
         text: text,
         captureInfo: _captureInfo,
-        screenshotBytes: _screenshotBytes,
+        // 能力降级（capabilities.images 缺失）：单图旧字段兼容路径；
+        // 多图一律走 v12 images 有序列表（截图也是其中一项）。
+        screenshotBytes: _singleImageMode
+            ? (snapshot.images.isEmpty ? null : snapshot.images.first.bytes)
+            : null,
+        images: _singleImageMode || snapshot.images.isEmpty
+            ? null
+            : snapshot.images,
         logs: snapshot.logs.isEmpty ? null : snapshot.logs,
       );
       // T7：身份切换后到达的旧提交结果丢弃——不进入任务态、不清新草稿、
       // 不启动轮询（该提交可能已被旧服务器接收，由用户在新服务上自行重发）。
       if (!mounted || idSeq != _identitySeq) return;
-      // 成功接收后才清空草稿与截图；保留 _lastSubmittedText 供失败重试。
+      // 成功接收后才清空草稿与图片；保留 _lastSubmittedText 供失败重试。
       _lastSubmittedText = text;
       _draft.clear();
-      _screenshotBytes = null;
+      _images.clear();
       _captureInfo = null;
+      _undrawableNotice = false;
       _logs = <FeedbackLogFile>[];
       _logsCollected = false;
       _pendingSubmit = null;
@@ -1227,8 +1543,9 @@ class FeedbackPanelState extends State<FeedbackPanel>
       _draft.text = _lastSubmittedText!;
     }
     if (!restoreDraft) {
-      _screenshotBytes = null;
+      _images.clear();
       _captureInfo = null;
+      _undrawableNotice = false;
     }
     setState(() {
       _stage = FeedbackStage.compose;
@@ -1340,13 +1657,7 @@ class FeedbackPanelState extends State<FeedbackPanel>
       }
     }
     if (!mounted) return;
-    final ScaffoldMessengerState? messenger =
-        ScaffoldMessenger.maybeOf(context);
-    messenger?.showSnackBar(SnackBar(
-      content: Text(launched ? '正在打开归档链接…' : '链接已复制到剪贴板'),
-      behavior: SnackBarBehavior.floating,
-      width: 280,
-    ));
+    _showToast(launched ? '正在打开归档链接…' : '链接已复制到剪贴板');
   }
 
   // ---------------------------------------------------------------- 文案
@@ -1369,9 +1680,750 @@ class FeedbackPanelState extends State<FeedbackPanel>
         return '内容超出大小限制';
       case 'not_found':
         return '未找到该反馈记录';
+      case 'cancellation_failed':
+        return '自动撤销 Kaneo 任务失败，请稍后重试';
       default:
         return e.message ?? '服务返回错误（${e.statusCode}）';
     }
+  }
+
+  // ---------------------------------------------------------------- 历史与工单沟通
+
+  void _cancelSummaryTimer() {
+    _summaryTimer?.cancel();
+    _summaryTimer = null;
+  }
+
+  void _startSummaryPolling() {
+    _cancelSummaryTimer();
+    if (!mounted || !_signedIn || !_panelVisible || !_foreground) return;
+    if (_panelTab == _PanelTab.compose &&
+        (_stage == FeedbackStage.accepted ||
+            _stage == FeedbackStage.processing)) {
+      return;
+    }
+    _summaryTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      unawaited(_fetchSummary());
+    });
+  }
+
+  Future<void> _fetchSummary() async {
+    if (!mounted || !_signedIn || !_serverPrefsReady) return;
+    final int session = _trackingSession;
+    final ApiClient api = _api;
+    try {
+      final UnreadSummaryResponse res =
+          await api.fetchUnreadSummary(appId: widget.config.appId);
+      if (!_trackingValid(session, api)) return;
+      if (_unreadCount != res.totalUnreadMessages) {
+        setState(() {
+          _unreadCount = res.totalUnreadMessages;
+        });
+        widget.onUnreadCountChange?.call(_unreadCount);
+      }
+    } catch (_) {}
+  }
+
+  void _cancelDialogueTimer() {
+    _dialogueTimer?.cancel();
+    _dialogueTimer = null;
+  }
+
+  void _startDialoguePolling() {
+    _cancelDialogueTimer();
+    if (!mounted ||
+        !_signedIn ||
+        !_panelVisible ||
+        !_foreground ||
+        _selectedDialogueId == null) {
+      return;
+    }
+    _dialogueTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      if (_selectedDialogueId != null) {
+        unawaited(_loadDialogue(_selectedDialogueId!, silent: true));
+      }
+    });
+  }
+
+  void _switchTab(_PanelTab tab) {
+    if (_panelTab == tab && _selectedDialogueId == null) return;
+    _saveReplyDraft();
+    ++_dialogueVisit;
+    ++_dialogueRequest;
+    _replyFocus.unfocus();
+    setState(() {
+      _panelTab = tab;
+      _selectedDialogueId = null;
+      _dialogueData = null;
+      _dialogueError = null;
+    });
+    _cancelDialogueTimer();
+    if (tab == _PanelTab.history && _signedIn) {
+      unawaited(_loadHistoryList());
+    }
+    _startSummaryPolling();
+  }
+
+  /// v12：历史列表加载（分页 + 状态筛选）。`reset` 为 true 时回到第 1 页。
+  Future<void> _loadHistoryList({bool reset = false, int? page}) async {
+    if (!mounted || !_signedIn || !_serverPrefsReady) return;
+    final int targetPage = reset ? 1 : (page ?? _historyPage);
+    final int session = _trackingSession;
+    final int request = ++_historyRequest;
+    final ApiClient api = _api;
+    bool valid() => _trackingValid(session, api) && request == _historyRequest;
+    setState(() {
+      _historyLoading = true;
+      _historyError = null;
+    });
+    try {
+      final UserFeedbackListResponse res = await api.fetchMyFeedbacks(
+        appId: widget.config.appId,
+        page: targetPage,
+        limit: _historyLimit,
+        issueStatus: _historyFilter?.toWire(),
+      );
+      if (!valid()) return;
+      setState(() {
+        _myFeedbacks = res.items;
+        _historyPage = res.page;
+        _historyTotal = res.total;
+        _historyLoading = false;
+        _unreadCount = res.unreadTotal;
+      });
+      widget.onUnreadCountChange?.call(_unreadCount);
+    } on ApiException catch (e) {
+      if (!valid()) return;
+      setState(() {
+        _historyLoading = false;
+        _historyError = _friendlyApiError(e);
+      });
+    } catch (_) {
+      if (!valid()) return;
+      setState(() {
+        _historyLoading = false;
+        _historyError = '加载历史反馈失败，请检查网络';
+      });
+    }
+  }
+
+  /// 切换状态筛选（v12）：回到第 1 页重新加载。
+  void _setHistoryFilter(IssueStatus? status) {
+    if (_historyFilter == status) return;
+    setState(() {
+      _historyFilter = status;
+      _historyPage = 1;
+      _myFeedbacks = <UserFeedbackListItem>[];
+    });
+    unawaited(_loadHistoryList(reset: true));
+  }
+
+  /// 翻页（v12）：服务端分页，上一页 / 下一页。
+  void _loadHistoryPage(int delta) {
+    final int next = _historyPage + delta;
+    final int maxPage = _historyTotal <= 0
+        ? 1
+        : ((_historyTotal + _historyLimit - 1) ~/ _historyLimit);
+    if (next < 1 || next > maxPage || _historyLoading) return;
+    unawaited(_loadHistoryList(page: next));
+  }
+
+  void _openDialogue(String feedbackId) {
+    _saveReplyDraft();
+    ++_dialogueVisit;
+    ++_dialogueRequest;
+    final _ReplyDraft? draft = _replyDrafts[feedbackId];
+    _replyFocus.unfocus();
+    setState(() {
+      _panelTab = _PanelTab.history;
+      _selectedDialogueId = feedbackId;
+      _dialogueLoading = true;
+      _dialogueError = null;
+      _dialogueData = null;
+      _replyController.text = draft?.text ?? '';
+      _replyImages
+        ..clear()
+        ..addAll(draft?.images ?? <FeedbackImageFile>[]);
+      _replyLogs
+        ..clear()
+        ..addAll(draft?.logs ?? <FeedbackLogFile>[]);
+      _replySending = _sendingReplies.contains(feedbackId);
+      _replyError = draft?.error;
+    });
+    _cancelSummaryTimer();
+    unawaited(_loadDialogue(feedbackId));
+    _startDialoguePolling();
+  }
+
+  void _closeDialogue() {
+    _saveReplyDraft();
+    ++_dialogueVisit;
+    ++_dialogueRequest;
+    _replyFocus.unfocus();
+    _cancelDialogueTimer();
+    setState(() {
+      _selectedDialogueId = null;
+      _dialogueData = null;
+      _dialogueError = null;
+      _replyController.clear();
+      _replyImages.clear();
+      _replyLogs.clear();
+      _replySending = false;
+      _replyError = null;
+    });
+    _startSummaryPolling();
+    unawaited(_loadHistoryList());
+  }
+
+  Future<void> _loadDialogue(String feedbackId,
+      {bool silent = false, bool force = false}) async {
+    if (!mounted || !_signedIn || !_serverPrefsReady) return;
+    if (silent &&
+        !force &&
+        _dialogueFlight != null &&
+        _dialogueFlightVisit == _dialogueVisit) {
+      return;
+    }
+    final int session = _trackingSession;
+    final int visit = _dialogueVisit;
+    final int request = ++_dialogueRequest;
+    _dialogueFlight = request;
+    _dialogueFlightVisit = visit;
+    final ApiClient api = _api;
+    bool valid() =>
+        _trackingValid(session, api) &&
+        visit == _dialogueVisit &&
+        request == _dialogueRequest &&
+        _selectedDialogueId == feedbackId;
+    if (!silent) {
+      setState(() {
+        _dialogueLoading = true;
+        _dialogueError = null;
+      });
+    }
+    try {
+      final FeedbackDialogueResponse res =
+          await api.fetchFeedbackDialogue(feedbackId);
+      if (!valid()) return;
+      // v12 草稿保护：轮询刷新只更新数据，绝不清回复草稿、不强制跳滚动——
+      // 仅当用户本已在底部时才跟随新消息滚到底。
+      final bool firstLoad = _dialogueData == null;
+      final double? savedOffset = _replyDrafts[feedbackId]?.offset;
+      final bool wasAtBottom = !firstLoad &&
+          (!_dialogueScroll.hasClients ||
+              _dialogueScroll.position.pixels >=
+                  _dialogueScroll.position.maxScrollExtent - 48);
+      setState(() {
+        _dialogueData = res;
+        _dialogueLoading = false;
+        _dialogueError = null;
+      });
+      if ((firstLoad || wasAtBottom) && !_replyFocus.hasFocus) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!valid() || !_dialogueScroll.hasClients) return;
+          final double target = firstLoad
+              ? (savedOffset ?? 0)
+              : _dialogueScroll.position.maxScrollExtent;
+          _dialogueScroll.jumpTo(
+              target.clamp(0, _dialogueScroll.position.maxScrollExtent));
+        });
+      }
+
+      int maxSeq = res.lastReadSeq;
+      for (final FeedbackMessageItem msg in res.messages) {
+        if (msg.seq > maxSeq) {
+          maxSeq = msg.seq;
+        }
+      }
+      if (maxSeq > res.lastReadSeq) {
+        unawaited(api.markFeedbackRead(feedbackId, maxSeq).then((_) {
+          if (_trackingValid(session, api)) unawaited(_fetchSummary());
+        }).catchError((Object _) {}));
+      }
+    } on ApiException catch (e) {
+      if (!valid()) return;
+      if (!silent) {
+        setState(() {
+          _dialogueLoading = false;
+          _dialogueError = _friendlyApiError(e);
+        });
+      }
+    } catch (_) {
+      if (!valid()) return;
+      if (!silent) {
+        setState(() {
+          _dialogueLoading = false;
+          _dialogueError = '加载对话失败，请检查网络';
+        });
+      }
+    } finally {
+      if (_dialogueFlight == request) {
+        _dialogueFlight = null;
+        _dialogueFlightVisit = null;
+      }
+    }
+  }
+
+  Future<void> _sendReply() async {
+    final String text = _replyController.text.trim();
+    final String? feedbackId = _selectedDialogueId;
+    final List<FeedbackImageFile> images =
+        List<FeedbackImageFile>.from(_replyImages);
+    final List<FeedbackLogFile> logs = List<FeedbackLogFile>.from(_replyLogs);
+    if (!_signedIn ||
+        feedbackId == null ||
+        _replySending ||
+        _sendingReplies.contains(feedbackId) ||
+        (text.isEmpty && images.isEmpty && logs.isEmpty)) {
+      return;
+    }
+    final int session = _trackingSession;
+    final ApiClient api = _api;
+    final int visit = _dialogueVisit;
+    bool selected() =>
+        _trackingValid(session, api) &&
+        visit == _dialogueVisit &&
+        _selectedDialogueId == feedbackId;
+    // 在能力探测之前锁定发送，避免连续点击产生多个请求。
+    _sendingReplies.add(feedbackId);
+    setState(() {
+      _replySending = true;
+      _replyError = null;
+    });
+    _saveReplyDraft();
+    String? error;
+    try {
+      if (images.isNotEmpty && !_capabilitiesLoaded) {
+        await _refreshCapabilities();
+        if (!_trackingValid(session, api)) return;
+      }
+      final bool singleMode = _singleImageMode;
+      await api.sendFeedbackReply(
+        feedbackId,
+        text: text,
+        screenshotBytes:
+            singleMode && images.isNotEmpty ? images.first.bytes : null,
+        images: singleMode || images.isEmpty ? null : images,
+        logs: logs.isEmpty ? null : logs,
+      );
+      if (!_trackingValid(session, api)) return;
+      _replyDrafts.remove(feedbackId);
+      if (_selectedDialogueId == feedbackId) {
+        _replyController.clear();
+        setState(() {
+          _replyImages.clear();
+          _replyLogs.clear();
+          _replyError = null;
+        });
+        unawaited(_loadDialogue(feedbackId, silent: true, force: true));
+      }
+      unawaited(_fetchSummary());
+    } on ApiException catch (e) {
+      error = _friendlyApiError(e);
+    } catch (_) {
+      error = '发送回复失败，请稍后重试';
+    } finally {
+      if (_trackingValid(session, api)) {
+        _sendingReplies.remove(feedbackId);
+        if (error != null) {
+          final _ReplyDraft? draft = _replyDrafts[feedbackId];
+          _replyDrafts[feedbackId] = _ReplyDraft(
+            draft?.text ?? text,
+            draft?.images ?? images,
+            draft?.logs ?? logs,
+            draft?.offset ?? 0,
+            error,
+          );
+        }
+        if (_selectedDialogueId == feedbackId) {
+          setState(() {
+            _replySending = false;
+            _replyError = error;
+          });
+        }
+        if (error != null && selected()) _showToast(error);
+      }
+    }
+  }
+
+  /// 面板内轻提示：优先宿主 ScaffoldMessenger；MaterialApp 外侧挂载时
+  /// 无 ScaffoldMessenger 祖先，退回 Overlay 内联提示条（不依赖 Navigator）。
+  void _showToast(String message) {
+    final ScaffoldMessengerState? messenger =
+        ScaffoldMessenger.maybeOf(context);
+    if (messenger != null) {
+      messenger.showSnackBar(SnackBar(content: Text(message)));
+      return;
+    }
+    final OverlayState? overlay = Overlay.maybeOf(context);
+    if (overlay == null) return;
+    late OverlayEntry entry;
+    entry = OverlayEntry(
+      builder: (BuildContext ctx) => Positioned(
+        bottom: 24,
+        left: 24,
+        right: 24,
+        child: Material(
+          color: Colors.transparent,
+          child: Container(
+            key: const Key('feedback-toast'),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: const Color(0xE01F1F1F),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Text(message,
+                style: const TextStyle(color: Colors.white, fontSize: 13)),
+          ),
+        ),
+      ),
+    );
+    overlay.insert(entry);
+    Timer(const Duration(seconds: 3), () {
+      if (entry.mounted) entry.remove();
+    });
+  }
+
+  /// 面板内对话框：优先 `showDialog`（有 Navigator 祖先，如应用内挂载）；
+  /// MaterialApp 外侧挂载时回退为祖先 Overlay 上的 OverlayEntry——
+  /// 覆盖全组件区域而非面板宽度，且不依赖 Navigator。
+  ///
+  /// [builder] 收到的 [close] 统一关闭对话框（路由 pop 或移除 entry），
+  /// 调用方不得再用 `Navigator.pop`（Overlay 路径没有路由可弹）。
+  Future<T?> _showPanelDialog<T>({
+    required Widget Function(
+            BuildContext context, void Function([T? result]) close)
+        builder,
+    bool barrierDismissible = true,
+  }) {
+    if (Navigator.maybeOf(context) != null) {
+      return showDialog<T>(
+        context: context,
+        barrierDismissible: barrierDismissible,
+        builder: (BuildContext ctx) =>
+            builder(ctx, ([T? result]) => Navigator.of(ctx).pop(result)),
+      );
+    }
+    final OverlayState? overlay = Overlay.maybeOf(context);
+    if (overlay == null) {
+      return Future<T?>.value();
+    }
+    final Completer<T?> completer = Completer<T?>();
+    late OverlayEntry entry;
+    void close([T? result]) {
+      if (!completer.isCompleted) completer.complete(result);
+      if (entry.mounted) entry.remove();
+    }
+
+    entry = OverlayEntry(
+      builder: (BuildContext ctx) => Stack(
+        children: <Widget>[
+          Positioned.fill(
+            child: GestureDetector(
+              onTap: barrierDismissible ? () => close() : null,
+              child: const ColoredBox(color: Colors.black54),
+            ),
+          ),
+          Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 560, maxHeight: 640),
+              child: Material(
+                type: MaterialType.transparency,
+                child: builder(ctx, close),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    overlay.insert(entry);
+    return completer.future;
+  }
+
+  Future<void> _pickReplyLog() async {
+    final int session = _trackingSession;
+    final int visit = _dialogueVisit;
+    final ApiClient api = _api;
+    if (_replyLogs.length >= kFeedbackMaxLogFiles) {
+      _showToast('最多附加 3 个日志文件');
+      return;
+    }
+    try {
+      final FeedbackFilePicker picker =
+          widget.filePicker ?? widget.config.filePicker ?? _defaultFilePicker;
+      final List<FeedbackLogFile>? files = await picker();
+      if (!_trackingValid(session, api) ||
+          visit != _dialogueVisit ||
+          _replySending ||
+          files == null ||
+          files.isEmpty) {
+        return;
+      }
+      setState(() {
+        for (final FeedbackLogFile file in files) {
+          if (_replyLogs.length >= kFeedbackMaxLogFiles) break;
+          final String ext = _getLogExtension(file.filename);
+          if (kFeedbackAllowedLogExtensions.contains(ext) &&
+              file.bytes.length <= kFeedbackMaxLogBytes) {
+            _replyLogs.add(file);
+          }
+        }
+      });
+    } catch (_) {}
+  }
+
+  // ---------------------------------------------------------------- 图片附件（v12）
+
+  /// 调用当前生效的图片选择器（widget > config > file_selector 默认）；
+  /// 默认实现支持 [onError] 回传部分失败原因。
+  Future<List<FeedbackImageFile>?> _invokeImagePicker({
+    void Function(String)? onError,
+  }) {
+    final FeedbackImagePicker? custom =
+        widget.imagePicker ?? widget.config.imagePicker;
+    if (custom != null) {
+      return Future<List<FeedbackImageFile>?>.value(custom());
+    }
+    return defaultFeedbackImagePicker(onError: onError);
+  }
+
+  /// 选择并追加图片到 [target] 列表（撰写 / 回复共用）。
+  ///
+  /// 单图模式（旧服务无 capabilities.images）只允许 1 张并提示升级；
+  /// 超限 / 读取失败提示且**保留草稿与已有图片**。
+  Future<void> _pickImagesInto(
+    List<FeedbackImageFile> target, {
+    int? maxCount,
+  }) async {
+    final int identity = _identitySeq;
+    final int session = _trackingSession;
+    final int visit = _dialogueVisit;
+    final bool reply = identical(target, _replyImages);
+    bool valid() =>
+        mounted &&
+        identity == _identitySeq &&
+        (!reply ||
+            (session == _trackingSession &&
+                visit == _dialogueVisit &&
+                !_replySending));
+    // 首次加图前若能力未知，先探测一次（确定多图上限与是否单图模式）。
+    if (!_capabilitiesLoaded) {
+      await _refreshCapabilities();
+      if (!valid()) return;
+    }
+    final int limit = maxCount ?? _maxImages;
+    final int remaining = limit - target.length;
+    if (remaining <= 0) {
+      _showToast('最多附加 $limit 张图片');
+      return;
+    }
+    if (_singleImageMode && target.isNotEmpty) {
+      _showToast('当前服务仅支持单图附件，升级服务端以支持多图');
+      return;
+    }
+    try {
+      String? pickerNote;
+      final List<FeedbackImageFile>? picked =
+          await _invokeImagePicker(onError: (String m) => pickerNote = m);
+      if (!valid() || picked == null || picked.isEmpty) return;
+      setState(() {
+        int added = 0;
+        for (final FeedbackImageFile img in picked) {
+          if (target.length >= limit) break;
+          target.add(img);
+          added++;
+        }
+        if (added < picked.length) {
+          _showToast('最多附加 $limit 张图片，多余的已忽略');
+        }
+      });
+      if (pickerNote != null) _showToast(pickerNote!);
+    } on FeedbackImageException catch (e) {
+      if (!valid()) return;
+      _showToast(e.message);
+    } catch (_) {
+      if (!valid()) return;
+      _showToast('选择图片失败');
+    }
+  }
+
+  /// 编辑图片（裁剪/矩形/遮挡/撤销）：保存后**替换原槽位**（id 复用，
+  /// source 标记 edited），不新增名额；取消不改动。
+  Future<void> _editImage(List<FeedbackImageFile> list, int index) async {
+    if (index < 0 || index >= list.length) return;
+    final FeedbackImageFile original = list[index];
+    final int identity = _identitySeq;
+    final int session = _trackingSession;
+    final int visit = _dialogueVisit;
+    final bool reply = identical(list, _replyImages);
+    Uint8List? result;
+    final NavigatorState? nav = Navigator.maybeOf(context);
+    if (nav != null) {
+      result = await FeedbackImageEditor.open(
+        context,
+        bytes: original.bytes,
+        filename: original.filename,
+      );
+    } else {
+      final OverlayState? overlay = Overlay.maybeOf(context);
+      if (overlay == null) return;
+      final Completer<Uint8List?> completer = Completer<Uint8List?>();
+      FeedbackImageEditor.openAsOverlay(
+        overlay,
+        bytes: original.bytes,
+        filename: original.filename,
+        onDone: completer.complete,
+      );
+      result = await completer.future;
+    }
+    if (!mounted ||
+        identity != _identitySeq ||
+        result == null ||
+        (reply &&
+            (session != _trackingSession ||
+                visit != _dialogueVisit ||
+                _replySending)) ||
+        index >= list.length ||
+        !identical(list[index], original)) {
+      return;
+    } // 取消 / 渲染失败：原图保留
+    setState(() {
+      list[index] = original.copyWith(
+        bytes: result,
+        mime: 'image/png',
+        filename: normalizeImageFilename(original.filename, 'image/png'),
+        source: 'edited',
+      );
+    });
+  }
+
+  /// 图片放大预览（用面板对话框包装，兼容无 Navigator 的挂载）。
+  void _openImageZoom(BuildContext context, FeedbackImageFile image) {
+    unawaited(_showPanelDialog<void>(
+      builder: (BuildContext ctx, void Function([void]) close) {
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          insetPadding: const EdgeInsets.all(16),
+          child: Stack(
+            alignment: Alignment.center,
+            children: <Widget>[
+              InteractiveViewer(
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: Image.memory(image.bytes),
+                ),
+              ),
+              Positioned(
+                top: 8,
+                right: 8,
+                child: IconButton(
+                  key: const Key('feedback-zoom-close'),
+                  style: IconButton.styleFrom(backgroundColor: Colors.black54),
+                  icon: const Icon(Icons.close, color: Colors.white),
+                  onPressed: () => close(),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    ));
+  }
+
+  /// v12：本人反馈的日志附件经 Bearer 下载后内联预览（不阻塞文本渲染）。
+  Future<void> _openRemoteLogPreview(
+    String feedbackId,
+    FeedbackLogAttachmentView log,
+  ) async {
+    _showToast('正在下载日志…');
+    try {
+      final Uint8List bytes = await _api.fetchFeedbackLog(feedbackId, log.id);
+      if (!mounted) return;
+      final String text = utf8.decode(bytes, allowMalformed: true);
+      unawaited(_showPanelDialog<void>(
+        builder: (BuildContext ctx, void Function([void]) close) {
+          return AlertDialog(
+            key: const Key('feedback-log-preview-dialog'),
+            title: Text(
+              log.filename,
+              key: const Key('feedback-log-preview-title'),
+              style: const TextStyle(fontSize: 16),
+            ),
+            content: SizedBox(
+              width: double.maxFinite,
+              child: SingleChildScrollView(
+                child: SelectableText(
+                  text,
+                  key: const Key('feedback-log-preview-body'),
+                  style: const TextStyle(
+                    fontFamily: 'monospace',
+                    fontSize: 12,
+                  ),
+                ),
+              ),
+            ),
+            actions: <Widget>[
+              TextButton(
+                key: const Key('feedback-log-preview-close'),
+                onPressed: () => close(),
+                child: const Text('关闭'),
+              ),
+            ],
+          );
+        },
+      ));
+    } catch (_) {
+      if (!mounted) return;
+      _showToast('日志下载失败，请稍后重试');
+    }
+  }
+
+  /// 消息中的非图片附件（日志）：Bearer 下载后预览。
+  Future<void> _openRemoteAttachment(FeedbackMessageAttachment att) async {
+    _showToast('正在下载附件…');
+    try {
+      final Uint8List bytes = await _api.fetchMessageAttachment(att.id);
+      if (!mounted) return;
+      final String text = utf8.decode(bytes, allowMalformed: true);
+      unawaited(_showPanelDialog<void>(
+        builder: (BuildContext ctx, void Function([void]) close) {
+          return AlertDialog(
+            key: const Key('feedback-attachment-preview-dialog'),
+            title: Text(att.filename, style: const TextStyle(fontSize: 16)),
+            content: SizedBox(
+              width: double.maxFinite,
+              child: SingleChildScrollView(
+                child: SelectableText(
+                  text,
+                  style: const TextStyle(
+                    fontFamily: 'monospace',
+                    fontSize: 12,
+                  ),
+                ),
+              ),
+            ),
+            actions: <Widget>[
+              TextButton(
+                onPressed: () => close(),
+                child: const Text('关闭'),
+              ),
+            ],
+          );
+        },
+      ));
+    } catch (_) {
+      if (!mounted) return;
+      _showToast('附件下载失败，请稍后重试');
+    }
+  }
+
+  String _formatTime(DateTime dt) {
+    final DateTime local = dt.toLocal();
+    final String month = local.month.toString().padLeft(2, '0');
+    final String day = local.day.toString().padLeft(2, '0');
+    final String hour = local.hour.toString().padLeft(2, '0');
+    final String minute = local.minute.toString().padLeft(2, '0');
+    return '$month-$day $hour:$minute';
   }
 
   // ---------------------------------------------------------------- 服务器设置（T6/T7）
@@ -1388,7 +2440,7 @@ class FeedbackPanelState extends State<FeedbackPanel>
   /// 草稿文本 / 截图 / 日志 / 在途或未确认的提交。
   bool get _needsSwitchConfirm =>
       _draft.text.trim().isNotEmpty ||
-      _screenshotBytes != null ||
+      _images.isNotEmpty ||
       _logs.isNotEmpty ||
       _ticketId != null ||
       _pendingSubmit != null ||
@@ -1469,9 +2521,8 @@ class FeedbackPanelState extends State<FeedbackPanel>
   Future<bool?> _confirmServerSwitch() {
     final bool uncertain =
         _busy || _pendingSubmit != null || _stage == FeedbackStage.notSent;
-    return showDialog<bool>(
-      context: context,
-      builder: (BuildContext ctx) => AlertDialog(
+    return _showPanelDialog<bool>(
+      builder: (BuildContext ctx, void Function([bool?]) close) => AlertDialog(
         key: const Key('feedback-server-confirm'),
         title: const Text('切换 Feedback 服务器？'),
         content: Text(
@@ -1481,12 +2532,12 @@ class FeedbackPanelState extends State<FeedbackPanel>
         actions: <Widget>[
           TextButton(
             key: const Key('feedback-server-confirm-cancel'),
-            onPressed: () => Navigator.of(ctx).pop(false),
+            onPressed: () => close(false),
             child: const Text('取消'),
           ),
           FilledButton(
             key: const Key('feedback-server-confirm-ok'),
-            onPressed: () => Navigator.of(ctx).pop(true),
+            onPressed: () => close(true),
             child: const Text('清空并切换'),
           ),
         ],
@@ -1652,18 +2703,81 @@ class FeedbackPanelState extends State<FeedbackPanel>
 
   Widget _buildHeader(BuildContext context) {
     final ColorScheme scheme = Theme.of(context).colorScheme;
+    final bool inDialogue = _selectedDialogueId != null;
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 12, 8, 12),
+      padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
       child: Row(
         children: <Widget>[
-          Icon(Icons.feedback_outlined, color: scheme.primary),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              '反馈',
-              style: Theme.of(context).textTheme.titleMedium,
+          if (inDialogue) ...<Widget>[
+            IconButton(
+              key: const Key('feedback-dialogue-back'),
+              tooltip: '返回反馈列表',
+              onPressed: _closeDialogue,
+              icon: const Icon(Icons.arrow_back),
             ),
-          ),
+            const SizedBox(width: 4),
+            Expanded(
+              child: Text(
+                '反馈详情',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+            ),
+          ] else ...<Widget>[
+            const SizedBox(width: 8),
+            Icon(Icons.feedback_outlined, color: scheme.primary),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Row(
+                children: <Widget>[
+                  TextButton(
+                    key: const Key('tab-compose'),
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      // 点击目标至少 48dp（冻结视觉规格）。
+                      minimumSize: const Size(48, 48),
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      foregroundColor: _panelTab == _PanelTab.compose
+                          ? scheme.primary
+                          : scheme.onSurfaceVariant,
+                      textStyle: TextStyle(
+                        fontWeight: _panelTab == _PanelTab.compose
+                            ? FontWeight.bold
+                            : FontWeight.normal,
+                        fontSize: 15,
+                      ),
+                    ),
+                    onPressed: () => _switchTab(_PanelTab.compose),
+                    child: const Text('新建反馈'),
+                  ),
+                  const SizedBox(width: 4),
+                  TextButton(
+                    key: const Key('tab-history'),
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      minimumSize: const Size(48, 48),
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      foregroundColor: _panelTab == _PanelTab.history
+                          ? scheme.primary
+                          : scheme.onSurfaceVariant,
+                      textStyle: TextStyle(
+                        fontWeight: _panelTab == _PanelTab.history
+                            ? FontWeight.bold
+                            : FontWeight.normal,
+                        fontSize: 15,
+                      ),
+                    ),
+                    onPressed: () => _switchTab(_PanelTab.history),
+                    child: _unreadCount > 0
+                        ? Badge.count(
+                            count: _unreadCount,
+                            child: const Text('我的反馈'),
+                          )
+                        : const Text('我的反馈'),
+                  ),
+                ],
+              ),
+            ),
+          ],
           // T6：服务器设置入口（未登录也可进入；设置视图自带返回）。
           IconButton(
             key: const Key('feedback-settings'),
@@ -1689,6 +2803,12 @@ class FeedbackPanelState extends State<FeedbackPanel>
     // 保证不启动任何依赖服务器的请求。
     if (!_serverPrefsReady || !_authReady) {
       return const Center(child: CircularProgressIndicator());
+    }
+    if (_selectedDialogueId != null) {
+      return _buildDialogueView(context);
+    }
+    if (_panelTab == _PanelTab.history) {
+      return _buildHistoryView(context);
     }
     // 未登录也可继续编辑：登录表单在撰写视图底部按需展开（不打开任何窗口）。
     if (!_signedIn) return _buildComposeView(context);
@@ -1734,20 +2854,20 @@ class FeedbackPanelState extends State<FeedbackPanel>
         }
         return _buildStatusNotice(
           title: '已接收',
-          subtitle: '您的反馈已保存，等待后台处理…',
+          subtitle: '您的反馈已保存，等待后台处理。稍后可在「我的反馈」查看进展和回复。',
           icon: _statusIcon(
               Icons.mark_email_read_outlined, Icons.check_circle_outline),
         );
       case FeedbackStage.processing:
         return _buildStatusNotice(
           title: '处理中',
-          subtitle: '正在整理您的反馈，请稍候…',
+          subtitle: '您的反馈已保存，正在后台整理。稍后可在「我的反馈」查看进展和回复。',
           icon: _statusIcon(Icons.autorenew, Icons.pending_outlined),
         );
       case FeedbackStage.archived:
         return _buildStatusNotice(
           title: '已归档',
-          subtitle: '感谢您的反馈，已记录到任务看板。',
+          subtitle: '您的反馈已保存并记录到任务看板；归档不代表问题已解决。稍后可在「我的反馈」查看进展和回复。',
           icon: const Icon(Icons.check_circle_outline, size: 40),
           extra: <Widget>[
             if (_kaneoUrl != null)
@@ -1953,6 +3073,19 @@ class FeedbackPanelState extends State<FeedbackPanel>
     List<Widget> extra = const <Widget>[],
   }) {
     final ThemeData theme = Theme.of(context);
+    final bool saved = _ticketId != null &&
+        _stage != FeedbackStage.compose &&
+        _stage != FeedbackStage.notSent;
+    final List<Widget> actions = <Widget>[
+      if (saved && _signedIn && _capabilities?.dialogue == true)
+        FilledButton.icon(
+          key: const Key('feedback-view-progress'),
+          onPressed: () => _openDialogue(_ticketId!),
+          icon: const Icon(Icons.forum_outlined, size: 18),
+          label: const Text('查看进展'),
+        ),
+      ...extra,
+    ];
     return Center(
       child: Semantics(
         liveRegion: true,
@@ -1986,13 +3119,20 @@ class FeedbackPanelState extends State<FeedbackPanel>
                   style: theme.textTheme.bodySmall,
                 ),
               ],
+              if (saved && footnote == null) ...<Widget>[
+                const SizedBox(height: 12),
+                SelectableText('反馈 ID：$_ticketId',
+                    key: const Key('feedback-ticket-id'),
+                    textAlign: TextAlign.center,
+                    style: theme.textTheme.bodySmall),
+              ],
               if (footnote != null) ...<Widget>[
                 const SizedBox(height: 12),
                 footnote,
               ],
-              if (extra.isNotEmpty) ...<Widget>[
+              if (actions.isNotEmpty) ...<Widget>[
                 const SizedBox(height: 24),
-                for (final Widget button in extra) ...<Widget>[
+                for (final Widget button in actions) ...<Widget>[
                   SizedBox(width: 220, child: button),
                   const SizedBox(height: 10),
                 ],
@@ -2087,259 +3227,190 @@ class FeedbackPanelState extends State<FeedbackPanel>
     );
   }
 
+  /// 撰写视图（T2.7 组件顺序）：标题与页签（Header）→ 反馈描述 →
+  /// 图片证据 → 可折叠日志 → **固定提交区**。技术信息（日志详情）与
+  /// 账户信息（额度/用户名）弱化展示。
   Widget _buildComposeView(BuildContext context) {
     final ThemeData theme = Theme.of(context);
     final int runes = _draft.text.runes.length;
     final bool nearLimit = runes >= kFeedbackMaxTextRunes;
-    // T9：有界可滚动布局——高度充足时主输入区照旧占满剩余空间；
-    // 高度不足（键盘展开 / 小屏 / 放大字体 / 截图+日志+登录表单）时
-    // 整体可滚动，底部计数与操作按钮始终可达，不再溢出裁剪。
-    return LayoutBuilder(
-      builder: (BuildContext context, BoxConstraints constraints) {
-        final double minHeight = constraints.maxHeight.isFinite
-            ? math.max(0.0, constraints.maxHeight - 28)
-            : 0.0;
-        return SingleChildScrollView(
-          key: const Key('feedback-compose-scroll'),
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-          child: ConstrainedBox(
-            constraints: BoxConstraints(minHeight: minHeight),
-            child: IntrinsicHeight(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: <Widget>[
-                  if (_composeError != null) ...<Widget>[
-                    Container(
-                      key: const Key('feedback-compose-error'),
-                      margin: const EdgeInsets.only(bottom: 12),
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                        color: theme.colorScheme.errorContainer,
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Row(
-                        children: <Widget>[
-                          Icon(Icons.warning_amber_rounded,
-                              size: 18,
-                              color: theme.colorScheme.onErrorContainer),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              _composeError!,
-                              style: TextStyle(
-                                  color: theme.colorScheme.onErrorContainer),
+    // T9：有界可滚动内容区 + 固定提交区——高度充足时输入区占满剩余空间；
+    // 高度不足（键盘展开 / 小屏 / 放大字体 / 截图+日志+登录表单）时内容区
+    // 整体可滚动，底部提交区固定始终可达，不再溢出裁剪。
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        Expanded(
+          child: LayoutBuilder(
+            builder: (BuildContext context, BoxConstraints constraints) {
+              // 预留固定提交区高度，内容不足时仍铺满可用空间。
+              final double minHeight = constraints.maxHeight.isFinite
+                  ? math.max(0.0, constraints.maxHeight - 56)
+                  : 0.0;
+              return SingleChildScrollView(
+                key: const Key('feedback-compose-scroll'),
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(minHeight: minHeight),
+                  child: IntrinsicHeight(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: <Widget>[
+                        if (_composeError != null) ...<Widget>[
+                          Container(
+                            key: const Key('feedback-compose-error'),
+                            margin: const EdgeInsets.only(bottom: 12),
+                            padding: const EdgeInsets.all(10),
+                            decoration: BoxDecoration(
+                              color: theme.colorScheme.errorContainer,
+                              borderRadius: BorderRadius.circular(8),
                             ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                  if (_screenshotBytes != null) ...<Widget>[
-                    Container(
-                      key: const Key('feedback-screenshot-wrap'),
-                      height: 120,
-                      margin: const EdgeInsets.only(bottom: 12),
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(8),
-                        border:
-                            Border.all(color: theme.colorScheme.outlineVariant),
-                      ),
-                      clipBehavior: Clip.antiAlias,
-                      child: Stack(
-                        fit: StackFit.expand,
-                        children: <Widget>[
-                          GestureDetector(
-                            key: const Key('feedback-screenshot-thumb'),
-                            onTap: () => _openZoomDialog(context),
-                            child: Image.memory(
-                              _screenshotBytes!,
-                              fit: BoxFit.cover,
-                            ),
-                          ),
-                          Positioned(
-                            top: 6,
-                            left: 6,
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 6, vertical: 2),
-                              decoration: BoxDecoration(
-                                color: Colors.black54,
-                                borderRadius: BorderRadius.circular(4),
-                              ),
-                              child: const Text(
-                                '当前截图 (点击放大)',
-                                style: TextStyle(
-                                    color: Colors.white, fontSize: 10),
-                              ),
-                            ),
-                          ),
-                          Positioned(
-                            bottom: 6,
-                            right: 6,
                             child: Row(
-                              mainAxisSize: MainAxisSize.min,
                               children: <Widget>[
-                                if (widget.onRetakeScreenshot != null)
-                                  IconButton.filledTonal(
-                                    key: const Key('feedback-retake-btn'),
-                                    visualDensity: VisualDensity.compact,
-                                    tooltip: '重新截图',
-                                    icon: const Icon(Icons.refresh, size: 16),
-                                    onPressed: widget.onRetakeScreenshot,
+                                Icon(Icons.warning_amber_rounded,
+                                    size: 18,
+                                    color: theme.colorScheme.onErrorContainer),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    _composeError!,
+                                    style: TextStyle(
+                                        color:
+                                            theme.colorScheme.onErrorContainer),
                                   ),
-                                const SizedBox(width: 4),
-                                IconButton.filledTonal(
-                                  key: const Key(
-                                      'feedback-remove-screenshot-btn'),
-                                  visualDensity: VisualDensity.compact,
-                                  tooltip: '移除截图',
-                                  icon: const Icon(Icons.delete_outline,
-                                      size: 16),
-                                  onPressed: () {
-                                    setState(() {
-                                      _screenshotBytes = null;
-                                      _captureInfo = null;
-                                    });
-                                  },
                                 ),
                               ],
                             ),
                           ),
                         ],
-                      ),
-                    ),
-                  ],
-                  _buildLogsArea(context),
-                  const SizedBox(height: 8),
-                  Expanded(
-                    child: TextField(
-                      key: const Key('feedback-input'),
-                      controller: _draft,
-                      focusNode: _draftFocus,
-                      expands: true,
-                      maxLines: null,
-                      minLines: null,
-                      textAlignVertical: TextAlignVertical.top,
-                      keyboardType: TextInputType.multiline,
-                      inputFormatters: <TextInputFormatter>[
-                        const _RuneLimitFormatter(kFeedbackMaxTextRunes),
-                      ],
-                      decoration: const InputDecoration(
-                        hintText: '刚才哪里不顺手？你希望它怎样改进？',
-                        border: OutlineInputBorder(),
-                        isDense: true,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  if (!_signedIn && _showLoginForm)
-                    _buildInlineLoginForm(context),
-                  if (_signedIn && _quotaBlocked)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 8),
-                      child: Text(
-                        '今日提交次数已用完，额度刷新后可继续提交',
-                        key: const Key('feedback-quota-blocked'),
-                        style: theme.textTheme.bodySmall
-                            ?.copyWith(color: theme.colorScheme.error),
-                      ),
-                    ),
-                  Row(
-                    children: <Widget>[
-                      Text(
-                        '$runes / $kFeedbackMaxTextRunes',
-                        key: const Key('feedback-counter'),
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: nearLimit
-                              ? theme.colorScheme.error
-                              : theme.colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                      if (_signedIn && _quota != null) ...<Widget>[
-                        const SizedBox(width: 10),
+                        // ① 反馈描述（主输入区）。
                         Expanded(
-                          child: Text(
-                            '${_user?.username ?? ''} · 今日剩余 ${_quota!.remaining} 次',
-                            key: const Key('feedback-quota'),
-                            overflow: TextOverflow.ellipsis,
-                            style: theme.textTheme.bodySmall?.copyWith(
-                                color: theme.colorScheme.onSurfaceVariant),
+                          child: TextField(
+                            key: const Key('feedback-input'),
+                            controller: _draft,
+                            focusNode: _draftFocus,
+                            expands: true,
+                            maxLines: null,
+                            minLines: null,
+                            textAlignVertical: TextAlignVertical.top,
+                            keyboardType: TextInputType.multiline,
+                            inputFormatters: <TextInputFormatter>[
+                              const _RuneLimitFormatter(kFeedbackMaxTextRunes),
+                            ],
+                            decoration: const InputDecoration(
+                              hintText: '刚才哪里不顺手？你希望它怎样改进？',
+                              border: OutlineInputBorder(),
+                              isDense: true,
+                            ),
                           ),
                         ),
-                      ] else
-                        const Spacer(),
-                      FilledButton.icon(
-                        key: const Key('feedback-submit'),
-                        // 未登录：点击在当前面板展开登录表单（成功后自动提交一次）。
-                        onPressed: _signedIn
-                            ? (_canSubmit ? _submit : null)
-                            : (_draftValid && !_busy
-                                ? () => _openLoginForm(thenSubmit: true)
-                                : null),
-                        icon: Icon(
-                          _signedIn ? Icons.send_outlined : Icons.login,
-                          size: 18,
-                        ),
-                        // Class A（未送达）时按钮语义是重试：同 key 同字节重发，
-                        // 快照变化（改文案 / 换图 / 移图）则自动换新 key。
-                        label: Text(
-                          _signedIn
-                              ? (_stage == FeedbackStage.notSent
-                                  ? '重试提交'
-                                  : '提交')
-                              : '登录并提交',
-                        ),
-                      ),
-                    ],
+                        const SizedBox(height: 12),
+                        // ② 图片证据。
+                        _buildImagesArea(context),
+                        const SizedBox(height: 4),
+                        // ③ 可折叠日志（技术信息弱化：默认只显示摘要）。
+                        _buildLogsArea(context),
+                        const SizedBox(height: 8),
+                        // 登录表单与额度提示（账户信息弱化展示）。
+                        if (!_signedIn && _showLoginForm)
+                          _buildInlineLoginForm(context),
+                        if (_signedIn && _quotaBlocked)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 8),
+                            child: Text(
+                              '今日提交次数已用完，额度刷新后可继续提交',
+                              key: const Key('feedback-quota-blocked'),
+                              style: theme.textTheme.bodySmall
+                                  ?.copyWith(color: theme.colorScheme.error),
+                            ),
+                          ),
+                      ],
+                    ),
                   ),
-                ],
-              ),
+                ),
+              );
+            },
+          ),
+        ),
+        // ④ 固定提交区：计数 / 账户信息（弱化）/ 提交按钮常驻底部。
+        _buildSubmitBar(context, runes: runes, nearLimit: nearLimit),
+      ],
+    );
+  }
+
+  /// 固定提交区（T2.7）：细边框分隔，阴影只用于浮层——这里只用边框。
+  Widget _buildSubmitBar(
+    BuildContext context, {
+    required int runes,
+    required bool nearLimit,
+  }) {
+    final ThemeData theme = Theme.of(context);
+    return Container(
+      key: const Key('feedback-submit-bar'),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surface,
+        border: Border(
+          top: BorderSide(color: theme.colorScheme.outlineVariant, width: 1),
+        ),
+      ),
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+      child: Row(
+        children: <Widget>[
+          Text(
+            '$runes / $kFeedbackMaxTextRunes',
+            key: const Key('feedback-counter'),
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: nearLimit
+                  ? theme.colorScheme.error
+                  : theme.colorScheme.onSurfaceVariant,
             ),
           ),
-        );
-      },
-    );
-  }
-
-  void _openZoomDialog(BuildContext context) {
-    if (_screenshotBytes == null) return;
-    showDialog<void>(
-      context: context,
-      builder: (BuildContext ctx) {
-        return Dialog(
-          backgroundColor: Colors.transparent,
-          insetPadding: const EdgeInsets.all(16),
-          child: Stack(
-            alignment: Alignment.center,
-            children: <Widget>[
-              InteractiveViewer(
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
-                  child: Image.memory(_screenshotBytes!),
-                ),
+          if (_signedIn && _quota != null) ...<Widget>[
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                _quota!.unlimited
+                    ? '${_user?.username ?? ''} · 不限次数'
+                    : '${_user?.username ?? ''} · 今日剩余 ${_quota!.remaining} 次',
+                key: const Key('feedback-quota'),
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
               ),
-              Positioned(
-                top: 8,
-                right: 8,
-                child: IconButton(
-                  key: const Key('feedback-zoom-close'),
-                  style: IconButton.styleFrom(backgroundColor: Colors.black54),
-                  icon: const Icon(Icons.close, color: Colors.white),
-                  onPressed: () => Navigator.of(ctx).pop(),
-                ),
-              ),
-            ],
+            ),
+          ] else
+            const Spacer(),
+          FilledButton.icon(
+            key: const Key('feedback-submit'),
+            // 未登录：点击在当前面板展开登录表单（成功后自动提交一次）。
+            onPressed: _signedIn
+                ? (_canSubmit ? _submit : null)
+                : (_draftValid && !_busy
+                    ? () => _openLoginForm(thenSubmit: true)
+                    : null),
+            icon: Icon(
+              _signedIn ? Icons.send_outlined : Icons.login,
+              size: 18,
+            ),
+            // Class A（未送达）时按钮语义是重试：同 key 同字节重发，
+            // 快照变化（改文案 / 换图 / 移图）则自动换新 key。
+            label: Text(
+              _signedIn
+                  ? (_stage == FeedbackStage.notSent ? '重试提交' : '提交')
+                  : '登录并提交',
+            ),
           ),
-        );
-      },
+        ],
+      ),
     );
   }
 
-  Widget _buildLogsArea(BuildContext context) {
+  /// v12 撰写页图片区：≤5 张缩略图网格（点击放大）+ 逐张编辑/删除 +
+  /// 「添加图片」；不可绘制内容提示与单图模式升级提示。
+  Widget _buildImagesArea(BuildContext context) {
     final ThemeData theme = Theme.of(context);
-    final bool canAdd =
-        _logs.length < kFeedbackMaxLogFiles && !_busy && !_logsCollecting;
-
+    final int limit = _maxImages;
+    final bool canAdd = _images.length < limit && !_busy;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
@@ -2347,34 +3418,254 @@ class FeedbackPanelState extends State<FeedbackPanel>
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: <Widget>[
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: <Widget>[
-                Text(
-                  '日志附件 (${_logs.length}/$kFeedbackMaxLogFiles)',
-                  key: const Key('feedback-logs-count'),
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    fontWeight: FontWeight.bold,
-                    color: theme.colorScheme.onSurfaceVariant,
-                  ),
+            Text(
+              '图片附件 (${_images.length}/$limit)',
+              key: const Key('feedback-images-count'),
+              style: theme.textTheme.bodySmall?.copyWith(
+                fontWeight: FontWeight.bold,
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+            if (canAdd)
+              TextButton.icon(
+                key: const Key('feedback-btn-add-image'),
+                onPressed: () => _pickImagesInto(_images),
+                icon: const Icon(Icons.add_photo_alternate_outlined, size: 14),
+                label: const Text('添加图片', style: TextStyle(fontSize: 12)),
+                style: TextButton.styleFrom(
+                  tapTargetSize: MaterialTapTargetSize.padded,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 ),
-                if (_logsCollecting) ...<Widget>[
-                  const SizedBox(width: 8),
-                  const SizedBox(
-                    width: 12,
-                    height: 12,
-                    child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+          ],
+        ),
+        if (_undrawableNotice) ...<Widget>[
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(
+              '部分内容可能未入图（系统级画面），可手动添加图片补充',
+              key: const Key('feedback-undrawable-hint'),
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.tertiary,
+              ),
+            ),
+          ),
+        ],
+        if (_singleImageMode) ...<Widget>[
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(
+              '当前服务仅支持单图附件，升级服务端以支持多图',
+              key: const Key('feedback-single-image-hint'),
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+        ],
+        if (_images.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 6, bottom: 10),
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: <Widget>[
+                for (int i = 0; i < _images.length; i++)
+                  _buildImageThumb(context, _images, i),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+
+  /// 单张图片卡片（T2.6）：缩略图**完整显示**（`BoxFit.contain`，禁止
+  /// cover 二次裁切），左上角「局部截图／已编辑／截图」标记、右下角
+  /// 输出尺寸；编辑、删除放在图片**下方**（≥48dp），不遮挡内容；
+  /// capture 槽位支持重拍。
+  Widget _buildImageThumb(
+    BuildContext context,
+    List<FeedbackImageFile> list,
+    int index,
+  ) {
+    final FeedbackImageFile image = list[index];
+    final ThemeData theme = Theme.of(context);
+    final bool isCapture = image.source == 'capture';
+    final bool isRegionCapture = isCapture && _captureInfo?.region != null;
+    final String badge = image.source == 'edited'
+        ? '已编辑'
+        : isRegionCapture
+            ? '局部截图'
+            : (isCapture ? '截图' : '');
+    return SizedBox(
+      key: isCapture
+          ? const Key('feedback-screenshot-wrap')
+          : Key('feedback-image-$index'),
+      width: 152,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          SizedBox(
+            height: 96,
+            child: ClipRRect(
+              // 面板规格：图片圆角 10。
+              borderRadius: BorderRadius.circular(10),
+              child: Stack(
+                fit: StackFit.expand,
+                children: <Widget>[
+                  ColoredBox(color: theme.colorScheme.surfaceContainerHighest),
+                  GestureDetector(
+                    key: isCapture
+                        ? const Key('feedback-screenshot-thumb')
+                        : Key('feedback-image-thumb-$index'),
+                    onTap: () => _openImageZoom(context, image),
+                    child: _ThumbnailImageView(bytes: image.bytes),
                   ),
-                  const SizedBox(width: 4),
-                  Text(
-                    '正在采集...',
-                    key: const Key('feedback-logs-collecting'),
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant,
+                  if (badge.isNotEmpty)
+                    Positioned(
+                      top: 4,
+                      left: 4,
+                      child: DecoratedBox(
+                        decoration: const BoxDecoration(
+                          color: Colors.black54,
+                          borderRadius: BorderRadius.all(Radius.circular(4)),
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 4, vertical: 1),
+                          child: Text(
+                            badge,
+                            key: isCapture
+                                ? const Key('feedback-screenshot-badge')
+                                : Key('feedback-image-badge-$index'),
+                            style: const TextStyle(
+                                color: Colors.white, fontSize: 9),
+                          ),
+                        ),
+                      ),
                     ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 4),
+          // 操作行：图片下方固定，不遮挡图片内容。
+          SizedBox(
+            height: 48,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: <Widget>[
+                if (isCapture && widget.onRetakeScreenshot != null)
+                  IconButton(
+                    key: const Key('feedback-retake-btn'),
+                    tooltip: '重新截图',
+                    padding: EdgeInsets.zero,
+                    constraints:
+                        const BoxConstraints(minWidth: 48, minHeight: 48),
+                    icon: const Icon(Icons.refresh, size: 16),
+                    onPressed: widget.onRetakeScreenshot,
+                  ),
+                IconButton(
+                  key: Key('feedback-image-edit-$index'),
+                  tooltip: '编辑',
+                  padding: EdgeInsets.zero,
+                  constraints:
+                      const BoxConstraints(minWidth: 48, minHeight: 48),
+                  icon: const Icon(Icons.edit_outlined, size: 16),
+                  onPressed: _busy ? null : () => _editImage(list, index),
+                ),
+                IconButton(
+                  key: isCapture
+                      ? const Key('feedback-remove-screenshot-btn')
+                      : Key('feedback-image-remove-$index'),
+                  tooltip: '移除',
+                  padding: EdgeInsets.zero,
+                  constraints:
+                      const BoxConstraints(minWidth: 48, minHeight: 48),
+                  icon: const Icon(Icons.delete_outline, size: 16),
+                  onPressed: _busy
+                      ? null
+                      : () {
+                          setState(() {
+                            list.removeAt(index);
+                            if (isCapture) {
+                              _captureInfo = null;
+                              _undrawableNotice = false;
+                            }
+                          });
+                        },
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// T4：可折叠日志区——默认只显示「已附诊断日志／暂无日志」摘要，
+  /// 展开后可查看文件、预览、移除、重新采集；采集失败提示常驻（折叠也
+  /// 可见）且不阻塞提交。
+  Widget _buildLogsArea(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    final bool canAdd =
+        _logs.length < kFeedbackMaxLogFiles && !_busy && !_logsCollecting;
+    final bool expanded = _logsExpanded;
+    final bool hasProvider =
+        (widget.logProvider ?? widget.config.logProvider) != null;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        Row(
+          children: <Widget>[
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      Text(
+                        '日志附件 (${_logs.length}/$kFeedbackMaxLogFiles)',
+                        key: const Key('feedback-logs-count'),
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          fontWeight: FontWeight.bold,
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                      if (_logsCollecting) ...<Widget>[
+                        const SizedBox(width: 8),
+                        const SizedBox(
+                          width: 12,
+                          height: 12,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          '正在采集...',
+                          key: const Key('feedback-logs-collecting'),
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                  const SizedBox(height: 2),
+                  // 默认摘要（T4）：不展开也能看懂是否已附诊断日志。
+                  Text(
+                    _logs.isNotEmpty ? '已附诊断日志' : '暂无日志',
+                    key: const Key('feedback-logs-summary'),
+                    style: theme.textTheme.bodySmall
+                        ?.copyWith(color: theme.colorScheme.outline),
                   ),
                 ],
-              ],
+              ),
             ),
             if (canAdd)
               TextButton.icon(
@@ -2383,16 +3674,24 @@ class FeedbackPanelState extends State<FeedbackPanel>
                 icon: const Icon(Icons.add, size: 14),
                 label: const Text('添加日志', style: TextStyle(fontSize: 12)),
                 style: TextButton.styleFrom(
-                  visualDensity: VisualDensity.compact,
-                  // 触屏目标不小于 48dp（Material 无障碍下限）；
-                  // 紧凑视觉样式只影响绘制，不影响命中区域。
+                  // 触屏目标不小于 48dp（Material 无障碍下限）。
                   tapTargetSize: MaterialTapTargetSize.padded,
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  minimumSize: const Size(64, 48),
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
                 ),
               ),
+            IconButton(
+              key: const Key('feedback-logs-expand'),
+              tooltip: expanded ? '收起日志详情' : '展开日志详情',
+              iconSize: 20,
+              constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+              isSelected: expanded,
+              icon: Icon(expanded ? Icons.expand_less : Icons.expand_more),
+              onPressed: () => setState(() => _logsExpanded = !expanded),
+            ),
           ],
         ),
+        // 采集 / 选择错误常驻：折叠态同样可见、可重试。
         if (_logError != null)
           Padding(
             padding: const EdgeInsets.only(top: 4, bottom: 4),
@@ -2404,24 +3703,77 @@ class FeedbackPanelState extends State<FeedbackPanel>
               ),
             ),
           ),
-        if (_logs.isNotEmpty)
-          Container(
-            key: const Key('feedback-logs-list'),
-            margin: const EdgeInsets.only(top: 4, bottom: 6),
-            padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 8),
-            decoration: BoxDecoration(
-              color: theme.colorScheme.surfaceContainerHighest,
-              borderRadius: BorderRadius.circular(6),
-              border: Border.all(color: theme.colorScheme.outlineVariant),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: <Widget>[
-                for (int i = 0; i < _logs.length; i++)
-                  _buildLogItem(context, i, _logs[i]),
-              ],
-            ),
-          ),
+        // 展开区：文件列表（预览 / 移除）+ 重新采集。
+        AnimatedSize(
+          key: const Key('feedback-logs-collapsible'),
+          duration: kFeedbackMotion,
+          curve: Curves.easeOut,
+          alignment: Alignment.topCenter,
+          child: !expanded
+              ? const SizedBox(width: double.infinity)
+              : Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    if (_logs.isNotEmpty)
+                      Container(
+                        key: const Key('feedback-logs-list'),
+                        margin: const EdgeInsets.only(top: 4, bottom: 6),
+                        padding: const EdgeInsets.symmetric(
+                            vertical: 2, horizontal: 8),
+                        decoration: BoxDecoration(
+                          color: theme.colorScheme.surfaceContainerHighest,
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(
+                              color: theme.colorScheme.outlineVariant),
+                        ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: <Widget>[
+                            for (int i = 0; i < _logs.length; i++)
+                              _buildLogItem(context, i, _logs[i]),
+                          ],
+                        ),
+                      )
+                    else
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 6),
+                        child: Text(
+                          '暂无日志文件',
+                          key: const Key('feedback-logs-empty'),
+                          style: theme.textTheme.bodySmall
+                              ?.copyWith(color: theme.colorScheme.outline),
+                        ),
+                      ),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: TextButton.icon(
+                        key: const Key('feedback-logs-recollect'),
+                        onPressed:
+                            (_logsCollecting || _busy) ? null : _recollectLogs,
+                        icon: const Icon(Icons.refresh, size: 14),
+                        label:
+                            const Text('重新采集', style: TextStyle(fontSize: 12)),
+                        style: TextButton.styleFrom(
+                          tapTargetSize: MaterialTapTargetSize.padded,
+                          minimumSize: const Size(64, 48),
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                        ),
+                      ),
+                    ),
+                    if (!hasProvider)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 4),
+                        child: Text(
+                          '未配置自动采集器，可手动添加日志文件',
+                          key: const Key('feedback-logs-no-provider'),
+                          style: theme.textTheme.bodySmall
+                              ?.copyWith(color: theme.colorScheme.outline),
+                        ),
+                      ),
+                  ],
+                ),
+        ),
       ],
     );
   }
@@ -2482,18 +3834,17 @@ class FeedbackPanelState extends State<FeedbackPanel>
             key: Key('feedback-log-btn-preview-$index'),
             icon: const Icon(Icons.visibility_outlined, size: 16),
             tooltip: '预览',
-            visualDensity: VisualDensity.compact,
             padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+            // 点击目标至少 48dp（冻结视觉规格）。
+            constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
             onPressed: () => _openLogPreview(context, log),
           ),
           IconButton(
             key: Key('feedback-log-btn-remove-$index'),
             icon: const Icon(Icons.close, size: 16),
             tooltip: '移除',
-            visualDensity: VisualDensity.compact,
             padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+            constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
             onPressed: _busy ? null : () => removeLog(index),
           ),
         ],
@@ -2502,9 +3853,8 @@ class FeedbackPanelState extends State<FeedbackPanel>
   }
 
   void _openLogPreview(BuildContext context, FeedbackLogFile log) {
-    showDialog<void>(
-      context: context,
-      builder: (BuildContext ctx) {
+    unawaited(_showPanelDialog<void>(
+      builder: (BuildContext ctx, void Function([void]) close) {
         return AlertDialog(
           key: const Key('feedback-log-preview-dialog'),
           title: Text(
@@ -2528,13 +3878,13 @@ class FeedbackPanelState extends State<FeedbackPanel>
           actions: <Widget>[
             TextButton(
               key: const Key('feedback-log-preview-close'),
-              onPressed: () => Navigator.of(ctx).pop(),
+              onPressed: () => close(),
               child: const Text('关闭'),
             ),
           ],
         );
       },
-    );
+    ));
   }
 
   Future<void> _collectLogs() async {
@@ -2557,16 +3907,56 @@ class FeedbackPanelState extends State<FeedbackPanel>
       }
       _logsCollected = true;
       if (result != null && result.isNotEmpty) {
-        final List<FeedbackLogFile> valid = <FeedbackLogFile>[];
+        final List<FeedbackLogFile> manual = _logs
+            .where((FeedbackLogFile l) => l.source != 'auto')
+            .toList(growable: false);
+        String? error;
+        if (manual.length + result.length > kFeedbackMaxLogFiles) {
+          error = '日志数量超过 $kFeedbackMaxLogFiles 个上限（含手动附加的日志）';
+        }
         for (final FeedbackLogFile log in result) {
-          if (valid.length >= kFeedbackMaxLogFiles) break;
+          if (error != null) break;
           final String ext = _getLogExtension(log.filename);
-          if (!kFeedbackAllowedLogExtensions.contains(ext)) continue;
-          if (log.byteSize > kFeedbackMaxLogBytes) continue;
-          valid.add(log);
+          String? reason;
+          if (log.filename.contains('/') || log.filename.contains('\\')) {
+            reason = '日志文件名不能包含路径分隔符';
+          } else if (!kFeedbackAllowedLogExtensions.contains(ext)) {
+            reason = '文件格式不受支持，仅支持 .log, .txt, .json, .jsonl';
+          } else if (log.bytes.isEmpty) {
+            reason = '日志文件不能为空';
+          } else if (log.byteSize > kFeedbackMaxLogBytes) {
+            reason = '日志文件不能超过 1MiB 限制';
+          } else {
+            try {
+              final String text = utf8.decode(log.bytes, allowMalformed: false);
+              if (text.contains('\u0000')) {
+                reason = '日志不能包含 NUL 字符';
+              }
+            } on FormatException {
+              reason = '日志必须是有效的 UTF-8 文本';
+            }
+          }
+          if (reason != null) error = '${log.filename}: $reason';
+        }
+        if (error != null) {
+          setState(() {
+            _logsCollecting = false;
+            _logError = error;
+          });
+          return;
         }
         setState(() {
-          _logs = valid;
+          // 整批校验成功才替换自动项；失败时保留原列表，手动项始终保留。
+          _logs = <FeedbackLogFile>[
+            ...manual,
+            for (final FeedbackLogFile log in result)
+              FeedbackLogFile(
+                filename: log.filename,
+                bytes: log.bytes,
+                source: 'auto',
+                sha256: log.sha256,
+              ),
+          ];
           _logsCollecting = false;
         });
       } else {
@@ -2653,6 +4043,7 @@ class FeedbackPanelState extends State<FeedbackPanel>
   void _addManualLogs(List<FeedbackLogFile> files) {
     setState(() {
       _logError = null;
+      int added = 0;
       for (final FeedbackLogFile file in files) {
         if (_logs.length >= kFeedbackMaxLogFiles) {
           _logError = '最多附加 $kFeedbackMaxLogFiles 个日志文件';
@@ -2675,7 +4066,1192 @@ class FeedbackPanelState extends State<FeedbackPanel>
             sha256: file.sha256,
           ),
         );
+        added++;
       }
+      // 手动添加成功后展开列表，明确回显新增内容。
+      if (added > 0) _logsExpanded = true;
     });
+  }
+
+  /// T4：重新采集诊断日志——保留手动附加项，重新调用 logProvider；
+  /// 采集失败仍可提交（失败只提示，不阻塞）。
+  Future<void> _recollectLogs() async {
+    final FeedbackLogProvider? provider =
+        widget.logProvider ?? widget.config.logProvider;
+    if (provider == null) {
+      _showToast('未配置日志采集器，可手动添加日志文件');
+      return;
+    }
+    if (_logsCollecting) return;
+    setState(() {
+      _logsExpanded = true;
+      _logsCollected = false;
+      _logError = null;
+    });
+    await _collectLogs();
+  }
+
+  // ---------------------------------------------------------------- 历史与工单详情视图
+
+  Widget _buildHistoryView(BuildContext context) {
+    if (!_signedIn) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Icon(Icons.lock_outline,
+                  size: 48, color: Theme.of(context).colorScheme.outline),
+              const SizedBox(height: 16),
+              Text(
+                '查看反馈历史需要登录',
+                style: Theme.of(context).textTheme.titleSmall,
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                '登录后可查看您提交的全部反馈及管理团队的回复',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.grey, fontSize: 13),
+              ),
+              const SizedBox(height: 20),
+              FilledButton(
+                key: const Key('history-login-btn'),
+                onPressed: () {
+                  setState(() {
+                    _panelTab = _PanelTab.compose;
+                    _showLoginForm = true;
+                  });
+                },
+                child: const Text('前往登录'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    if (_historyLoading && _myFeedbacks.isEmpty) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    if (_historyError != null && _myFeedbacks.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              const Icon(Icons.error_outline, size: 48, color: Colors.red),
+              const SizedBox(height: 12),
+              Text(_historyError!, textAlign: TextAlign.center),
+              const SizedBox(height: 16),
+              OutlinedButton(
+                onPressed: _loadHistoryList,
+                child: const Text('重试'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    // v12：状态筛选行（待处理/待补充/待管理员回复/已解决）+ 分页控件。
+    final Widget filterRow = SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+      child: Row(
+        children: <Widget>[
+          _buildFilterChip(null, '全部'),
+          _buildFilterChip(IssueStatus.open, '待处理'),
+          _buildFilterChip(IssueStatus.waitingUser, '待补充'),
+          _buildFilterChip(IssueStatus.waitingAdmin, '待管理员回复'),
+          _buildFilterChip(IssueStatus.resolved, '已解决'),
+        ],
+      ),
+    );
+
+    final int maxPage = _historyTotal <= 0
+        ? 1
+        : ((_historyTotal + _historyLimit - 1) ~/ _historyLimit);
+
+    final Widget listBody;
+    if (_myFeedbacks.isEmpty && !_historyLoading) {
+      listBody = Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Icon(Icons.inbox_outlined,
+                size: 48, color: Theme.of(context).colorScheme.outline),
+            const SizedBox(height: 12),
+            Text(
+              _historyFilter == null ? '暂无反馈记录' : '该状态下暂无反馈',
+              style: const TextStyle(color: Colors.grey),
+            ),
+            const SizedBox(height: 16),
+            FilledButton.tonal(
+              onPressed: () => _switchTab(_PanelTab.compose),
+              child: const Text('新建一条反馈'),
+            ),
+          ],
+        ),
+      );
+    } else {
+      listBody = RefreshIndicator(
+        onRefresh: () => _loadHistoryList(),
+        child: ListView.separated(
+          padding: const EdgeInsets.all(12),
+          itemCount: _myFeedbacks.length,
+          separatorBuilder: (_, __) => const Divider(height: 1),
+          itemBuilder: (BuildContext context, int index) {
+            final UserFeedbackListItem item = _myFeedbacks[index];
+            return _buildHistoryItem(context, item);
+          },
+        ),
+      );
+    }
+
+    return Column(
+      children: <Widget>[
+        Row(children: <Widget>[
+          Expanded(child: filterRow),
+          IconButton(
+            key: const Key('feedback-history-refresh'),
+            tooltip: '刷新我的反馈',
+            onPressed: _historyLoading ? null : _loadHistoryList,
+            icon: const Icon(Icons.refresh),
+          ),
+        ]),
+        if (_historyError != null)
+          Padding(
+              padding: const EdgeInsets.all(8), child: Text(_historyError!)),
+        Expanded(child: listBody),
+        if (_historyTotal > _historyLimit || _historyPage > 1)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: <Widget>[
+                IconButton(
+                  key: const Key('feedback-history-prev'),
+                  tooltip: '上一页',
+                  icon: const Icon(Icons.chevron_left),
+                  onPressed: _historyPage > 1 && !_historyLoading
+                      ? () => _loadHistoryPage(-1)
+                      : null,
+                ),
+                Flexible(
+                    child: Text(
+                  '第 $_historyPage / $maxPage 页（共 $_historyTotal 条）',
+                  key: const Key('feedback-history-pageinfo'),
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.bodySmall,
+                )),
+                IconButton(
+                  key: const Key('feedback-history-next'),
+                  tooltip: '下一页',
+                  icon: const Icon(Icons.chevron_right),
+                  onPressed: _historyPage < maxPage && !_historyLoading
+                      ? () => _loadHistoryPage(1)
+                      : null,
+                ),
+                if (_historyLoading)
+                  const Padding(
+                    padding: EdgeInsets.only(left: 8),
+                    child: SizedBox.square(
+                      dimension: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildFilterChip(IssueStatus? status, String label) {
+    final bool selected = _historyFilter == status;
+    final ColorScheme scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(right: 6),
+      child: Material(
+        color: selected ? scheme.primaryContainer : Colors.transparent,
+        borderRadius: BorderRadius.circular(8),
+        child: InkWell(
+          key: Key('feedback-filter-${status?.toWire() ?? 'all'}'),
+          borderRadius: BorderRadius.circular(8),
+          onTap: () => _setHistoryFilter(status),
+          // 状态筛选点击目标 ≥48dp（冻结视觉规格）。
+          child: SizedBox(
+            height: 48,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                const SizedBox(width: 10),
+                Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: selected
+                        ? scheme.onPrimaryContainer
+                        : scheme.onSurfaceVariant,
+                    fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
+                  ),
+                ),
+                const SizedBox(width: 10),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHistoryItem(BuildContext context, UserFeedbackListItem item) {
+    final ColorScheme scheme = Theme.of(context).colorScheme;
+    // v12 用户端统一文案：open→待处理、waiting_user→待补充、
+    // waiting_admin→待管理员回复、resolved→已解决（含状态图标）。
+    final (Color tagBg, Color tagFg, String tagText, IconData tagIcon) =
+        switch (item.issueStatus) {
+      IssueStatus.waitingUser => (
+          Colors.orange.shade100,
+          Colors.orange.shade900,
+          '待补充',
+          Icons.edit_note,
+        ),
+      IssueStatus.waitingAdmin => (
+          scheme.primaryContainer,
+          scheme.onPrimaryContainer,
+          '待管理员回复',
+          Icons.support_agent,
+        ),
+      IssueStatus.resolved => (
+          Colors.green.shade100,
+          Colors.green.shade900,
+          '已解决',
+          Icons.check_circle_outline,
+        ),
+      IssueStatus.open => (
+          scheme.surfaceContainerHighest,
+          scheme.onSurfaceVariant,
+          '待处理',
+          Icons.hourglass_empty,
+        ),
+    };
+
+    final String displayTitle =
+        item.title?.isNotEmpty == true ? item.title! : item.text;
+
+    return InkWell(
+      key: Key('feedback-item-${item.id}'),
+      onTap: () => _openDialogue(item.id),
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              children: <Widget>[
+                Text('#${item.id}',
+                    style: Theme.of(context).textTheme.bodySmall),
+                Text('${item.messageCount} 条动态',
+                    style: Theme.of(context).textTheme.bodySmall),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Row(
+              children: <Widget>[
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: tagBg,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      Icon(tagIcon, size: 11, color: tagFg),
+                      const SizedBox(width: 3),
+                      // 裸 RichText（非 Text/Text.rich）：状态筛选行的同名
+                      // chip 与本标签并存时，find.text 只命中 chip 不误伤。
+                      RichText(
+                        text: TextSpan(
+                          text: tagText,
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold,
+                            color: tagFg,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                if (item.unread) ...<Widget>[
+                  const SizedBox(width: 6),
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.red.shade600,
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: const Text(
+                      '未读',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text('最近更新：${_formatTime(item.lastActivityAt)}',
+                style: Theme.of(context).textTheme.bodySmall),
+            const SizedBox(height: 6),
+            Text(
+              displayTitle,
+              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+            ),
+            if (item.latestMessageText != null) ...<Widget>[
+              const SizedBox(height: 4),
+              Text(
+                '${_messageRole(item.latestMessageSender)}: ${item.latestMessageText}',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: item.latestMessageSender == 'admin'
+                          ? scheme.primary
+                          : Colors.grey.shade700,
+                    ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _messageRole(String? sender) => switch (sender) {
+        'system' => '系统',
+        'admin' => '管理员',
+        'user' => '我',
+        _ => '动态',
+      };
+
+  String _nextStep(IssueStatus status) => switch (status) {
+        IssueStatus.open => '反馈已保存，等待管理员处理；有新线索可在下方补充。',
+        IssueStatus.waitingUser => '管理员正在等待您的补充，请查看下方回复并提供信息。',
+        IssueStatus.waitingAdmin => '您的补充已保存，等待管理员回复；无需重复提交。',
+        IssueStatus.resolved => '问题已标记解决；仍有问题可继续补充，保留同一条反馈。',
+      };
+
+  Widget _buildDialogueView(BuildContext context) {
+    if (_dialogueLoading && _dialogueData == null) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (_dialogueError != null && _dialogueData == null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              const Icon(Icons.error_outline, size: 48, color: Colors.red),
+              const SizedBox(height: 12),
+              Text(_dialogueError!, textAlign: TextAlign.center),
+              const SizedBox(height: 16),
+              OutlinedButton(
+                onPressed: () {
+                  if (_selectedDialogueId != null) {
+                    _loadDialogue(_selectedDialogueId!);
+                  }
+                },
+                child: const Text('重试'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+    if (_dialogueData == null) {
+      return const SizedBox.shrink();
+    }
+
+    final FeedbackDialogueResponse dialogue = _dialogueData!;
+    final ColorScheme scheme = Theme.of(context).colorScheme;
+    final List<FeedbackMessageItem> messages =
+        List<FeedbackMessageItem>.from(dialogue.messages)
+          ..sort((FeedbackMessageItem a, FeedbackMessageItem b) =>
+              a.seq.compareTo(b.seq));
+    final String? latestNote = messages.reversed
+            .map((FeedbackMessageItem m) => m.resolutionNote)
+            .whereType<String>()
+            .where((String note) => note.trim().isNotEmpty)
+            .firstOrNull ??
+        dialogue.resolutionNote;
+
+    return Column(
+      children: <Widget>[
+        Expanded(
+          child: ListView(
+            key: const Key('feedback-dialogue-list'),
+            controller: _dialogueScroll,
+            padding: const EdgeInsets.all(12),
+            children: <Widget>[
+              Text(
+                  dialogue.title?.isNotEmpty == true ? dialogue.title! : '反馈详情',
+                  key: const Key('feedback-dialogue-title'),
+                  style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 6),
+              SelectableText('#${dialogue.feedbackId}',
+                  key: const Key('feedback-dialogue-id'),
+                  style: Theme.of(context).textTheme.bodySmall),
+              const SizedBox(height: 4),
+              Text(
+                  '提交于 ${_formatTime(dialogue.createdAt)} · 最近更新 ${_formatTime(dialogue.lastActivityAt)}',
+                  style: Theme.of(context).textTheme.bodySmall),
+              const SizedBox(height: 8),
+              Text(dialogue.issueStatus.label,
+                  style: TextStyle(
+                      color: scheme.primary, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 4),
+              Text(_nextStep(dialogue.issueStatus),
+                  key: const Key('feedback-next-step'),
+                  style: Theme.of(context).textTheme.bodyMedium),
+              if (_dialogueError != null) Text(_dialogueError!),
+              const SizedBox(height: 16),
+              // 原话卡片
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: scheme.surfaceContainerHighest.withValues(alpha: 0.5),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: scheme.outlineVariant),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text('我 · ${_formatTime(dialogue.createdAt)} · 提交了问题',
+                        style: Theme.of(context).textTheme.labelMedium),
+                    const SizedBox(height: 6),
+                    SelectableText(
+                      dialogue.text,
+                      style: const TextStyle(fontSize: 14, height: 1.4),
+                    ),
+                    // v12：初始反馈图片列表（历史单图经兼容读取进入同一列表；
+                    // 老服务可能只有 screenshot 元数据，退回单图展示）。
+                    if (dialogue.images.isNotEmpty) ...<Widget>[
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: <Widget>[
+                          for (final FeedbackImageView img in dialogue.images)
+                            _FeedbackBearerImage(
+                              key: Key('feedback-history-img-${img.id}'),
+                              bytesLoader: () => _api.fetchFeedbackImage(
+                                  dialogue.feedbackId, img.id),
+                              width: 84,
+                              height: 84,
+                              onRetry: _showToast,
+                            ),
+                        ],
+                      ),
+                    ] else if (dialogue.screenshot != null) ...<Widget>[
+                      const SizedBox(height: 8),
+                      _FeedbackBearerImage(
+                        key: const Key('feedback-history-screenshot'),
+                        bytesLoader: () =>
+                            _api.fetchFeedbackScreenshot(dialogue.feedbackId),
+                        width: 84,
+                        height: 84,
+                        onRetry: _showToast,
+                      ),
+                      const SizedBox(height: 4),
+                      Row(
+                        children: <Widget>[
+                          const Icon(Icons.image, size: 16, color: Colors.grey),
+                          const SizedBox(width: 4),
+                          Text(
+                            '包含截图 (${dialogue.screenshot!.width}x${dialogue.screenshot!.height})',
+                            style: const TextStyle(
+                                fontSize: 12, color: Colors.grey),
+                          ),
+                        ],
+                      ),
+                    ],
+                    if (dialogue.logs.isNotEmpty) ...<Widget>[
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 4,
+                        children:
+                            dialogue.logs.map((FeedbackLogAttachmentView log) {
+                          return ActionChip(
+                            avatar: const Icon(Icons.description, size: 14),
+                            label: Text(log.filename,
+                                style: const TextStyle(fontSize: 11)),
+                            tooltip: '查看日志',
+                            onPressed: () =>
+                                _openRemoteLogPreview(dialogue.feedbackId, log),
+                          );
+                        }).toList(),
+                      ),
+                    ],
+                    // v12：处理说明（管理员标记解决必填）对用户可见。
+                    if (latestNote != null &&
+                        latestNote.isNotEmpty) ...<Widget>[
+                      const SizedBox(height: 8),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          color: Colors.green.shade50,
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(color: Colors.green.shade200),
+                        ),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: <Widget>[
+                            Icon(Icons.check_circle_outline,
+                                size: 14, color: Colors.green.shade800),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Text(
+                                '最近处理说明：$latestNote',
+                                key: const Key('feedback-resolution-note'),
+                                style: TextStyle(
+                                    fontSize: 12, color: Colors.green.shade900),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+              // 对话消息列表
+              if (dialogue.messages.isEmpty)
+                Center(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 24),
+                    child: Text(
+                      '后续回复和系统动态会显示在这里。',
+                      style:
+                          TextStyle(color: Colors.grey.shade500, fontSize: 13),
+                    ),
+                  ),
+                )
+              else
+                ...messages.map((FeedbackMessageItem msg) =>
+                    _buildTimelineEvent(context, msg)),
+              const SizedBox(height: 12),
+              _buildReplyComposer(context),
+            ],
+          ),
+        ),
+        TextButton.icon(
+          key: const Key('feedback-jump-reply'),
+          onPressed: () {
+            if (!_dialogueScroll.hasClients) return;
+            _dialogueScroll.animateTo(_dialogueScroll.position.maxScrollExtent,
+                duration: kFeedbackMotion, curve: Curves.easeOut);
+          },
+          icon: const Icon(Icons.add_comment_outlined, size: 18),
+          label: const Text('补充信息'),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildTimelineEvent(BuildContext context, FeedbackMessageItem msg) {
+    final ColorScheme scheme = Theme.of(context).colorScheme;
+    return Container(
+      key: Key('feedback-event-${msg.id}'),
+      decoration: BoxDecoration(
+          border:
+              Border(left: BorderSide(color: scheme.outlineVariant, width: 2))),
+      padding: const EdgeInsets.only(left: 10, top: 4),
+      child:
+          Row(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
+        Padding(
+            padding: const EdgeInsets.only(top: 6, right: 8),
+            child: Icon(
+                msg.senderType == 'system'
+                    ? Icons.info_outline
+                    : Icons.chat_bubble_outline,
+                size: 16,
+                color: scheme.onSurfaceVariant)),
+        Expanded(child: _buildMessageBubble(context, msg)),
+      ]),
+    );
+  }
+
+  Widget _buildMessageBubble(BuildContext context, FeedbackMessageItem msg) {
+    final ColorScheme scheme = Theme.of(context).colorScheme;
+    final bool isUser = msg.senderType == 'user';
+    final bool isSystem = msg.senderType == 'system';
+
+    if (isSystem) {
+      return Center(
+        child: Container(
+          margin: const EdgeInsets.symmetric(vertical: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          decoration: BoxDecoration(
+            color: scheme.surfaceContainerHighest,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text('系统 · ${_formatTime(msg.createdAt)}',
+                    style: Theme.of(context).textTheme.labelSmall),
+                Text(msg.text,
+                    style: TextStyle(
+                        fontSize: 12, color: scheme.onSurfaceVariant)),
+                if (msg.resolutionNote?.isNotEmpty == true &&
+                    msg.text.trim() != msg.resolutionNote!.trim())
+                  Text('处理说明：${msg.resolutionNote}',
+                      key: Key('feedback-msg-resolution-${msg.id}')),
+              ]),
+        ),
+      );
+    }
+
+    final String displayName =
+        isUser ? '我' : (msg.senderName.isNotEmpty ? msg.senderName : '管理员');
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              children: <Widget>[
+                Text(
+                  displayName,
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    color: isUser ? scheme.primary : scheme.secondary,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  _formatTime(msg.createdAt),
+                  style: const TextStyle(fontSize: 10, color: Colors.grey),
+                ),
+              ],
+            ),
+          ),
+          Container(
+            constraints: BoxConstraints(
+              maxWidth: MediaQuery.of(context).size.width * 0.85,
+            ),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: isUser ? scheme.primary : scheme.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                if (msg.text.isNotEmpty)
+                  SelectableText(
+                    msg.text,
+                    style: TextStyle(
+                      fontSize: 14,
+                      color: isUser ? scheme.onPrimary : scheme.onSurface,
+                      height: 1.3,
+                    ),
+                  ),
+                // v12：处理说明（随解决动作入库并对用户可见）。
+                if (msg.resolutionNote != null &&
+                    msg.resolutionNote!.isNotEmpty &&
+                    msg.text.trim() != msg.resolutionNote!.trim()) ...<Widget>[
+                  const SizedBox(height: 6),
+                  Container(
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      color: isUser
+                          ? Colors.white.withValues(alpha: 0.15)
+                          : Colors.green.shade50,
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Text(
+                      '处理说明：${msg.resolutionNote}',
+                      key: Key('feedback-msg-resolution-${msg.id}'),
+                      style: TextStyle(
+                        fontSize: 11,
+                        color:
+                            isUser ? scheme.onPrimary : Colors.green.shade900,
+                      ),
+                    ),
+                  ),
+                ],
+                if (msg.attachments.isNotEmpty) ...<Widget>[
+                  const SizedBox(height: 6),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children:
+                        msg.attachments.map((FeedbackMessageAttachment att) {
+                      // v12：附件一律 Bearer 取回字节渲染（URL 不带凭据，
+                      // Image.network 跨源必然 401）；失败显示占位 + 重试。
+                      if (att.isImage) {
+                        return _FeedbackBearerImage(
+                          key: Key('feedback-msg-img-${att.id}'),
+                          bytesLoader: () =>
+                              _api.fetchMessageAttachment(att.id),
+                          width: 72,
+                          height: 72,
+                          onRetry: _showToast,
+                        );
+                      }
+                      return InkWell(
+                        onTap: () => _openRemoteAttachment(att),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: isUser
+                                ? Colors.white.withValues(alpha: 0.2)
+                                : scheme.surface,
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: <Widget>[
+                              Icon(
+                                att.isImage ? Icons.image : Icons.description,
+                                size: 12,
+                                color: isUser
+                                    ? scheme.onPrimary
+                                    : scheme.onSurface,
+                              ),
+                              const SizedBox(width: 4),
+                              Text(
+                                att.filename,
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: isUser
+                                      ? scheme.onPrimary
+                                      : scheme.onSurface,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildReplyComposer(BuildContext context) {
+    final ColorScheme scheme = Theme.of(context).colorScheme;
+    final bool hasAttachments =
+        _replyImages.isNotEmpty || _replyLogs.isNotEmpty;
+
+    return Container(
+      key: const Key('feedback-reply-composer'),
+      color: scheme.surface,
+      padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Text('补充信息', style: Theme.of(context).textTheme.titleSmall),
+          const SizedBox(height: 4),
+          Text('补充会保留在这条问题中，返回列表后草稿仍在。',
+              style: Theme.of(context).textTheme.bodySmall),
+          if (_replyError != null)
+            Text(_replyError!,
+                key: const Key('feedback-reply-error'),
+                style: TextStyle(color: scheme.error)),
+          const SizedBox(height: 8),
+          if (hasAttachments) ...<Widget>[
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: <Widget>[
+                  // v12 / T2.6：回复图片卡片——完整显示（contain），
+                  // 编辑 / 删除在图片下方（≥48dp），不遮挡内容。
+                  for (int i = 0; i < _replyImages.length; i++)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 6, bottom: 6),
+                      child: SizedBox(
+                        width: 96,
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: <Widget>[
+                            SizedBox(
+                              height: 64,
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(10),
+                                child: Stack(
+                                  fit: StackFit.expand,
+                                  children: <Widget>[
+                                    const ColoredBox(color: Color(0x14000000)),
+                                    GestureDetector(
+                                      key: Key('reply-image-thumb-$i'),
+                                      onTap: () => _openImageZoom(
+                                          context, _replyImages[i]),
+                                      child: Image.memory(_replyImages[i].bytes,
+                                          fit: BoxFit.contain),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            SizedBox(
+                              height: 48,
+                              child: Row(
+                                mainAxisAlignment:
+                                    MainAxisAlignment.spaceEvenly,
+                                children: <Widget>[
+                                  IconButton(
+                                    key: Key('reply-image-edit-$i'),
+                                    tooltip: '编辑',
+                                    padding: EdgeInsets.zero,
+                                    constraints: const BoxConstraints(
+                                        minWidth: 48, minHeight: 48),
+                                    icon: const Icon(Icons.edit_outlined,
+                                        size: 16),
+                                    onPressed: _replySending
+                                        ? null
+                                        : () => _editImage(_replyImages, i),
+                                  ),
+                                  IconButton(
+                                    key: Key('reply-image-remove-$i'),
+                                    tooltip: '删除',
+                                    padding: EdgeInsets.zero,
+                                    constraints: const BoxConstraints(
+                                        minWidth: 48, minHeight: 48),
+                                    icon: const Icon(Icons.delete_outline,
+                                        size: 16),
+                                    onPressed: _replySending
+                                        ? null
+                                        : () {
+                                            setState(() {
+                                              _replyImages.removeAt(i);
+                                            });
+                                          },
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ..._replyLogs.map((FeedbackLogFile log) {
+                    return Padding(
+                      padding: const EdgeInsets.only(right: 6, bottom: 6),
+                      child: Chip(
+                        avatar: const Icon(Icons.description, size: 14),
+                        label: Text(log.filename,
+                            style: const TextStyle(fontSize: 11)),
+                        onDeleted: _replySending
+                            ? null
+                            : () {
+                                setState(() {
+                                  _replyLogs.remove(log);
+                                });
+                              },
+                      ),
+                    );
+                  }),
+                ],
+              ),
+            ),
+          ],
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: <Widget>[
+              Expanded(
+                child: TextField(
+                  key: const Key('feedback-reply-input'),
+                  controller: _replyController,
+                  focusNode: _replyFocus,
+                  enabled: !_replySending,
+                  minLines: 2,
+                  maxLines: 6,
+                  inputFormatters: const <TextInputFormatter>[
+                    _RuneLimitFormatter(kFeedbackMaxTextRunes)
+                  ],
+                  decoration: const InputDecoration(
+                    hintText: '补充信息或回复管理员…',
+                    isDense: true,
+                    contentPadding:
+                        EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.all(Radius.circular(8)),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              IconButton.filled(
+                key: const Key('feedback-reply-send'),
+                tooltip: '发送补充',
+                icon: _replySending
+                    ? const SizedBox.square(
+                        dimension: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Icon(Icons.send, size: 18),
+                onPressed: _replySending ? null : _sendReply,
+              ),
+            ],
+          ),
+          Wrap(children: <Widget>[
+            IconButton(
+              key: const Key('reply-attach-image'),
+              icon: const Icon(Icons.image_outlined, size: 20),
+              tooltip: '附加图片',
+              onPressed:
+                  _replySending ? null : () => _pickImagesInto(_replyImages),
+            ),
+            IconButton(
+              key: const Key('reply-attach-log'),
+              icon: const Icon(Icons.attach_file, size: 20),
+              tooltip: '附加日志',
+              onPressed: _replySending ? null : _pickReplyLog,
+            ),
+          ]),
+        ],
+      ),
+    );
+  }
+}
+
+/// 缩略图视图（T2.6）：`BoxFit.contain` **完整显示**（禁止 cover 二次
+/// 裁切），右下角解析并显示输出尺寸（`宽×高` 像素）。
+class _ThumbnailImageView extends StatefulWidget {
+  const _ThumbnailImageView({required this.bytes});
+
+  final Uint8List bytes;
+
+  @override
+  State<_ThumbnailImageView> createState() => _ThumbnailImageViewState();
+}
+
+class _ThumbnailImageViewState extends State<_ThumbnailImageView> {
+  int? _width;
+  int? _height;
+  ImageStreamListener? _listener;
+
+  @override
+  void initState() {
+    super.initState();
+    _resolveSize();
+  }
+
+  @override
+  void didUpdateWidget(_ThumbnailImageView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.bytes, widget.bytes)) {
+      _detach();
+      _width = null;
+      _height = null;
+      _resolveSize();
+    }
+  }
+
+  void _resolveSize() {
+    final ImageProvider provider = MemoryImage(widget.bytes);
+    final ImageStream stream = provider.resolve(const ImageConfiguration());
+    final ImageStreamListener listener = ImageStreamListener(
+      (ImageInfo info, bool synchronousCall) {
+        if (!mounted) return;
+        setState(() {
+          _width = info.image.width;
+          _height = info.image.height;
+        });
+      },
+      onError: (Object error, StackTrace? stackTrace) {
+        // 解码失败：不显示尺寸标签（缩略图本身由 Image.memory 报错）。
+      },
+    );
+    _listener = listener;
+    stream.addListener(listener);
+    _stream = stream;
+  }
+
+  ImageStream? _stream;
+
+  void _detach() {
+    final ImageStreamListener? listener = _listener;
+    if (listener != null) _stream?.removeListener(listener);
+    _listener = null;
+    _stream = null;
+  }
+
+  @override
+  void dispose() {
+    _detach();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      fit: StackFit.expand,
+      children: <Widget>[
+        Positioned.fill(
+          child: Image.memory(widget.bytes, fit: BoxFit.contain),
+        ),
+        if (_width != null && _height != null)
+          Positioned(
+            right: 4,
+            bottom: 4,
+            child: DecoratedBox(
+              decoration: const BoxDecoration(
+                color: Colors.black54,
+                borderRadius: BorderRadius.all(Radius.circular(4)),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                child: Text(
+                  '$_width×$_height',
+                  key: const Key('feedback-image-size'),
+                  style: const TextStyle(color: Colors.white, fontSize: 9),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// Bearer 附件图片（v12）：附件 URL 不携带凭据，经 [bytesLoader]
+/// （`Authorization: Bearer` 请求）取回字节后 `Image.memory` 渲染；
+/// 加载失败显示占位与「重试」，不阻塞消息文本渲染。
+class _FeedbackBearerImage extends StatefulWidget {
+  const _FeedbackBearerImage({
+    super.key,
+    required this.bytesLoader,
+    this.width = 84,
+    this.height = 84,
+    this.onRetry,
+  });
+
+  /// Bearer 下载字节（如 `ApiClient.fetchFeedbackImage`）。
+  final Future<Uint8List> Function() bytesLoader;
+  final double width;
+  final double height;
+
+  /// 失败重试提示回调（宿主 Toast）。
+  final void Function(String)? onRetry;
+
+  @override
+  State<_FeedbackBearerImage> createState() => _FeedbackBearerImageState();
+}
+
+class _FeedbackBearerImageState extends State<_FeedbackBearerImage> {
+  Uint8List? _bytes;
+  bool _failed = false;
+  int _loadSeq = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final int seq = ++_loadSeq;
+    try {
+      final Uint8List bytes = await widget.bytesLoader();
+      if (!mounted || seq != _loadSeq) return;
+      setState(() {
+        _bytes = bytes;
+        _failed = false;
+      });
+    } catch (_) {
+      if (!mounted || seq != _loadSeq) return;
+      setState(() {
+        _failed = true;
+      });
+      widget.onRetry?.call('附件加载失败');
+    }
+  }
+
+  void _retry() {
+    setState(() {
+      _failed = false;
+      _bytes = null;
+    });
+    _load();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    final Uint8List? bytes = _bytes;
+    final Widget child;
+    if (bytes != null) {
+      // T2.6 / T3：附件预览与新建反馈一致——完整显示（contain），不二次裁切。
+      child = Image.memory(bytes, fit: BoxFit.contain);
+    } else if (_failed) {
+      child = Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: <Widget>[
+          Icon(Icons.broken_image_outlined,
+              size: 20, color: theme.colorScheme.onSurfaceVariant),
+          const SizedBox(height: 2),
+          Text('重试',
+              style: TextStyle(fontSize: 10, color: theme.colorScheme.primary)),
+        ],
+      );
+    } else {
+      child = const Center(
+        child: SizedBox.square(
+          dimension: 18,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      );
+    }
+    return GestureDetector(
+      onTap: _failed ? _retry : null,
+      child: Container(
+        width: widget.width,
+        height: widget.height,
+        decoration: BoxDecoration(
+          color: theme.colorScheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: theme.colorScheme.outlineVariant),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: child,
+      ),
+    );
   }
 }

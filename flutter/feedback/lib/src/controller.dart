@@ -31,6 +31,17 @@ class FeedbackController extends ChangeNotifier {
   /// 面板当前是否展开。
   bool get isOpen => _isOpen;
 
+  /// 未读消息数（红点徽标）。
+  int get unreadCount => _unreadCount;
+  int _unreadCount = 0;
+
+  /// 组件内部更新未读数（宿主不应调用；调用即触发监听通知）。
+  void setUnreadCount(int count) {
+    if (_unreadCount == count) return;
+    _unreadCount = count;
+    notifyListeners();
+  }
+
   /// 展开反馈面板。
   void open() {
     if (_isOpen) return;

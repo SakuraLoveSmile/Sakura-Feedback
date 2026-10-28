@@ -13,6 +13,8 @@ dependencies:
 
   http: ^1.2.0
   url_launcher: ^6.3.0
+  # v12 多图附件：metadata.images 描述符必须携带内容 sha256。
+  crypto: ^3.0.3
   # 原生平台的 flutter_secure_storage 仅通过条件导入使用；
   # web 端令牌仅存内存（见 src/token_store/_web 实现）。
   # 兼容 9/10/11 全线：只使用三版共有的 read/write/delete，不抬高本包 SDK 下限；
