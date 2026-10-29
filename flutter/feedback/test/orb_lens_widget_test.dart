@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:feedback_widget/src/test_env.dart';
 import 'package:http/http.dart' as http;
 
 import 'capture_test_utils.dart';
@@ -202,6 +203,9 @@ void main() {
   late FocusHighlightStrategy savedStrategy;
 
   setUp(() {
+    // A 路线的像素证据必须在没有 C 接管时采集：首次可见的一次性捕获会把
+    // 透镜换成着色器路线，倍率曲线随之不同。
+    debugDisableOrbLensCapture = true;
     controller = FeedbackController();
     client = captureMockClient();
     savedStrategy = FocusManager.instance.highlightStrategy;
@@ -210,6 +214,7 @@ void main() {
   });
 
   tearDown(() {
+    debugDisableOrbLensCapture = false;
     controller.dispose();
     client.close();
     FocusManager.instance.highlightStrategy = savedStrategy;
