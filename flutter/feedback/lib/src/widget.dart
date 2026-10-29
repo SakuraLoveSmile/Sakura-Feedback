@@ -1,13 +1,22 @@
 import 'dart:async';
 import 'dart:math' as math;
-import 'dart:ui' as ui show Image, ImageByteFormat, Picture, PictureRecorder;
+import 'dart:ui' as ui
+    show
+        FilterQuality,
+        FragmentProgram,
+        FragmentShader,
+        Image,
+        ImageByteFormat,
+        ImageFilter,
+        Picture,
+        PictureRecorder;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart' show GestureBinding, kPrimaryButton;
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart' show SchedulerBinding, SchedulerPhase;
 import 'package:flutter/rendering.dart'
-    show MatrixUtils, RenderEditable, RenderRepaintBoundary;
+    show Matrix4, MatrixUtils, RenderEditable, RenderRepaintBoundary;
 import 'package:flutter/services.dart'
     show HardwareKeyboard, KeyDownEvent, LogicalKeyboardKey;
 import 'package:http/http.dart' as http;
@@ -233,6 +242,23 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   final GlobalKey<FeedbackPanelState> _panelKey =
       GlobalKey<FeedbackPanelState>();
 
+  /// 球盒锚点：C 路线把捕获图像像素映射回球盒时，需要球盒的全局左上角。
+  final GlobalKey _orbLensAnchorKey = GlobalKey();
+
+  // ---- T-L3b C 路线单次捕获（本地内存，不上传、不写盘）----
+
+  /// 最近的宿主快照。捕获完成只刷新透镜层，不重建球体 / 面板。
+  final ValueNotifier<_OrbLensSnapshot?> _lensSnapshot =
+      ValueNotifier<_OrbLensSnapshot?>(null);
+  ui.FragmentShader? _lensShaderCache;
+  bool _lensProgramUnavailable = false;
+  bool _lensCaptureInFlight = false;
+
+  /// 捕获间隔闸门用单调时钟，系统校时回拨不会把它锁死。
+  final Stopwatch _lensGate = Stopwatch();
+  int _lensRetries = 0;
+  bool _lensFirstCaptureScheduled = false;
+
   // 灵感球拖拽状态
   Offset _dragOffset = Offset.zero;
   Offset _lastGlobalPosition = Offset.zero;
@@ -400,6 +426,175 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     }
   }
 
+  /// C 路线触发闸门：只在「球首次可见」调度一次捕获，hidden 时释放快照。
+  ///
+  /// 绝不周期捕获；重复触发的唯一入口是拖动开始，且受 [_captureLensSnapshot]
+  /// 的一秒间隔与单在途约束。
+  void _syncOrbLensCapture(
+      {required bool open, required FeedbackConfig config}) {
+    final bool visible = !open &&
+        config.showLauncher &&
+        config.launcherMode == FeedbackLauncherMode.orb;
+    if (!visible) {
+      // 释放会写 notifier 并让透镜子树重建，不能在 build 里同步做。
+      if (_lensSnapshot.value != null || _lensFirstCaptureScheduled) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || _disposed) return;
+          _releaseLensSnapshot();
+        });
+      }
+      return;
+    }
+    if (debugDisableOrbLensCapture) return;
+    if (_lensSnapshot.value != null ||
+        _lensCaptureInFlight ||
+        _lensFirstCaptureScheduled) {
+      return;
+    }
+    _lensFirstCaptureScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _disposed) return;
+      unawaited(_captureLensSnapshot());
+    });
+  }
+
+  void _releaseLensSnapshot() {
+    _lensFirstCaptureScheduled = false;
+    _lensRetries = 0;
+    final _OrbLensSnapshot? snapshot = _lensSnapshot.value;
+    if (snapshot == null) return;
+    _lensSnapshot.value = null;
+    // 位图可能正被上一帧的绘制引用：等这一帧画完再释放。
+    _disposeAfterFrame(snapshot.image);
+  }
+
+  void _disposeAfterFrame(ui.Image image) {
+    WidgetsBinding.instance.addPostFrameCallback((_) => image.dispose());
+  }
+
+  /// 捕获宿主的当前位置作为 C 路线采样源。
+  ///
+  /// 硬约束：同一时刻最多一个在途；新触发间隔 ≥1000ms；失败立即退回 A，
+  /// 并在两帧后重试，最多两次。重试属于同一次触发，不受间隔闸门拦截。
+  Future<void> _captureLensSnapshot({bool retry = false}) async {
+    if (debugDisableOrbLensCapture) return;
+    if (_disposed || !mounted) return;
+    if (_lensCaptureInFlight) return;
+    if (_selectionCapture != null ||
+        _controller.isOpen ||
+        !widget.config.showLauncher) {
+      // 这次调度被覆盖层/面板拦下：放开标记，否则覆盖层结束后永远停在 A。
+      _lensFirstCaptureScheduled = false;
+      return;
+    }
+    if (!retry) {
+      if (_lensGate.isRunning &&
+          _lensGate.elapsed < debugOrbLensGateDuration) {
+        return;
+      }
+      _lensGate
+        ..reset()
+        ..start();
+    }
+    _lensCaptureInFlight = true;
+    try {
+      // 先确认着色器可用：它不可用是终态，不该为每次触发做一次整窗捕获。
+      final ui.FragmentShader? shader = await _lensShaderOrNull();
+      if (_disposed || !mounted) return;
+      if (shader == null) return;
+      final RenderRepaintBoundary? boundary = _repaintBoundaryKey.currentContext
+          ?.findRenderObject() as RenderRepaintBoundary?;
+      if (boundary == null || !boundary.attached || boundary.size.isEmpty) {
+        _scheduleLensRetry();
+        return;
+      }
+      final double ratio = math.min(
+        MediaQuery.maybeDevicePixelRatioOf(context) ??
+            View.of(context).devicePixelRatio,
+        kFeedbackCaptureMaxDevicePixelRatio,
+      );
+      // 几何在 toImage 之前同步取，避免「位图时刻」与「几何时刻」错开。
+      final Rect source = boundary.localToGlobal(Offset.zero) & boundary.size;
+      final RenderBox? anchor =
+          _orbLensAnchorKey.currentContext?.findRenderObject() as RenderBox?;
+      final Offset? anchorGlobal = (anchor != null && anchor.attached)
+          ? anchor.localToGlobal(Offset.zero)
+          : null;
+      debugOrbLensCaptureAttempts++;
+      if (debugFailOrbLensCapture) {
+        throw StateError('debugFailOrbLensCapture');
+      }
+      final ui.Image image = await boundary.toImage(pixelRatio: ratio);
+      if (_disposed ||
+          !mounted ||
+          _controller.isOpen ||
+          !widget.config.showLauncher) {
+        image.dispose();
+        return;
+      }
+      final _OrbLensSnapshot? previous = _lensSnapshot.value;
+      _lensSnapshot.value = _OrbLensSnapshot(
+        image: image,
+        sourceRect: source,
+        pixelRatio: ratio,
+        anchorGlobal: anchorGlobal ?? source.topLeft,
+        shader: shader,
+      );
+      if (previous != null) _disposeAfterFrame(previous.image);
+      _lensRetries = 0;
+    } catch (error) {
+      // 立即退回 A；图像未就绪时上层本来就在画 A。这里留一条不含像素的
+      // 线索，线上才能区分「着色器缺失」和「捕获失败」。
+      debugPrint('反馈组件：透镜捕获失败（${error.runtimeType}: $error）');
+      _scheduleLensRetry();
+    } finally {
+      _lensCaptureInFlight = false;
+    }
+  }
+
+  void _scheduleLensRetry() {
+    if (_disposed || !mounted || _lensRetries >= 2) return;
+    _lensRetries++;
+    int remaining = 2;
+    void onFrame(Duration _) {
+      if (!mounted || _disposed) return;
+      remaining--;
+      if (remaining > 0) {
+        WidgetsBinding.instance.scheduleFrame();
+        WidgetsBinding.instance.addPostFrameCallback(onFrame);
+        return;
+      }
+      unawaited(_captureLensSnapshot(retry: true));
+    }
+
+    WidgetsBinding.instance.scheduleFrame();
+    WidgetsBinding.instance.addPostFrameCallback(onFrame);
+  }
+
+  Future<ui.FragmentShader?> _lensShaderOrNull() async {
+    if (debugFailOrbLensShader) return null;
+    if (_lensShaderCache != null) return _lensShaderCache;
+    if (_lensProgramUnavailable) return null;
+    // 包被宿主引用时资源键带包前缀；先试前缀，组件包自己的测试/示例回退根键。
+    for (final String key in const <String>[
+      'packages/feedback_widget/shaders/orb_lens.frag',
+      'shaders/orb_lens.frag',
+    ]) {
+      try {
+        final ui.FragmentProgram program =
+            await ui.FragmentProgram.fromAsset(key);
+        // 加载期间组件可能已被移除：此时不要再创建/缓存 shader。
+        if (_disposed) return null;
+        return _lensShaderCache = program.fragmentShader();
+      } catch (_) {
+        continue;
+      }
+    }
+    if (_disposed) return null;
+    _lensProgramUnavailable = true;
+    return null;
+  }
+
   @override
   void didUpdateWidget(FeedbackWidget oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -521,6 +716,10 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     final _FrozenCapture? selection = _selectionCapture;
     _selectionCapture = null;
     selection?.dispose();
+    _lensSnapshot.value?.image.dispose();
+    _lensSnapshot.dispose();
+    _lensShaderCache?.dispose();
+    _lensShaderCache = null;
     GestureBinding.instance.pointerRouter
         .removeGlobalRoute(_globalPointerRoute);
     HardwareKeyboard.instance.removeHandler(_handleGlobalKeyEvent);
@@ -1210,6 +1409,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     //（T7i），不是纯防御。build 内不能 setState。
     if (open || !config.showLauncher) _orbFocusVisible = false;
     _syncOrbFlow();
+    _syncOrbLensCapture(open: open, config: config);
     return LayoutBuilder(
       builder: (BuildContext context, BoxConstraints constraints) {
         final double width = constraints.maxWidth.isFinite
@@ -1430,6 +1630,8 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
           brightness: brightness,
         );
     final AnimationController? glow = _orbGlow;
+    // 选区覆盖层期间不挂透镜层：覆盖层是冻结位图，透镜只会放大它自己。
+    final bool showLens = _selectionCapture == null;
 
     Widget orbBox = AnimatedContainer(
       key: const Key('feedback-orb-body'),
@@ -1459,22 +1661,43 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
               // 回弹过冲会产生负 pull，必须钳制以免 stretch<1、glow 反向。
               final double safePull =
                   (_orbReleasing ? value : pull).clamp(0.0, 1.0).toDouble();
-              return glow == null
-                  ? CustomPaint(
-                      painter:
-                          orbPainter(0.0, stateScale, safePull, breathWeight))
-                  : AnimatedBuilder(
-                      animation: glow,
-                      builder: (BuildContext context, Widget? child) =>
-                          CustomPaint(
-                        painter: orbPainter(
-                          reduceMotion ? 0.0 : glow.value,
+              Widget compose(double flow) {
+                final double breathFactor =
+                    1.0 + 0.02 * orbBreath(flow) * breathWeight;
+                return Stack(
+                  key: _orbLensAnchorKey,
+                  clipBehavior: Clip.none,
+                  fit: StackFit.expand,
+                  children: <Widget>[
+                    if (showLens)
+                      KeyedSubtree(
+                        key: const Key('feedback-orb-lens'),
+                        child: _buildOrbLensLayer(
                           stateScale,
+                          angle,
                           safePull,
-                          breathWeight,
+                          breathFactor,
                         ),
                       ),
-                    );
+                    CustomPaint(
+                      painter: orbPainter(
+                        flow,
+                        stateScale,
+                        safePull,
+                        breathWeight,
+                      ),
+                    ),
+                  ],
+                );
+              }
+
+              if (glow == null) return compose(0.0);
+              return AnimatedBuilder(
+                animation: glow,
+                builder: (BuildContext context, Widget? child) => compose(
+                  reduceMotion ? 0.0 : glow.value,
+                ),
+              );
             },
           ),
         ),
@@ -1610,6 +1833,8 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
                   _dragOffset = Offset.zero;
                   _isDragging = false;
                 });
+                // 拖动开始：刷新一次 C 路线快照（受一秒间隔与单在途约束）。
+                unawaited(_captureLensSnapshot());
               },
               onPanUpdate: (DragUpdateDetails details) {
                 _lastGlobalPosition = details.globalPosition;
@@ -1687,6 +1912,55 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
         ),
       ),
     );
+  }
+
+  /// 透镜层：C 就绪时用捕获图 + 着色器，否则（首帧、失败、被禁用）退回 A。
+  Widget _buildOrbLensLayer(
+    double stateScale,
+    double dragAngle,
+    double pull,
+    double breathFactor,
+  ) {
+    return ValueListenableBuilder<_OrbLensSnapshot?>(
+      valueListenable: _lensSnapshot,
+      builder:
+          (BuildContext context, _OrbLensSnapshot? snapshot, Widget? child) {
+        if (snapshot == null) {
+          return _OrbLensLayer(
+            stateScale: stateScale,
+            dragAngle: dragAngle,
+            pull: pull,
+            breathFactor: breathFactor,
+          );
+        }
+        final Offset anchor =
+            _orbLensAnchorGlobalOrNull() ?? snapshot.anchorGlobal;
+        return _OrbLensShaderLayer(
+          key: const Key('feedback-orb-lens-shader'),
+          shader: snapshot.shader,
+          image: snapshot.image,
+          imageOffset:
+              (anchor - snapshot.sourceRect.topLeft) * snapshot.pixelRatio,
+          pixelRatio: snapshot.pixelRatio,
+          stateScale: stateScale,
+          dragAngle: dragAngle,
+          pull: pull,
+          breathFactor: breathFactor,
+        );
+      },
+    );
+  }
+
+  /// 球盒当前的全局左上角（含拖动位移）。取上一帧的绘制变换，误差上限一帧。
+  Offset? _orbLensAnchorGlobalOrNull() {
+    final RenderObject? renderObject =
+        _orbLensAnchorKey.currentContext?.findRenderObject();
+    if (renderObject is RenderBox &&
+        renderObject.attached &&
+        renderObject.hasSize) {
+      return renderObject.localToGlobal(Offset.zero);
+    }
+    return null;
   }
 
   Widget _buildPanel(FeedbackConfig config, {required bool visible}) {
@@ -1859,4 +2133,283 @@ class _FeedbackEnvironment extends StatelessWidget {
     }
     return result;
   }
+}
+
+/// A 路线透镜的几何：与 `OrbPainter.paint` 的变换链逐项同构，
+/// 把球心在原点、半径 28 的玻璃圆映射到球盒坐标。
+Matrix4 _orbLensGeometry(
+  Size size, {
+  required double stateScale,
+  required double dragAngle,
+  required double pull,
+  required double breathFactor,
+}) {
+  final double unit = size.shortestSide / kFeedbackOrbIdleDiameter;
+  final double scale = unit * stateScale * breathFactor;
+  final Offset center = size.center(Offset.zero);
+  return Matrix4.identity()
+    ..translateByDouble(center.dx, center.dy, 0, 1)
+    ..rotateZ(dragAngle)
+    ..scaleByDouble(orbStretch(pull), 1, 1, 1)
+    ..rotateZ(-dragAngle)
+    ..scaleByDouble(scale, scale, 1, 1);
+}
+
+/// 以球心为原点放大 [kFeedbackOrbLensCenterScale] 的背景采样矩阵。
+///
+/// 放大发生在透镜自己的坐标帧里：`G · S(k) · G⁻¹`，因此内容不会被拖动角旋转、
+/// 也不会被方向拉伸带偏；球缘采样半径就是 1.7R（A 路线为常数）。
+Matrix4 _orbLensFilter(
+  Size size, {
+  required double stateScale,
+  required double dragAngle,
+  required double pull,
+  required double breathFactor,
+}) {
+  final Matrix4 geometry = _orbLensGeometry(
+    size,
+    stateScale: stateScale,
+    dragAngle: dragAngle,
+    pull: pull,
+    breathFactor: breathFactor,
+  );
+  final Matrix4 zoom = Matrix4.diagonal3Values(
+    kFeedbackOrbLensCenterScale,
+    kFeedbackOrbLensCenterScale,
+    1,
+  );
+  return geometry.multiplied(zoom).multiplied(Matrix4.inverted(geometry));
+}
+
+/// 玻璃圆裁剪：半径 28 的圆按 [_orbLensGeometry] 变换后在球盒里的椭圆。
+class _OrbLensClipper extends CustomClipper<Path> {
+  const _OrbLensClipper({
+    required this.stateScale,
+    required this.dragAngle,
+    required this.pull,
+    required this.breathFactor,
+  });
+
+  final double stateScale;
+  final double dragAngle;
+  final double pull;
+  final double breathFactor;
+
+  @override
+  Path getClip(Size size) {
+    final Matrix4 geometry = _orbLensGeometry(
+      size,
+      stateScale: stateScale,
+      dragAngle: dragAngle,
+      pull: pull,
+      breathFactor: breathFactor,
+    );
+    // 3.41 的 Path.transform 返回新 Path，不原地变换（级联会丢掉结果）。
+    final Path circle = Path()
+      ..addOval(
+        Rect.fromCircle(
+          center: Offset.zero,
+          radius: kFeedbackOrbIdleDiameter / 2,
+        ),
+      );
+    return circle.transform(geometry.storage);
+  }
+
+  @override
+  bool shouldReclip(_OrbLensClipper oldClipper) =>
+      oldClipper.stateScale != stateScale ||
+      oldClipper.dragAngle != dragAngle ||
+      oldClipper.pull != pull ||
+      oldClipper.breathFactor != breathFactor;
+}
+
+/// A 路线透镜层：玻璃圆内以球心为原点放大背景，叠在球体 painter 之下。
+///
+/// 外层 [RepaintBoundary] 把 `ImageFilter.matrix` 的参考坐标系钉在透镜盒本地
+/// 坐标——`BackdropFilter` 的矩阵按最近合成层解释，裸挂时会被祖先的绘制偏移
+/// （Positioned / Transform.translate）平移掉，放大中心就不在球心。
+class _OrbLensLayer extends StatelessWidget {
+  const _OrbLensLayer({
+    required this.stateScale,
+    required this.dragAngle,
+    required this.pull,
+    required this.breathFactor,
+  });
+
+  final double stateScale;
+  final double dragAngle;
+  final double pull;
+  final double breathFactor;
+
+  @override
+  Widget build(BuildContext context) {
+    return RepaintBoundary(
+      child: IgnorePointer(
+        child: ClipPath(
+          clipper: _OrbLensClipper(
+            stateScale: stateScale,
+            dragAngle: dragAngle,
+            pull: pull,
+            breathFactor: breathFactor,
+          ),
+          child: LayoutBuilder(
+            builder: (BuildContext context, BoxConstraints constraints) =>
+                BackdropFilter(
+              filter: ui.ImageFilter.matrix(
+                _orbLensFilter(
+                  constraints.biggest,
+                  stateScale: stateScale,
+                  dragAngle: dragAngle,
+                  pull: pull,
+                  breathFactor: breathFactor,
+                ).storage,
+                filterQuality: ui.FilterQuality.high,
+              ),
+              child: const SizedBox.expand(),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// C 路线透镜层：把单次捕获的宿主背景交给 `shaders/orb_lens.frag`，
+/// 按七点径向表采样；`r/R > 1` 由着色器输出透明，外层再用同一玻璃圆裁剪
+/// 补抗锯齿。
+class _OrbLensShaderLayer extends StatelessWidget {
+  const _OrbLensShaderLayer({
+    super.key,
+    required this.shader,
+    required this.image,
+    required this.imageOffset,
+    required this.pixelRatio,
+    required this.stateScale,
+    required this.dragAngle,
+    required this.pull,
+    required this.breathFactor,
+  });
+
+  final ui.FragmentShader shader;
+  final ui.Image image;
+
+  /// 球盒本地 (0,0) 在捕获图像里的像素坐标。
+  final Offset imageOffset;
+  final double pixelRatio;
+  final double stateScale;
+  final double dragAngle;
+  final double pull;
+  final double breathFactor;
+
+  @override
+  Widget build(BuildContext context) {
+    return RepaintBoundary(
+      child: IgnorePointer(
+        child: ClipPath(
+          clipper: _OrbLensClipper(
+            stateScale: stateScale,
+            dragAngle: dragAngle,
+            pull: pull,
+            breathFactor: breathFactor,
+          ),
+          child: CustomPaint(
+            painter: _OrbLensShaderPainter(
+              shader: shader,
+              image: image,
+              imageOffset: imageOffset,
+              pixelRatio: pixelRatio,
+              stateScale: stateScale,
+              dragAngle: dragAngle,
+              stretch: orbStretch(pull),
+              breathFactor: breathFactor,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _OrbLensShaderPainter extends CustomPainter {
+  const _OrbLensShaderPainter({
+    required this.shader,
+    required this.image,
+    required this.imageOffset,
+    required this.pixelRatio,
+    required this.stateScale,
+    required this.dragAngle,
+    required this.stretch,
+    required this.breathFactor,
+  });
+
+  final ui.FragmentShader shader;
+  final ui.Image image;
+  final Offset imageOffset;
+  final double pixelRatio;
+  final double stateScale;
+  final double dragAngle;
+
+  /// 玻璃椭圆的长轴倍率（沿拖动方向），与 painter 的 `orbStretch(pull)` 同源。
+  final double stretch;
+  final double breathFactor;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final double unit = size.shortestSide / kFeedbackOrbIdleDiameter;
+    final double radius =
+        kFeedbackOrbIdleDiameter / 2 * unit * stateScale * breathFactor;
+    final Offset center = size.center(Offset.zero);
+    final List<double> uniforms = orbLensUniformValues(
+      imageSize: Size(image.width.toDouble(), image.height.toDouble()),
+      imageOffset: imageOffset,
+      pixelRatio: pixelRatio,
+      center: center,
+      radiusPx: radius,
+      stretch: stretch,
+      angle: dragAngle,
+      dispersion: kFeedbackOrbLensDispersionEdge,
+    );
+    for (int i = 0; i < uniforms.length; i++) {
+      shader.setFloat(i, uniforms[i]);
+    }
+    shader.setImageSampler(0, image);
+    canvas.drawRect(Offset.zero & size, Paint()..shader = shader);
+  }
+
+  @override
+  bool shouldRepaint(_OrbLensShaderPainter oldDelegate) =>
+      oldDelegate.image != image ||
+      oldDelegate.imageOffset != imageOffset ||
+      oldDelegate.pixelRatio != pixelRatio ||
+      oldDelegate.stateScale != stateScale ||
+      oldDelegate.dragAngle != dragAngle ||
+      oldDelegate.stretch != stretch ||
+      oldDelegate.breathFactor != breathFactor;
+}
+
+/// C 路线的一次性快照：宿主位图 + 换成球盒坐标所需的元数据。
+class _OrbLensSnapshot {
+  const _OrbLensSnapshot({
+    required this.image,
+    required this.sourceRect,
+    required this.pixelRatio,
+    required this.anchorGlobal,
+    required this.shader,
+  });
+
+  final ui.Image image;
+
+  /// 捕获时宿主边界在全局逻辑坐标下的矩形。
+  final Rect sourceRect;
+
+  /// 捕获时使用的像素比（逻辑像素 → 图像像素）。
+  final double pixelRatio;
+
+  /// 捕获时球盒左上角的全局逻辑坐标，与 [sourceRect] 同一时刻取样。
+  ///
+  /// 只是兜底：正常绘制走实时锚点（[_OrbLensShaderLayer] 的 anchor），
+  /// 只有锚点暂时不可得时才用这里的快照值。
+  final Offset anchorGlobal;
+
+  final ui.FragmentShader shader;
 }
