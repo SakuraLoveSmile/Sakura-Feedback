@@ -681,7 +681,8 @@ T-L1 已于 2026-10-29 完成裁决，结果见 §13.7；本节参数仍是后�
 
 **已知代价与未验证**：
 
-- C 的快照在宿主滚动/动画期间会陈旧；一秒闸门内不补拍；捕获成本 macOS 首次约 98ms、Android 约 158ms。
+- C 的快照在宿主滚动/动画期间会陈旧；一秒闸门内不补拍。捕获成本：macOS 首次约 98ms、Android 模拟器约 158ms（T-L1 尖刺）；Android 真机（Mi 10 / Android 16 / Flutter 3.41.3 profile）首拍 `toImage` 34ms（冷启动）/ 20ms（Activity 恢复）/ 2–5ms（热态），着色器加载 0–2ms，调度到快照就绪 67–112ms（任务记录 §22）。
 - 色散幅度 `0.05R` 是观感裁决值，不是官方帧实测；球缘 `1.12R/1.25R` 的壳层 split 仍低于 §12.6.1 目标量级。
-- 测试渲染器为软件光栅；Impeller 与 Skia 的滤镜差异、真机帧时间、拖动锚点滞后需在真机验收（任务记录 T-L7）。
+- 测试渲染器为软件光栅；Impeller 与 Skia 的差异已由真机复核（文字正立、球内内容与球位一致）；真机 90Hz 下静止 total p99 5ms、按住拖动 p99 10ms（230 帧里 1 帧 12ms），未观察到持续卡顿。拖动锚点的逐帧相位未单独测量，结构上限一帧（任务记录 §22）。
+- **平台视图（PlatformView/Texture）与捕获**：Android 16 + Flutter 3.41.3 实测，平台视图已上屏后能进入 C 的 `toImage` 并被正常放大；但**首次捕获可能早于平台视图上屏**，此时球内该区域缺少内容，直到下一次合法捕获（拖动开始）。这是首拍竞态，不是永久排除。
 - **Impeller GLES 的捕获纹理方向**：3.47 之前 GLES 后端把渲染目标纹理自下而上存放，C 路线采样时必须在 `IMPELLER_TARGET_OPENGLES && !IMPELLER_OPENGLES_UNFLIPPED_DEPRECATED` 下翻转 `uv.y`；Skia/Metal/Vulkan 不翻转。该分支已在 `orb_lens.frag` 的 `sampleLens()` 内实现，并用非对称夹具回归（上下翻转会红）。
