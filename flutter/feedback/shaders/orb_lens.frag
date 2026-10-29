@@ -41,6 +41,18 @@ float lensMagnification(float r) {
     return mix(1.173, 0.866, (t - 0.95) / 0.05);
 }
 
+// 捕获图是渲染目标纹理：Impeller 的 OpenGL ES 后端在 3.47 之前按自下而上
+// 存放，按 v = y / H 直接采样会上下颠倒；Skia、Metal、Vulkan 都是自上而下。
+// 3.47 起 GLES 也改为自上而下并定义 IMPELLER_OPENGLES_UNFLIPPED_DEPRECATED，
+// 这个分支届时自动失效。只作用于采样 uv，不影响几何与色散。
+vec4 sampleLens(vec2 imagePx) {
+    vec2 uv = imagePx / uImageSize;
+#if defined(IMPELLER_TARGET_OPENGLES) && !defined(IMPELLER_OPENGLES_UNFLIPPED_DEPRECATED)
+    uv.y = 1.0 - uv.y;
+#endif
+    return texture(uBg, uv);
+}
+
 void main() {
     vec2 local = FlutterFragCoord().xy;
     vec2 image = uOffset + local * uScale;
@@ -59,15 +71,15 @@ void main() {
     vec2 base = uCenter + delta / lensMagnification(radius);
     if (radius <= 0.0) {
         // 球心没有径向方向：直接单次采样，避免除零。
-        fragColor = texture(uBg, base / uImageSize);
+        fragColor = sampleLens(base);
         return;
     }
     // 径向分通道色散：R 向球心、B 向球缘各偏半个位移，G 居中；
     // 单通道偏移 = 0.5 × Dispersion × r² × R（图像像素），alpha 不变。
     vec2 radial = delta / length(delta);
     float shift = 0.5 * uDispersion * radius * radius * uRadiusPx;
-    vec4 centerSample = texture(uBg, base / uImageSize);
-    float red = texture(uBg, (base - radial * shift) / uImageSize).r;
-    float blue = texture(uBg, (base + radial * shift) / uImageSize).b;
+    vec4 centerSample = sampleLens(base);
+    float red = sampleLens(base - radial * shift).r;
+    float blue = sampleLens(base + radial * shift).b;
     fragColor = vec4(red, centerSample.g, blue, centerSample.a);
 }

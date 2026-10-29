@@ -236,6 +236,28 @@ Future<ui.Image> _flatGrayImage(int value) async {
   return recorder.endRecording().toImage(_imageSize, _imageSize);
 }
 
+/// 非对称夹具：黑底上两个白块，左上大块、右上小块。
+/// 上下翻转、左右翻转、180° 旋转都会把它们移出原象限，可判定翻转类型。
+Future<ui.Image> _asymmetricImage() async {
+  final ui.PictureRecorder recorder = ui.PictureRecorder();
+  final ui.Canvas canvas = ui.Canvas(recorder);
+  canvas.drawRect(
+    Rect.fromLTWH(0, 0, _imageSize.toDouble(), _imageSize.toDouble()),
+    ui.Paint()..color = const Color(0xFF000000),
+  );
+  // 球心左上 40px：20×20，放大后中心约 (188,188)。
+  canvas.drawRect(
+    const Rect.fromLTWH(206, 206, 20, 20),
+    ui.Paint()..color = const Color(0xFFFFFFFF),
+  );
+  // 球心右上 35/−25px：10×10，放大后中心约 (315.5,213.5)。
+  canvas.drawRect(
+    const Rect.fromLTWH(286, 226, 10, 10),
+    ui.Paint()..color = const Color(0xFFFFFFFF),
+  );
+  return recorder.endRecording().toImage(_imageSize, _imageSize);
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -504,6 +526,83 @@ void main() {
     });
   });
 
+  group('着色器朝向', () {
+    testWidgets('正立：非对称夹具放大后仍在上方/左侧', (WidgetTester tester) async {
+      await tester.runAsync(() async {
+        final ui.FragmentProgram program =
+            await ui.FragmentProgram.fromAsset('shaders/orb_lens.frag');
+        final ui.Image background = await _asymmetricImage();
+        final _LensImage lens =
+            await _paintLens(program.fragmentShader(), background);
+        background.dispose();
+
+        ({double x, double y, int count}) bright(
+          double cx,
+          double cy,
+          double half,
+        ) {
+          double sx = 0;
+          double sy = 0;
+          int n = 0;
+          for (int y = (cy - half).round(); y <= (cy + half).round(); y++) {
+            for (int x = (cx - half).round(); x <= (cx + half).round(); x++) {
+              if (lens.alphaAt(x, y) == 0) continue;
+              final double luma = 0.299 * lens.channelAt(x, y, 0) +
+                  0.587 * lens.channelAt(x, y, 1) +
+                  0.114 * lens.channelAt(x, y, 2);
+              if (luma < 128) continue;
+              sx += x + 0.5;
+              sy += y + 0.5;
+              n++;
+            }
+          }
+          return (
+            x: n == 0 ? double.nan : sx / n,
+            y: n == 0 ? double.nan : sy / n,
+            count: n,
+          );
+        }
+
+        final ({double x, double y, int count}) upperLeft =
+            bright(188, 188, 30);
+        final ({double x, double y, int count}) upperRight =
+            bright(315, 213, 25);
+        debugPrint('ORB_LENS_ORIENTATION '
+            'ul=(${upperLeft.x.toStringAsFixed(1)},'
+            '${upperLeft.y.toStringAsFixed(1)}) n=${upperLeft.count} '
+            'ur=(${upperRight.x.toStringAsFixed(1)},'
+            '${upperRight.y.toStringAsFixed(1)}) n=${upperRight.count}');
+
+        expect(upperLeft.count, greaterThan(0),
+            reason: '左上白块放大后不见了：内容被翻转或错位');
+        expect(upperLeft.x, lessThan(_center), reason: '左侧内容跑到右侧');
+        expect(upperLeft.y, lessThan(_center), reason: '上方内容跑到下方：上下颠倒');
+        expect(upperRight.count, greaterThan(0),
+            reason: '右上白块放大后不见了：内容被翻转或错位');
+        expect(upperRight.x, greaterThan(_center), reason: '右侧内容跑到左侧');
+        expect(upperRight.y, lessThan(_center), reason: '上方内容跑到下方：上下颠倒');
+        expect(upperLeft.count, greaterThan(upperRight.count),
+            reason: '大小块被互换：180° 旋转或左右翻转');
+      });
+    });
+
+    test('GLES 捕获纹理翻转只作用于采样 uv，且所有采样统一走 sampleLens', () {
+      final String source = readComponentSource('shaders/orb_lens.frag');
+      expect(RegExp(r'texture\(uBg').allMatches(source).length, 1,
+          reason: '所有采样必须经 sampleLens，漏一处就会在 GLES 上颠倒');
+      expect(RegExp(r'vec4 sampleLens\(vec2 imagePx\)').hasMatch(source), isTrue,
+          reason: '缺少采样封装');
+      expect(
+          RegExp(r'#if defined\(IMPELLER_TARGET_OPENGLES\) && '
+                  r'!defined\(IMPELLER_OPENGLES_UNFLIPPED_DEPRECATED\)\s*\n'
+                  r'\s*uv\.y = 1\.0 - uv\.y;')
+              .hasMatch(source),
+          isTrue,
+          reason: 'Impeller OpenGL ES 的捕获纹理自下而上，采样 v 必须翻转；'
+              '3.47 起由 IMPELLER_OPENGLES_UNFLIPPED_DEPRECATED 关闭');
+    });
+  });
+
   group('着色器 uniform 接线', () {
     // 打包进 asset 的 .frag 是编译产物（IPLR 二进制），读不到声明；只能读源码。
     final String shaderSource = readComponentSource('shaders/orb_lens.frag');
@@ -763,6 +862,53 @@ void main() {
           reason: 'C 路线坐标换算错误：暗线未落在 1.70 倍处');
     });
 
+    testWidgets('C 路线正立：球心左上方的方块仍画在左上方', (WidgetTester tester) async {
+      final GlobalKey host = await pumpHost(
+        tester,
+        child: CustomPaint(painter: _CornerSquarePainter()),
+      );
+      await waitForC(tester);
+      expect(find.byKey(_shaderLensKey), findsOneWidget);
+
+      final ui.Image image = (await tester.runAsync(() async {
+        final RenderRepaintBoundary boundary =
+            host.currentContext!.findRenderObject()! as RenderRepaintBoundary;
+        return boundary.toImage(pixelRatio: 2);
+      }))!;
+      final ByteData? raw = await tester.runAsync<ByteData?>(
+          () => image.toByteData(format: ui.ImageByteFormat.rawRgba));
+      final Uint8List rgba = raw!.buffer.asUint8List();
+      final int width = image.width;
+      image.dispose();
+
+      // 球心 (200,200) 逻辑 → 输出 (400,400)；只扫玻璃内（r<52），避开白环。
+      const double center = 400;
+      double sumX = 0;
+      double sumY = 0;
+      int count = 0;
+      for (int y = 0; y < width; y++) {
+        for (int x = 0; x < width; x++) {
+          final double dx = x + 0.5 - center;
+          final double dy = y + 0.5 - center;
+          if (dx * dx + dy * dy > 52 * 52) continue;
+          final int o = (y * width + x) * 4;
+          final double luma =
+              0.299 * rgba[o] + 0.587 * rgba[o + 1] + 0.114 * rgba[o + 2];
+          if (luma > 100) continue;
+          sumX += x + 0.5;
+          sumY += y + 0.5;
+          count++;
+        }
+      }
+      debugPrint('ORB_LENS_ORIENTATION_WIDGET count=$count '
+          'cx=${(sumX / count).toStringAsFixed(1)} '
+          'cy=${(sumY / count).toStringAsFixed(1)}');
+      // 方块外缘被白色球环压住，只统计到内侧约一半面积。
+      expect(count, greaterThan(50), reason: '玻璃内找不到放大后的黑块');
+      expect(sumX / count, lessThan(center - 5), reason: '黑块跑到右侧：左右颠倒');
+      expect(sumY / count, lessThan(center - 5), reason: '黑块跑到下方：上下颠倒');
+    });
+
     testWidgets('拖动拉伸：C 路线把 orbStretch(pull) 与拖动角传进着色器',
         (WidgetTester tester) async {
       await pumpHost(tester);
@@ -820,6 +966,21 @@ void main() {
           reason: '着色器不可用时必须保留 A 的 BackdropFilter 放大');
     });
   });
+}
+
+/// 白底 + 球心左上 10 逻辑像素处的 4×4 黑色方块，用来判定透镜内容朝向。
+class _CornerSquarePainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.drawRect(Offset.zero & size, Paint()..color = Colors.white);
+    canvas.drawRect(
+      const Rect.fromLTWH(186, 186, 8, 8),
+      Paint()..color = Colors.black,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_CornerSquarePainter oldDelegate) => false;
 }
 
 /// 白底 + 球心左侧 10 逻辑像素处 1 逻辑像素宽的黑线。
