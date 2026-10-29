@@ -1,13 +1,20 @@
 import 'dart:async';
 import 'dart:math' as math;
-import 'dart:ui' as ui show Image, ImageByteFormat, Picture, PictureRecorder;
+import 'dart:ui' as ui
+    show
+        FilterQuality,
+        Image,
+        ImageByteFormat,
+        ImageFilter,
+        Picture,
+        PictureRecorder;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart' show GestureBinding, kPrimaryButton;
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart' show SchedulerBinding, SchedulerPhase;
 import 'package:flutter/rendering.dart'
-    show MatrixUtils, RenderEditable, RenderRepaintBoundary;
+    show Matrix4, MatrixUtils, RenderEditable, RenderRepaintBoundary;
 import 'package:flutter/services.dart'
     show HardwareKeyboard, KeyDownEvent, LogicalKeyboardKey;
 import 'package:http/http.dart' as http;
@@ -1430,6 +1437,8 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
           brightness: brightness,
         );
     final AnimationController? glow = _orbGlow;
+    // 选区覆盖层期间不挂透镜层：覆盖层是冻结位图，透镜只会放大它自己。
+    final bool showLens = _selectionCapture == null;
 
     Widget orbBox = AnimatedContainer(
       key: const Key('feedback-orb-body'),
@@ -1459,22 +1468,36 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
               // 回弹过冲会产生负 pull，必须钳制以免 stretch<1、glow 反向。
               final double safePull =
                   (_orbReleasing ? value : pull).clamp(0.0, 1.0).toDouble();
-              return glow == null
-                  ? CustomPaint(
-                      painter:
-                          orbPainter(0.0, stateScale, safePull, breathWeight))
-                  : AnimatedBuilder(
-                      animation: glow,
-                      builder: (BuildContext context, Widget? child) =>
-                          CustomPaint(
+              Widget compose(double flow) => Stack(
+                    clipBehavior: Clip.none,
+                    fit: StackFit.expand,
+                    children: <Widget>[
+                      if (showLens)
+                        _OrbLensLayer(
+                          key: const Key('feedback-orb-lens'),
+                          stateScale: stateScale,
+                          dragAngle: angle,
+                          pull: safePull,
+                          breathFactor:
+                              1.0 + 0.02 * orbBreath(flow) * breathWeight,
+                        ),
+                      CustomPaint(
                         painter: orbPainter(
-                          reduceMotion ? 0.0 : glow.value,
+                          flow,
                           stateScale,
                           safePull,
                           breathWeight,
                         ),
                       ),
-                    );
+                    ],
+                  );
+              if (glow == null) return compose(0.0);
+              return AnimatedBuilder(
+                animation: glow,
+                builder: (BuildContext context, Widget? child) => compose(
+                  reduceMotion ? 0.0 : glow.value,
+                ),
+              );
             },
           ),
         ),
@@ -1858,5 +1881,145 @@ class _FeedbackEnvironment extends StatelessWidget {
       );
     }
     return result;
+  }
+}
+
+/// A 路线透镜的几何：与 `OrbPainter.paint` 的变换链逐项同构，
+/// 把球心在原点、半径 28 的玻璃圆映射到球盒坐标。
+Matrix4 _orbLensGeometry(
+  Size size, {
+  required double stateScale,
+  required double dragAngle,
+  required double pull,
+  required double breathFactor,
+}) {
+  final double unit = size.shortestSide / kFeedbackOrbIdleDiameter;
+  final double scale = unit * stateScale * breathFactor;
+  final Offset center = size.center(Offset.zero);
+  return Matrix4.identity()
+    ..translateByDouble(center.dx, center.dy, 0, 1)
+    ..rotateZ(dragAngle)
+    ..scaleByDouble(orbStretch(pull), 1, 1, 1)
+    ..rotateZ(-dragAngle)
+    ..scaleByDouble(scale, scale, 1, 1);
+}
+
+/// 以球心为原点放大 [kFeedbackOrbLensCenterScale] 的背景采样矩阵。
+///
+/// 放大发生在透镜自己的坐标帧里：`G · S(k) · G⁻¹`，因此内容不会被拖动角旋转、
+/// 也不会被方向拉伸带偏；球缘采样半径就是 1.7R（A 路线为常数）。
+Matrix4 _orbLensFilter(
+  Size size, {
+  required double stateScale,
+  required double dragAngle,
+  required double pull,
+  required double breathFactor,
+}) {
+  final Matrix4 geometry = _orbLensGeometry(
+    size,
+    stateScale: stateScale,
+    dragAngle: dragAngle,
+    pull: pull,
+    breathFactor: breathFactor,
+  );
+  final Matrix4 zoom = Matrix4.diagonal3Values(
+    kFeedbackOrbLensCenterScale,
+    kFeedbackOrbLensCenterScale,
+    1,
+  );
+  return geometry.multiplied(zoom).multiplied(Matrix4.inverted(geometry));
+}
+
+/// 玻璃圆裁剪：半径 28 的圆按 [_orbLensGeometry] 变换后在球盒里的椭圆。
+class _OrbLensClipper extends CustomClipper<Path> {
+  const _OrbLensClipper({
+    required this.stateScale,
+    required this.dragAngle,
+    required this.pull,
+    required this.breathFactor,
+  });
+
+  final double stateScale;
+  final double dragAngle;
+  final double pull;
+  final double breathFactor;
+
+  @override
+  Path getClip(Size size) {
+    final Matrix4 geometry = _orbLensGeometry(
+      size,
+      stateScale: stateScale,
+      dragAngle: dragAngle,
+      pull: pull,
+      breathFactor: breathFactor,
+    );
+    // 3.41 的 Path.transform 返回新 Path，不原地变换（级联会丢掉结果）。
+    final Path circle = Path()
+      ..addOval(
+        Rect.fromCircle(
+          center: Offset.zero,
+          radius: kFeedbackOrbIdleDiameter / 2,
+        ),
+      );
+    return circle.transform(geometry.storage);
+  }
+
+  @override
+  bool shouldReclip(_OrbLensClipper oldClipper) =>
+      oldClipper.stateScale != stateScale ||
+      oldClipper.dragAngle != dragAngle ||
+      oldClipper.pull != pull ||
+      oldClipper.breathFactor != breathFactor;
+}
+
+/// A 路线透镜层：玻璃圆内以球心为原点放大背景，叠在球体 painter 之下。
+///
+/// 外层 [RepaintBoundary] 把 `ImageFilter.matrix` 的参考坐标系钉在透镜盒本地
+/// 坐标——`BackdropFilter` 的矩阵按最近合成层解释，裸挂时会被祖先的绘制偏移
+/// （Positioned / Transform.translate）平移掉，放大中心就不在球心。
+class _OrbLensLayer extends StatelessWidget {
+  const _OrbLensLayer({
+    super.key,
+    required this.stateScale,
+    required this.dragAngle,
+    required this.pull,
+    required this.breathFactor,
+  });
+
+  final double stateScale;
+  final double dragAngle;
+  final double pull;
+  final double breathFactor;
+
+  @override
+  Widget build(BuildContext context) {
+    return RepaintBoundary(
+      child: IgnorePointer(
+        child: ClipPath(
+          clipper: _OrbLensClipper(
+            stateScale: stateScale,
+            dragAngle: dragAngle,
+            pull: pull,
+            breathFactor: breathFactor,
+          ),
+          child: LayoutBuilder(
+            builder: (BuildContext context, BoxConstraints constraints) =>
+                BackdropFilter(
+              filter: ui.ImageFilter.matrix(
+                _orbLensFilter(
+                  constraints.biggest,
+                  stateScale: stateScale,
+                  dragAngle: dragAngle,
+                  pull: pull,
+                  breathFactor: breathFactor,
+                ).storage,
+                filterQuality: ui.FilterQuality.high,
+              ),
+              child: const SizedBox.expand(),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
