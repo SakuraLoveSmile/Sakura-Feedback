@@ -408,9 +408,9 @@ const double kFeedbackOrbRollFactor = 1.0;
 
 /// C 路线透镜球缘处的 B−R 总位移，单位是透镜半径。
 ///
-/// 由官方 Dispersion / Refraction = 0.61 / 1.31 与球缘源点位移 0.412R
-/// 的比例推导，**不是实测值**；只作为色散强度的目标量级。
-const double kFeedbackOrbLensDispersionEdge = 0.072;
+/// 初始值 0.072 由官方 Dispersion / Refraction = 0.61 / 1.31 与球缘源点位移
+/// 0.412R 的比例推导；2026-10-29 按用户观感收敛为 0.05。**不是实测值**。
+const double kFeedbackOrbLensDispersionEdge = 0.05;
 
 /// 透镜径向放大表的采样点，取值为归一化半径 r/R，升序排列。
 const List<double> kFeedbackOrbLensSampleR = <double>[

@@ -191,29 +191,23 @@ double _centerPeriodMagnification(List<double> row, double level) {
   return (right - left) / _stripeHalf;
 }
 
-/// 水平线性渐变：value = 128 + (x − 球心) × [slope]，两端钳到 0..255。
-/// 平滑夹具用来测 1px 以内的亚像素位移——硬边的量化台阶测不出这么小的量。
-Future<ui.Image> _rampImage(double slope) async {
+/// 水平线性渐变：value = [atValue] + (x − [atX]) × [slope]，两端钳到 0..255。
+/// 平滑夹具用来测亚像素位移——硬边的量化台阶测不出这么小的量。
+Future<ui.Image> _rampImage(
+  double slope, {
+  double atX = _center,
+  double atValue = 128,
+}) async {
   final ui.PictureRecorder recorder = ui.PictureRecorder();
   final ui.Canvas canvas = ui.Canvas(recorder);
   for (int x = 0; x < _imageSize; x++) {
-    final int value = (128 + (x - _center) * slope).round().clamp(0, 255);
+    final int value = (atValue + (x - atX) * slope).round().clamp(0, 255);
     canvas.drawRect(
       Rect.fromLTWH(x.toDouble(), 0, 1, _imageSize.toDouble()),
       ui.Paint()..color = Color.fromARGB(255, value, value, value),
     );
   }
   return recorder.endRecording().toImage(_imageSize, _imageSize);
-}
-
-/// 源点半径对屏幕像素的导数：把屏幕位移换算成图像像素位移。
-double _sourcePerDisplayPx(double rNorm) {
-  const double h = 0.005;
-  final double lo = (rNorm - h).clamp(0.0, 1.0);
-  final double hi = (rNorm + h).clamp(0.0, 1.0);
-  final double sLo = orbLensSourceOffset(lo) * _lensRadius;
-  final double sHi = orbLensSourceOffset(hi) * _lensRadius;
-  return (sHi - sLo) / ((hi - lo) * _lensRadius);
 }
 
 /// 黑底白块，竖直硬边在 [edgeX]。
@@ -360,6 +354,11 @@ void main() {
 
   testWidgets('色散：R/B 边沿采样位移 = Dispersion × r² × R',
       (WidgetTester tester) async {
+    // 球缘色散强度是用户观感裁决（0.072 → 0.05）。期望值用字面量而不是
+    // 常量：常量被误改时位移断言自己就会红，不会两边同时归零而假绿。
+    const double expectedEdge = 0.05;
+    expect(kFeedbackOrbLensDispersionEdge, expectedEdge,
+        reason: '球缘色散强度的观感裁决值');
     await tester.runAsync(() async {
       final ui.FragmentProgram program =
           await ui.FragmentProgram.fromAsset('shaders/orb_lens.frag');
@@ -400,14 +399,24 @@ void main() {
         return total;
       }
 
-      /// 平滑渐变：位移小于 1px 时用窗口均值差 / 斜率换算成像素位移。
-      Future<double> rampShift(double targetR) async {
-        final ui.Image background = await _rampImage(2.0);
+      /// 平滑渐变：通道均值差 / 渐变斜率就是 B 与 R 取样点在源坐标里的间距。
+      ///
+      /// 渐变定义在源坐标上且线性，两个通道各自偏移 ±位移后读到的值差
+      /// 正好是「斜率 × 总位移」，与屏幕到源的放大无关。
+      Future<double> rampShift(
+        double targetR,
+        double halfWidth,
+        double slope, {
+        double atX = _center,
+      }) async {
+        final ui.Image background = await _rampImage(slope, atX: atX);
         final _LensImage lens =
             await _paintLens(program.fragmentShader(), background);
         background.dispose();
-        final int from = (_center + targetR * _lensRadius - 10).round();
-        final int to = (_center + targetR * _lensRadius + 10).round();
+        final int from =
+            (_center + (targetR - halfWidth) * _lensRadius).round();
+        final int to =
+            (_center + (targetR + halfWidth) * _lensRadius).round();
         double mean(int channel) {
           double sum = 0;
           for (int x = from; x <= to; x++) {
@@ -416,24 +425,26 @@ void main() {
           return sum / (to - from + 1);
         }
 
-        final double displayShift = (mean(2) - mean(0)) / 2.0;
-        final double total = displayShift * _sourcePerDisplayPx(targetR);
+        final double total = (mean(2) - mean(0)) / slope;
         debugPrint('ORB_LENS_DISPERSION r=$targetR ramp '
-            'displayShift=${displayShift.toStringAsFixed(3)} '
-            'sourceShift=${total.toStringAsFixed(3)}');
+            'window=[$from,$to] sourceShift=${total.toStringAsFixed(3)}');
         return total;
       }
 
-      final double rim = await hardEdgeShift(0.98);
+      // 球缘的放大表导数约 7 源像素/屏幕像素，硬边交点只能分辨到 ±1 屏幕像素
+      // （≈7 源像素），读不出 0.05R ≈ 9.6px；球缘改用平滑渐变（斜率 4，
+      // 取样窗口落在渐变线性区中间，避开 0/255 钳制）。
+      final double rim = await rampShift(0.98, 0.015, 4, atX: 456);
       final double outer = await hardEdgeShift(0.9);
-      final double inner = await rampShift(0.1);
+      // 球心的位移只有 0.1px 量级：用一条覆盖 0.02R–0.18R 的渐变带，
+      // 让足够多的取样相位参与平均，读数才不被纹理量化的单相位噪声左右。
+      final double inner = await rampShift(0.1, 0.08, 2.0);
 
-      double edgeAt(double r) =>
-          kFeedbackOrbLensDispersionEdge * r * r * _lensRadius;
+      double edgeAt(double r) => expectedEdge * r * r * _lensRadius;
       expect(rim, closeTo(edgeAt(0.98), 0.25 * edgeAt(0.98)),
-          reason: 'r≈1 处 B−R 应约 0.072R（半径 200 约 14px）');
+          reason: 'r≈1 处 B−R 应约 0.05R（半径 200 约 10px）');
       expect(outer, closeTo(edgeAt(0.9), 0.25 * edgeAt(0.9)),
-          reason: 'r≈0.9 处应约 0.058R');
+          reason: 'r≈0.9 处应约 0.041R');
       expect(inner, lessThan(0.3), reason: 'r≈0.1 处通道错位应可忽略');
     });
   });
