@@ -2346,20 +2346,20 @@ class _OrbLensShaderPainter extends CustomPainter {
     final double radius =
         kFeedbackOrbIdleDiameter / 2 * unit * stateScale * breathFactor;
     final Offset center = size.center(Offset.zero);
-    // uniform 顺序必须与 shaders/orb_lens.frag 的声明一致。
-    shader
-      ..setFloat(0, image.width.toDouble())
-      ..setFloat(1, image.height.toDouble())
-      ..setFloat(2, imageOffset.dx)
-      ..setFloat(3, imageOffset.dy)
-      ..setFloat(4, pixelRatio)
-      ..setFloat(5, imageOffset.dx + center.dx * pixelRatio)
-      ..setFloat(6, imageOffset.dy + center.dy * pixelRatio)
-      ..setFloat(7, radius * pixelRatio)
-      ..setFloat(8, stretch)
-      ..setFloat(9, dragAngle)
-      ..setFloat(10, kFeedbackOrbLensDispersionEdge)
-      ..setImageSampler(0, image);
+    final List<double> uniforms = orbLensUniformValues(
+      imageSize: Size(image.width.toDouble(), image.height.toDouble()),
+      imageOffset: imageOffset,
+      pixelRatio: pixelRatio,
+      center: center,
+      radiusPx: radius,
+      stretch: stretch,
+      angle: dragAngle,
+      dispersion: kFeedbackOrbLensDispersionEdge,
+    );
+    for (int i = 0; i < uniforms.length; i++) {
+      shader.setFloat(i, uniforms[i]);
+    }
+    shader.setImageSampler(0, image);
     canvas.drawRect(Offset.zero & size, Paint()..shader = shader);
   }
 

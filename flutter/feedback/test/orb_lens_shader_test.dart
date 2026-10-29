@@ -493,6 +493,107 @@ void main() {
     });
   });
 
+  group('着色器 uniform 接线', () {
+    // 打包进 asset 的 .frag 是编译产物（IPLR 二进制），读不到声明；只能读源码。
+    final String shaderSource = readComponentSource('shaders/orb_lens.frag');
+
+    test('uniform 声明顺序与 orbLensUniformValues 的十一个槽位一一对应', () {
+      final List<String> slots = <String>[
+        for (final RegExpMatch match in RegExp(
+          r'^\s*uniform\s+(vec2|float|sampler2D)\s+(\w+)\s*;',
+          multiLine: true,
+        ).allMatches(shaderSource))
+          if (match.group(1) != 'sampler2D')
+            for (int i = 0; i < (match.group(1) == 'vec2' ? 2 : 1); i++)
+              match.group(2)!,
+      ];
+      expect(slots, <String>[
+        'uImageSize',
+        'uImageSize',
+        'uOffset',
+        'uOffset',
+        'uScale',
+        'uCenter',
+        'uCenter',
+        'uRadiusPx',
+        'uStretch',
+        'uAngle',
+        'uDispersion',
+      ]);
+      expect(shaderSource, contains('uniform sampler2D uBg;'),
+          reason: 'uBg 不占 float 槽位，由 setImageSampler 单独设置');
+      expect(
+        orbLensUniformValues(
+          imageSize: const Size(1, 1),
+          imageOffset: Offset.zero,
+          pixelRatio: 1,
+          center: Offset.zero,
+          radiusPx: 1,
+          stretch: 1,
+          angle: 0,
+          dispersion: 0,
+        ),
+        hasLength(slots.length),
+      );
+    });
+
+    test('已知输入的十一个值按序落位', () {
+      const double ratio = 2.5;
+      const Offset offset = Offset(40, 20);
+      const Offset center = Offset(28, 28);
+      const double radius = 28;
+      const double stretch = 1.04;
+      const double angle = 0.75;
+      final List<double> values = orbLensUniformValues(
+        imageSize: const Size(800, 600),
+        imageOffset: offset,
+        pixelRatio: ratio,
+        center: center,
+        radiusPx: radius,
+        stretch: stretch,
+        angle: angle,
+        dispersion: kFeedbackOrbLensDispersionEdge,
+      );
+      expect(values, hasLength(11));
+      expect(values[0], 800);
+      expect(values[1], 600);
+      expect(values[2], offset.dx);
+      expect(values[3], offset.dy);
+      expect(values[4], ratio, reason: 'uScale 就是捕获像素比');
+      expect(values[5], offset.dx + center.dx * ratio);
+      expect(values[6], offset.dy + center.dy * ratio);
+      expect(values[7], radius * ratio);
+      expect(values[8], stretch);
+      expect(values[9], angle);
+      expect(values[10], kFeedbackOrbLensDispersionEdge);
+    });
+
+    test('色散常量落在索引 10', () {
+      final List<double> values = orbLensUniformValues(
+        imageSize: const Size(10, 10),
+        imageOffset: Offset.zero,
+        pixelRatio: 1,
+        center: Offset.zero,
+        radiusPx: 8,
+        stretch: 1,
+        angle: 0,
+        dispersion: kFeedbackOrbLensDispersionEdge,
+      );
+      expect(values.indexOf(kFeedbackOrbLensDispersionEdge), 10);
+    });
+
+    test('painter 的 uniform 只经 orbLensUniformValues 写入', () {
+      final String widgetSource = readComponentSource('lib/src/widget.dart');
+      expect(widgetSource, contains('orbLensUniformValues('));
+      expect(widgetSource,
+          contains('dispersion: kFeedbackOrbLensDispersionEdge'),
+          reason: 'painter 必须把色散常量交给统一顺序表');
+      expect(RegExp(r'setFloat\(\s*\d+\s*,').hasMatch(widgetSource), isFalse,
+          reason: '逐项下标写入会再次脱离顺序保护');
+      expect(widgetSource, contains('setFloat(i, uniforms[i])'));
+    });
+  });
+
   group('组件接线', () {
     late FeedbackController controller;
     late http.Client client;

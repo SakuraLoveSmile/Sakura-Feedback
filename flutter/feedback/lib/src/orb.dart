@@ -467,3 +467,33 @@ double orbRollAngle(double travelled, double radius) {
   final double angle = travelled / radius * kFeedbackOrbRollFactor;
   return angle.clamp(0.0, 2 * math.pi);
 }
+
+/// 按 `shaders/orb_lens.frag` 的 uniform 声明顺序，把十一个 float 槽位排成列表。
+///
+/// 顺序固定为 uImageSize.x、uImageSize.y、uOffset.x、uOffset.y、uScale、
+/// uCenter.x、uCenter.y、uRadiusPx、uStretch、uAngle、uDispersion；
+/// 必须与着色器的 uniform 声明顺序一致，改动其中一处就要同步另一处。
+/// sampler2D uBg 不占 float 槽位，由调用方单独设置。
+List<double> orbLensUniformValues({
+  required Size imageSize,
+  required Offset imageOffset,
+  required double pixelRatio,
+  required Offset center,
+  required double radiusPx,
+  required double stretch,
+  required double angle,
+  required double dispersion,
+}) =>
+    <double>[
+      imageSize.width,
+      imageSize.height,
+      imageOffset.dx,
+      imageOffset.dy,
+      pixelRatio,
+      imageOffset.dx + center.dx * pixelRatio,
+      imageOffset.dy + center.dy * pixelRatio,
+      radiusPx * pixelRatio,
+      stretch,
+      angle,
+      dispersion,
+    ];
