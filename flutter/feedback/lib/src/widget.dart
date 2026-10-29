@@ -2306,6 +2306,8 @@ class _OrbLensShaderLayer extends StatelessWidget {
               imageOffset: imageOffset,
               pixelRatio: pixelRatio,
               stateScale: stateScale,
+              dragAngle: dragAngle,
+              stretch: orbStretch(pull),
               breathFactor: breathFactor,
             ),
           ),
@@ -2322,6 +2324,8 @@ class _OrbLensShaderPainter extends CustomPainter {
     required this.imageOffset,
     required this.pixelRatio,
     required this.stateScale,
+    required this.dragAngle,
+    required this.stretch,
     required this.breathFactor,
   });
 
@@ -2330,6 +2334,10 @@ class _OrbLensShaderPainter extends CustomPainter {
   final Offset imageOffset;
   final double pixelRatio;
   final double stateScale;
+  final double dragAngle;
+
+  /// 玻璃椭圆的长轴倍率（沿拖动方向），与 painter 的 `orbStretch(pull)` 同源。
+  final double stretch;
   final double breathFactor;
 
   @override
@@ -2348,6 +2356,8 @@ class _OrbLensShaderPainter extends CustomPainter {
       ..setFloat(5, imageOffset.dx + center.dx * pixelRatio)
       ..setFloat(6, imageOffset.dy + center.dy * pixelRatio)
       ..setFloat(7, radius * pixelRatio)
+      ..setFloat(8, stretch)
+      ..setFloat(9, dragAngle)
       ..setImageSampler(0, image);
     canvas.drawRect(Offset.zero & size, Paint()..shader = shader);
   }
@@ -2358,6 +2368,8 @@ class _OrbLensShaderPainter extends CustomPainter {
       oldDelegate.imageOffset != imageOffset ||
       oldDelegate.pixelRatio != pixelRatio ||
       oldDelegate.stateScale != stateScale ||
+      oldDelegate.dragAngle != dragAngle ||
+      oldDelegate.stretch != stretch ||
       oldDelegate.breathFactor != breathFactor;
 }
 

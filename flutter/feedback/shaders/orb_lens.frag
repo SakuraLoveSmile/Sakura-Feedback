@@ -3,12 +3,16 @@
 
 // C 路线透镜：单次捕获的宿主背景 + 七点径向放大表。
 // uBg 是捕获图像；uOffset / uScale 把绘制坐标换成图像像素；
-// uCenter / uRadiusPx 是图像像素下的球心与透镜半径。
+// uCenter / uRadiusPx 是图像像素下的球心与透镜半径；
+// uStretch / uAngle 描述拖动拉伸后的玻璃椭圆：半长轴 = uRadiusPx * uStretch，
+// 方向沿拖动角 uAngle。半径判定必须用椭圆，否则球缘会露出未放大的背景。
 uniform vec2 uImageSize;
 uniform vec2 uOffset;
 uniform float uScale;
 uniform vec2 uCenter;
 uniform float uRadiusPx;
+uniform float uStretch;
+uniform float uAngle;
 uniform sampler2D uBg;
 
 out vec4 fragColor;
@@ -39,7 +43,12 @@ void main() {
     vec2 local = FlutterFragCoord().xy;
     vec2 image = uOffset + local * uScale;
     vec2 delta = image - uCenter;
-    float radius = length(delta) / uRadiusPx;
+
+    // 旋到拖动帧后按椭圆归一化：长轴（拖动方向）除以 R * Stretch，短轴除以 R。
+    float c = cos(uAngle);
+    float s = sin(uAngle);
+    vec2 lens = vec2(c * delta.x + s * delta.y, -s * delta.x + c * delta.y);
+    float radius = length(vec2(lens.x / (uRadiusPx * uStretch), lens.y / uRadiusPx));
     if (radius > 1.0) {
         fragColor = vec4(0.0);
         return;

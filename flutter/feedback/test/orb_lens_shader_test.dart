@@ -1,7 +1,9 @@
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:feedback_widget/feedback_widget.dart';
+import 'package:feedback_widget/src/orb.dart';
 import 'package:feedback_widget/src/test_env.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -26,6 +28,12 @@ const double _stripePeriod = 32;
 const double _stripeHalf = 16;
 // 相位错开球心，保证球心附近有条纹边沿可比对。
 const double _stripePhase = 8;
+
+/// 拖动饱和时的玻璃拉伸倍率（与 `orbStretch(1.0)` 同值）。
+const double _stretch = 1.04;
+
+/// 斜向拖动的代表角，用来证明椭圆跟随拖动方向。
+const double _angle = 0.6;
 const double _minCenter = 1.615;
 const double _maxCenter = 1.785;
 
@@ -48,15 +56,33 @@ Future<ui.Image> _stripeImage() async {
   return recorder.endRecording().toImage(_imageSize, _imageSize);
 }
 
-class _LensRow {
-  const _LensRow(this.chroma, this.alpha);
+class _LensImage {
+  const _LensImage(this.rgba);
 
-  final List<double> chroma;
-  final List<int> alpha;
+  final Uint8List rgba;
+
+  int alphaAt(int x, int y) => rgba[(y * _imageSize + x) * 4 + 3];
+
+  double chromaAt(int x, int y) {
+    final int o = (y * _imageSize + x) * 4;
+    return (rgba[o] - rgba[o + 2]).toDouble();
+  }
+
+  List<double> chromaRow(int y) => <double>[
+        for (int x = 0; x < _imageSize; x++) chromaAt(x, y),
+      ];
 }
 
-/// 把着色器画满 512×512，返回过球心那一行的色差与 alpha。
-Future<_LensRow> _paintLens(ui.FragmentShader shader, ui.Image bg) async {
+/// 把着色器画满 512×512（画布本身透明），返回原始像素。
+///
+/// [stretch] / [angle] 是拖动拉伸后的玻璃椭圆：半长轴 = R × stretch，
+/// 沿拖动角 angle。
+Future<_LensImage> _paintLens(
+  ui.FragmentShader shader,
+  ui.Image bg, {
+  double stretch = 1.0,
+  double angle = 0.0,
+}) async {
   final ui.PictureRecorder recorder = ui.PictureRecorder();
   final ui.Canvas canvas = ui.Canvas(recorder);
   shader
@@ -68,6 +94,8 @@ Future<_LensRow> _paintLens(ui.FragmentShader shader, ui.Image bg) async {
     ..setFloat(5, _center)
     ..setFloat(6, _center)
     ..setFloat(7, _lensRadius)
+    ..setFloat(8, stretch)
+    ..setFloat(9, angle)
     ..setImageSampler(0, bg);
   canvas.drawRect(
     Rect.fromLTWH(0, 0, _imageSize.toDouble(), _imageSize.toDouble()),
@@ -79,18 +107,7 @@ Future<_LensRow> _paintLens(ui.FragmentShader shader, ui.Image bg) async {
       await out.toByteData(format: ui.ImageByteFormat.rawRgba);
   final Uint8List rgba = raw!.buffer.asUint8List();
   out.dispose();
-  final int row = _center.toInt();
-  return _LensRow(
-    <double>[
-      for (int x = 0; x < _imageSize; x++)
-        (rgba[(row * _imageSize + x) * 4] -
-                rgba[(row * _imageSize + x) * 4 + 2])
-            .toDouble(),
-    ],
-    <int>[
-      for (int x = 0; x < _imageSize; x++) rgba[(row * _imageSize + x) * 4 + 3],
-    ],
-  );
+  return _LensImage(rgba);
 }
 
 /// 环带内相邻条纹边沿的平均间距 / 源半周期（16 px）= 表观放大倍率。
@@ -128,16 +145,16 @@ void main() {
       final ui.FragmentProgram program =
           await ui.FragmentProgram.fromAsset('shaders/orb_lens.frag');
       final ui.Image background = await _stripeImage();
-      final _LensRow row =
+      final _LensImage lens =
           await _paintLens(program.fragmentShader(), background);
       background.dispose();
+      final List<double> row = lens.chromaRow(_center.toInt());
 
-      final double center =
-          _edgeMagnification(row.chroma, 0, 0.30 * _lensRadius);
-      final double mid = _edgeMagnification(
-          row.chroma, 0.60 * _lensRadius, 0.80 * _lensRadius);
-      final double rim = _edgeMagnification(
-          row.chroma, 0.90 * _lensRadius, 0.995 * _lensRadius);
+      final double center = _edgeMagnification(row, 0, 0.30 * _lensRadius);
+      final double mid =
+          _edgeMagnification(row, 0.60 * _lensRadius, 0.80 * _lensRadius);
+      final double rim =
+          _edgeMagnification(row, 0.90 * _lensRadius, 0.995 * _lensRadius);
       debugPrint('ORB_LENS_SHADER center=${center.toStringAsFixed(4)} '
           'mid=${mid.toStringAsFixed(4)} rim=${rim.toStringAsFixed(4)}');
 
@@ -148,8 +165,91 @@ void main() {
 
       // r/R > 1 输出透明：取球心右侧 1.05R 处。
       final int outsideX = (_center + 1.05 * _lensRadius).round();
-      expect(row.alpha[outsideX], 0, reason: '圆外必须完全透明');
-      expect(row.alpha[_center.toInt()], 255, reason: '球心必须是不透明采样');
+      final int centerY = _center.toInt();
+      expect(lens.alphaAt(outsideX, centerY), 0, reason: '圆外必须完全透明');
+      expect(lens.alphaAt(_center.toInt(), centerY), 255, reason: '球心必须是不透明采样');
+    });
+  });
+
+  testWidgets('拖动拉伸：椭圆长轴沿拖动方向，整条轴不透明且倍率仍 1.70', (WidgetTester tester) async {
+    await tester.runAsync(() async {
+      final ui.FragmentProgram program =
+          await ui.FragmentProgram.fromAsset('shaders/orb_lens.frag');
+      final ui.Image background = await _stripeImage();
+      final _LensImage straight = await _paintLens(
+        program.fragmentShader(),
+        background,
+        stretch: _stretch,
+      );
+      final _LensImage rotated = await _paintLens(
+        program.fragmentShader(),
+        background,
+        stretch: _stretch,
+        angle: _angle,
+      );
+      background.dispose();
+
+      final int centerY = _center.toInt();
+      int transparent = 0;
+      int scanned = 0;
+      int transparentRotated = 0;
+      int scannedRotated = 0;
+      final double reach = 0.999 * _lensRadius * _stretch;
+      for (double d = 0; d <= reach; d += 1) {
+        scanned++;
+        if (straight.alphaAt((_center + d).round(), centerY) != 255) {
+          transparent++;
+        }
+        scannedRotated++;
+        final int rx = (_center + d * math.cos(_angle)).round();
+        final int ry = (_center + d * math.sin(_angle)).round();
+        if (rotated.alphaAt(rx, ry) != 255) transparentRotated++;
+      }
+      debugPrint('ORB_LENS_STRETCH scanned=$scanned transparent=$transparent '
+          'scannedRotated=$scannedRotated transparentRotated=$transparentRotated '
+          'reach=${reach.toStringAsFixed(2)}');
+
+      // 长轴端：0.999×(R×stretch) 内一粒透明像素都不许有（修补前 1.0R 外全透明）。
+      expect(transparent, 0, reason: '拖动轴方向上不得出现透明像素');
+      expect(transparentRotated, 0, reason: '旋转后的长轴方向同样不得透明');
+      // 长轴外、短轴外都必须恢复透明：椭圆而不是圆。
+      final double beyondMajor = 1.01 * _lensRadius * _stretch;
+      expect(straight.alphaAt((_center + beyondMajor).round(), centerY), 0);
+      expect(
+          rotated.alphaAt(
+            (_center + beyondMajor * math.cos(_angle)).round(),
+            (_center + beyondMajor * math.sin(_angle)).round(),
+          ),
+          0);
+      // 短轴（垂直于拖动方向）：R 以内不透明，1.01R 透明。
+      final int minorIn = (_center + 0.99 * _lensRadius).round();
+      final int minorOut = (_center + 1.01 * _lensRadius).round();
+      expect(straight.alphaAt(_center.toInt(), minorIn), 255);
+      expect(straight.alphaAt(_center.toInt(), minorOut), 0);
+      final double perp = _angle + math.pi / 2;
+      expect(
+          rotated.alphaAt(
+            (_center + 0.99 * _lensRadius * math.cos(perp)).round(),
+            (_center + 0.99 * _lensRadius * math.sin(perp)).round(),
+          ),
+          255);
+      expect(
+          rotated.alphaAt(
+            (_center + 1.01 * _lensRadius * math.cos(perp)).round(),
+            (_center + 1.01 * _lensRadius * math.sin(perp)).round(),
+          ),
+          0);
+      // 旋转举证：沿屏幕 y 轴、0.999×(R×stretch) 处应已落在椭圆外。
+      expect(rotated.alphaAt(_center.toInt(), (_center + reach).round()), 0,
+          reason: '椭圆必须随拖动角旋转，而不是固定沿 x 轴');
+
+      // 该方向倍率仍为 1.70（±5%）。
+      final double magnification = _edgeMagnification(
+          straight.chromaRow(centerY), 0, 0.30 * _lensRadius);
+      expect(magnification, inInclusiveRange(_minCenter, _maxCenter),
+          reason: '拉伸后拖动轴方向倍率仍应为 1.70');
+      debugPrint(
+          'ORB_LENS_STRETCH_M magnification=${magnification.toStringAsFixed(4)}');
     });
   });
 
@@ -309,6 +409,47 @@ void main() {
       // × 1.70 = 32.3 → 预计落在 367.7。
       expect(centroidX, closeTo(400 - 19 * 1.70, 3),
           reason: 'C 路线坐标换算错误：暗线未落在 1.70 倍处');
+    });
+
+    testWidgets('拖动拉伸：C 路线把 orbStretch(pull) 与拖动角传进着色器',
+        (WidgetTester tester) async {
+      await pumpHost(tester);
+      await waitForC(tester);
+      expect(find.byKey(_shaderLensKey), findsOneWidget);
+
+      final Finder body = find.byKey(const Key('feedback-orb-body'));
+      final TestGesture gesture =
+          await tester.startGesture(tester.getCenter(body));
+      // 第一次位移只跨过 pan slop，后两次累计业务位移并让拉力饱和。
+      await gesture.moveBy(const Offset(-40, 0));
+      await gesture.moveBy(const Offset(-40, 0));
+      await gesture.moveBy(const Offset(-40, 0));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 260));
+
+      final OrbPainter orb = tester
+          .widgetList<CustomPaint>(
+              find.descendant(of: body, matching: find.byType(CustomPaint)))
+          .map((CustomPaint paint) => paint.painter)
+          .whereType<OrbPainter>()
+          .single;
+      expect(orb.pull, 1.0, reason: '拖动 100px 应让拉力饱和');
+      expect(tester.getSize(body).width, closeTo(84, 0.01));
+      expect(find.byKey(_shaderLensKey), findsOneWidget);
+
+      final CustomPaint lensPaint = tester.widget<CustomPaint>(
+        find.descendant(
+            of: find.byKey(_shaderLensKey), matching: find.byType(CustomPaint)),
+      );
+      final dynamic lens = lensPaint.painter;
+      debugPrint('ORB_LENS_STRETCH_WIRING pull=${orb.pull} '
+          'stretch=${lens.stretch} angle=${lens.dragAngle}');
+      expect(lens.stretch as double, closeTo(orbStretch(1.0), 1e-9),
+          reason: '着色器必须收到 painter 同源的 orbStretch(pull)');
+      expect(lens.dragAngle as double, closeTo(orb.dragAngle, 1e-9));
+
+      await gesture.cancel();
+      await tester.pump();
     });
 
     testWidgets('着色器失败注入：保持 A 放大，无异常冒泡', (WidgetTester tester) async {
