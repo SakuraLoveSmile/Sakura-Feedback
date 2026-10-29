@@ -2358,6 +2358,7 @@ class _OrbLensShaderPainter extends CustomPainter {
       ..setFloat(7, radius * pixelRatio)
       ..setFloat(8, stretch)
       ..setFloat(9, dragAngle)
+      ..setFloat(10, kFeedbackOrbLensDispersionEdge)
       ..setImageSampler(0, image);
     canvas.drawRect(Offset.zero & size, Paint()..shader = shader);
   }

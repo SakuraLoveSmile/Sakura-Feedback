@@ -71,6 +71,39 @@ class _LensImage {
   List<double> chromaRow(int y) => <double>[
         for (int x = 0; x < _imageSize; x++) chromaAt(x, y),
       ];
+
+  double channelAt(int x, int y, int channel) =>
+      rgba[(y * _imageSize + x) * 4 + channel].toDouble();
+
+  List<double> channelRow(int y, int channel) => <double>[
+        for (int x = 0; x < _imageSize; x++) channelAt(x, y, channel),
+      ];
+
+  /// 两个渲染结果的 alpha 差异像素数（用来证明色散不改透明度）。
+  int alphaDiffCount(_LensImage other) {
+    int diff = 0;
+    for (int i = 3; i < rgba.length; i += 4) {
+      if (rgba[i] != other.rgba[i]) diff++;
+    }
+    return diff;
+  }
+
+  double meanLuma(double inner, double outer) {
+    double sum = 0;
+    int count = 0;
+    for (int y = 0; y < _imageSize; y++) {
+      for (int x = 0; x < _imageSize; x++) {
+        final double dx = x + 0.5 - _center;
+        final double dy = y + 0.5 - _center;
+        final double r = math.sqrt(dx * dx + dy * dy);
+        if (r < inner || r > outer) continue;
+        final int o = (y * _imageSize + x) * 4;
+        sum += 0.299 * rgba[o] + 0.587 * rgba[o + 1] + 0.114 * rgba[o + 2];
+        count++;
+      }
+    }
+    return count == 0 ? double.nan : sum / count;
+  }
 }
 
 /// 把着色器画满 512×512（画布本身透明），返回原始像素。
@@ -82,6 +115,7 @@ Future<_LensImage> _paintLens(
   ui.Image bg, {
   double stretch = 1.0,
   double angle = 0.0,
+  double dispersion = kFeedbackOrbLensDispersionEdge,
 }) async {
   final ui.PictureRecorder recorder = ui.PictureRecorder();
   final ui.Canvas canvas = ui.Canvas(recorder);
@@ -96,6 +130,7 @@ Future<_LensImage> _paintLens(
     ..setFloat(7, _lensRadius)
     ..setFloat(8, stretch)
     ..setFloat(9, angle)
+    ..setFloat(10, dispersion)
     ..setImageSampler(0, bg);
   canvas.drawRect(
     Rect.fromLTWH(0, 0, _imageSize.toDouble(), _imageSize.toDouble()),
@@ -135,6 +170,76 @@ double _edgeMagnification(List<double> row, double inner, double outer) {
   }
   if (count == 0) return double.nan;
   return sum / count / _stripeHalf;
+}
+
+/// 球心两侧最近的两条边沿相距 16px（半个条纹周期），除以源半周期 = 球心倍率。
+double _centerPeriodMagnification(List<double> row, double level) {
+  double? left;
+  double? right;
+  for (int x = 1; x < _imageSize - 1; x++) {
+    final double a = row[x] - level;
+    final double b = row[x + 1] - level;
+    if ((a < 0) == (b < 0)) continue;
+    final double edge = x + (0 - a) / (b - a);
+    if (edge <= _center) {
+      if (left == null || edge > left) left = edge;
+    } else if (right == null || edge < right) {
+      right = edge;
+    }
+  }
+  if (left == null || right == null) return double.nan;
+  return (right - left) / _stripeHalf;
+}
+
+/// 水平线性渐变：value = 128 + (x − 球心) × [slope]，两端钳到 0..255。
+/// 平滑夹具用来测 1px 以内的亚像素位移——硬边的量化台阶测不出这么小的量。
+Future<ui.Image> _rampImage(double slope) async {
+  final ui.PictureRecorder recorder = ui.PictureRecorder();
+  final ui.Canvas canvas = ui.Canvas(recorder);
+  for (int x = 0; x < _imageSize; x++) {
+    final int value = (128 + (x - _center) * slope).round().clamp(0, 255);
+    canvas.drawRect(
+      Rect.fromLTWH(x.toDouble(), 0, 1, _imageSize.toDouble()),
+      ui.Paint()..color = Color.fromARGB(255, value, value, value),
+    );
+  }
+  return recorder.endRecording().toImage(_imageSize, _imageSize);
+}
+
+/// 源点半径对屏幕像素的导数：把屏幕位移换算成图像像素位移。
+double _sourcePerDisplayPx(double rNorm) {
+  const double h = 0.005;
+  final double lo = (rNorm - h).clamp(0.0, 1.0);
+  final double hi = (rNorm + h).clamp(0.0, 1.0);
+  final double sLo = orbLensSourceOffset(lo) * _lensRadius;
+  final double sHi = orbLensSourceOffset(hi) * _lensRadius;
+  return (sHi - sLo) / ((hi - lo) * _lensRadius);
+}
+
+/// 黑底白块，竖直硬边在 [edgeX]。
+Future<ui.Image> _hardEdgeImage(double edgeX) async {
+  final ui.PictureRecorder recorder = ui.PictureRecorder();
+  final ui.Canvas canvas = ui.Canvas(recorder);
+  canvas.drawRect(
+    Rect.fromLTWH(0, 0, _imageSize.toDouble(), _imageSize.toDouble()),
+    ui.Paint()..color = const Color(0xFF000000),
+  );
+  canvas.drawRect(
+    Rect.fromLTWH(edgeX, 0, _imageSize - edgeX, _imageSize.toDouble()),
+    ui.Paint()..color = const Color(0xFFFFFFFF),
+  );
+  return recorder.endRecording().toImage(_imageSize, _imageSize);
+}
+
+Future<ui.Image> _flatGrayImage(int value) async {
+  final ui.PictureRecorder recorder = ui.PictureRecorder();
+  final ui.Canvas canvas = ui.Canvas(recorder);
+  final Color color = Color.fromARGB(255, value, value, value);
+  canvas.drawRect(
+    Rect.fromLTWH(0, 0, _imageSize.toDouble(), _imageSize.toDouble()),
+    ui.Paint()..color = color,
+  );
+  return recorder.endRecording().toImage(_imageSize, _imageSize);
 }
 
 void main() {
@@ -250,6 +355,141 @@ void main() {
           reason: '拉伸后拖动轴方向倍率仍应为 1.70');
       debugPrint(
           'ORB_LENS_STRETCH_M magnification=${magnification.toStringAsFixed(4)}');
+    });
+  });
+
+  testWidgets('色散：R/B 边沿采样位移 = Dispersion × r² × R',
+      (WidgetTester tester) async {
+    await tester.runAsync(() async {
+      final ui.FragmentProgram program =
+          await ui.FragmentProgram.fromAsset('shaders/orb_lens.frag');
+      final int cy = _center.toInt();
+
+      /// 硬边夹具：位移 ≥1px 时用阈值交点，直接读数不受采样量化影响。
+      Future<double> hardEdgeShift(double targetR) async {
+        final double sourceRadius = orbLensSourceOffset(targetR) * _lensRadius;
+        final ui.Image background =
+            await _hardEdgeImage(_center + sourceRadius);
+        final _LensImage lens =
+            await _paintLens(program.fragmentShader(), background);
+        background.dispose();
+        double crossing(List<double> row) {
+          for (int x = _center.toInt() + 2;
+              x < (_center + 0.995 * _lensRadius).floor();
+              x++) {
+            final double a = row[x] - 128;
+            final double b = row[x + 1] - 128;
+            if ((a < 0) == (b < 0)) continue;
+            return x + (0 - a) / (b - a);
+          }
+          return double.nan;
+        }
+
+        double sourceAt(double x) =>
+            orbLensSourceOffset((x - _center).abs() / _lensRadius) *
+            _lensRadius;
+        final double xR = crossing(lens.channelRow(cy, 0));
+        final double xG = crossing(lens.channelRow(cy, 1));
+        final double xB = crossing(lens.channelRow(cy, 2));
+        final double total = sourceAt(xR) - sourceAt(xB);
+        debugPrint('ORB_LENS_DISPERSION r=$targetR '
+            'R:${xR.toStringAsFixed(2)} G:${xG.toStringAsFixed(2)} '
+            'B:${xB.toStringAsFixed(2)} sourceShift=${total.toStringAsFixed(2)}');
+        expect(xB, lessThan(xG), reason: 'B 向球缘采样 → 屏幕边沿更靠内');
+        expect(xG, lessThan(xR), reason: 'R 向球心采样 → 屏幕边沿更靠外');
+        return total;
+      }
+
+      /// 平滑渐变：位移小于 1px 时用窗口均值差 / 斜率换算成像素位移。
+      Future<double> rampShift(double targetR) async {
+        final ui.Image background = await _rampImage(2.0);
+        final _LensImage lens =
+            await _paintLens(program.fragmentShader(), background);
+        background.dispose();
+        final int from = (_center + targetR * _lensRadius - 10).round();
+        final int to = (_center + targetR * _lensRadius + 10).round();
+        double mean(int channel) {
+          double sum = 0;
+          for (int x = from; x <= to; x++) {
+            sum += lens.channelAt(x, cy, channel);
+          }
+          return sum / (to - from + 1);
+        }
+
+        final double displayShift = (mean(2) - mean(0)) / 2.0;
+        final double total = displayShift * _sourcePerDisplayPx(targetR);
+        debugPrint('ORB_LENS_DISPERSION r=$targetR ramp '
+            'displayShift=${displayShift.toStringAsFixed(3)} '
+            'sourceShift=${total.toStringAsFixed(3)}');
+        return total;
+      }
+
+      final double rim = await hardEdgeShift(0.98);
+      final double outer = await hardEdgeShift(0.9);
+      final double inner = await rampShift(0.1);
+
+      double edgeAt(double r) =>
+          kFeedbackOrbLensDispersionEdge * r * r * _lensRadius;
+      expect(rim, closeTo(edgeAt(0.98), 0.25 * edgeAt(0.98)),
+          reason: 'r≈1 处 B−R 应约 0.072R（半径 200 约 14px）');
+      expect(outer, closeTo(edgeAt(0.9), 0.25 * edgeAt(0.9)),
+          reason: 'r≈0.9 处应约 0.058R');
+      expect(inner, lessThan(0.3), reason: 'r≈0.1 处通道错位应可忽略');
+    });
+  });
+
+  testWidgets('色散不改球心倍率、亮度与 alpha 剖面', (WidgetTester tester) async {
+    await tester.runAsync(() async {
+      final ui.FragmentProgram program =
+          await ui.FragmentProgram.fromAsset('shaders/orb_lens.frag');
+      final int cy = _center.toInt();
+
+      final ui.Image stripes = await _stripeImage();
+      final _LensImage off = await _paintLens(
+        program.fragmentShader(),
+        stripes,
+        dispersion: 0,
+      );
+      final _LensImage on = await _paintLens(program.fragmentShader(), stripes);
+      stripes.dispose();
+
+      // 球心倍率：取球心两侧最近的两条边沿（整周期 32px），R/B 各自量一次。
+      for (final int channel in <int>[0, 2]) {
+        final double offM =
+            _centerPeriodMagnification(off.channelRow(cy, channel), 135);
+        final double onM =
+            _centerPeriodMagnification(on.channelRow(cy, channel), 135);
+        debugPrint('ORB_LENS_DISPERSION_MAG ch=$channel '
+            'off=${offM.toStringAsFixed(4)} on=${onM.toStringAsFixed(4)}');
+        expect((onM - offM).abs() / offM, lessThan(0.01),
+            reason: '分通道采样不得改变球心倍率');
+      }
+      // 中心采样通道（G）逐像素不变。
+      expect(on.channelRow(cy, 1), off.channelRow(cy, 1),
+          reason: 'G 是中心采样，必须与改动前逐像素一致');
+
+      // 亮度中性：纯灰 128 上球内平均亮度变化 < 2/255。
+      final ui.Image gray = await _flatGrayImage(128);
+      final _LensImage grayOff = await _paintLens(
+        program.fragmentShader(),
+        gray,
+        dispersion: 0,
+      );
+      final _LensImage grayOn =
+          await _paintLens(program.fragmentShader(), gray);
+      gray.dispose();
+      final double meanDelta = (grayOn.meanLuma(0, 0.9 * _lensRadius) -
+              grayOff.meanLuma(0, 0.9 * _lensRadius))
+          .abs();
+      debugPrint(
+          'ORB_LENS_DISPERSION_LUMA delta=${meanDelta.toStringAsFixed(4)}');
+      expect(meanDelta, lessThan(2.0), reason: '纯灰背景球内平均亮度变化应 < 2/255');
+
+      // alpha 剖面完全不变；圆外仍为 0。
+      expect(on.alphaDiffCount(off), 0, reason: '色散不得改变 alpha');
+      expect(grayOn.alphaDiffCount(grayOff), 0, reason: '色散不得改变 alpha');
+      expect(on.alphaAt((_center + 1.05 * _lensRadius).round(), cy), 0,
+          reason: '圆外必须仍然完全透明');
     });
   });
 

@@ -6,6 +6,7 @@
 // uCenter / uRadiusPx 是图像像素下的球心与透镜半径；
 // uStretch / uAngle 描述拖动拉伸后的玻璃椭圆：半长轴 = uRadiusPx * uStretch，
 // 方向沿拖动角 uAngle。半径判定必须用椭圆，否则球缘会露出未放大的背景。
+// uDispersion 是球缘处的 B−R 总位移（相对半径），按 r² 沿径向展开。
 uniform vec2 uImageSize;
 uniform vec2 uOffset;
 uniform float uScale;
@@ -13,6 +14,7 @@ uniform vec2 uCenter;
 uniform float uRadiusPx;
 uniform float uStretch;
 uniform float uAngle;
+uniform float uDispersion;
 uniform sampler2D uBg;
 
 out vec4 fragColor;
@@ -53,7 +55,19 @@ void main() {
         fragColor = vec4(0.0);
         return;
     }
-    // 按 r / M(r) 取源点：中心放大、球缘压缩，不做 RGB 分通道色散。
-    vec2 source = uCenter + delta / lensMagnification(radius);
-    fragColor = texture(uBg, source / uImageSize);
+    // 按 r / M(r) 取源点：中心放大、球缘压缩。
+    vec2 base = uCenter + delta / lensMagnification(radius);
+    if (radius <= 0.0) {
+        // 球心没有径向方向：直接单次采样，避免除零。
+        fragColor = texture(uBg, base / uImageSize);
+        return;
+    }
+    // 径向分通道色散：R 向球心、B 向球缘各偏半个位移，G 居中；
+    // 单通道偏移 = 0.5 × Dispersion × r² × R（图像像素），alpha 不变。
+    vec2 radial = delta / length(delta);
+    float shift = 0.5 * uDispersion * radius * radius * uRadiusPx;
+    vec4 centerSample = texture(uBg, base / uImageSize);
+    float red = texture(uBg, (base - radial * shift) / uImageSize).r;
+    float blue = texture(uBg, (base + radial * shift) / uImageSize).b;
+    fragColor = vec4(red, centerSample.g, blue, centerSample.a);
 }
