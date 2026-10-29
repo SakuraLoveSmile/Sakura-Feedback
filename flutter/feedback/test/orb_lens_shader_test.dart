@@ -603,6 +603,47 @@ void main() {
     });
   });
 
+  group('径向放大表一致性', () {
+    test('shader 的断点、系数、分段宽度与 kFeedbackOrbLensSampleR/M 一致', () {
+      final String source = readComponentSource('shaders/orb_lens.frag');
+      final List<double> breaks = <double>[
+        for (final RegExpMatch match
+            in RegExp(r'if \(t <= ([0-9.]+)\)').allMatches(source))
+          double.parse(match.group(1)!),
+      ];
+      final List<RegExpMatch> mixes = RegExp(
+        r'mix\(\s*([0-9.]+)\s*,\s*([0-9.]+)\s*,',
+      ).allMatches(source).toList();
+      final List<double> coefficients = <double>[
+        double.parse(mixes.first.group(1)!),
+        for (final RegExpMatch match in mixes) double.parse(match.group(2)!),
+      ];
+      final List<double> widths = <double>[
+        for (final RegExpMatch match in RegExp(
+          r'mix\([^,]+,[^,]+,\s*(?:t\s*/\s*|\(t\s*-\s*[0-9.]+\s*\)\s*/\s*)([0-9.]+)\s*\)',
+        ).allMatches(source))
+          double.parse(match.group(1)!),
+      ];
+
+      expect(breaks, kFeedbackOrbLensSampleR.sublist(1, 6),
+          reason: 'shader 断点与 Dart 表漂移');
+      expect(coefficients, hasLength(kFeedbackOrbLensSampleM.length));
+      for (int i = 0; i < coefficients.length; i++) {
+        expect(coefficients[i], closeTo(kFeedbackOrbLensSampleM[i], 1e-9),
+            reason: '第 $i 个放大系数与 Dart 表漂移');
+      }
+      final List<double> expectedWidths = <double>[
+        for (int i = 1; i < kFeedbackOrbLensSampleR.length; i++)
+          kFeedbackOrbLensSampleR[i] - kFeedbackOrbLensSampleR[i - 1],
+      ];
+      expect(widths, hasLength(expectedWidths.length), reason: '分段数不一致');
+      for (int i = 0; i < widths.length; i++) {
+        expect(widths[i], closeTo(expectedWidths[i], 1e-12),
+            reason: '第 $i 段宽度与断点漂移');
+      }
+    });
+  });
+
   group('着色器 uniform 接线', () {
     // 打包进 asset 的 .frag 是编译产物（IPLR 二进制），读不到声明；只能读源码。
     final String shaderSource = readComponentSource('shaders/orb_lens.frag');
@@ -711,10 +752,15 @@ void main() {
     setUp(() {
       controller = FeedbackController();
       client = captureMockClient();
+      debugOrbLensGateDuration = const Duration(seconds: 1);
+      debugOrbLensCaptureAttempts = 0;
+      debugFailOrbLensCapture = false;
     });
 
     tearDown(() {
       debugFailOrbLensShader = false;
+      debugFailOrbLensCapture = false;
+      debugOrbLensGateDuration = const Duration(seconds: 1);
       controller.dispose();
       client.close();
     });
@@ -761,13 +807,6 @@ void main() {
       fail('C 路线未在超时内接管');
     }
 
-    Future<void> realDelay(WidgetTester tester, int ms) async {
-      await tester.runAsync(() async {
-        await Future<void>.delayed(Duration(milliseconds: ms));
-      });
-      await tester.pump();
-    }
-
     /// 拖动开始是一次合法触发；返回时 pan 仍按着，调用方负责取消。
     Future<TestGesture> startDrag(WidgetTester tester) async {
       final TestGesture gesture =
@@ -779,6 +818,8 @@ void main() {
 
     testWidgets('首次可见后 C 接管；hidden 释放回退 A；一秒闸门内不再捕获',
         (WidgetTester tester) async {
+      // 闸门拉到十分钟：整段序列内都不可能有第二次捕获，不依赖真实耗时。
+      debugOrbLensGateDuration = const Duration(minutes: 10);
       await pumpHost(tester);
       expect(find.byKey(_lensKey), findsOneWidget);
       await waitForC(tester);
@@ -809,8 +850,8 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 500));
 
-      // 闸门过期后的拖动开始：重新捕获一次，C 回来。
-      await realDelay(tester, 1100);
+      // 把闸门放开（等价于等待一秒过期），避免依赖真实耗时。
+      debugOrbLensGateDuration = Duration.zero;
       final TestGesture capture = await startDrag(tester);
       await waitForC(tester);
       expect(find.byKey(_shaderLensKey), findsOneWidget, reason: '拖动开始应重新捕获');
@@ -964,6 +1005,52 @@ void main() {
       expect(find.byKey(_shaderLensKey), findsNothing);
       expect(find.byType(BackdropFilter), findsOneWidget,
           reason: '着色器不可用时必须保留 A 的 BackdropFilter 放大');
+      expect(debugOrbLensCaptureAttempts, 0,
+          reason: '着色器不可用是终态，不得为每次触发做整窗捕获');
+    });
+
+    testWidgets('捕获节奏：首次可见 1 次；闸门内 0 次；放开后一次拖动 1 次',
+        (WidgetTester tester) async {
+      debugOrbLensGateDuration = const Duration(minutes: 10);
+      await pumpHost(tester);
+      await waitForC(tester);
+      expect(debugOrbLensCaptureAttempts, 1, reason: '首次可见只捕一次');
+
+      final TestGesture blocked = await startDrag(tester);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(debugOrbLensCaptureAttempts, 1, reason: '闸门内拖动不得再捕');
+      await blocked.cancel();
+      await tester.pump();
+
+      debugOrbLensGateDuration = Duration.zero;
+      final TestGesture allowed = await startDrag(tester);
+      await tester.pump();
+      for (int i = 0; i < 20; i++) {
+        await tester.pump();
+        await tester.runAsync(() async {
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+        });
+      }
+      expect(debugOrbLensCaptureAttempts, 2,
+          reason: '闸门放开后，一次拖动开始只捕一次');
+      await allowed.cancel();
+      await tester.pump();
+    });
+
+    testWidgets('捕获失败：首次 + 两次重试，最多 3 次', (WidgetTester tester) async {
+      debugFailOrbLensCapture = true;
+      await pumpHost(tester);
+      for (int i = 0; i < 60; i++) {
+        await tester.pump();
+        await tester.runAsync(() async {
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+        });
+      }
+      expect(tester.takeException(), isNull);
+      expect(debugOrbLensCaptureAttempts, 3, reason: '首次 + 2 次重试后停手');
+      expect(find.byKey(_shaderLensKey), findsNothing, reason: '失败期间保持 A');
+      expect(find.byType(BackdropFilter), findsOneWidget);
     });
   });
 }

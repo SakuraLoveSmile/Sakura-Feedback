@@ -341,9 +341,13 @@ void main() {
       Future<(Rect, Map<String, String>, Map<String, bool>)> sample(
           {required bool routeC}) async {
         debugDisableOrbLensCapture = !routeC;
+        final FeedbackController inlineController = FeedbackController();
+        final http.Client inlineClient = captureMockClient();
+        addTearDown(inlineController.dispose);
+        addTearDown(inlineClient.close);
         await _pumpHost(tester,
-            controller: FeedbackController(),
-            client: captureMockClient(),
+            controller: inlineController,
+            client: inlineClient,
             stripes: const _StripesPainter(
               base: Color(0xFFC9C9C9),
               stripe: Color(0xFF303030),
@@ -450,9 +454,13 @@ void main() {
       (WidgetTester tester) async {
     Future<(List<String>, int)> sample({required bool routeC}) async {
       debugDisableOrbLensCapture = !routeC;
+      final FeedbackController inlineController = FeedbackController();
+      final http.Client inlineClient = captureMockClient();
+      addTearDown(inlineController.dispose);
+      addTearDown(inlineClient.close);
       await _pumpHost(tester,
-          controller: FeedbackController(),
-          client: captureMockClient(),
+          controller: inlineController,
+          client: inlineClient,
           stripes: const _StripesPainter(
             base: Color(0xFFC9C9C9),
             stripe: Color(0xFF303030),

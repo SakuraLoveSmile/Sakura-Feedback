@@ -253,7 +253,9 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   ui.FragmentShader? _lensShaderCache;
   bool _lensProgramUnavailable = false;
   bool _lensCaptureInFlight = false;
-  DateTime? _lensLastCaptureAt;
+
+  /// 捕获间隔闸门用单调时钟，系统校时回拨不会把它锁死。
+  final Stopwatch _lensGate = Stopwatch();
   int _lensRetries = 0;
   bool _lensFirstCaptureScheduled = false;
 
@@ -434,7 +436,13 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
         config.showLauncher &&
         config.launcherMode == FeedbackLauncherMode.orb;
     if (!visible) {
-      _releaseLensSnapshot();
+      // 释放会写 notifier 并让透镜子树重建，不能在 build 里同步做。
+      if (_lensSnapshot.value != null || _lensFirstCaptureScheduled) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || _disposed) return;
+          _releaseLensSnapshot();
+        });
+      }
       return;
     }
     if (debugDisableOrbLensCapture) return;
@@ -475,53 +483,53 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     if (_selectionCapture != null ||
         _controller.isOpen ||
         !widget.config.showLauncher) {
+      // 这次调度被覆盖层/面板拦下：放开标记，否则覆盖层结束后永远停在 A。
+      _lensFirstCaptureScheduled = false;
       return;
     }
     if (!retry) {
-      final DateTime now = DateTime.now();
-      final DateTime? last = _lensLastCaptureAt;
-      if (last != null &&
-          now.difference(last) < const Duration(milliseconds: 1000)) {
+      if (_lensGate.isRunning &&
+          _lensGate.elapsed < debugOrbLensGateDuration) {
         return;
       }
-      _lensLastCaptureAt = now;
-    }
-    final RenderRepaintBoundary? boundary = _repaintBoundaryKey.currentContext
-        ?.findRenderObject() as RenderRepaintBoundary?;
-    if (boundary == null || !boundary.attached || boundary.size.isEmpty) {
-      _scheduleLensRetry();
-      return;
+      _lensGate
+        ..reset()
+        ..start();
     }
     _lensCaptureInFlight = true;
     try {
+      // 先确认着色器可用：它不可用是终态，不该为每次触发做一次整窗捕获。
+      final ui.FragmentShader? shader = await _lensShaderOrNull();
+      if (_disposed || !mounted) return;
+      if (shader == null) return;
+      final RenderRepaintBoundary? boundary = _repaintBoundaryKey.currentContext
+          ?.findRenderObject() as RenderRepaintBoundary?;
+      if (boundary == null || !boundary.attached || boundary.size.isEmpty) {
+        _scheduleLensRetry();
+        return;
+      }
       final double ratio = math.min(
         MediaQuery.maybeDevicePixelRatioOf(context) ??
             View.of(context).devicePixelRatio,
         kFeedbackCaptureMaxDevicePixelRatio,
       );
-      final ui.Image image = await boundary.toImage(pixelRatio: ratio);
-      if (_disposed ||
-          !mounted ||
-          _controller.isOpen ||
-          !widget.config.showLauncher) {
-        image.dispose();
-        return;
-      }
+      // 几何在 toImage 之前同步取，避免「位图时刻」与「几何时刻」错开。
       final Rect source = boundary.localToGlobal(Offset.zero) & boundary.size;
       final RenderBox? anchor =
           _orbLensAnchorKey.currentContext?.findRenderObject() as RenderBox?;
       final Offset? anchorGlobal = (anchor != null && anchor.attached)
           ? anchor.localToGlobal(Offset.zero)
           : null;
-      final ui.FragmentShader? shader = await _lensShaderOrNull();
-      if (_disposed || !mounted) {
-        image.dispose();
-        return;
+      debugOrbLensCaptureAttempts++;
+      if (debugFailOrbLensCapture) {
+        throw StateError('debugFailOrbLensCapture');
       }
-      if (shader == null) {
-        // 着色器不可用：立即退回 A，保留到下一次触发。
+      final ui.Image image = await boundary.toImage(pixelRatio: ratio);
+      if (_disposed ||
+          !mounted ||
+          _controller.isOpen ||
+          !widget.config.showLauncher) {
         image.dispose();
-        _scheduleLensRetry();
         return;
       }
       final _OrbLensSnapshot? previous = _lensSnapshot.value;
@@ -534,8 +542,10 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
       );
       if (previous != null) _disposeAfterFrame(previous.image);
       _lensRetries = 0;
-    } catch (_) {
-      // toImage 失败立即退回 A；图像未就绪时上层本来就在画 A。
+    } catch (error) {
+      // 立即退回 A；图像未就绪时上层本来就在画 A。这里留一条不含像素的
+      // 线索，线上才能区分「着色器缺失」和「捕获失败」。
+      debugPrint('反馈组件：透镜捕获失败（${error.runtimeType}: $error）');
       _scheduleLensRetry();
     } finally {
       _lensCaptureInFlight = false;
@@ -565,19 +575,22 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     if (debugFailOrbLensShader) return null;
     if (_lensShaderCache != null) return _lensShaderCache;
     if (_lensProgramUnavailable) return null;
-    // 包被宿主引用时资源键带包前缀；组件包自己的测试/示例里是根键。
+    // 包被宿主引用时资源键带包前缀；先试前缀，组件包自己的测试/示例回退根键。
     for (final String key in const <String>[
-      'shaders/orb_lens.frag',
       'packages/feedback_widget/shaders/orb_lens.frag',
+      'shaders/orb_lens.frag',
     ]) {
       try {
         final ui.FragmentProgram program =
             await ui.FragmentProgram.fromAsset(key);
+        // 加载期间组件可能已被移除：此时不要再创建/缓存 shader。
+        if (_disposed) return null;
         return _lensShaderCache = program.fragmentShader();
       } catch (_) {
         continue;
       }
     }
+    if (_disposed) return null;
     _lensProgramUnavailable = true;
     return null;
   }
@@ -2392,7 +2405,10 @@ class _OrbLensSnapshot {
   /// 捕获时使用的像素比（逻辑像素 → 图像像素）。
   final double pixelRatio;
 
-  /// 捕获时球盒左上角的全局逻辑坐标。
+  /// 捕获时球盒左上角的全局逻辑坐标，与 [sourceRect] 同一时刻取样。
+  ///
+  /// 只是兜底：正常绘制走实时锚点（[_OrbLensShaderLayer] 的 anchor），
+  /// 只有锚点暂时不可得时才用这里的快照值。
   final Offset anchorGlobal;
 
   final ui.FragmentShader shader;
