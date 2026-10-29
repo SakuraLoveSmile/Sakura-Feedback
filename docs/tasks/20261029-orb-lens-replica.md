@@ -406,6 +406,6 @@
 - 文档提交：`ae94222` `docs(orb): 记录透镜复刻的契约、裁决与验证`（spec 13、任务记录、Flutter/Web README、integration）。
 - 合并提交：`f1d4a1b` `Merge branch 'feat/20261029-orb-lens-replica'`（`--no-ff`，含 `5b561f8`…`67bf794` 共 11 个实现/测试提交）。
 - 合并后复跑（主工作区）：`flutter analyze` 无问题；`flutter test` **411 passed**；`examples/flutter` **38 passed**。
-- 本地 `main` 领先 `origin/main` 12 个提交；**尚未推送**（推送/PR 待授权）。
+- 已按用户指示推送：`404f7cf..fbda2ba  main -> main`（origin `SakuraLoveSmile/Sakura-Feedback`）。
 - worktree `worktrees/personal-feedback/20261029-feat-orb-lens-replica/` 与本地分支保留，待推送与体验结束后按数据保全规则清理。
 - 仍未完成（不阻塞合并）：真机帧时间、首捕获耗时与重试、拖动锚点滞后、PlatformView 不进捕获；以及 Web 非强制模式焦点环 2.849:1 的历史遗留裁决。
