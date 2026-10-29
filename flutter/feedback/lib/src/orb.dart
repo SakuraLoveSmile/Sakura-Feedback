@@ -396,3 +396,68 @@ bool orbShouldRunFlow({
   required bool occluded,
 }) =>
     !open && orbMode && showLauncher && !reducedMotion && !occluded;
+
+/// 透镜中心处的径向放大倍数。
+const double kFeedbackOrbLensCenterScale = 1.70;
+
+/// 透镜球缘处的径向放大倍数。
+const double kFeedbackOrbLensEdgeScale = 0.866;
+
+/// 滚动角随累计行进距离增长的因子。
+const double kFeedbackOrbRollFactor = 1.0;
+
+/// 透镜径向放大表的采样点，取值为归一化半径 r/R，升序排列。
+const List<double> kFeedbackOrbLensSampleR = <double>[
+  0.00,
+  0.25,
+  0.50,
+  0.70,
+  0.85,
+  0.95,
+  1.00,
+];
+
+/// 与 [kFeedbackOrbLensSampleR] 一一对应的放大倍数采样点。
+const List<double> kFeedbackOrbLensSampleM = <double>[
+  1.700,
+  1.698,
+  1.671,
+  1.577,
+  1.401,
+  1.173,
+  0.866,
+];
+
+/// 按归一化半径返回透镜放大倍数；越界先钳制到零到一，再在表内分段线性插值。
+double orbLensMagnification(double r) {
+  final double t = r.clamp(0.0, 1.0);
+  for (int i = 1; i < kFeedbackOrbLensSampleR.length; i++) {
+    final double upper = kFeedbackOrbLensSampleR[i];
+    if (t <= upper) {
+      final double lower = kFeedbackOrbLensSampleR[i - 1];
+      final double fraction = (t - lower) / (upper - lower);
+      return kFeedbackOrbLensSampleM[i - 1] +
+          (kFeedbackOrbLensSampleM[i] - kFeedbackOrbLensSampleM[i - 1]) *
+              fraction;
+    }
+  }
+  return kFeedbackOrbLensSampleM.last;
+}
+
+/// 返回球内半径 r 对应的源点半径 r / M(r)，即透镜取样位置的相对半径。
+double orbLensSourceOffset(double r) {
+  final double t = r.clamp(0.0, 1.0);
+  if (t == 0.0) {
+    return 0.0;
+  }
+  return t / orbLensMagnification(t);
+}
+
+/// 按累计行进距离与半径返回滚动角，钳制到零到二派；半径非正时返回零。
+double orbRollAngle(double travelled, double radius) {
+  if (!(radius > 0.0)) {
+    return 0.0;
+  }
+  final double angle = travelled / radius * kFeedbackOrbRollFactor;
+  return angle.clamp(0.0, 2 * math.pi);
+}
