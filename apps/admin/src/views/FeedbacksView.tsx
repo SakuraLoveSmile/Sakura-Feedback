@@ -88,7 +88,12 @@ export default function FeedbacksView() {
   const [moreOpen, setMoreOpen] = useState(false);
   /** <768 移动断点与筛选区开关：移动端整个筛选区（含搜索）默认收起；纯 UI 状态，不进 URL。 */
   const [isMobile, setIsMobile] = useState(() => window.matchMedia("(max-width: 767px)").matches);
+  /** ≥1280 宽屏：列表与详情同屏；更窄视口继续使用遮罩抽屉。 */
+  const [isWide, setIsWide] = useState(() => window.matchMedia("(min-width: 1280px)").matches);
   const [filterAreaOpen, setFilterAreaOpen] = useState(false);
+  /** 内联详情关闭后把焦点还给打开它的标题按钮（行点击不设触发元素）。 */
+  const detailTriggerRef = useRef<HTMLElement | null>(null);
+  const prevDetailIdRef = useRef<string | null>(detailId);
   /** 详情拉取失败后的重试计数：自增触发详情 effect 重新请求。 */
   const [detailRetry, setDetailRetry] = useState(0);
   /** 列表请求序号：切换筛选/区域后的迟到响应直接丢弃，不回写旧数据。 */
@@ -117,6 +122,23 @@ export default function FeedbacksView() {
     mq.addEventListener("change", onChange);
     return () => mq.removeEventListener("change", onChange);
   }, []);
+
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 1280px)");
+    const onChange = () => setIsWide(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+
+  // 详情关闭（不是切换到另一条）时恢复焦点；切换详情保持新触发元素的焦点。
+  useEffect(() => {
+    const prev = prevDetailIdRef.current;
+    prevDetailIdRef.current = detailId;
+    if (!prev || detailId) return;
+    const trigger = detailTriggerRef.current;
+    detailTriggerRef.current = null;
+    if (trigger && document.contains(trigger)) trigger.focus();
+  }, [detailId]);
   const onSearch = useCallback(
     (v: string) => {
       const clipped = v.slice(0, 200);
@@ -412,11 +434,17 @@ export default function FeedbacksView() {
     });
   }
 
-  const openDetail = useCallback((id: string) => setParams({ id }, false), [setParams]);
+  const openDetail = useCallback(
+    (id: string, trigger?: HTMLElement | null) => {
+      detailTriggerRef.current = trigger ?? null;
+      setParams({ id }, false);
+    },
+    [setParams],
+  );
   const closeDetail = useCallback(() => setParams({ id: null }, false), [setParams]);
 
   return (
-    <div className="feedback-page">
+    <div className="feedback-page" data-split={isWide ? "true" : undefined}>
       <div className="page-header">
         <div>
           <h1>反馈</h1>
@@ -619,373 +647,435 @@ export default function FeedbacksView() {
         </section>
       )}
 
-      <div className="feedback-list-heading">
-        <h2>{VIEW_LABELS[view]}</h2>
-        <span className="small muted" role="status">
-          {loading === "initial"
-            ? "正在加载反馈…"
-            : counts
-              ? `共 ${counts[view]} 条 · 已加载 ${items.length} 条`
-              : `已加载 ${items.length} 条`}
-        </span>
-      </div>
+      <div className="feedback-split">
+        <div className="feedback-list-pane">
+          <div className="feedback-list-heading">
+            <h2>{VIEW_LABELS[view]}</h2>
+            <span className="small muted" role="status">
+              {loading === "initial"
+                ? "正在加载反馈…"
+                : counts
+                  ? `共 ${counts[view]} 条 · 已加载 ${items.length} 条`
+                  : `已加载 ${items.length} 条`}
+            </span>
+          </div>
 
-      {hasNew && (
-        <div className="notice-bar" role="status">
-          有新的反馈
-          <button
-            type="button"
-            className="btn sm"
-            onClick={() => {
-              setHasNew(false);
-              void loadList("reset");
-              void loadCounts();
-            }}
-          >
-            刷新列表
-          </button>
-        </div>
-      )}
-
-      {selected.size > 0 && (
-        <div className="batch-bar" role="toolbar" aria-label="批量操作">
-          <span className="small">已选 {selected.size} 条</span>
-          {view === "inbox" && (
-            <>
-              <button
-                type="button"
-                className="btn sm primary"
-                disabled={!selectedItems.every((i) => i.status === "archived")}
-                title={
-                  selectedItems.every((i) => i.status === "archived")
-                    ? "将选中项移入已归档"
-                    : "仅完整同步（已同步）的反馈可归档"
-                }
-                onClick={() =>
-                  void runLifecycle(
-                    "archive",
-                    selectedItems.map((i) => ({ id: i.id, expectedVersion: i.lifecycleVersion })),
-                  )
-                }
-              >
-                <Icon name="archive" size={14} />
-                归档
-              </button>
-              <button type="button" className="btn sm" onClick={() => askTrash(selectedItems)}>
-                <Icon name="trash" size={14} />
-                移入回收站
-              </button>
-            </>
-          )}
-          {view === "archived" && (
-            <>
+          {hasNew && (
+            <div className="notice-bar" role="status">
+              有新的反馈
               <button
                 type="button"
                 className="btn sm"
-                onClick={() =>
-                  void runLifecycle(
-                    "unarchive",
-                    selectedItems.map((i) => ({ id: i.id, expectedVersion: i.lifecycleVersion })),
-                  )
-                }
+                onClick={() => {
+                  setHasNew(false);
+                  void loadList("reset");
+                  void loadCounts();
+                }}
               >
-                <Icon name="restore" size={14} />
-                恢复到收件箱
+                刷新列表
               </button>
-              <button type="button" className="btn sm" onClick={() => askTrash(selectedItems)}>
-                <Icon name="trash" size={14} />
-                移入回收站
-              </button>
-            </>
+            </div>
           )}
-          {view === "trash" && (
-            <>
-              <button
-                type="button"
-                className="btn sm"
-                onClick={() =>
-                  void runLifecycle(
-                    "restore",
-                    selectedItems.map((i) => ({ id: i.id, expectedVersion: i.lifecycleVersion })),
-                  )
-                }
-              >
-                <Icon name="restore" size={14} />
-                恢复
-              </button>
-              <button type="button" className="btn sm danger" onClick={() => askPurge(selectedItems)}>
-                <Icon name="trash" size={14} />
-                彻底删除
-              </button>
-            </>
-          )}
-          <button type="button" className="btn sm ghost" onClick={() => setSelected(new Set())}>
-            清除选择
-          </button>
-        </div>
-      )}
 
-      {listError && <InlineError message={listError} onRetry={() => void loadList("reset")} />}
-
-      {listError && items.length === 0 ? (
-        <div className="table-wrap">
-          <EmptyState title="反馈暂时无法加载" hint="请使用上方的重试入口重新加载。" />
-        </div>
-      ) : loading === "initial" && items.length === 0 ? (
-        <div className="table-wrap">
-          <SkeletonRows rows={6} />
-        </div>
-      ) : items.length === 0 ? (
-        <div className="table-wrap">
-          <EmptyState
-            title={
-              activeFilterCount > 0
-                ? "没有符合筛选条件的反馈"
-                : view === "trash"
-                  ? "回收站为空"
-                  : view === "archived"
-                    ? "还没有已归档的反馈"
-                    : "收件箱为空"
-            }
-            hint={
-              activeFilterCount > 0
-                ? "尝试减少筛选条件，或清除全部筛选查看此区域的反馈。"
-                : view === "inbox"
-                  ? "新提交的反馈会先出现在这里；同步完成后可手动归档整理。"
-                  : view === "archived"
-                    ? "只有完整同步到 Kaneo 的反馈可以归档。"
-                    : "移入回收站的反馈会保留全部内容，可恢复或手动彻底删除。"
-            }
-            action={
-              activeFilterCount > 0 ? (
-                <button type="button" className="btn" onClick={clearFilters}>
-                  清除全部筛选
-                </button>
-              ) : undefined
-            }
-          />
-        </div>
-      ) : (
-        <>
-          {/* 桌面表格（≥768px）：标题/摘要为阅读主体，工单状态为主标签，处理状态降为灰度辅助 */}
-          <div className="table-wrap fb-table">
-            <table>
-              <thead>
-                <tr>
-                  <th style={{ width: 32 }}>
-                    <input type="checkbox" aria-label="全选当前已加载记录" checked={allChecked} onChange={toggleAll} />
-                  </th>
-                  <th>标题 / 摘要</th>
-                  <th>软件</th>
-                  <th>提交账号</th>
-                  <th>状态</th>
-                  <th>附件</th>
-                  <th>提交时间</th>
-                  <th style={{ width: 80 }}>操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {items.map((it) => (
-                  <tr
-                    key={it.id}
-                    className={`clickable${selected.has(it.id) ? " selected" : ""}`}
-                    onClick={() => openDetail(it.id)}
+          {selected.size > 0 && (
+            <div className="batch-bar" role="toolbar" aria-label="批量操作">
+              <span className="small">已选 {selected.size} 条</span>
+              {view === "inbox" && (
+                <>
+                  <button
+                    type="button"
+                    className="btn sm primary"
+                    disabled={!selectedItems.every((i) => i.status === "archived")}
+                    title={
+                      selectedItems.every((i) => i.status === "archived")
+                        ? "将选中项移入已归档"
+                        : "仅完整同步（已同步）的反馈可归档"
+                    }
+                    onClick={() =>
+                      void runLifecycle(
+                        "archive",
+                        selectedItems.map((i) => ({ id: i.id, expectedVersion: i.lifecycleVersion })),
+                      )
+                    }
                   >
-                    {/* biome-ignore lint/a11y/useKeyWithClickEvents: 仅阻止行点击冒泡，本身无交互 */}
-                    <td onClick={(e) => e.stopPropagation()}>
+                    <Icon name="archive" size={14} />
+                    归档
+                  </button>
+                  <button type="button" className="btn sm" onClick={() => askTrash(selectedItems)}>
+                    <Icon name="trash" size={14} />
+                    移入回收站
+                  </button>
+                </>
+              )}
+              {view === "archived" && (
+                <>
+                  <button
+                    type="button"
+                    className="btn sm"
+                    onClick={() =>
+                      void runLifecycle(
+                        "unarchive",
+                        selectedItems.map((i) => ({ id: i.id, expectedVersion: i.lifecycleVersion })),
+                      )
+                    }
+                  >
+                    <Icon name="restore" size={14} />
+                    恢复到收件箱
+                  </button>
+                  <button type="button" className="btn sm" onClick={() => askTrash(selectedItems)}>
+                    <Icon name="trash" size={14} />
+                    移入回收站
+                  </button>
+                </>
+              )}
+              {view === "trash" && (
+                <>
+                  <button
+                    type="button"
+                    className="btn sm"
+                    onClick={() =>
+                      void runLifecycle(
+                        "restore",
+                        selectedItems.map((i) => ({ id: i.id, expectedVersion: i.lifecycleVersion })),
+                      )
+                    }
+                  >
+                    <Icon name="restore" size={14} />
+                    恢复
+                  </button>
+                  <button type="button" className="btn sm danger" onClick={() => askPurge(selectedItems)}>
+                    <Icon name="trash" size={14} />
+                    彻底删除
+                  </button>
+                </>
+              )}
+              <button type="button" className="btn sm ghost" onClick={() => setSelected(new Set())}>
+                清除选择
+              </button>
+            </div>
+          )}
+
+          {listError && <InlineError message={listError} onRetry={() => void loadList("reset")} />}
+
+          {listError && items.length === 0 ? (
+            <div className="table-wrap">
+              <EmptyState title="反馈暂时无法加载" hint="请使用上方的重试入口重新加载。" />
+            </div>
+          ) : loading === "initial" && items.length === 0 ? (
+            <div className="table-wrap">
+              <SkeletonRows rows={6} />
+            </div>
+          ) : items.length === 0 ? (
+            <div className="table-wrap">
+              <EmptyState
+                title={
+                  activeFilterCount > 0
+                    ? "没有符合筛选条件的反馈"
+                    : view === "trash"
+                      ? "回收站为空"
+                      : view === "archived"
+                        ? "还没有已归档的反馈"
+                        : "收件箱为空"
+                }
+                hint={
+                  activeFilterCount > 0
+                    ? "尝试减少筛选条件，或清除全部筛选查看此区域的反馈。"
+                    : view === "inbox"
+                      ? "新提交的反馈会先出现在这里；同步完成后可手动归档整理。"
+                      : view === "archived"
+                        ? "只有完整同步到 Kaneo 的反馈可以归档。"
+                        : "移入回收站的反馈会保留全部内容，可恢复或手动彻底删除。"
+                }
+                action={
+                  activeFilterCount > 0 ? (
+                    <button type="button" className="btn" onClick={clearFilters}>
+                      清除全部筛选
+                    </button>
+                  ) : undefined
+                }
+              />
+            </div>
+          ) : (
+            <>
+              {/* 桌面表格（≥768px）：标题/摘要为阅读主体，工单状态为主标签，处理状态降为灰度辅助 */}
+              <div className="table-wrap fb-table">
+                <table>
+                  <thead>
+                    <tr>
+                      <th style={{ width: 32 }}>
+                        <input
+                          type="checkbox"
+                          aria-label="全选当前已加载记录"
+                          checked={allChecked}
+                          onChange={toggleAll}
+                        />
+                      </th>
+                      <th>标题 / 摘要</th>
+                      <th className="col-app">软件</th>
+                      <th className="col-user">提交账号</th>
+                      <th>状态</th>
+                      <th className="col-attach">附件</th>
+                      <th>提交时间</th>
+                      <th style={{ width: 80 }}>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {items.map((it) => (
+                      <tr
+                        key={it.id}
+                        className={`clickable${selected.has(it.id) ? " selected" : ""}`}
+                        onClick={() => openDetail(it.id)}
+                      >
+                        {/* biome-ignore lint/a11y/useKeyWithClickEvents: 仅阻止行点击冒泡，本身无交互 */}
+                        <td onClick={(e) => e.stopPropagation()}>
+                          <input
+                            type="checkbox"
+                            aria-label={`选择反馈 ${it.title ?? it.id}`}
+                            checked={selected.has(it.id)}
+                            onChange={() => toggleOne(it.id)}
+                          />
+                        </td>
+                        <td style={{ minWidth: 220 }}>
+                          {/* 整行可点之外，标题做成真按钮：键盘 Tab/Enter 与读屏可直达详情。 */}
+                          <button
+                            type="button"
+                            className="cell-open"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openDetail(it.id, e.currentTarget);
+                            }}
+                          >
+                            <span className="feedback-title clamp-2">{it.title ?? it.textPreview ?? "（无标题）"}</span>
+                            {it.title && it.textPreview && it.title !== it.textPreview && (
+                              <span className="feedback-summary clamp-2">{it.textPreview}</span>
+                            )}
+                            <span className="feedback-inline-meta">
+                              <span className="feedback-inline-app">
+                                {it.appName && it.appName !== it.appId ? it.appName : it.appId}
+                              </span>
+                              {it.username ? <span>{it.username}</span> : null}
+                              {it.appDeleted ? <span>软件已删除</span> : null}
+                            </span>
+                          </button>
+                        </td>
+                        <td className="col-app">
+                          {it.appName && it.appName !== it.appId ? (
+                            <>
+                              <div>{it.appName}</div>
+                              <div className="muted small wrap-anywhere">{it.appId}</div>
+                            </>
+                          ) : (
+                            <div className="wrap-anywhere">{it.appId}</div>
+                          )}
+                          {it.appDeleted && <span className="tag tone-warn">软件已删除</span>}
+                        </td>
+                        <td className="col-user">
+                          {it.username === null || it.username === undefined ? (
+                            <span className="muted">—</span>
+                          ) : (
+                            <span className="feedback-username feedback-username--table" title={it.username}>
+                              {it.username}
+                            </span>
+                          )}
+                        </td>
+                        <td>
+                          <div className="row row-wrap">
+                            {/* 主要标签：工单状态（issueStatus），四种状态全部有色 */}
+                            <span className={`tag ${issueTone(it.issueStatus)}`}>
+                              {ISSUE_STATUS_LABELS[it.issueStatus ?? "open"] ?? it.issueStatus ?? "新反馈"}
+                            </span>
+                            {/* 同步/处理状态：灰度辅助标签，不与主标签争抢 */}
+                            <span className="tag">{STATUS_LABELS[it.status] ?? it.status}</span>
+                            {it.unread && (
+                              <span
+                                className="tag tone-err"
+                                style={{ padding: "1px 5px", fontSize: "11px", fontWeight: "bold" }}
+                              >
+                                未读
+                              </span>
+                            )}
+                          </div>
+                          {it.resumePaused && <div className="muted small">已暂停</div>}
+                          {it.resolutionNote && (
+                            <div className="muted small clamp-2" title={it.resolutionNote}>
+                              处理说明：{it.resolutionNote}
+                            </div>
+                          )}
+                          {waitingText(it) && <div className="muted small clamp-2">{waitingText(it)}</div>}
+                        </td>
+                        <td className="col-attach muted small nowrap-ellipsis">{attachText(it)}</td>
+                        <td className="muted small" style={{ whiteSpace: "nowrap" }}>
+                          <time dateTime={it.createdAt} title={new Date(it.createdAt).toLocaleString()}>
+                            {listTime(it.createdAt)}
+                          </time>
+                        </td>
+                        {/* biome-ignore lint/a11y/useKeyWithClickEvents: 仅阻止行点击冒泡，本身无交互 */}
+                        <td onClick={(e) => e.stopPropagation()}>
+                          <div className="row" style={{ gap: 4 }}>
+                            {it.kaneoUrl && (
+                              <a
+                                className="icon-btn"
+                                href={it.kaneoUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                aria-label="在 Kaneo 中打开"
+                                title="在 Kaneo 中打开"
+                              >
+                                <Icon name="external" size={16} />
+                              </a>
+                            )}
+                            <MoreMenu
+                              items={rowMenuItems(it, {
+                                onArchive: () =>
+                                  void runLifecycle("archive", [{ id: it.id, expectedVersion: it.lifecycleVersion }]),
+                                onUnarchive: () =>
+                                  void runLifecycle("unarchive", [{ id: it.id, expectedVersion: it.lifecycleVersion }]),
+                                onResume: () =>
+                                  void runLifecycle("resume_processing", [
+                                    { id: it.id, expectedVersion: it.lifecycleVersion },
+                                  ]),
+                                onTrash: () => askTrash([it]),
+                                onRestore: () =>
+                                  void runLifecycle("restore", [{ id: it.id, expectedVersion: it.lifecycleVersion }]),
+                                onPurge: () => askPurge([it]),
+                              })}
+                            />
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* 移动卡片（<768px）：与桌面同一层级——标题摘要主体、工单状态主标签、灰度辅助信息 */}
+              <div className="fb-cards">
+                {items.map((it) => (
+                  <div key={it.id} className="fb-card">
+                    <div className="fb-card-top">
                       <input
                         type="checkbox"
                         aria-label={`选择反馈 ${it.title ?? it.id}`}
                         checked={selected.has(it.id)}
                         onChange={() => toggleOne(it.id)}
                       />
-                    </td>
-                    <td style={{ minWidth: 220 }}>
-                      {/* 整行可点之外，标题做成真按钮：键盘 Tab/Enter 与读屏可直达详情。 */}
                       <button
                         type="button"
-                        className="cell-open"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          openDetail(it.id);
-                        }}
+                        className="fb-card-open"
+                        style={{ flex: 1, minWidth: 0 }}
+                        onClick={(e) => openDetail(it.id, e.currentTarget)}
                       >
-                        <span className="feedback-title clamp-2">{it.title ?? it.textPreview ?? "（无标题）"}</span>
+                        <span className="fb-card-title feedback-title">
+                          {it.title ?? it.textPreview ?? "（无标题）"}
+                        </span>
                         {it.title && it.textPreview && it.title !== it.textPreview && (
                           <span className="feedback-summary clamp-2">{it.textPreview}</span>
                         )}
                       </button>
-                    </td>
-                    <td>
+                      <MoreMenu
+                        items={rowMenuItems(it, {
+                          onArchive: () =>
+                            void runLifecycle("archive", [{ id: it.id, expectedVersion: it.lifecycleVersion }]),
+                          onUnarchive: () =>
+                            void runLifecycle("unarchive", [{ id: it.id, expectedVersion: it.lifecycleVersion }]),
+                          onResume: () =>
+                            void runLifecycle("resume_processing", [
+                              { id: it.id, expectedVersion: it.lifecycleVersion },
+                            ]),
+                          onTrash: () => askTrash([it]),
+                          onRestore: () =>
+                            void runLifecycle("restore", [{ id: it.id, expectedVersion: it.lifecycleVersion }]),
+                          onPurge: () => askPurge([it]),
+                        })}
+                      />
+                    </div>
+                    <div className="fb-card-meta feedback-meta">
+                      {/* 主要标签：工单状态（issueStatus），四种状态全部有色 */}
+                      <span className={`tag ${issueTone(it.issueStatus)}`}>
+                        {ISSUE_STATUS_LABELS[it.issueStatus ?? "open"] ?? it.issueStatus ?? "新反馈"}
+                      </span>
+                      {/* 同步/处理状态：灰度辅助标签 */}
+                      <span className="tag">{STATUS_LABELS[it.status] ?? it.status}</span>
+                      {it.unread && (
+                        <span
+                          className="tag tone-err"
+                          style={{ padding: "1px 5px", fontSize: "11px", fontWeight: "bold" }}
+                        >
+                          未读
+                        </span>
+                      )}
                       {it.appName && it.appName !== it.appId ? (
                         <>
-                          <div>{it.appName}</div>
-                          <div className="muted small wrap-anywhere">{it.appId}</div>
+                          <span>{it.appName}</span>
+                          <span className="muted small wrap-anywhere">{it.appId}</span>
                         </>
                       ) : (
-                        <div className="wrap-anywhere">{it.appId}</div>
+                        <span className="wrap-anywhere">{it.appId}</span>
                       )}
                       {it.appDeleted && <span className="tag tone-warn">软件已删除</span>}
-                    </td>
-                    <td>
-                      {it.username === null || it.username === undefined ? (
-                        <span className="muted">—</span>
-                      ) : (
-                        <span className="feedback-username feedback-username--table" title={it.username}>
-                          {it.username}
-                        </span>
-                      )}
-                    </td>
-                    <td>
-                      <div className="row row-wrap">
-                        {/* 主要标签：工单状态（issueStatus），四种状态全部有色 */}
-                        <span className={`tag ${issueTone(it.issueStatus)}`}>
-                          {ISSUE_STATUS_LABELS[it.issueStatus ?? "open"] ?? it.issueStatus ?? "新反馈"}
-                        </span>
-                        {/* 同步/处理状态：灰度辅助标签，不与主标签争抢 */}
-                        <span className="tag">{STATUS_LABELS[it.status] ?? it.status}</span>
-                        {it.unread && (
-                          <span
-                            className="tag tone-err"
-                            style={{ padding: "1px 5px", fontSize: "11px", fontWeight: "bold" }}
-                          >
-                            未读
-                          </span>
-                        )}
-                      </div>
-                      {it.resumePaused && <div className="muted small">已暂停</div>}
+                      <span className="feedback-username feedback-username--mobile">{it.username ?? "—"}</span>
+                      <span>{attachText(it)}</span>
+                      <span>
+                        <time dateTime={it.createdAt} title={new Date(it.createdAt).toLocaleString()}>
+                          {listTime(it.createdAt)}
+                        </time>
+                      </span>
+                      {it.resumePaused && <span>已暂停</span>}
                       {it.resolutionNote && (
-                        <div className="muted small clamp-2" title={it.resolutionNote}>
+                        <span className="muted small clamp-2" title={it.resolutionNote}>
                           处理说明：{it.resolutionNote}
-                        </div>
+                        </span>
                       )}
-                      {waitingText(it) && <div className="muted small clamp-2">{waitingText(it)}</div>}
-                    </td>
-                    <td className="muted small nowrap-ellipsis">{attachText(it)}</td>
-                    <td className="muted small" style={{ whiteSpace: "nowrap" }}>
-                      {new Date(it.createdAt).toLocaleString()}
-                    </td>
-                    {/* biome-ignore lint/a11y/useKeyWithClickEvents: 仅阻止行点击冒泡，本身无交互 */}
-                    <td onClick={(e) => e.stopPropagation()}>
-                      <div className="row" style={{ gap: 4 }}>
-                        {it.kaneoUrl && (
-                          <a
-                            className="icon-btn"
-                            href={it.kaneoUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                            aria-label="在 Kaneo 中打开"
-                            title="在 Kaneo 中打开"
-                          >
-                            <Icon name="external" size={16} />
-                          </a>
-                        )}
-                        <MoreMenu
-                          items={rowMenuItems(it, {
-                            onArchive: () =>
-                              void runLifecycle("archive", [{ id: it.id, expectedVersion: it.lifecycleVersion }]),
-                            onUnarchive: () =>
-                              void runLifecycle("unarchive", [{ id: it.id, expectedVersion: it.lifecycleVersion }]),
-                            onResume: () =>
-                              void runLifecycle("resume_processing", [
-                                { id: it.id, expectedVersion: it.lifecycleVersion },
-                              ]),
-                            onTrash: () => askTrash([it]),
-                            onRestore: () =>
-                              void runLifecycle("restore", [{ id: it.id, expectedVersion: it.lifecycleVersion }]),
-                            onPurge: () => askPurge([it]),
-                          })}
-                        />
-                      </div>
-                    </td>
-                  </tr>
+                      {waitingText(it) && <span className="muted small clamp-2">{waitingText(it)}</span>}
+                    </div>
+                  </div>
                 ))}
-              </tbody>
-            </table>
-          </div>
+              </div>
 
-          {/* 移动卡片（<768px）：与桌面同一层级——标题摘要主体、工单状态主标签、灰度辅助信息 */}
-          <div className="fb-cards">
-            {items.map((it) => (
-              <div key={it.id} className="fb-card">
-                <div className="fb-card-top">
-                  <input
-                    type="checkbox"
-                    aria-label={`选择反馈 ${it.title ?? it.id}`}
-                    checked={selected.has(it.id)}
-                    onChange={() => toggleOne(it.id)}
-                  />
+              {nextCursor && (
+                <div style={{ padding: "var(--sp-3)", textAlign: "center" }}>
                   <button
                     type="button"
-                    className="fb-card-open"
-                    style={{ flex: 1, minWidth: 0 }}
-                    onClick={() => openDetail(it.id)}
+                    className="btn"
+                    disabled={loading === "more"}
+                    onClick={() => void loadList("more")}
                   >
-                    <span className="fb-card-title feedback-title">{it.title ?? it.textPreview ?? "（无标题）"}</span>
-                    {it.title && it.textPreview && it.title !== it.textPreview && (
-                      <span className="feedback-summary clamp-2">{it.textPreview}</span>
-                    )}
+                    {loading === "more" ? "加载中…" : "加载更多"}
                   </button>
-                  <MoreMenu
-                    items={rowMenuItems(it, {
-                      onArchive: () =>
-                        void runLifecycle("archive", [{ id: it.id, expectedVersion: it.lifecycleVersion }]),
-                      onUnarchive: () =>
-                        void runLifecycle("unarchive", [{ id: it.id, expectedVersion: it.lifecycleVersion }]),
-                      onResume: () =>
-                        void runLifecycle("resume_processing", [{ id: it.id, expectedVersion: it.lifecycleVersion }]),
-                      onTrash: () => askTrash([it]),
-                      onRestore: () =>
-                        void runLifecycle("restore", [{ id: it.id, expectedVersion: it.lifecycleVersion }]),
-                      onPurge: () => askPurge([it]),
-                    })}
-                  />
                 </div>
-                <div className="fb-card-meta feedback-meta">
-                  {/* 主要标签：工单状态（issueStatus），四种状态全部有色 */}
-                  <span className={`tag ${issueTone(it.issueStatus)}`}>
-                    {ISSUE_STATUS_LABELS[it.issueStatus ?? "open"] ?? it.issueStatus ?? "新反馈"}
-                  </span>
-                  {/* 同步/处理状态：灰度辅助标签 */}
-                  <span className="tag">{STATUS_LABELS[it.status] ?? it.status}</span>
-                  {it.unread && (
-                    <span className="tag tone-err" style={{ padding: "1px 5px", fontSize: "11px", fontWeight: "bold" }}>
-                      未读
-                    </span>
-                  )}
-                  {it.appName && it.appName !== it.appId ? (
-                    <>
-                      <span>{it.appName}</span>
-                      <span className="muted small wrap-anywhere">{it.appId}</span>
-                    </>
-                  ) : (
-                    <span className="wrap-anywhere">{it.appId}</span>
-                  )}
-                  {it.appDeleted && <span className="tag tone-warn">软件已删除</span>}
-                  <span className="feedback-username feedback-username--mobile">{it.username ?? "—"}</span>
-                  <span>{attachText(it)}</span>
-                  <span>{new Date(it.createdAt).toLocaleString()}</span>
-                  {it.resumePaused && <span>已暂停</span>}
-                  {it.resolutionNote && (
-                    <span className="muted small clamp-2" title={it.resolutionNote}>
-                      处理说明：{it.resolutionNote}
-                    </span>
-                  )}
-                  {waitingText(it) && <span className="muted small clamp-2">{waitingText(it)}</span>}
-                </div>
-              </div>
-            ))}
-          </div>
-
-          {nextCursor && (
-            <div style={{ padding: "var(--sp-3)", textAlign: "center" }}>
-              <button type="button" className="btn" disabled={loading === "more"} onClick={() => void loadList("more")}>
-                {loading === "more" ? "加载中…" : "加载更多"}
-              </button>
-            </div>
+              )}
+            </>
           )}
-        </>
-      )}
+        </div>
+
+        {detailId ? (
+          <div className={isWide ? "feedback-detail-pane" : "feedback-detail-slot"}>
+            <FeedbackDrawer
+              key={detailId}
+              detail={detail}
+              inline={isWide}
+              onClose={closeDetail}
+              onRetry={() => setDetailRetry((n) => n + 1)}
+              onAction={singleAction}
+              onTrash={(d) => askTrash([detailToListItem(d)])}
+              onPurge={(d) => askPurge([detailToListItem(d)])}
+              onChanged={() => void refreshAfterAction()}
+            />
+          </div>
+        ) : (
+          isWide && (
+            <div className="feedback-detail-pane is-empty">
+              <div className="feedback-detail-empty">
+                <span className="empty-art">
+                  <Icon name="feedback" size={22} />
+                </span>
+                <h3>选择一条反馈</h3>
+                <p>在左侧列表中选择反馈，查看原文、对话与同步状态。</p>
+              </div>
+            </div>
+          )
+        )}
+      </div>
 
       {/* 确认弹窗 */}
       {confirm?.kind === "trash" && (
@@ -1049,20 +1139,6 @@ export default function FeedbacksView() {
           }
         />
       )}
-
-      {/* 详情抽屉 */}
-      {detailId && (
-        <FeedbackDrawer
-          key={detailId}
-          detail={detail}
-          onClose={closeDetail}
-          onRetry={() => setDetailRetry((n) => n + 1)}
-          onAction={singleAction}
-          onTrash={(d) => askTrash([detailToListItem(d)])}
-          onPurge={(d) => askPurge([detailToListItem(d)])}
-          onChanged={() => void refreshAfterAction()}
-        />
-      )}
     </div>
   );
 }
@@ -1103,6 +1179,18 @@ function rowMenuItems(
 
 function detailToListItem(d: FeedbackDetail): FeedbackListItem {
   return { ...d, lifecycleVersion: d.lifecycleVersion };
+}
+
+/** 列表时间：7 天内用相对时间，更早用本地日期；完整时间由 title 提供。 */
+function listTime(iso: string): string {
+  const d = new Date(iso);
+  const diff = Date.now() - d.getTime();
+  if (Number.isNaN(d.getTime())) return "—";
+  if (diff >= 0 && diff < 60_000) return "刚刚";
+  if (diff >= 0 && diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
+  if (diff >= 0 && diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`;
+  if (diff >= 0 && diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)} 天前`;
+  return d.toLocaleDateString();
 }
 
 /** 附件摘要：v12 优先用 imageCount（含历史单图兼容计数），缺失时回退 hasScreenshot。 */

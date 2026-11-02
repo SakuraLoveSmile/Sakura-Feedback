@@ -468,29 +468,58 @@ export function Drawer({
   children,
   footer,
   onClose,
+  inline = false,
 }: {
   title: ReactNode;
   children: ReactNode;
   footer?: ReactNode;
   onClose: () => void;
+  /** 宽屏分栏：在页面内静态渲染，不建遮罩、不做焦点陷阱；Esc 仍关闭（嵌套弹层优先）。 */
+  inline?: boolean;
 }) {
   const ref = useRef<HTMLElement>(null);
-  useFocusTrap(true, ref, onClose);
+  // 内联模式不是模态层：不抢焦点、不限制 Tab；关闭后的焦点恢复由父级列表负责。
+  useFocusTrap(!inline, ref, onClose);
   const labelId = useId();
+
+  useEffect(() => {
+    if (!inline) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      // 抽屉内的确认弹窗、图片灯箱或更多菜单打开时，Esc 先交给它们处理。
+      if (document.querySelector(".overlay, .more-menu-pop")) return;
+      onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [inline, onClose]);
+
+  const drawer = (
+    <aside
+      ref={ref}
+      className={`drawer${inline ? " inline" : ""}`}
+      role={inline ? "region" : "dialog"}
+      {...(inline ? {} : { "aria-modal": true })}
+      aria-labelledby={labelId}
+      tabIndex={inline ? undefined : -1}
+    >
+      <div className="drawer-head">
+        <h2 id={labelId}>{title}</h2>
+        <button type="button" className="icon-btn" onClick={onClose} aria-label="关闭">
+          <Icon name="close" />
+        </button>
+      </div>
+      <div className="drawer-body">{children}</div>
+      {footer && <div className="drawer-foot">{footer}</div>}
+    </aside>
+  );
+
+  if (inline) return drawer;
   return createPortal(
     <>
       {/* biome-ignore lint/a11y/noStaticElementInteractions: 背景遮罩点击关闭是抽屉标准交互，键盘走 Escape */}
       <div className="drawer-overlay" onMouseDown={onClose} />
-      <aside ref={ref} className="drawer" role="dialog" aria-modal="true" aria-labelledby={labelId} tabIndex={-1}>
-        <div className="drawer-head">
-          <h2 id={labelId}>{title}</h2>
-          <button type="button" className="icon-btn" onClick={onClose} aria-label="关闭">
-            <Icon name="close" />
-          </button>
-        </div>
-        <div className="drawer-body">{children}</div>
-        {footer && <div className="drawer-foot">{footer}</div>}
-      </aside>
+      {drawer}
     </>,
     document.body,
   );

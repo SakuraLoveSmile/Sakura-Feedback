@@ -110,6 +110,7 @@ export default function FeedbackDrawer({
   onTrash,
   onPurge,
   onChanged,
+  inline = false,
 }: {
   detail: FeedbackDetail | "loading" | "purged" | "error" | null;
   onClose: () => void;
@@ -121,6 +122,8 @@ export default function FeedbackDrawer({
   onPurge: (d: FeedbackDetail) => void;
   /** 分类/恢复等操作完成后由父级刷新详情与列表。 */
   onChanged: () => void;
+  /** 宽屏分栏：内联为页面右栏；窄屏保持遮罩抽屉。 */
+  inline?: boolean;
 }) {
   const toast = useToast();
   const [classifyDirty, setClassifyDirty] = useState(false);
@@ -252,7 +255,7 @@ export default function FeedbackDrawer({
 
   if (detail === "loading" || detail === null) {
     return (
-      <Drawer title="反馈详情" onClose={requestClose}>
+      <Drawer title="反馈详情" onClose={requestClose} inline={inline}>
         <SkeletonRows rows={8} />
         {discardDialog}
       </Drawer>
@@ -260,7 +263,7 @@ export default function FeedbackDrawer({
   }
   if (detail === "purged") {
     return (
-      <Drawer title="反馈详情" onClose={requestClose}>
+      <Drawer title="反馈详情" onClose={requestClose} inline={inline}>
         <EmptyState title="该反馈已被彻底删除" hint="记录及其附件已清理，仅保留最小删除凭据。" />
         {discardDialog}
       </Drawer>
@@ -268,7 +271,7 @@ export default function FeedbackDrawer({
   }
   if (detail === "error") {
     return (
-      <Drawer title="反馈详情" onClose={requestClose}>
+      <Drawer title="反馈详情" onClose={requestClose} inline={inline}>
         <EmptyState
           title="详情加载失败"
           hint="网络或服务暂时不可用，可重试。"
@@ -372,17 +375,18 @@ export default function FeedbackDrawer({
 
   return (
     <Drawer
+      inline={inline}
       title={
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {detail.title || detail.text.slice(0, 40) || "（无标题）"}
+        <span className={inline ? "drawer-title-stack" : "drawer-title-row"}>
+          <span className="drawer-title-text">{detail.title || detail.text.slice(0, 40) || "（无标题）"}</span>
+          <span className="drawer-title-tags">
+            {/* 主要标签：工单状态（issueStatus）；处理状态降为灰度辅助 */}
+            <span className={`tag ${issueTone(detail.issueStatus)}`}>
+              {ISSUE_STATUS_LABELS[detail.issueStatus ?? "open"] ?? detail.issueStatus ?? "新反馈"}
+            </span>
+            <span className="tag">{STATUS_LABELS[detail.status] ?? detail.status}</span>
+            {readOnly && <span className="tag tone-warn">回收站 · 只读</span>}
           </span>
-          {/* 主要标签：工单状态（issueStatus）；处理状态降为灰度辅助 */}
-          <span className={`tag ${issueTone(detail.issueStatus)}`}>
-            {ISSUE_STATUS_LABELS[detail.issueStatus ?? "open"] ?? detail.issueStatus ?? "新反馈"}
-          </span>
-          <span className="tag">{STATUS_LABELS[detail.status] ?? detail.status}</span>
-          {readOnly && <span className="tag tone-warn">回收站 · 只读</span>}
         </span>
       }
       onClose={requestClose}
@@ -599,10 +603,10 @@ export default function FeedbackDrawer({
                 padding: "10px 14px",
                 background:
                   msg.senderType === "admin"
-                    ? "var(--bg-admin-msg, #eef2ff)"
+                    ? "var(--msg-admin-bg)"
                     : msg.senderType === "system"
-                      ? "var(--bg-subtle, #f3f4f6)"
-                      : "var(--bg-user-msg, #f0fdf4)",
+                      ? "var(--msg-system-bg)"
+                      : "var(--msg-user-bg)",
                 borderRadius: "8px",
                 borderLeft: `4px solid ${msg.senderType === "admin" ? "#6366f1" : msg.senderType === "system" ? "#94a3b8" : "#22c55e"}`,
               }}
