@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { ApiError, api, type KaneoTestResult } from "../api.ts";
-import { Field, InlineError, SkeletonRows } from "../ui.tsx";
+import { Field, Icon, InlineError, SkeletonRows } from "../ui.tsx";
 
 interface KaneoGet {
   baseUrl: string | null;
@@ -132,6 +132,10 @@ export default function ConnectionsView() {
     );
   }
 
+  const kReady = Boolean(k.baseUrl && k.apiKeySet);
+  const aReady = Boolean(a.baseUrl && a.model && a.apiKeySet);
+  const readyCount = Number(kReady) + Number(aReady);
+
   return (
     <div>
       <div className="page-header">
@@ -139,11 +143,28 @@ export default function ConnectionsView() {
           <h1>连接配置</h1>
           <div className="sub">Kaneo 同步目标与 AI 整理服务；密钥只写服务器，不回显。</div>
         </div>
+        <span className={`tag ${readyCount === 2 ? "archived" : "tone-warn"}`}>{readyCount} / 2 项已配置</span>
       </div>
-      <div className="cards-2col">
-        <div className="card">
-          <h2>Kaneo 连接</h2>
-          <p className="form-section-desc">反馈自动同步到 Kaneo 任务的目标实例；留空的密钥表示沿用已保存值。</p>
+      <div className="cards-2col conn-grid">
+        <div className="card conn-card">
+          <div className="conn-head">
+            <span className="conn-icon tone-info">
+              <Icon name="link" size={18} />
+            </span>
+            <div className="conn-title">
+              <h2 className="conn-name">Kaneo 连接</h2>
+              <p>反馈自动同步到任务实例</p>
+            </div>
+            <span className={`tag ${kReady ? "archived" : "tone-warn"}`}>{kReady ? "已配置" : "待配置"}</span>
+          </div>
+          <div className="conn-meta-row">
+            <span className="conn-meta-main">
+              <span className={`status-dot ${k.apiKeySet ? "is-ok" : "is-muted"}`} aria-hidden="true" />
+              API Key {k.apiKeySet ? "已保存" : "未保存"}
+            </span>
+            <span className="muted">测试结果显示在本卡片内</span>
+          </div>
+          <p className="form-section-desc">留空的密钥表示沿用已保存值；保存只写入本服务器。</p>
           <Field id="kb" label="API 地址" hint="含或不含 /api 后缀均可。">
             {(ctl) => (
               <input
@@ -234,9 +255,25 @@ export default function ConnectionsView() {
           </div>
         </div>
 
-        <div className="card">
-          <h2>AI（OpenAI 兼容）</h2>
-          <p className="form-section-desc">反馈自动整理所用的 Chat Completions 服务；留空的密钥表示沿用已保存值。</p>
+        <div className="card conn-card">
+          <div className="conn-head">
+            <span className="conn-icon tone-violet">
+              <Icon name="key" size={18} />
+            </span>
+            <div className="conn-title">
+              <h2 className="conn-name">AI（OpenAI 兼容）</h2>
+              <p>反馈自动整理与摘要</p>
+            </div>
+            <span className={`tag ${aReady ? "archived" : "tone-warn"}`}>{aReady ? "已配置" : "待配置"}</span>
+          </div>
+          <div className="conn-meta-row">
+            <span className="conn-meta-main">
+              <span className={`status-dot ${a.apiKeySet ? "is-ok" : "is-muted"}`} aria-hidden="true" />
+              密钥 {a.apiKeySet ? "已保存" : "未保存"}
+            </span>
+            <span className="muted">支持连接测试与图像识别测试</span>
+          </div>
+          <p className="form-section-desc">留空的密钥表示沿用已保存值；密钥在服务器端加密存储。</p>
           <Field id="ab" label="接口地址" hint="Chat Completions 的基址，如 https://api.openai.com/v1。">
             {(ctl) => (
               <input

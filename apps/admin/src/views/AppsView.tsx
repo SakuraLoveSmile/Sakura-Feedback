@@ -244,6 +244,14 @@ export default function AppsView() {
 
   // 详情面板：来源列表与规则选项
   const [selected, setSelected] = useState<AppItem | null>(null);
+  /** ≥1280 宽屏：软件列与配置同屏；窄屏保持列表在上、配置在下的堆叠。 */
+  const [isWide, setIsWide] = useState(() => window.matchMedia("(min-width: 1280px)").matches);
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 1280px)");
+    const onChange = () => setIsWide(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
   const [sources, setSources] = useState<AppSourceItem[]>([]);
   const [options, setOptions] = useState<ClassifyOptions | null>(null);
   const [optionsError, setOptionsError] = useState<string | null>(null);
@@ -1180,7 +1188,7 @@ export default function AppsView() {
         : undefined;
 
   return (
-    <div>
+    <div className="apps-page" data-split={isWide ? "true" : undefined}>
       <div className="page-header">
         <div>
           <h1>软件配置</h1>
@@ -1202,727 +1210,826 @@ export default function AppsView() {
       {error && <InlineError message={error} />}
       {listError && <InlineError message={listError} onRetry={() => void load().catch(() => {})} />}
 
-      <div className="table-wrap" aria-busy={listLoading}>
-        {apps.length === 0 && listLoading ? (
-          <div className="empty" role="status">
-            正在读取软件列表…
+      <div className="apps-split">
+        <div className="apps-list-pane">
+          <div className="apps-list-heading">
+            <h2 className="apps-list-title">全部软件</h2>
+            <span className="small muted">{apps.length} 个</span>
           </div>
-        ) : apps.length === 0 && listError ? (
-          <EmptyState title="软件列表未加载" hint="请重试读取列表，当前编辑内容仍会保留。" />
-        ) : apps.length === 0 ? (
-          <EmptyState
-            title="还没有软件配置"
-            hint="组件首次提交反馈后会自动出现在这里，也可以手动新增。"
-            action={
-              <button
-                type="button"
-                className="btn sm"
-                disabled={editActionBlocked}
-                title={editActionHint}
-                onClick={() => requestEditAction({ kind: "new" })}
-              >
-                手动新增软件
-              </button>
-            }
-          />
-        ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>名称</th>
-                <th>appId</th>
-                <th>状态</th>
-                <th>同步方式</th>
-                <th>来源（待确认/已确认）</th>
-                <th>等待反馈</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {apps.map((a) => (
-                <tr key={a.id}>
-                  <td>{a.name}</td>
-                  <td>
-                    <code className="wrap-anywhere">{a.appId}</code>
-                  </td>
-                  <td>
-                    {a.configStatus === "pending" ? (
-                      <span className="tag tone-warn">待配置</span>
-                    ) : (
-                      <span className="tag archived">已配置</span>
+          <div className="table-wrap" aria-busy={listLoading}>
+            {apps.length === 0 && listLoading ? (
+              <div className="empty" role="status">
+                正在读取软件列表…
+              </div>
+            ) : apps.length === 0 && listError ? (
+              <EmptyState title="软件列表未加载" hint="请重试读取列表，当前编辑内容仍会保留。" />
+            ) : apps.length === 0 ? (
+              <EmptyState
+                title="还没有软件配置"
+                hint="组件首次提交反馈后会自动出现在这里，也可以手动新增。"
+                action={
+                  <button
+                    type="button"
+                    className="btn sm"
+                    disabled={editActionBlocked}
+                    title={editActionHint}
+                    onClick={() => requestEditAction({ kind: "new" })}
+                  >
+                    手动新增软件
+                  </button>
+                }
+              />
+            ) : (
+              <table>
+                <thead>
+                  <tr>
+                    <th>名称</th>
+                    <th className="col-appid">appId</th>
+                    <th className="col-status">状态</th>
+                    <th className="col-sync">同步方式</th>
+                    <th className="col-sources">来源（待确认/已确认）</th>
+                    <th className="col-waiting">等待反馈</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {apps.map((a) => (
+                    <tr key={a.id} className={selected?.id === a.id ? "selected" : undefined}>
+                      <td>
+                        <div className="apps-name-cell">
+                          <span
+                            className={`apps-avatar ${a.configStatus === "pending" ? "is-warn" : "is-ok"}`}
+                            aria-hidden="true"
+                          >
+                            {a.name.slice(0, 1).toUpperCase()}
+                          </span>
+                          <div className="apps-name-text">
+                            <span className="apps-name">{a.name}</span>
+                            <span className="apps-appid-inline muted small wrap-anywhere">{a.appId}</span>
+                          </div>
+                          <span
+                            role="img"
+                            className={`status-dot ${
+                              a.configStatus === "pending"
+                                ? "is-warn"
+                                : a.archiveMode === "automatic"
+                                  ? a.ruleComplete
+                                    ? "is-ok"
+                                    : "is-err"
+                                  : "is-muted"
+                            }`}
+                            title={
+                              a.configStatus === "pending"
+                                ? "待配置"
+                                : a.archiveMode === "automatic"
+                                  ? a.ruleComplete
+                                    ? "自动同步已开启"
+                                    : "规则不完整"
+                                  : "人工同步"
+                            }
+                            aria-label={
+                              a.configStatus === "pending"
+                                ? "状态：待配置"
+                                : a.archiveMode === "automatic"
+                                  ? a.ruleComplete
+                                    ? "状态：自动同步已开启"
+                                    : "状态：规则不完整"
+                                  : "状态：人工同步"
+                            }
+                          />
+                        </div>
+                      </td>
+                      <td className="col-appid">
+                        <code>{a.appId}</code>
+                      </td>
+                      <td className="col-status">
+                        {a.configStatus === "pending" ? (
+                          <span className="tag tone-warn">待配置</span>
+                        ) : (
+                          <span className="tag archived">已配置</span>
+                        )}
+                        {a.configStatus === "pending" && <div className="muted small">自动发现</div>}
+                      </td>
+                      <td className="col-sync">
+                        {archiveModeText(a)}
+                        {a.archiveMode === "automatic" && !a.ruleComplete && (
+                          <div className="err small">规则不完整</div>
+                        )}
+                        <div className="muted small">规则 v{a.ruleVersion}</div>
+                      </td>
+                      <td className="col-sources">
+                        <b>{a.pendingSources}</b> / {a.confirmedSources}
+                      </td>
+                      <td className="col-waiting">{a.waitingFeedbacks}</td>
+                      <td>
+                        <div className="row" style={{ gap: "var(--sp-2)", flexWrap: "wrap" }}>
+                          {/* 保存或详情加载期间禁止切换对象；未保存修改需先确认。 */}
+                          <button
+                            type="button"
+                            className="btn sm"
+                            onClick={() => requestEditAction({ kind: "open", appId: a.id })}
+                            disabled={editActionBlocked}
+                            title={editActionHint}
+                          >
+                            配置
+                          </button>
+                          {a.archiveMode === "automatic" ? (
+                            <button
+                              type="button"
+                              className="btn sm row-action-secondary"
+                              onClick={() => disableAuto(a)}
+                              disabled={busy}
+                              title={busy ? "有操作进行中，稍候重试" : undefined}
+                            >
+                              关闭自动同步
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              className="btn sm row-action-secondary"
+                              onClick={() => enableAuto(a)}
+                              disabled={busy}
+                              title={
+                                busy
+                                  ? "有操作进行中，稍候重试"
+                                  : !a.ruleComplete
+                                    ? "自动同步规则不完整：需先配置项目、目标列与至少一个工作区标签"
+                                    : undefined
+                              }
+                            >
+                              启用自动同步
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="btn sm danger row-action-secondary"
+                            onClick={() => void remove(a)}
+                            disabled={busy || saving || deletingId !== null}
+                            title={
+                              deletingId !== null
+                                ? "已有删除进行中，稍候重试"
+                                : saving
+                                  ? "保存进行中，稍候重试"
+                                  : busy
+                                    ? "有操作进行中，稍候重试"
+                                    : undefined
+                            }
+                          >
+                            {deletingId === a.id ? "删除中…" : "删除"}
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+
+        <div className="apps-detail-pane">
+          {selected && (
+            <div className="card">
+              <h2>来源确认：{selected.name}</h2>
+              <p className="muted">
+                服务端按请求 Origin 逐条记录来源；无 Origin 的原生客户端记为 <code>native</code>
+                。待确认来源不会自动同步，确认后由扫描自动补处理。
+              </p>
+              <div className="table-wrap" style={{ border: "none", borderRadius: 0 }}>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>来源</th>
+                      <th>类型</th>
+                      <th>状态</th>
+                      <th>最近出现</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sources.map((s) => (
+                      <tr key={s.origin}>
+                        <td>
+                          <code className="wrap-anywhere">{s.origin}</code>
+                        </td>
+                        <td>{s.kind === "native" ? "原生客户端" : "浏览器"}</td>
+                        <td>
+                          {s.status === "confirmed" ? (
+                            <span className="tag archived">已确认</span>
+                          ) : (
+                            <span className="tag tone-warn">待确认</span>
+                          )}
+                        </td>
+                        <td className="muted">{s.lastSeenAt}</td>
+                        <td>
+                          {s.status === "pending" ? (
+                            <button
+                              type="button"
+                              className="btn sm"
+                              onClick={() => void confirmSource(selected, s.origin)}
+                              disabled={busy}
+                            >
+                              确认来源
+                            </button>
+                          ) : (
+                            <span className="muted">—</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                    {sources.length === 0 && (
+                      <tr>
+                        <td colSpan={5}>
+                          <EmptyState title="还没有观察到任何来源" hint="组件提交后自动登记。" />
+                        </td>
+                      </tr>
                     )}
-                    {a.configStatus === "pending" && <div className="muted small">自动发现</div>}
-                  </td>
-                  <td>
-                    {archiveModeText(a)}
-                    {a.archiveMode === "automatic" && !a.ruleComplete && <div className="err small">规则不完整</div>}
-                    <div className="muted small">规则 v{a.ruleVersion}</div>
-                  </td>
-                  <td>
-                    <b>{a.pendingSources}</b> / {a.confirmedSources}
-                  </td>
-                  <td>{a.waitingFeedbacks}</td>
-                  <td>
-                    <div className="row" style={{ gap: "var(--sp-2)", flexWrap: "wrap" }}>
-                      {/* 保存或详情加载期间禁止切换对象；未保存修改需先确认。 */}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          <div className="card">
+            <div className="apps-config-head">
+              <div className="apps-config-title">
+                <h2>
+                  {draft.id ? (
+                    <>
+                      <span className="sr-only">配置：</span>
+                      {draft.name}
+                    </>
+                  ) : (
+                    "新增软件"
+                  )}
+                </h2>
+                <div className="apps-config-sub muted small">
+                  {draft.id
+                    ? `${draft.appId || "—"} · 规则 v${selected?.ruleVersion ?? "—"}`
+                    : "填写 appId 与基础信息后创建"}
+                </div>
+              </div>
+              <div className="apps-config-status">
+                {!draft.id && <span className="tag">新建</span>}
+                {selected && (
+                  <span
+                    className={`tag ${
+                      selected.archiveMode === "automatic" ? (selected.ruleComplete ? "archived" : "tone-warn") : ""
+                    }`}
+                  >
+                    {selected.archiveMode === "automatic"
+                      ? selected.ruleComplete
+                        ? "自动同步已开启"
+                        : "规则不完整"
+                      : "人工同步"}
+                  </span>
+                )}
+                {selected?.archiveMode === "automatic" && (
+                  <button type="button" className="btn sm" onClick={() => disableAuto(selected)} disabled={busy}>
+                    关闭自动同步
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="rule-status" style={{ marginTop: 16 }} role="status" aria-live="polite">
+              {saving && (
+                <div className="rule-status-line">
+                  <span className="rule-status-tag muted">保存中</span>
+                  <span className="muted small">正在写入配置…</span>
+                </div>
+              )}
+              {conflict && (
+                <div className="rule-status-line" role="alert">
+                  <span className="rule-status-tag err">保存冲突</span>
+                  <span className="small">
+                    {conflict.message}
+                    {conflict.ruleVersion !== null &&
+                      `（最新保存版本：规则 v${conflict.ruleVersion}${conflict.savedAt ? `，${conflict.savedAt}` : ""}）`}
+                    {conflict.fetchError
+                      ? `；读取最新配置失败：${conflict.fetchError}。旧基准与草稿已保留，可重试。`
+                      : compareOpen
+                        ? "；正在逐项比较，表单已冻结。"
+                        : "；冲突未解决，保存已禁用：请进入比较或取消编辑。"}
+                  </span>
+                  {conflict.fetchError ? (
+                    <button
+                      type="button"
+                      className="btn sm"
+                      disabled={busy}
+                      onClick={() => void enterConflict(conflict.appId, conflict.message)}
+                    >
+                      重试读取最新配置
+                    </button>
+                  ) : (
+                    !compareOpen && (
                       <button
                         type="button"
                         className="btn sm"
-                        onClick={() => requestEditAction({ kind: "open", appId: a.id })}
-                        disabled={editActionBlocked}
-                        title={editActionHint}
+                        disabled={busy}
+                        onClick={() => {
+                          setCompareChoices({});
+                          setCompareOpen(true);
+                        }}
                       >
-                        配置
+                        进入比较
                       </button>
-                      {a.archiveMode === "automatic" ? (
-                        <button
-                          type="button"
-                          className="btn sm"
-                          onClick={() => disableAuto(a)}
-                          disabled={busy}
-                          title={busy ? "有操作进行中，稍候重试" : undefined}
-                        >
-                          关闭自动同步
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          className="btn sm"
-                          onClick={() => enableAuto(a)}
-                          disabled={busy}
-                          title={
-                            busy
-                              ? "有操作进行中，稍候重试"
-                              : !a.ruleComplete
-                                ? "自动同步规则不完整：需先配置项目、目标列与至少一个工作区标签"
-                                : undefined
-                          }
-                        >
-                          启用自动同步
-                        </button>
-                      )}
+                    )
+                  )}
+                </div>
+              )}
+              {conflictInfo && (
+                <div className="rule-status-line">
+                  <span className="rule-status-tag err">操作冲突</span>
+                  <span className="small">
+                    {conflictInfo.message}
+                    {conflictInfo.ruleVersion !== null &&
+                      `（最新保存版本：规则 v${conflictInfo.ruleVersion}${conflictInfo.savedAt ? `，${conflictInfo.savedAt}` : ""}）`}
+                    ；你的修改仍在表单中，可比较后再次保存。
+                  </span>
+                </div>
+              )}
+              {writeError && (
+                <div className="rule-status-line" role="alert">
+                  <span className="rule-status-tag err">{writeError.label}</span>
+                  <span className="small">{writeError.message}；未写入，表单草稿已保留，可重试。</span>
+                </div>
+              )}
+              {refreshError && (
+                <div className="rule-status-line">
+                  <span className="rule-status-tag warn">已保存</span>
+                  <span className="small">
+                    {refreshError}{" "}
+                    <button type="button" className="btn sm" disabled={busy} onClick={() => void retrySaveRefresh()}>
+                      重试刷新
+                    </button>
+                  </span>
+                </div>
+              )}
+              {formDirty && !saving && (
+                <div className="rule-status-line">
+                  <span className="rule-status-tag warn">未保存</span>
+                  <span className="muted small">有未保存的修改（与编辑基准不一致）。</span>
+                </div>
+              )}
+              {!formDirty && !saving && savedInfo && (
+                <div className="rule-status-line">
+                  <span className="rule-status-tag ok">已保存</span>
+                  <span className="muted small">
+                    规则 v{savedInfo.ruleVersion} · {savedInfo.at}
+                  </span>
+                </div>
+              )}
+              {missingRule.length > 0 && (
+                <div className="rule-status-line">
+                  <span className="rule-status-tag warn">规则缺项</span>
+                  <span className="small">{missingRule.join("；")}；补齐后才可启用自动同步。</span>
+                </div>
+              )}
+              {pendingSourceCount > 0 && (
+                <div className="rule-status-line">
+                  <span className="rule-status-tag warn">来源待确认</span>
+                  <span className="small">
+                    {pendingSourceCount} 条来源待确认：其反馈需确认后才会自动同步（与规则缺项相互独立）。
+                  </span>
+                </div>
+              )}
+              {!saving &&
+                !conflict &&
+                !conflictInfo &&
+                !writeError &&
+                !formDirty &&
+                !savedInfo &&
+                missingRule.length === 0 &&
+                pendingSourceCount === 0 && (
+                  <div className="rule-status-line">
+                    <span className="rule-status-tag ok">就绪</span>
+                    <span className="muted small">规则完整：保存或启用自动同步均可。</span>
+                  </div>
+                )}
+            </div>
+
+            {conflict && !conflict.fetchError && compareOpen && (
+              <section data-conflict-region="" aria-label="配置冲突比较">
+                <hr className="sep" />
+                <h3 style={{ marginTop: 0 }}>逐项比较：我的修改 vs 最新保存</h3>
+                <p className="muted small" style={{ marginTop: 0 }}>
+                  基准为本次打开时读到的版本；仅一方修改或双方相同的项自动采用，双方都改且不同的项必须明确选择。
+                  比较期间表单已冻结；「应用比较结果」只更新草稿与基准，仍需点击「保存配置」才会写入。
+                </p>
+                {(compareOptionsLoading || compareOptionsError) && (
+                  <div className="rule-status-line" role={compareOptionsError ? "alert" : "status"} aria-live="polite">
+                    <span className={`rule-status-tag ${compareOptionsError ? "err" : "muted"}`}>
+                      {compareOptionsError ? "选项读取失败" : "读取选项中"}
+                    </span>
+                    <span className="small">
+                      {compareOptionsError ??
+                        "正在分别读取两侧项目的列、标签和成员名称；读取完成前不能静默应用比较结果。"}
+                    </span>
+                    {compareOptionsError && (
                       <button
                         type="button"
-                        className="btn sm danger"
-                        onClick={() => void remove(a)}
-                        disabled={busy || saving || deletingId !== null}
-                        title={
-                          deletingId !== null
-                            ? "已有删除进行中，稍候重试"
-                            : saving
-                              ? "保存进行中，稍候重试"
-                              : busy
-                                ? "有操作进行中，稍候重试"
-                                : undefined
-                        }
+                        className="btn sm"
+                        disabled={busy || compareOptionsLoading}
+                        onClick={() => {
+                          if (serverSnapshot) void loadCompareOptions(form, serverSnapshot);
+                        }}
                       >
-                        {deletingId === a.id ? "删除中…" : "删除"}
+                        重试读取选项
                       </button>
+                    )}
+                  </div>
+                )}
+                {compareRows.map((row, i) => (
+                  <fieldset
+                    key={row.key}
+                    data-conflict-group={row.key}
+                    style={i === 0 ? fieldsetStyle : fieldsetDividedStyle}
+                  >
+                    <legend style={legendStyle}>
+                      {row.title}
+                      {row.state === "auto-mine" && (
+                        <span className="rule-status-tag ok" style={{ marginLeft: "var(--sp-2)" }}>
+                          采用我的修改
+                        </span>
+                      )}
+                      {row.state === "auto-theirs" && (
+                        <span className="rule-status-tag ok" style={{ marginLeft: "var(--sp-2)" }}>
+                          采用最新保存
+                        </span>
+                      )}
+                      {row.state === "same" && (
+                        <span className="rule-status-tag muted" style={{ marginLeft: "var(--sp-2)" }}>
+                          双方一致
+                        </span>
+                      )}
+                      {row.state === "needsChoice" && (
+                        <span className="rule-status-tag warn" style={{ marginLeft: "var(--sp-2)" }}>
+                          需选择
+                        </span>
+                      )}
+                    </legend>
+                    <div className="fields-2col">
+                      <div>
+                        <div className="muted small" style={{ marginBottom: "var(--sp-1)" }}>
+                          我的修改
+                        </div>
+                        <div style={valueBoxStyle} data-conflict-side="mine">
+                          {row.mine.map((line) => (
+                            <div key={line} className="wrap-anywhere">
+                              {line}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="muted small" style={{ marginBottom: "var(--sp-1)" }}>
+                          最新保存
+                        </div>
+                        <div style={valueBoxStyle} data-conflict-side="theirs">
+                          {row.theirs.map((line) => (
+                            <div key={line} className="wrap-anywhere">
+                              {line}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
                     </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-
-      {selected && (
-        <div className="card">
-          <h2>来源确认：{selected.name}</h2>
-          <p className="muted">
-            服务端按请求 Origin 逐条记录来源；无 Origin 的原生客户端记为 <code>native</code>
-            。待确认来源不会自动同步，确认后由扫描自动补处理。
-          </p>
-          <div className="table-wrap" style={{ border: "none", borderRadius: 0 }}>
-            <table>
-              <thead>
-                <tr>
-                  <th>来源</th>
-                  <th>类型</th>
-                  <th>状态</th>
-                  <th>最近出现</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sources.map((s) => (
-                  <tr key={s.origin}>
-                    <td>
-                      <code className="wrap-anywhere">{s.origin}</code>
-                    </td>
-                    <td>{s.kind === "native" ? "原生客户端" : "浏览器"}</td>
-                    <td>
-                      {s.status === "confirmed" ? (
-                        <span className="tag archived">已确认</span>
-                      ) : (
-                        <span className="tag tone-warn">待确认</span>
-                      )}
-                    </td>
-                    <td className="muted">{s.lastSeenAt}</td>
-                    <td>
-                      {s.status === "pending" ? (
-                        <button
-                          type="button"
-                          className="btn sm"
-                          onClick={() => void confirmSource(selected, s.origin)}
-                          disabled={busy}
-                        >
-                          确认来源
-                        </button>
-                      ) : (
-                        <span className="muted">—</span>
-                      )}
-                    </td>
-                  </tr>
+                    {row.state === "needsChoice" && (
+                      <div className="row row-wrap" style={{ marginTop: "var(--sp-2)", gap: "var(--sp-3)" }}>
+                        <label className="row" style={{ gap: "var(--sp-1)" }}>
+                          <input
+                            type="radio"
+                            name={`conflict-${row.key}`}
+                            value="mine"
+                            disabled={busy}
+                            checked={compareChoices[row.key] === "mine"}
+                            onChange={() => setCompareChoices((prev) => ({ ...prev, [row.key]: "mine" }))}
+                          />
+                          我的修改
+                        </label>
+                        <label className="row" style={{ gap: "var(--sp-1)" }}>
+                          <input
+                            type="radio"
+                            name={`conflict-${row.key}`}
+                            value="theirs"
+                            disabled={busy}
+                            checked={compareChoices[row.key] === "theirs"}
+                            onChange={() => setCompareChoices((prev) => ({ ...prev, [row.key]: "theirs" }))}
+                          />
+                          最新保存
+                        </label>
+                      </div>
+                    )}
+                  </fieldset>
                 ))}
-                {sources.length === 0 && (
-                  <tr>
-                    <td colSpan={5}>
-                      <EmptyState title="还没有观察到任何来源" hint="组件提交后自动登记。" />
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      <div className="card">
-        <h2>{draft.id ? `配置：${draft.name}` : "新增软件"}</h2>
-        <div className="rule-status" style={{ marginTop: 16 }} role="status" aria-live="polite">
-          {saving && (
-            <div className="rule-status-line">
-              <span className="rule-status-tag muted">保存中</span>
-              <span className="muted small">正在写入配置…</span>
-            </div>
-          )}
-          {conflict && (
-            <div className="rule-status-line" role="alert">
-              <span className="rule-status-tag err">保存冲突</span>
-              <span className="small">
-                {conflict.message}
-                {conflict.ruleVersion !== null &&
-                  `（最新保存版本：规则 v${conflict.ruleVersion}${conflict.savedAt ? `，${conflict.savedAt}` : ""}）`}
-                {conflict.fetchError
-                  ? `；读取最新配置失败：${conflict.fetchError}。旧基准与草稿已保留，可重试。`
-                  : compareOpen
-                    ? "；正在逐项比较，表单已冻结。"
-                    : "；冲突未解决，保存已禁用：请进入比较或取消编辑。"}
-              </span>
-              {conflict.fetchError ? (
-                <button
-                  type="button"
-                  className="btn sm"
-                  disabled={busy}
-                  onClick={() => void enterConflict(conflict.appId, conflict.message)}
-                >
-                  重试读取最新配置
-                </button>
-              ) : (
-                !compareOpen && (
-                  <button
-                    type="button"
-                    className="btn sm"
-                    disabled={busy}
-                    onClick={() => {
-                      setCompareChoices({});
-                      setCompareOpen(true);
-                    }}
-                  >
-                    进入比较
+                <div className="btn-row" style={{ marginTop: "var(--sp-3)" }}>
+                  <button type="button" className="btn primary" disabled={!allResolved || busy} onClick={applyCompare}>
+                    应用比较结果
                   </button>
-                )
-              )}
-            </div>
-          )}
-          {conflictInfo && (
-            <div className="rule-status-line">
-              <span className="rule-status-tag err">操作冲突</span>
-              <span className="small">
-                {conflictInfo.message}
-                {conflictInfo.ruleVersion !== null &&
-                  `（最新保存版本：规则 v${conflictInfo.ruleVersion}${conflictInfo.savedAt ? `，${conflictInfo.savedAt}` : ""}）`}
-                ；你的修改仍在表单中，可比较后再次保存。
-              </span>
-            </div>
-          )}
-          {writeError && (
-            <div className="rule-status-line" role="alert">
-              <span className="rule-status-tag err">{writeError.label}</span>
-              <span className="small">{writeError.message}；未写入，表单草稿已保留，可重试。</span>
-            </div>
-          )}
-          {refreshError && (
-            <div className="rule-status-line">
-              <span className="rule-status-tag warn">已保存</span>
-              <span className="small">
-                {refreshError}{" "}
-                <button type="button" className="btn sm" disabled={busy} onClick={() => void retrySaveRefresh()}>
-                  重试刷新
-                </button>
-              </span>
-            </div>
-          )}
-          {formDirty && !saving && (
-            <div className="rule-status-line">
-              <span className="rule-status-tag warn">未保存</span>
-              <span className="muted small">有未保存的修改（与编辑基准不一致）。</span>
-            </div>
-          )}
-          {!formDirty && !saving && savedInfo && (
-            <div className="rule-status-line">
-              <span className="rule-status-tag ok">已保存</span>
-              <span className="muted small">
-                规则 v{savedInfo.ruleVersion} · {savedInfo.at}
-              </span>
-            </div>
-          )}
-          {missingRule.length > 0 && (
-            <div className="rule-status-line">
-              <span className="rule-status-tag warn">规则缺项</span>
-              <span className="small">{missingRule.join("；")}；补齐后才可启用自动同步。</span>
-            </div>
-          )}
-          {pendingSourceCount > 0 && (
-            <div className="rule-status-line">
-              <span className="rule-status-tag warn">来源待确认</span>
-              <span className="small">
-                {pendingSourceCount} 条来源待确认：其反馈需确认后才会自动同步（与规则缺项相互独立）。
-              </span>
-            </div>
-          )}
-          {!saving &&
-            !conflict &&
-            !conflictInfo &&
-            !writeError &&
-            !formDirty &&
-            !savedInfo &&
-            missingRule.length === 0 &&
-            pendingSourceCount === 0 && (
-              <div className="rule-status-line">
-                <span className="rule-status-tag ok">就绪</span>
-                <span className="muted small">规则完整：保存或启用自动同步均可。</span>
-              </div>
-            )}
-        </div>
-
-        {conflict && !conflict.fetchError && compareOpen && (
-          <section data-conflict-region="" aria-label="配置冲突比较">
-            <hr className="sep" />
-            <h3 style={{ marginTop: 0 }}>逐项比较：我的修改 vs 最新保存</h3>
-            <p className="muted small" style={{ marginTop: 0 }}>
-              基准为本次打开时读到的版本；仅一方修改或双方相同的项自动采用，双方都改且不同的项必须明确选择。
-              比较期间表单已冻结；「应用比较结果」只更新草稿与基准，仍需点击「保存配置」才会写入。
-            </p>
-            {(compareOptionsLoading || compareOptionsError) && (
-              <div className="rule-status-line" role={compareOptionsError ? "alert" : "status"} aria-live="polite">
-                <span className={`rule-status-tag ${compareOptionsError ? "err" : "muted"}`}>
-                  {compareOptionsError ? "选项读取失败" : "读取选项中"}
-                </span>
-                <span className="small">
-                  {compareOptionsError ?? "正在分别读取两侧项目的列、标签和成员名称；读取完成前不能静默应用比较结果。"}
-                </span>
-                {compareOptionsError && (
-                  <button
-                    type="button"
-                    className="btn sm"
-                    disabled={busy || compareOptionsLoading}
-                    onClick={() => {
-                      if (serverSnapshot) void loadCompareOptions(form, serverSnapshot);
-                    }}
-                  >
-                    重试读取选项
+                  <button type="button" className="btn" disabled={busy} onClick={exitCompare}>
+                    退出比较继续编辑
                   </button>
-                )}
-              </div>
-            )}
-            {compareRows.map((row, i) => (
-              <fieldset
-                key={row.key}
-                data-conflict-group={row.key}
-                style={i === 0 ? fieldsetStyle : fieldsetDividedStyle}
-              >
-                <legend style={legendStyle}>
-                  {row.title}
-                  {row.state === "auto-mine" && (
-                    <span className="rule-status-tag ok" style={{ marginLeft: "var(--sp-2)" }}>
-                      采用我的修改
-                    </span>
-                  )}
-                  {row.state === "auto-theirs" && (
-                    <span className="rule-status-tag ok" style={{ marginLeft: "var(--sp-2)" }}>
-                      采用最新保存
-                    </span>
-                  )}
-                  {row.state === "same" && (
-                    <span className="rule-status-tag muted" style={{ marginLeft: "var(--sp-2)" }}>
-                      双方一致
-                    </span>
-                  )}
-                  {row.state === "needsChoice" && (
-                    <span className="rule-status-tag warn" style={{ marginLeft: "var(--sp-2)" }}>
-                      需选择
-                    </span>
-                  )}
-                </legend>
-                <div className="fields-2col">
-                  <div>
-                    <div className="muted small" style={{ marginBottom: "var(--sp-1)" }}>
-                      我的修改
-                    </div>
-                    <div style={valueBoxStyle} data-conflict-side="mine">
-                      {row.mine.map((line) => (
-                        <div key={line} className="wrap-anywhere">
-                          {line}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="muted small" style={{ marginBottom: "var(--sp-1)" }}>
-                      最新保存
-                    </div>
-                    <div style={valueBoxStyle} data-conflict-side="theirs">
-                      {row.theirs.map((line) => (
-                        <div key={line} className="wrap-anywhere">
-                          {line}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
                 </div>
-                {row.state === "needsChoice" && (
-                  <div className="row row-wrap" style={{ marginTop: "var(--sp-2)", gap: "var(--sp-3)" }}>
-                    <label className="row" style={{ gap: "var(--sp-1)" }}>
-                      <input
-                        type="radio"
-                        name={`conflict-${row.key}`}
-                        value="mine"
-                        disabled={busy}
-                        checked={compareChoices[row.key] === "mine"}
-                        onChange={() => setCompareChoices((prev) => ({ ...prev, [row.key]: "mine" }))}
-                      />
-                      我的修改
-                    </label>
-                    <label className="row" style={{ gap: "var(--sp-1)" }}>
-                      <input
-                        type="radio"
-                        name={`conflict-${row.key}`}
-                        value="theirs"
-                        disabled={busy}
-                        checked={compareChoices[row.key] === "theirs"}
-                        onChange={() => setCompareChoices((prev) => ({ ...prev, [row.key]: "theirs" }))}
-                      />
-                      最新保存
-                    </label>
-                  </div>
+                {!allResolved && (
+                  <p className="muted small" style={{ marginTop: "var(--sp-2)" }}>
+                    还有双方不同的项未选择：每组需点选「我的修改」或「最新保存」后才能应用。
+                  </p>
                 )}
-              </fieldset>
-            ))}
-            <div className="btn-row" style={{ marginTop: "var(--sp-3)" }}>
-              <button type="button" className="btn primary" disabled={!allResolved || busy} onClick={applyCompare}>
-                应用比较结果
-              </button>
-              <button type="button" className="btn" disabled={busy} onClick={exitCompare}>
-                退出比较继续编辑
-              </button>
-            </div>
-            {!allResolved && (
-              <p className="muted small" style={{ marginTop: "var(--sp-2)" }}>
-                还有双方不同的项未选择：每组需点选「我的修改」或「最新保存」后才能应用。
-              </p>
+                <hr className="sep" />
+              </section>
             )}
-            <hr className="sep" />
-          </section>
-        )}
 
-        <div className="fields-2col">
-          <Field id="an" label="名称" hint="在后台列表与反馈详情中展示的名称。">
-            {(ctl) => (
-              <input
-                {...ctl}
-                value={draft.name}
-                disabled={formFrozen}
-                onChange={(e) => patchDraft({ name: e.target.value })}
-              />
-            )}
-          </Field>
-          <Field id="ai2" label="appId" hint="组件提交时携带的标识；创建后不可改。">
-            {(ctl) => (
-              <input
-                {...ctl}
-                value={draft.appId}
-                disabled={Boolean(draft.id) || formFrozen}
-                onChange={(e) => patchDraft({ appId: e.target.value })}
-              />
-            )}
-          </Field>
-        </div>
-        <Field
-          id="orig"
-          label="允许的 Web 来源"
-          hint="每行一个 origin（如 https://example.com）；此处登记的来源直接视为已确认。"
-        >
-          {(ctl) => (
-            <textarea
-              {...ctl}
-              rows={2}
-              value={draft.originsText}
-              disabled={formFrozen}
-              onChange={(e) => patchDraft({ originsText: e.target.value })}
-            />
-          )}
-        </Field>
-
-        <h3 style={{ marginTop: "var(--sp-2)" }}>默认同步目标（自动同步规则）</h3>
-        <div className="row row-wrap" style={{ alignItems: "flex-start" }}>
-          <div style={{ flex: 1 }}>
-            <Field
-              id="pid"
-              label="Kaneo 项目"
-              hint={
-                projects.length > 0 ? "选项从连接配置的 Kaneo 实例加载。" : "实例选项未加载：直接填 Kaneo 项目 id。"
-              }
-            >
-              {(ctl) =>
-                projects.length > 0 ? (
-                  <select
-                    {...ctl}
-                    value={rule.projectId}
-                    disabled={detailLoading || formFrozen}
-                    onChange={(e) => {
-                      // 切换项目：立即清空列/标签/负责人，并丢弃旧项目的迟到响应
-                      patchRule({
-                        projectId: e.target.value,
-                        columnId: "",
-                        columnSlug: "",
-                        labelIds: [],
-                        assigneeId: "",
-                      });
-                      setOptions(null);
-                      void loadOptions(e.target.value);
-                      void testProjectWith(e.target.value);
-                    }}
-                  >
-                    <option value="">— 选择项目 —</option>
-                    {projects.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name}（{p.slug}）
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <input
-                    {...ctl}
-                    value={rule.projectId}
-                    disabled={detailLoading || formFrozen}
-                    onChange={(e) => patchRule({ projectId: e.target.value })}
-                  />
-                )
-              }
-            </Field>
-          </div>
-          <button
-            type="button"
-            className="btn"
-            onClick={loadProjects}
-            disabled={busy || formFrozen}
-            title={formFrozen ? formFrozenHint : busy ? "有操作进行中，稍候重试" : undefined}
-            style={{ marginTop: 22, whiteSpace: "nowrap" }}
-          >
-            <Icon name="refresh" size={16} />
-            {busy ? "加载中…" : "刷新项目列表"}
-          </button>
-          <div style={{ flex: 1 }}>
-            <Field id="col" label="目标列" hint="加载选项后从项目列中选择；未加载时直接填目标列 slug。">
-              {(ctl) =>
-                options && options.columns.length > 0 ? (
-                  <select
-                    {...ctl}
-                    value={rule.columnId}
-                    disabled={detailLoading || formFrozen}
-                    onChange={(e) => {
-                      const hit = options.columns.find((c) => c.id === e.target.value);
-                      patchRule({ columnId: e.target.value, columnSlug: hit?.slug ?? "" });
-                    }}
-                  >
-                    <option value="">— 选择列 —</option>
-                    {options.columns.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}（{c.slug}）
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <input
-                    {...ctl}
-                    value={rule.columnSlug}
-                    disabled={detailLoading || formFrozen}
-                    onChange={(e) => patchRule({ columnSlug: e.target.value })}
-                  />
-                )
-              }
-            </Field>
-          </div>
-          <button
-            type="button"
-            className="btn"
-            onClick={() => void loadOptions(rule.projectId)}
-            disabled={busy || !rule.projectId || formFrozen}
-            title={
-              !rule.projectId
-                ? "先选择 Kaneo 项目，才能加载列 / 标签 / 成员"
-                : formFrozen
-                  ? formFrozenHint
-                  : busy
-                    ? "有操作进行中，稍候重试"
-                    : undefined
-            }
-            style={{ marginTop: 22 }}
-          >
-            加载列 / 标签 / 成员
-          </button>
-        </div>
-
-        {/* 目标列校验错误：贴近「默认同步目标」字段，点重试即重测连接 */}
-        {targetError && <InlineError message={targetError} onRetry={() => void testProjectWith(effectiveProjectId)} />}
-        {optionsError && <InlineError message={optionsError} onRetry={() => void loadOptions(rule.projectId)} />}
-
-        {options && (
-          <div className="row row-wrap" style={{ alignItems: "flex-start" }}>
-            <div className="field" style={{ flex: 2 }}>
-              <span className="muted">工作区标签（至少选一个）</span>
-              <div className="label-picker">
-                {options.labels.map((l) => (
-                  <label key={l.id}>
-                    <input
-                      type="checkbox"
-                      checked={rule.labelIds.includes(l.id)}
-                      disabled={detailLoading || formFrozen}
-                      onChange={(e) =>
-                        patchRule({
-                          labelIds: e.target.checked
-                            ? [...rule.labelIds, l.id]
-                            : rule.labelIds.filter((x) => x !== l.id),
-                        })
-                      }
-                    />
-                    {l.name}
-                  </label>
-                ))}
-                {options.labels.length === 0 && <span className="muted">该项目工作区没有可用标签</span>}
-              </div>
-            </div>
-            <div style={{ flex: 1 }}>
-              <Field id="as" label="负责人" hint="可留空：同步任务不指定负责人。">
+            <div className="fields-2col">
+              <Field id="an" label="名称" hint="在后台列表与反馈详情中展示的名称。">
                 {(ctl) => (
-                  <select
+                  <input
                     {...ctl}
-                    value={rule.assigneeId}
+                    value={draft.name}
                     disabled={formFrozen}
-                    onChange={(e) => patchRule({ assigneeId: e.target.value })}
-                  >
-                    <option value="">— 不指定 —</option>
-                    {options.members.map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.name}
-                      </option>
-                    ))}
-                  </select>
+                    onChange={(e) => patchDraft({ name: e.target.value })}
+                  />
+                )}
+              </Field>
+              <Field id="ai2" label="appId" hint="组件提交时携带的标识；创建后不可改。">
+                {(ctl) => (
+                  <input
+                    {...ctl}
+                    value={draft.appId}
+                    disabled={Boolean(draft.id) || formFrozen}
+                    onChange={(e) => patchDraft({ appId: e.target.value })}
+                  />
                 )}
               </Field>
             </div>
-          </div>
-        )}
+            <Field
+              id="orig"
+              label="允许的 Web 来源"
+              hint="每行一个 origin（如 https://example.com）；此处登记的来源直接视为已确认。"
+            >
+              {(ctl) => (
+                <textarea
+                  {...ctl}
+                  rows={2}
+                  value={draft.originsText}
+                  disabled={formFrozen}
+                  onChange={(e) => patchDraft({ originsText: e.target.value })}
+                />
+              )}
+            </Field>
 
-        <div className="btn-row">
-          <button
-            type="button"
-            className="btn primary"
-            onClick={save}
-            disabled={busy || detailLoading || conflictPending}
-            title={
-              conflictPending
-                ? "存在未解决的保存冲突：请逐项比较并应用结果后再保存"
-                : detailLoading
-                  ? "正在读取软件详情，完成后可保存"
-                  : busy
-                    ? "有操作进行中，稍候重试"
-                    : undefined
-            }
-            aria-busy={saving}
-          >
-            {draft.id ? "保存配置（不触发同步）" : "创建"}
-          </button>
+            <h3 style={{ marginTop: "var(--sp-2)" }}>默认同步目标（自动同步规则）</h3>
+            <div className="row row-wrap" style={{ alignItems: "flex-start" }}>
+              <div style={{ flex: 1 }}>
+                <Field
+                  id="pid"
+                  label="Kaneo 项目"
+                  hint={
+                    projects.length > 0 ? "选项从连接配置的 Kaneo 实例加载。" : "实例选项未加载：直接填 Kaneo 项目 id。"
+                  }
+                >
+                  {(ctl) =>
+                    projects.length > 0 ? (
+                      <select
+                        {...ctl}
+                        value={rule.projectId}
+                        disabled={detailLoading || formFrozen}
+                        onChange={(e) => {
+                          // 切换项目：立即清空列/标签/负责人，并丢弃旧项目的迟到响应
+                          patchRule({
+                            projectId: e.target.value,
+                            columnId: "",
+                            columnSlug: "",
+                            labelIds: [],
+                            assigneeId: "",
+                          });
+                          setOptions(null);
+                          void loadOptions(e.target.value);
+                          void testProjectWith(e.target.value);
+                        }}
+                      >
+                        <option value="">— 选择项目 —</option>
+                        {projects.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.name}（{p.slug}）
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        {...ctl}
+                        value={rule.projectId}
+                        disabled={detailLoading || formFrozen}
+                        onChange={(e) => patchRule({ projectId: e.target.value })}
+                      />
+                    )
+                  }
+                </Field>
+              </div>
+              <button
+                type="button"
+                className="btn"
+                onClick={loadProjects}
+                disabled={busy || formFrozen}
+                title={formFrozen ? formFrozenHint : busy ? "有操作进行中，稍候重试" : undefined}
+                style={{ marginTop: 22, whiteSpace: "nowrap" }}
+              >
+                <Icon name="refresh" size={16} />
+                {busy ? "加载中…" : "刷新项目列表"}
+              </button>
+              <div style={{ flex: 1 }}>
+                <Field id="col" label="目标列" hint="加载选项后从项目列中选择；未加载时直接填目标列 slug。">
+                  {(ctl) =>
+                    options && options.columns.length > 0 ? (
+                      <select
+                        {...ctl}
+                        value={rule.columnId}
+                        disabled={detailLoading || formFrozen}
+                        onChange={(e) => {
+                          const hit = options.columns.find((c) => c.id === e.target.value);
+                          patchRule({ columnId: e.target.value, columnSlug: hit?.slug ?? "" });
+                        }}
+                      >
+                        <option value="">— 选择列 —</option>
+                        {options.columns.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.name}（{c.slug}）
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        {...ctl}
+                        value={rule.columnSlug}
+                        disabled={detailLoading || formFrozen}
+                        onChange={(e) => patchRule({ columnSlug: e.target.value })}
+                      />
+                    )
+                  }
+                </Field>
+              </div>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => void loadOptions(rule.projectId)}
+                disabled={busy || !rule.projectId || formFrozen}
+                title={
+                  !rule.projectId
+                    ? "先选择 Kaneo 项目，才能加载列 / 标签 / 成员"
+                    : formFrozen
+                      ? formFrozenHint
+                      : busy
+                        ? "有操作进行中，稍候重试"
+                        : undefined
+                }
+                style={{ marginTop: 22 }}
+              >
+                加载列 / 标签 / 成员
+              </button>
+            </div>
+
+            {/* 目标列校验错误：贴近「默认同步目标」字段，点重试即重测连接 */}
+            {targetError && (
+              <InlineError message={targetError} onRetry={() => void testProjectWith(effectiveProjectId)} />
+            )}
+            {optionsError && <InlineError message={optionsError} onRetry={() => void loadOptions(rule.projectId)} />}
+
+            {options && (
+              <div className="row row-wrap" style={{ alignItems: "flex-start" }}>
+                <div className="field" style={{ flex: 2 }}>
+                  <span className="muted">工作区标签（至少选一个）</span>
+                  <div className="label-picker">
+                    {options.labels.map((l) => (
+                      <label key={l.id}>
+                        <input
+                          type="checkbox"
+                          checked={rule.labelIds.includes(l.id)}
+                          disabled={detailLoading || formFrozen}
+                          onChange={(e) =>
+                            patchRule({
+                              labelIds: e.target.checked
+                                ? [...rule.labelIds, l.id]
+                                : rule.labelIds.filter((x) => x !== l.id),
+                            })
+                          }
+                        />
+                        {l.name}
+                      </label>
+                    ))}
+                    {options.labels.length === 0 && <span className="muted">该项目工作区没有可用标签</span>}
+                  </div>
+                </div>
+                <div style={{ flex: 1 }}>
+                  <Field id="as" label="负责人" hint="可留空：同步任务不指定负责人。">
+                    {(ctl) => (
+                      <select
+                        {...ctl}
+                        value={rule.assigneeId}
+                        disabled={formFrozen}
+                        onChange={(e) => patchRule({ assigneeId: e.target.value })}
+                      >
+                        <option value="">— 不指定 —</option>
+                        {options.members.map((m) => (
+                          <option key={m.id} value={m.id}>
+                            {m.name}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </Field>
+                </div>
+              </div>
+            )}
+
+            <div className="apps-save-bar">
+              <div className="btn-row">
+                <button
+                  type="button"
+                  className="btn primary"
+                  onClick={save}
+                  disabled={busy || detailLoading || conflictPending}
+                  title={
+                    conflictPending
+                      ? "存在未解决的保存冲突：请逐项比较并应用结果后再保存"
+                      : detailLoading
+                        ? "正在读取软件详情，完成后可保存"
+                        : busy
+                          ? "有操作进行中，稍候重试"
+                          : undefined
+                  }
+                  aria-busy={saving}
+                >
+                  {draft.id ? "保存配置（不触发同步）" : "创建"}
+                </button>
+                {selected && (
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => enableAuto(selected)}
+                    disabled={busy || formFrozen}
+                    title={
+                      formFrozen
+                        ? formFrozenHint
+                        : busy
+                          ? "有操作进行中，稍候重试"
+                          : !selected.ruleComplete
+                            ? "自动同步规则不完整：需先配置项目、目标列与至少一个工作区标签"
+                            : undefined
+                    }
+                  >
+                    启用自动同步并处理积压
+                  </button>
+                )}
+                {draft.id && (
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={editActionBlocked}
+                    title={editActionHint}
+                    onClick={() => requestEditAction({ kind: "reset" })}
+                  >
+                    取消编辑
+                  </button>
+                )}
+              </div>
+              <p className="save-hint">
+                保存位置：写入本服务器的软件配置；普通保存不会触发同步，同步到 Kaneo 需另行启用自动同步。
+              </p>
+              {columns.length > 0 && <p className="muted">项目共 {columns.length} 列（已通过连接测试）</p>}
+            </div>
+          </div>
+
+          {/* 危险操作独立分区：与配置表单分开；流程仍是确认弹窗 → 进行中禁用 → 可重试错误（与行内删除同一入口）。 */}
           {selected && (
-            <button
-              type="button"
-              className="btn"
-              onClick={() => enableAuto(selected)}
-              disabled={busy || formFrozen}
-              title={
-                formFrozen
-                  ? formFrozenHint
-                  : busy
-                    ? "有操作进行中，稍候重试"
-                    : !selected.ruleComplete
-                      ? "自动同步规则不完整：需先配置项目、目标列与至少一个工作区标签"
-                      : undefined
-              }
-            >
-              启用自动同步并处理积压
-            </button>
-          )}
-          {draft.id && (
-            <button
-              type="button"
-              className="btn"
-              disabled={editActionBlocked}
-              title={editActionHint}
-              onClick={() => requestEditAction({ kind: "reset" })}
-            >
-              取消编辑
-            </button>
+            <div className="danger-zone">
+              <div className="danger-zone-head">
+                <h2>危险操作</h2>
+                <span className="tag tone-err">软删除，历史保留</span>
+              </div>
+              <p>
+                删除「{selected.name}」（<code className="wrap-anywhere">{selected.appId}</code>）：历史反馈、截图与日志
+                全部保留；该 appId 再次提交反馈时会以全新待配置记录重新出现。列表行内也有同一删除入口。
+              </p>
+              <button
+                type="button"
+                className="btn danger"
+                onClick={() => void remove(selected)}
+                disabled={busy || saving || deletingId !== null}
+                title={
+                  deletingId !== null
+                    ? "已有删除进行中，稍候重试"
+                    : saving
+                      ? "保存进行中，稍候重试"
+                      : busy
+                        ? "有操作进行中，稍候重试"
+                        : undefined
+                }
+              >
+                {deletingId === selected.id ? "删除中…" : "删除该软件"}
+              </button>
+            </div>
           )}
         </div>
-        <p className="save-hint">
-          保存位置：写入本服务器的软件配置；普通保存不会触发同步，同步到 Kaneo 需另行启用自动同步。
-        </p>
-        {columns.length > 0 && <p className="muted">项目共 {columns.length} 列（已通过连接测试）</p>}
       </div>
-
-      {/* 危险操作独立分区：与配置表单分开；流程仍是确认弹窗 → 进行中禁用 → 可重试错误（与行内删除同一入口）。 */}
-      {selected && (
-        <div className="danger-zone">
-          <div className="danger-zone-head">
-            <h2>危险操作</h2>
-            <span className="tag tone-err">软删除，历史保留</span>
-          </div>
-          <p>
-            删除「{selected.name}」（<code className="wrap-anywhere">{selected.appId}</code>）：历史反馈、截图与日志
-            全部保留；该 appId 再次提交反馈时会以全新待配置记录重新出现。列表行内也有同一删除入口。
-          </p>
-          <button
-            type="button"
-            className="btn danger"
-            onClick={() => void remove(selected)}
-            disabled={busy || saving || deletingId !== null}
-            title={
-              deletingId !== null
-                ? "已有删除进行中，稍候重试"
-                : saving
-                  ? "保存进行中，稍候重试"
-                  : busy
-                    ? "有操作进行中，稍候重试"
-                    : undefined
-            }
-          >
-            {deletingId === selected.id ? "删除中…" : "删除该软件"}
-          </button>
-        </div>
-      )}
 
       {confirmState?.kind === "discard" && (
         <ConfirmDialog

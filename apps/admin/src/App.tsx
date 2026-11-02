@@ -90,21 +90,54 @@ function LoginView({
   }
 
   return (
-    <div className="login-wrap">
-      {/* 单一登录卡片：页头（标题 + 主题）→ 用途 → 服务身份 → 表单 → 提交。
-          错误经 Field 渲染在密码框正下方（贴近表单、role=alert、aria 关联），
-          出错后提交按钮变「重试登录」，原地重试即可。 */}
-      <form className="card" onSubmit={submit}>
+    <div className="login-wrap login-stage">
+      {/* 左侧品牌说明（纯展示）：讲清产品边界与能力；窄屏隐藏，只留登录表单。 */}
+      <div className="login-visual" aria-hidden="true">
         <div className="login-brand">
-          <Icon name="feedback" size={24} />
+          <Icon name="feedback" size={22} />
           <span>Feedback</span>
         </div>
+        <h2 className="login-headline">
+          把每一条反馈，
+          <br />
+          <em>变成可跟进的行动</em>。
+        </h2>
+        <p className="login-lede">
+          截图、对话、自动整理与 Kaneo 归档在同一条链路里完成。管理员登录后即可处理反馈、维护软件配置与接入凭据。
+        </p>
+        <ul className="login-feats">
+          <li>
+            <span className="feat-ic">
+              <Icon name="image" size={15} />
+            </span>
+            截图即反馈，敏感信息自动遮罩
+          </li>
+          <li>
+            <span className="feat-ic">
+              <Icon name="feedback" size={15} />
+            </span>
+            对话式跟进，状态与未读一目了然
+          </li>
+          <li>
+            <span className="feat-ic">
+              <Icon name="archive" size={15} />
+            </span>
+            自动整理并同步到 Kaneo 任务
+          </li>
+        </ul>
+      </div>
+
+      {/* 右侧登录表单：单一卡片，页头（标题 + 主题）→ 用途 → 服务身份 → 表单 → 提交。
+          错误经 Field 渲染在密码框正下方（贴近表单、role=alert、aria 关联），
+          出错后提交按钮变「重试登录」，原地重试即可。 */}
+      <form className="card login-form" onSubmit={submit}>
         <div className="login-card-head">
-          <h1>Feedback 管理登录</h1>
+          <h1>管理登录</h1>
           <ThemeSelect />
         </div>
         <p className="login-purpose">集中查看反馈、跟进问题，管理软件与账号。</p>
         <div className="login-server">
+          <Icon name="link" size={14} />
           <span>服务地址</span>
           <code>{window.location.origin}</code>
         </div>
@@ -148,6 +181,7 @@ function LoginView({
         >
           {busy ? "登录中…" : error ? "重试登录" : "登录"}
         </button>
+        <p className="login-foot">凭据仅用于本次管理会话 · 不开放注册</p>
       </form>
     </div>
   );
