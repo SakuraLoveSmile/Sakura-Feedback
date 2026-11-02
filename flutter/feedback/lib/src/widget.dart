@@ -2043,6 +2043,20 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
             ? _OrbMorphGeometry(
                 left: isLeft,
                 handle: _idlePreferences.style == FeedbackOrbIdleStyle.handle,
+                dark: !(MediaQuery.maybeOf(context)?.highContrast ??
+                        View.of(context)
+                            .platformDispatcher
+                            .accessibilityFeatures
+                            .highContrast) &&
+                    (Theme.maybeBrightnessOf(context) ??
+                            switch (config.theme) {
+                              FeedbackThemeMode.light => Brightness.light,
+                              FeedbackThemeMode.dark => Brightness.dark,
+                              FeedbackThemeMode.system => View.of(context)
+                                  .platformDispatcher
+                                  .platformBrightness,
+                            }) ==
+                        Brightness.dark,
                 progress: _orbMorphProgress,
                 dockCenter: _orbIdleDockCenter,
                 safeInsets: dockInsets,
@@ -2301,6 +2315,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     final bool handle = _idlePreferences.style == FeedbackOrbIdleStyle.handle;
     final double t = geometry.progress;
     final double halfWidth = geometry.halfWidth;
+    final double halfHeight = geometry.halfHeight;
     Widget art = IgnorePointer(
         child: ClipRect(
             clipper: const _OrbDockClipper(),
@@ -2308,21 +2323,21 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
               Positioned(
                   left: left ? geometry.paintInset : null,
                   right: left ? null : geometry.paintInset,
-                  top: 0,
+                  top: 28 - halfHeight,
                   width: halfWidth * 2,
-                  height: 56,
+                  height: halfHeight * 2,
                   child: SizedBox(
                       key: Key(
                           'feedback-orb-idle-${handle ? 'handle' : 'edge'}'),
                       child: Stack(clipBehavior: Clip.none, children: <Widget>[
                         Positioned(
                             left: halfWidth - 44.8,
-                            top: -16.8,
+                            top: halfHeight - 44.8,
                             width: 89.6,
                             height: 89.6,
                             child: _buildOrbLensLayer(28,
                                 fixedCenter: geometry.center,
-                                halfSize: Size(halfWidth, 28),
+                                halfSize: Size(halfWidth, halfHeight),
                                 handleMix: handle ? t : 0,
                                 mist: .74,
                                 idleMix: 1)),
@@ -2750,6 +2765,7 @@ class _OrbMorphGeometry {
   factory _OrbMorphGeometry({
     required bool left,
     required bool handle,
+    required bool dark,
     required double progress,
     required Offset dockCenter,
     required EdgeInsets safeInsets,
@@ -2760,8 +2776,11 @@ class _OrbMorphGeometry {
     final double edge = left ? safeLeft : safeRight;
     final double dockGap =
         left ? dockCenter.dx - 28 - edge : edge - dockCenter.dx - 28;
-    final double halfWidth = 28 + ((handle ? 6 : 28) - 28) * progress;
-    final double inset = dockGap + ((handle ? 3 : -28) - dockGap) * progress;
+    final double halfWidth =
+        28 + ((handle ? (dark ? 5 : 6) : 28) - 28) * progress;
+    final double halfHeight = 28 + (handle && dark ? -4 : 0) * progress;
+    final double inset =
+        dockGap + ((handle ? (dark ? 10 : 3) : -28) - dockGap) * progress;
     final Offset center = Offset(
         left ? edge + inset + halfWidth : edge - inset - halfWidth,
         dockCenter.dy);
@@ -2782,6 +2801,7 @@ class _OrbMorphGeometry {
         progress,
         center,
         halfWidth,
+        halfHeight,
         inset,
         hit,
         left ? hit.left - edge : edge - hit.right,
@@ -2789,11 +2809,19 @@ class _OrbMorphGeometry {
             viewportWidth - safeInsets.horizontal, math.max(56, dockGap + 56)));
   }
 
-  const _OrbMorphGeometry._(this.progress, this.center, this.halfWidth,
-      this.paintInset, this.hit, this.hitInset, this.clipWidth);
+  const _OrbMorphGeometry._(
+      this.progress,
+      this.center,
+      this.halfWidth,
+      this.halfHeight,
+      this.paintInset,
+      this.hit,
+      this.hitInset,
+      this.clipWidth);
   final double progress;
   final Offset center;
   final double halfWidth;
+  final double halfHeight;
   final double paintInset;
   final Rect hit;
   final double hitInset;

@@ -132,8 +132,9 @@ describe('R7 safe-texture ownership',()=>{
     m.widget.showLauncher=true;
     return {...m,provider};
   }
-  function expectHandle() {
-    expect(draws.at(-1)![5]).toEqual({halfSize:{x:6,y:28},handleMix:1,mist:.74,idleMix:1});
+  function expectHandle(dark=false) {
+    // R11 changes only the dark handle; ownership and masked sampling stay fixed.
+    expect(draws.at(-1)![5]).toEqual({halfSize:dark?{x:5,y:24}:{x:6,y:28},handleMix:1,mist:.74,idleMix:1});
   }
   it.each(['full','handle','edge'].flatMap(style=>['explicit','system'].map(trigger=>({style,trigger}))))('R7 theme $trigger refreshes one masked background for the visible $style and wake keeps the new pixels',async({style,trigger})=>{
     vi.spyOn(window,'innerWidth','get').mockReturnValue(390);
@@ -184,7 +185,7 @@ describe('R7 safe-texture ownership',()=>{
     expect(isCoverPixel(uploads[0]!,150,110)).toBe(true); expect(closes[1]).toHaveBeenCalledTimes(1);
     expect(capture.captureViewport).toHaveBeenCalledTimes(2);
     expect(vi.mocked(capture.captureViewport).mock.calls[0]![0].signal?.aborted).toBe(true);
-    expectHandle(); expect(m.provider).not.toHaveBeenCalled(); expect(dispose).not.toHaveBeenCalled();
+    expectHandle(true); expect(m.provider).not.toHaveBeenCalled(); expect(dispose).not.toHaveBeenCalled();
   });
   it.each(['panel','host','background'] as const)('R7 theme changes during %s do not capture; restoration samples the latest host once and keeps the draft',async gate=>{
     const {change}=colorScheme(false,true),m=launcher({theme:'system'}); await settled();

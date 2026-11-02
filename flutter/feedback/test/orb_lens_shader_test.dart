@@ -167,6 +167,105 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   testWidgets(
+      'R11 dark idle keeps the clear background and a subdued local edge for sphere and capsule',
+      (tester) async {
+    await tester.runAsync(() async {
+      const Color backdrop = Color(0xFF1C1D21);
+      final ui.Image safe =
+          await _image((canvas) => canvas.drawColor(backdrop, BlendMode.src));
+      try {
+        for (final bool handle in <bool>[false, true]) {
+          final _Pixels pixels = await _render(safe,
+              center: const Offset(256.5, 256.5),
+              radius: 28,
+              halfSize: handle ? const Size(5, 24) : null,
+              handleMix: handle ? 1 : 0,
+              mist: .74,
+              idleMix: 1,
+              dark: true,
+              backdrop: backdrop);
+          expect(pixels.channel(256, 256, 0), inInclusiveRange(29, 34),
+              reason: 'the selected clear glass only lightly tints the host');
+          expect(pixels.channel(256, 256, 2), inInclusiveRange(34, 40));
+          expect(pixels.channel(256, 256, 3), 255);
+          for (int x = 256; x <= 256 + (handle ? 5 : 28) + 8; x++) {
+            for (int c = 0; c < 3; c++) {
+              expect(pixels.channel(x.toDouble(), 256, c), lessThan(80),
+                  reason: 'the edge must never become a bright white ring');
+            }
+          }
+        }
+      } finally {
+        safe.dispose();
+      }
+    });
+  });
+
+  testWidgets(
+      'R11 dark no-texture fallback is nearly transparent and retains high-contrast contours',
+      (tester) async {
+    await tester.runAsync(() async {
+      for (final bool handle in <bool>[false, true]) {
+        for (final bool highContrast in <bool>[false, true]) {
+          final OrbLiquidOutlinePainter fallback = OrbLiquidOutlinePainter(
+              radius: 28,
+              halfSize: handle ? const Size(5, 24) : null,
+              handleMix: handle ? 1 : 0,
+              idleMix: 1,
+              dark: true,
+              highContrast: highContrast);
+          final ui.Image image = await _image(
+              (canvas) => fallback.paint(canvas, const Size(512, 512)));
+          try {
+            final ByteData? raw =
+                await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+            final _Pixels pixels = _Pixels(raw!.buffer.asUint8List());
+            if (highContrast) {
+              expect(pixels.channel(256, 256, 3), 0,
+                  reason: 'the existing high-contrast outline is preserved');
+            } else {
+              expect(pixels.channel(256, 256, 3),
+                  handle ? inInclusiveRange(10, 14) : inInclusiveRange(3, 6),
+                  reason: 'the rejected 62% smoke body must not return');
+              expect(pixels.channel(256, 256, 0), lessThanOrEqualTo(8));
+              expect(pixels.channel(256, 256, 2), lessThanOrEqualTo(9));
+              for (int i = 0; i < pixels.data.length; i += 4) {
+                for (int c = 0; c < 3; c++) {
+                  expect(pixels.data[i + c],
+                      lessThanOrEqualTo(pixels.data[i + 3]));
+                }
+              }
+            }
+          } finally {
+            image.dispose();
+          }
+        }
+      }
+    });
+  });
+
+  testWidgets(
+      'R11 clear idle preserves a one-pixel feature with only 0.35px softness',
+      (tester) async {
+    await tester.runAsync(() async {
+      final ui.Image point = await _image((canvas) => canvas.drawRect(
+          const Rect.fromLTWH(256, 256, 1, 1), Paint()..color = Colors.red));
+      try {
+        final _Pixels pixels = await _render(point,
+            center: const Offset(256.5, 256.5),
+            radius: 28,
+            mist: .74,
+            idleMix: 1,
+            dark: true);
+        expect(pixels.channel(256, 256, 3), closeTo(.825 * 255, 1),
+            reason: 'lightly filtered safe alpha retains fine detail');
+      } finally {
+        point.dispose();
+      }
+    });
+  });
+
+  testWidgets(
       'R9 light idle glow remains visible and softly fades 2–6px outside round and handle shapes',
       (tester) async {
     await tester.runAsync(() async {
@@ -264,7 +363,7 @@ void main() {
   });
 
   testWidgets(
-      'R9 light glow preserves transparent centers and premultiplication; dark idle retains its prior glow',
+      'R11 idle preserves transparent sampled centers and premultiplication with a soft outer shadow',
       (tester) async {
     await tester.runAsync(() async {
       final ui.Image transparent = await _image((canvas) {});
@@ -274,7 +373,9 @@ void main() {
             final _Pixels layer = await _render(transparent,
                 center: const Offset(256.5, 256.5),
                 radius: 28,
-                halfSize: handle ? const Size(6, 28) : null,
+                halfSize: handle
+                    ? (dark ? const Size(5, 24) : const Size(6, 28))
+                    : null,
                 handleMix: handle ? 1 : 0,
                 mist: .74,
                 idleMix: 1,
@@ -292,14 +393,18 @@ void main() {
             expect(excess, 0,
                 reason: 'every output pixel remains premultiplied');
             if (dark) {
-              final int halfWidth = handle ? 6 : 28;
+              final int halfWidth = handle ? 5 : 28;
+              int previousAlpha = 255;
               for (int gap = 2; gap <= 6; gap++) {
-                final double r = (halfWidth + gap) / halfWidth;
-                final double oldAlpha =
-                    math.exp(-math.pow((r - 1.04) / .14, 2)) * .10 * 255;
                 final double x = 256 + halfWidth + gap.toDouble();
-                expect(layer.channel(x, 256, 3), closeTo(oldAlpha, 1));
-                expect(layer.channel(x, 256, 0), closeTo(oldAlpha * .95, 1));
+                final int alpha = layer.channel(x, 256, 3);
+                // R11's transparent exterior is the selected preview's
+                // soft neutral shadow; it is independent of sampled alpha.
+                expect(alpha,
+                    closeTo(math.exp(-math.pow(gap / 4.5, 2)) * .11 * 255, 1));
+                expect(alpha, lessThan(previousAlpha));
+                expect(layer.channel(x, 256, 0), lessThanOrEqualTo(12));
+                previousAlpha = alpha;
               }
             }
           }
@@ -353,7 +458,7 @@ void main() {
   });
 
   testWidgets(
-      'R7 capsule has straight sides and complete round caps at 12 by 56',
+      'idle capsule has complete round caps: R11 dark 10 by 48 and R9 light 12 by 56',
       (tester) async {
     await tester.runAsync(() async {
       final ui.Image safe = await _image((canvas) {
@@ -364,19 +469,21 @@ void main() {
           final _Pixels pixels = await _render(safe,
               center: const Offset(256.5, 256.5),
               radius: 28,
-              halfSize: const Size(6, 28),
+              halfSize: dark ? const Size(5, 24) : const Size(6, 28),
               handleMix: 1,
               mist: .74,
               idleMix: 1,
               dark: dark);
-          expect(pixels.channel(251, 256, 3), greaterThan(250));
-          expect(pixels.channel(251, 274, 3), greaterThan(250),
+          expect(pixels.channel(dark ? 252 : 251, 256, 3), greaterThan(250));
+          expect(pixels.channel(dark ? 252 : 251, dark ? 273 : 274, 3),
+              greaterThan(250),
               reason: 'vertical stem is not an ellipse');
-          expect(pixels.channel(256, 229, 3), greaterThan(250));
-          expect(pixels.channel(256, 283, 3), greaterThan(250));
+          expect(pixels.channel(256, dark ? 233 : 229, 3), greaterThan(250));
+          expect(pixels.channel(256, dark ? 279 : 283, 3), greaterThan(250));
           if (dark) {
             expect(pixels.channel(249, 230, 3), lessThan(30));
-            expect(pixels.channel(246, 256, 3), lessThan(10));
+            // Five pixels beyond the new 5px half-width is only soft shadow.
+            expect(pixels.channel(246, 256, 3), closeTo(8, 1));
           } else {
             // R9 intentionally adds a 4.5px-wide light idle glow outside the
             // surface; these pixels may contain glow, but never opaque glass.

@@ -251,6 +251,66 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
+  for (final FeedbackSide side in FeedbackSide.values) {
+    testWidgets(
+        'R11 ${side.name}: dark 10 by 48 handle keeps the 44 by 56 hit target and updates with theme',
+        (tester) async {
+      host.side = side;
+      host.theme = ThemeData(brightness: Brightness.dark);
+      await host.mount(tester);
+      final Rect dock = tester.getRect(liquidOrb);
+      await idle(tester);
+      final Finder face = find.byKey(const Key('feedback-orb-idle-handle'));
+      final Rect darkFace = tester.getRect(face);
+      expect(darkFace.size, const Size(10, 48));
+      expect(darkFace.center.dy, dock.center.dy);
+      expect(
+          side == FeedbackSide.left ? darkFace.left : 800 - darkFace.right, 10);
+      expect(tester.getSize(collapsed), const Size(44, 56));
+      host.theme = ThemeData(brightness: Brightness.light);
+      await host.mount(tester);
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(tester.getSize(face), const Size(12, 56));
+      expect(tester.getSize(collapsed), const Size(44, 56));
+      host.theme = ThemeData(brightness: Brightness.dark);
+      await host.mount(tester);
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(tester.getRect(face), darkFace);
+      await tester.tapAt(darkFace.center);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 420));
+      expect(tester.getRect(liquidOrb), dock);
+      expect(host.controller.isOpen, isFalse,
+          reason: 'the smaller visual still wakes without activating feedback');
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
+  testWidgets(
+      'R11 dark high contrast retains the original capsule and wake target',
+      (tester) async {
+    tester.platformDispatcher.accessibilityFeaturesTestValue =
+        const FakeAccessibilityFeatures(highContrast: true);
+    addTearDown(tester.platformDispatcher.clearAccessibilityFeaturesTestValue);
+    host.theme = ThemeData(brightness: Brightness.dark);
+    await host.mount(tester);
+    final Rect dock = tester.getRect(liquidOrb);
+    await idle(tester);
+    final Rect face =
+        tester.getRect(find.byKey(const Key('feedback-orb-idle-handle')));
+    expect(face.size, const Size(12, 56));
+    expect(800 - face.right, 3);
+    expect(face.center.dy, dock.center.dy);
+    expect(tester.getSize(collapsed), const Size(44, 56));
+    await tester.tapAt(face.center);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 420));
+    expect(tester.getRect(liquidOrb), dock);
+    expect(host.controller.isOpen, isFalse,
+        reason: 'high contrast keeps the original wake-only interaction');
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('press, drag, keyboard focus and hover suspend the timer',
       (tester) async {
     await host.mount(tester);

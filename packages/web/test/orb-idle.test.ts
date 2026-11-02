@@ -240,6 +240,50 @@ describe('idle generation and host lifecycle',()=>{
   });
 });
 
+describe('R11 dark no-WebGL fallback',()=>{
+  it('uses a clear tint and local thin reflection, then restores light and clear drag',async()=>{
+    const m=mount({theme:'dark'}),outline=m.root.querySelector<SVGSVGElement>('svg.fb-orb-lens')!;
+    const art=outline.querySelector('g')!,body=art.querySelector('path')!;
+    const gradient=outline.querySelector('linearGradient')!;
+    expect(gradient).not.toBeNull();
+    expect(body.getAttribute('fill')).toBe('rgb(132,137,153)');
+    expect(Number(body.getAttribute('fill-opacity'))).toBeCloseTo(.016,12);
+    expect(body.getAttribute('stroke')).toBe(`url(#${gradient.id})`);
+    expect(body.getAttribute('stroke-width')).toBe('1');
+    expect(outline.style.filter).toBe('none');
+    vi.advanceTimersByTime(5000);
+    expect(Number(body.getAttribute('fill-opacity'))).toBeCloseTo(.042,12);
+    m.widget.setAttribute('theme','light'); await settle();
+    expect(body.getAttribute('fill')).toBe('none');
+    m.widget.setAttribute('theme','dark'); await settle();
+    m.orb.click(); pointer(m,'pointerdown'); pointer(m,'pointermove',160,100);
+    expect(m.orb.classList.contains('is-dragging')).toBe(true);
+    expect(body.getAttribute('fill')).toBe('none');
+  });
+  it.each(['left','right'])('%s dark handle is10×48 and10px from the safe edge; live theme changes retain collapse and hit size',async side=>{
+    const m=mount({theme:'dark',side}),outline=m.root.querySelector<SVGSVGElement>('svg.fb-orb-lens')!;
+    const path=outline.querySelector('g path')!;
+    const size=()=>{
+      const points=[...path.getAttribute('d')!.matchAll(/([\d.e+-]+),([\d.e+-]+)/g)].map(match=>[Number(match[1]),Number(match[2])]);
+      return {width:Math.max(...points.map(p=>p[0]!))-Math.min(...points.map(p=>p[0]!)),height:Math.max(...points.map(p=>p[1]!))-Math.min(...points.map(p=>p[1]!))};
+    };
+    vi.advanceTimersByTime(5000);
+    expect(collapsed(m)).toBe(true);
+    expect(size().width).toBeCloseTo(10,4); expect(size().height).toBeCloseTo(48,4);
+    const center=parseFloat(outline.style.left)+28*1.6;
+    expect(side==='left'?center-5:1024-center-5).toBeCloseTo(10,8);
+    expect(getComputedStyle(m.orb).width).toBe('44px'); expect(getComputedStyle(m.orb).height).toBe('56px');
+    m.widget.setAttribute('theme','light'); await settle();
+    expect(collapsed(m)).toBe(true); expect(size().width).toBeCloseTo(12,4); expect(size().height).toBeCloseTo(56,4);
+    m.widget.setAttribute('theme','dark'); await settle();
+    expect(collapsed(m)).toBe(true); expect(size().width).toBeCloseTo(10,4); expect(size().height).toBeCloseTo(48,4);
+    m.orb.click(); expect(collapsed(m)).toBe(false); expect(size().width).toBeCloseTo(56,4);
+    vi.advanceTimersByTime(3000); m.widget.setAttribute('theme','light'); await settle();
+    vi.advanceTimersByTime(1999); expect(collapsed(m)).toBe(false);
+    vi.advanceTimersByTime(1); expect(collapsed(m)).toBe(true);
+  });
+});
+
 describe('R7 finite continuous glass morph',()=>{
   it('light fallback clips only the outside after blur through capsule geometry, and removes clipping for dark or drag',async()=>{
     const m=mount({theme:'light'}),outline=m.root.querySelector<SVGSVGElement>('svg.fb-orb-lens')!;

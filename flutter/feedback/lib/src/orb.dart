@@ -608,35 +608,95 @@ class OrbLiquidOutlinePainter extends CustomPainter {
       }
     }
     path.close();
-    // An unavailable texture keeps a transparent, softly glowing idle shape.
-    // High contrast and clear dragging retain their visible contour.
+    // No sampling is used when the safe texture is unavailable. Dark standby
+    // retains only the approved clear tint and local edge reflections.
+    // High contrast and clear dragging retain their existing visible contour.
     if (idleMix > 0 && !highContrast) {
-      if (!dark) {
-        // A narrow handle's two blurred sides otherwise overlap at its center.
-        // Keep the light idle cue outside the unfilled glass silhouette.
+      if (dark) {
+        final Rect bounds = path.getBounds();
+        final double haze = (.016 + .026 * handleMix) * idleMix;
+        canvas.drawPath(
+            path, Paint()..color = Color.fromRGBO(132, 137, 153, haze));
+        if (handleMix > 0) {
+          canvas.drawPath(
+              path,
+              Paint()
+                ..shader = LinearGradient(
+                  colors: <Color>[
+                    const Color(0x00D9DEEA),
+                    Color.fromRGBO(217, 222, 234, .055 * handleMix * idleMix),
+                    const Color(0x00D9DEEA),
+                    const Color(0x00D9DEEA),
+                  ],
+                  stops: const <double>[0, .22, .5, 1],
+                ).createShader(bounds));
+        }
+        final List<double> stops = List<double>.generate(17, (i) => i / 16);
+        double shine(double t) => math
+            .pow(math.max(0, math.cos(t * 2 * math.pi - math.pi + 2.3)), 5)
+            .toDouble();
+        final SweepGradient localRim = SweepGradient(
+            startAngle: -math.pi,
+            endAngle: math.pi,
+            colors: stops
+                .map((t) => Color.fromRGBO(217, 222, 234,
+                    (.015 + shine(t) * .16 + handleMix * .055) * idleMix))
+                .toList(),
+            stops: stops);
+        canvas.drawPath(
+            path,
+            Paint()
+              ..shader = localRim.createShader(bounds)
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = .8);
         canvas.save();
         canvas.clipPath(Path.combine(PathOperation.difference,
             Path()..addRect(Offset.zero & size), path));
+        canvas.drawPath(
+            path,
+            Paint()
+              ..color = Color.fromRGBO(0, 0, 0, .11 * idleMix)
+              ..maskFilter =
+                  const ui.MaskFilter.blur(ui.BlurStyle.normal, 3.2));
+        canvas.drawPath(
+            path,
+            Paint()
+              ..shader = SweepGradient(
+                      startAngle: -math.pi,
+                      endAngle: math.pi,
+                      colors: stops
+                          .map((t) => Color.fromRGBO(174, 183, 205,
+                              (.006 + shine(t) * .044) * idleMix))
+                          .toList(),
+                      stops: stops)
+                  .createShader(bounds)
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 2
+              ..maskFilter =
+                  const ui.MaskFilter.blur(ui.BlurStyle.normal, 2.5));
+        canvas.restore();
+        return;
       }
+      // A narrow handle's two blurred sides otherwise overlap at its center.
+      // Keep the light idle cue outside the unfilled glass silhouette.
+      canvas.save();
+      canvas.clipPath(Path.combine(
+          PathOperation.difference, Path()..addRect(Offset.zero & size), path));
       canvas.drawPath(
           path,
           Paint()
-            ..color = dark
-                ? color.withValues(alpha: color.a * .16 * idleMix)
-                : Color.fromRGBO(89, 110, 143, .10 * idleMix)
+            ..color = Color.fromRGBO(89, 110, 143, .10 * idleMix)
             ..style = PaintingStyle.stroke
             ..strokeWidth = 4
             ..maskFilter = const ui.MaskFilter.blur(ui.BlurStyle.normal, 5));
       canvas.drawPath(
           path,
           Paint()
-            ..color = dark
-                ? Color.fromRGBO(235, 237, 246, .45 * idleMix)
-                : Color.fromRGBO(89, 110, 143, .32 * idleMix)
+            ..color = Color.fromRGBO(89, 110, 143, .32 * idleMix)
             ..style = PaintingStyle.stroke
             ..strokeWidth = 4
             ..maskFilter = const ui.MaskFilter.blur(ui.BlurStyle.normal, 3));
-      if (!dark) canvas.restore();
+      canvas.restore();
       return;
     }
     canvas.drawPath(

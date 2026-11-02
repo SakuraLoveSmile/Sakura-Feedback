@@ -3045,9 +3045,10 @@ export class FeedbackWidget extends HTMLElement {
     const inset=parseFloat(this.side==='left'?safe.paddingLeft:safe.paddingRight)||0;
     const signed=(distance:number)=>this.side==='left'?distance:window.innerWidth-distance;
     const handle=collapsed && this.orbIdleStyle==='handle';
+    const clearDark=this.orbMaterialIsDark() && !(window.matchMedia?.('(forced-colors: active)').matches ?? false);
     return {
-      x:signed(collapsed?inset+(handle?9:0):Math.max(20,inset)+28),
-      halfX:handle?6:28,halfY:28,handleMix:handle?1:0,
+      x:signed(collapsed?inset+(handle?(clearDark?15:9):0):Math.max(20,inset)+28),
+      halfX:handle?(clearDark?5:6):28,halfY:handle && clearDark?24:28,handleMix:handle?1:0,
       hitX:signed(collapsed?inset+22:Math.max(20,inset)+28),hitWidth:collapsed?44:56,
       clipLeft:collapsed && !handle && this.side==='left'?.5:0,
       clipRight:collapsed && !handle && this.side!=='left'?.5:0,
@@ -3207,7 +3208,10 @@ export class FeedbackWidget extends HTMLElement {
     const resume = () => { this.orbSurfaceActive = true; this.syncOrbIdle(true); this.prepareLens(); };
     resolution = window.matchMedia?.(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
     const color = window.matchMedia?.('(forced-colors: active)');
-    const colors = () => { this.releaseLens(); this.prepareLens(); };
+    const colors = () => {
+      this.clearOrbIdleMorph(); this.orbIdleVisual=this.orbIdleTarget(this.orbCollapsed);
+      this.releaseLens(); this.prepareLens();
+    };
     const theme = window.matchMedia?.('(prefers-color-scheme: dark)');
     const recolor = () => { if (this.theme === 'system') this.redrawOrbMaterial(); };
     const motion = window.matchMedia?.('(prefers-reduced-motion: reduce)');
@@ -3345,6 +3349,8 @@ export class FeedbackWidget extends HTMLElement {
 
   private redrawOrbMaterial(): void {
     if (!this.isConnected || !this.orbSurfaceActive || document.visibilityState === 'hidden') return;
+    // Theme-specific capsule geometry changes without waking it or resetting its timer.
+    this.clearOrbIdleMorph(); this.orbIdleVisual=this.orbIdleTarget(this.orbCollapsed);
     const session = this.regionSession;
     if (session?.phase === 'selection') {
       this.renderRegion(this.prefersReducedMotion() ? 550 : performance.now()-session.startedAt);
@@ -3353,7 +3359,7 @@ export class FeedbackWidget extends HTMLElement {
       // texture before requesting the new generation through the same masked pipeline.
       this.invalidateLensTexture();
       this.prepareLens();
-    }
+    } else if (this.canUseOrbLauncher()) this.drawLiquid();
   }
 
   private dragLiquidRadius(): number {
@@ -3387,11 +3393,17 @@ export class FeedbackWidget extends HTMLElement {
       const forced=window.matchMedia?.('(forced-colors: active)').matches ?? false;
       const softIdle = !forced && !this.isDragging;
       const lightIdle = softIdle && !this.orbMaterialIsDark();
-      this.orbOutlinePath.setAttribute('stroke',forced?'ButtonText':lightIdle?'rgba(89,110,143,.32)':softIdle?'rgba(235,237,246,.45)':'rgba(255,255,255,.75)');
-      this.orbOutlinePath.setAttribute('stroke-width',softIdle?'4':'1');
-      this.orbOutline.style.filter=softIdle && !lightIdle?'blur(3px)':'none';
+      const darkIdle = softIdle && !lightIdle;
+      this.orbOutlinePath.setAttribute('fill',darkIdle?'rgb(132,137,153)':'none');
+      this.orbOutlinePath.setAttribute('fill-opacity',darkIdle?String(.016+.026*visual.handleMix):'1');
+      this.orbOutlinePath.setAttribute('stroke',forced?'ButtonText':darkIdle?`url(#${this.orbOutlineExteriorId}-glass)`:lightIdle?'rgba(89,110,143,.32)':'rgba(255,255,255,.75)');
+      this.orbOutlinePath.setAttribute('stroke-width',darkIdle?'1':softIdle?'4':'1');
+      this.orbOutline.style.filter='none';
       this.orbOutlinePath.style.filter=lightIdle?'blur(3px)':'none';
-      this.orbOutlineHalo.style.display=lightIdle?'':'none';
+      this.orbOutlineHalo.style.display=softIdle?'':'none';
+      this.orbOutlineHalo.setAttribute('stroke',darkIdle?'rgba(0,0,0,.11)':'rgba(89,110,143,.10)');
+      this.orbOutlineHalo.setAttribute('stroke-width',darkIdle?'3':'4');
+      this.orbOutlineHalo.style.filter=darkIdle?'blur(4.5px)':'blur(5px)';
       if (lightIdle) this.orbOutlineArt.setAttribute('clip-path',`url(#${this.orbOutlineExteriorId})`);
       else this.orbOutlineArt.removeAttribute('clip-path');
       const size=radius*3.2, points:string[]=[];
@@ -3605,6 +3617,17 @@ export class FeedbackWidget extends HTMLElement {
     this.orbOutlineExterior.setAttribute('clip-rule','evenodd');
     exteriorClip.append(this.orbOutlineExterior);
     exteriorDefs.append(exteriorClip);
+    // Texture-free dark standby keeps only a restrained NW reflection.
+    const darkGlass = document.createElementNS('http://www.w3.org/2000/svg','linearGradient');
+    darkGlass.id = `${this.orbOutlineExteriorId}-glass`;
+    darkGlass.setAttribute('x2','1'); darkGlass.setAttribute('y2','1');
+    for (const [offset,opacity] of [['0%','.175'],['45%','.025'],['100%','.015']]) {
+      const stop = document.createElementNS('http://www.w3.org/2000/svg','stop');
+      stop.setAttribute('offset',offset!); stop.setAttribute('stop-color','rgb(217,222,234)');
+      stop.setAttribute('stop-opacity',opacity!);
+      darkGlass.append(stop);
+    }
+    exteriorDefs.append(darkGlass);
     this.orbOutline.append(exteriorDefs);
     this.orbCanvas = el('canvas', 'fb-orb-lens');
     this.orbCanvas.hidden = true;
