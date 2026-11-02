@@ -1,5 +1,6 @@
 // Liquid priority replaces the old ellipse/release/sweep hierarchy while
-// preserving primary input, hidden, hover/press, badge and keyboard focus.
+// preserving primary input, hidden, hover/press, unread metadata and keyboard
+// focus.
 import 'package:feedback_widget/feedback_widget.dart';
 import 'package:feedback_widget/src/orb.dart';
 import 'package:feedback_widget/src/test_env.dart';
@@ -151,16 +152,18 @@ void main() {
   });
 
   testWidgets(
-      'keyboard ring follows the moving 104px ball and leaves badge geometry intact',
+      'keyboard ring follows the moving 104px ball with no unread badge',
       (tester) async {
     await host.mount(tester);
     host.controller.setUnreadCount(3);
     await tester.pump();
+    // v0.8.2：未读数不再绘制数字角标（F1）。
+    expect(find.byType(Badge), findsNothing);
+    expect(find.text('3'), findsNothing);
     await tester.sendKeyEvent(LogicalKeyboardKey.tab);
     await tester.pump();
     final Finder ring = find.byKey(const Key('feedback-orb-focus-ring'));
     expect(ring, findsOneWidget);
-    final Rect badgeBefore = tester.getRect(find.text('3'));
     final TestGesture gesture =
         await tester.startGesture(tester.getCenter(liquidOrb));
     await gesture.moveBy(const Offset(-100, -50));
@@ -172,9 +175,8 @@ void main() {
     expect(tester.getRect(ring).size, const Size(112, 112));
     expect((tester.getCenter(ring) - tester.getCenter(liquidLens)).distance,
         lessThan(.001));
-    // Expansion changes the dock hit box, but the badge stays outside the
-    // transformed optical subtree and is never stretched by liquid modes.
-    expect(tester.getRect(find.text('3')).size, badgeBefore.size);
+    // Unread metadata must not add any badge layout inside the moving orb.
+    expect(find.byType(Badge), findsNothing);
     await gesture.cancel();
   });
 

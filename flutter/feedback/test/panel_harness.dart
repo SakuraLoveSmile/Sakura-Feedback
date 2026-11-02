@@ -179,11 +179,15 @@ Future<void> pumpPanel(
   FeedbackServerPrefStore? serverPrefStore,
   FeedbackConfig? config,
   bool? visible,
+  ThemeData? theme,
   Size surface = const Size(1000, 800),
 }) async {
   await tester.binding.setSurfaceSize(surface);
   addTearDown(() => tester.binding.setSurfaceSize(null));
   await tester.pumpWidget(MaterialApp(
+    // 宿主主题：面板在真实挂载时继承宿主 Theme（config.theme 仅在面板
+    // 挂载于无 Theme 祖先时兜底），深浅主题断言需要显式注入。
+    theme: theme,
     // Scaffold 提供 ScaffoldMessenger 目标：面板内提示与真实挂载一致。
     home: Scaffold(
       body: FeedbackPanel(

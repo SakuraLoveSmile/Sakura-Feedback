@@ -20,6 +20,7 @@ import {
   listFeedbackMessages,
   listUnifiedFeedbackImages,
   listUserFeedbacks,
+  markAllReadForUser,
   markReadCursor,
   NATIVE_SOURCE,
   submitFeedbackAtomic,
@@ -526,6 +527,19 @@ export function feedbackRoutes(deps: FeedbackDeps): Hono {
     const appId = c.req.query("appId") || undefined;
     const summary = getUnreadSummaryForUser(db, user.id, appId);
     return c.json(summary);
+  });
+
+  // v0.8.2：一键已读 —— 把本人（可选 appId 范围内）全部未读反馈的读游标推进到
+  // 各自 admin/system 消息的最大 seq；过滤口径与 unread-summary 一致，只推进不回退。
+  routes.post("/read-all", (c) => {
+    const session = requireSession(db, c, ["cookie", "client", "handshake"]);
+    if (isErr(session)) return fail(c, session);
+    const user = sessionUser(db, session);
+    if (!user) return fail(c, err("unauthorized", "需要登录", 401));
+
+    const appId = c.req.query("appId") || undefined;
+    const outcome = markAllReadForUser(db, user.id, appId);
+    return c.json({ ok: true, markedFeedbacks: outcome.markedFeedbacks, markedMessages: outcome.markedMessages });
   });
 
   routes.get("/messages/attachments/:id", (c) => {

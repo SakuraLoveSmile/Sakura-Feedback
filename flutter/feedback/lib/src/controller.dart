@@ -31,7 +31,7 @@ class FeedbackController extends ChangeNotifier {
   /// 面板当前是否展开。
   bool get isOpen => _isOpen;
 
-  /// 未读消息数（红点徽标）。
+  /// 未读消息数（v0.8.2 起组件入口不再绘制数字角标，仅供宿主自绘提示）。
   int get unreadCount => _unreadCount;
   int _unreadCount = 0;
 

@@ -402,3 +402,111 @@ describe('R7 finite continuous glass morph',()=>{
     expect(draw).toHaveBeenCalledTimes(count);expect(material().halfSize).toEqual({x:28,y:28});expect(collapsed(m)).toBe(false);
   });
 });
+
+/**
+ * 0.8.2：第三种待机样式「隐藏」。
+ * - parser 接受 hidden，旧/非法值仍回退 handle（旧组件读到 hidden 也按 handle 安全降级）；
+ * - 设置里出现第三张单选卡，选中后不显示任何入口（复用 .fb-orb.is-unavailable）；
+ * - 隐藏后仍可通过宿主入口 open() 打开面板，并在设置里改回 handle / edge 恢复显示；
+ * - 偏好按 appId 保存，切走再切回、断开重连都保持。
+ */
+describe('third idle style: hidden',()=>{
+  it('parser accepts hidden while invalid and legacy values still fall back to handle',()=>{
+    expect(parseOrbIdlePreference('{"version":1,"style":"hidden"}')).toBe('hidden');
+    expect(parseOrbIdlePreference('{"version":1,"style":"handle"}')).toBe('handle');
+    expect(parseOrbIdlePreference('{"version":1,"style":"edge"}')).toBe('edge');
+    for(const value of [null,'bad','{}','{"version":0,"style":"hidden"}','{"version":1,"style":"HIDDEN"}','{"version":1,"style":"hidden "}']) {
+      expect(parseOrbIdlePreference(value),`非法值 ${value} 必须回退 handle`).toBe('handle');
+    }
+  });
+
+  it('settings expose three radio cards with the third one explaining how to restore the entry',()=>{
+    const m=mount(); settings(m);
+    const values=[...m.root.querySelectorAll<HTMLInputElement>('[data-orb-idle]')].map(input=>input.dataset.orbIdle);
+    expect(values).toEqual(['handle','edge','hidden']);
+    const titles=[...m.root.querySelectorAll<HTMLElement>('.fb-orb-idle-option')].map(option=>option.textContent);
+    expect(titles).toEqual(['小把手','球体贴边','隐藏']);
+    const footnote=m.root.querySelector<HTMLElement>('.fb-orb-idle-settings .fb-footnote')!;
+    expect(footnote.textContent).toContain('隐藏');
+    expect(footnote.textContent).toContain('宿主入口');
+    expect(footnote.textContent).toContain('改回');
+  });
+
+  it('choosing hidden persists the preference, hides every entry form, and open() still opens the panel to switch back',()=>{
+    const m=mount(); settings(m);
+    radio(m,'hidden').click();
+    expect(JSON.parse(localStorage.getItem(orbIdlePreferenceKey(APP_ID))!)).toEqual({version:1,style:'hidden'});
+    // 关闭面板，排除 openState 对入口可用性的影响，单独验证「隐藏」偏好本身
+    m.widget.close();
+    expect(m.orb.dataset.idleStyle).toBe('hidden');
+    // 复用既有不可用路径：is-unavailable 由样式表 display:none !important 整棵隐藏
+    expect(m.orb.classList.contains('is-unavailable')).toBe(true);
+    expect(getComputedStyle(m.orb).display).toBe('none');
+    expect(m.root.querySelector('.fb-launcher-badge')).toBeNull();
+    // 收起 / 待机计时不会再驱动这个入口
+    vi.advanceTimersByTime(5000);
+    expect(collapsed(m)).toBe(false);
+    expect(getComputedStyle(m.orb).display).toBe('none');
+
+    // 隐藏后仍可由宿主入口打开反馈面板，并在设置里改回「小把手」恢复显示
+    m.widget.open();
+    expect(m.panel.classList.contains('is-open')).toBe(true);
+    m.root.querySelector<HTMLButtonElement>('.fb-settings-btn')!.click();
+    expect(radio(m,'hidden').checked).toBe(true);
+    radio(m,'handle').click();
+    expect(m.orb.dataset.idleStyle).toBe('handle');
+    expect(JSON.parse(localStorage.getItem(orbIdlePreferenceKey(APP_ID))!)).toEqual({version:1,style:'handle'});
+    // 面板打开期间入口本就不可用（openState）；关闭后按新偏好恢复显示
+    m.widget.close();
+    expect(m.orb.classList.contains('is-unavailable')).toBe(false);
+    expect(getComputedStyle(m.orb).display).not.toBe('none');
+
+    // 再隐藏一次后改回「球体贴边」同样立即恢复（两种旧样式都可作为恢复入口）
+    m.widget.open();
+    m.root.querySelector<HTMLButtonElement>('.fb-settings-btn')!.click();
+    radio(m,'hidden').click();
+    m.widget.close();
+    expect(m.orb.classList.contains('is-unavailable')).toBe(true);
+    m.widget.open();
+    m.root.querySelector<HTMLButtonElement>('.fb-settings-btn')!.click();
+    radio(m,'edge').click();
+    m.widget.close();
+    expect(m.orb.classList.contains('is-unavailable')).toBe(false);
+    expect(getComputedStyle(m.orb).display).not.toBe('none');
+    expect(JSON.parse(localStorage.getItem(orbIdlePreferenceKey(APP_ID))!)).toEqual({version:1,style:'edge'});
+  });
+
+  it('hidden preference survives reconnect and is scoped per appId',()=>{
+    const m=mount(); settings(m); radio(m,'hidden').click();
+    m.widget.close();
+    expect(m.orb.classList.contains('is-unavailable')).toBe(true);
+
+    m.widget.remove(); document.body.append(m.widget);
+    expect(radio(m,'hidden').checked).toBe(true);
+    expect(m.orb.classList.contains('is-unavailable')).toBe(true);
+
+    // 另一个 appId 没有该偏好 → 回退 handle 并恢复可见
+    m.widget.appId='other app';
+    expect(radio(m,'handle').checked).toBe(true);
+    expect(m.orb.classList.contains('is-unavailable')).toBe(false);
+    expect(getComputedStyle(m.orb).display).not.toBe('none');
+
+    // 切回原 appId 恢复 hidden
+    m.widget.appId=APP_ID;
+    expect(radio(m,'hidden').checked).toBe(true);
+    expect(m.orb.classList.contains('is-unavailable')).toBe(true);
+    expect(getComputedStyle(m.orb).display).toBe('none');
+  });
+
+  it('a stored hidden preference is applied on startup without opening the panel',()=>{
+    localStorage.setItem(orbIdlePreferenceKey(APP_ID),'{"version":1,"style":"hidden"}');
+    const m=mount();
+    expect(m.orb.dataset.idleStyle).toBe('hidden');
+    expect(m.orb.classList.contains('is-unavailable')).toBe(true);
+    expect(getComputedStyle(m.orb).display).toBe('none');
+    // 面板仍可被宿主 API 打开（隐藏只针对入口，不锁面板）
+    m.widget.open();
+    expect(m.panel.classList.contains('is-open')).toBe(true);
+  });
+});
+

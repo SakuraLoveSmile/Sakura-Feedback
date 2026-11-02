@@ -762,6 +762,32 @@ class UnreadSummaryResponse {
       );
 }
 
+/// 一键已读结果：`POST /api/feedback/read-all`。
+class MarkAllReadResult {
+  /// 构造一键已读结果。
+  const MarkAllReadResult({
+    required this.ok,
+    required this.markedFeedbacks,
+    required this.markedMessages,
+  });
+
+  /// 服务端是否完成处理（正常响应恒为 true）。
+  final bool ok;
+
+  /// 本次由未读变为已读的反馈数。
+  final int markedFeedbacks;
+
+  /// 本次清除的未读消息数。
+  final int markedMessages;
+
+  factory MarkAllReadResult.fromJson(Map<String, Object?> json) =>
+      MarkAllReadResult(
+        ok: json['ok'] != false,
+        markedFeedbacks: (json['markedFeedbacks'] as num?)?.toInt() ?? 0,
+        markedMessages: (json['markedMessages'] as num?)?.toInt() ?? 0,
+      );
+}
+
 /// 某条反馈的完整对话。
 class FeedbackDialogueResponse {
   const FeedbackDialogueResponse({
@@ -1333,6 +1359,30 @@ class ApiClient {
         .timeout(_requestTimeout);
     if (response.statusCode == 200) {
       return UnreadSummaryResponse.fromJson(_decode(response));
+    }
+    if (response.statusCode == 401) {
+      await _handleUnauthorized(lease);
+    }
+    _throwApiError(response);
+  }
+
+  /// 一键全部标记已读：`POST /api/feedback/read-all`。
+  ///
+  /// `appId` 与未读摘要同口径：存在时只处理该应用的反馈；省略时服务端按
+  /// 会话可访问范围处理。鉴权、超时与错误口径与 `fetchUnreadSummary` /
+  /// `markFeedbackRead` 一致。
+  Future<MarkAllReadResult> markAllRead({String? appId}) async {
+    final TokenLease lease = await _tokens.lease();
+    final Map<String, String> q = <String, String>{};
+    if (appId != null && appId.isNotEmpty) q['appId'] = appId;
+    final Uri uri = _uri('/api/feedback/read-all').replace(
+      queryParameters: q.isEmpty ? null : q,
+    );
+    final http.Response response = await _client
+        .post(uri, headers: _headers(token: lease.token))
+        .timeout(_requestTimeout);
+    if (response.statusCode == 200) {
+      return MarkAllReadResult.fromJson(_decode(response));
     }
     if (response.statusCode == 401) {
       await _handleUnauthorized(lease);

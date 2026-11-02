@@ -11,7 +11,7 @@ v12 端到端联调与验收（t5）——真实服务端 + 真实 mock 外部 +
   PHASE browser 真实 Chromium + 真实服务：侧栏/菜单/弹窗入图且组件不入图、跨源不可绘制提示、
                 组件内选图（1/5/6 张、非法格式）、编辑器保存后预览与上传字节一致、
                 提交失败重试保留草稿、我的反馈分页与筛选、对话详情（Bearer 取图/日志/处理说明）、
-                未读徽标、追加回复、capabilities 降级（单图模式 + 升级提示）。
+                一键已读与状态配色、追加回复、capabilities 降级（单图模式 + 升级提示）。
   PHASE admin   真实管理端 dist + 真实服务：抽屉图片网格、处理说明、Kaneo 撤销任务审计区。
   PHASE shots   390x844 / 768x1024 / 1440x900 × 浅色/深色 视觉规格截图。
 
@@ -878,7 +878,9 @@ BROWSER_JS = {
     "historyMeta": "() => window.__fbE2E.historyMeta()",
     "dialogueImages": "() => window.__fbE2E.dialogueImages()",
     "dialogueText": "() => window.__fbE2E.dialogueText()",
-    "launcherBadge": "() => window.__fbE2E.launcherBadge()",
+    "cornerBadges": "() => window.__fbE2E.cornerBadges()",
+    "historyActions": "() => window.__fbE2E.historyActions()",
+    "statusColors": "() => window.__fbE2E.statusColors()",
     "panelBg": "() => window.__fbE2E.panelBg()",
 }
 
@@ -1140,21 +1142,32 @@ def phase_browser(ctx, engine: str) -> None:
             record("历史列表按 limit=20 分页（第 1/2 页 + 20 项）",
                    metas["info"] == "第 1 / 2 页" and metas["items"] == 20, json.dumps(metas, ensure_ascii=False))
             record("状态筛选文案为 v12 口径",
-                   ["全部状态", "待处理", "待补充", "待管理员回复", "已解决"] == metas["filterOptions"], json.dumps(metas["filterOptions"], ensure_ascii=False))
+                   ["全部状态", "待处理", "待补充", "等待回复", "已解决"] == metas["filterOptions"], json.dumps(metas["filterOptions"], ensure_ascii=False))
             page.locator(".fb-history-page-next").click()
             metas2 = wait_js(page, "historyMeta", lambda v: v and v["info"] and "第 2" in v["info"], 15)
             record("点击下一页回到第 2 页且条目数减少", "第 2 / 2 页" in (metas2["info"] or "") and metas2["items"] < 20, json.dumps(metas2, ensure_ascii=False))
             page.locator(".fb-history-page-prev").click()
             wait_js(page, "historyMeta", lambda v: v and v["info"] and "第 1" in v["info"], 15)
-            # 未读：管理员回复一条 → 列表项出现未读标签；入口徽标由 30s 摘要轮询给出
+            # 未读：管理员回复一条 → 列表项出现未读标签；入口不再显示数字角标，改用一键已读清零
             st, _r = rb.api("POST", f"/api/admin/feedback/{admin_reply_target}/messages", {"text": f"B6 管理员回复 {RUN_TAG}", "issueStatusAction": "reply"})
             record("管理员回复成功（为未读提醒铺垫）", st in (200, 201), f"{st}")
             page.locator(".fb-nav-btn", has_text="新建反馈").click()
             page.locator(".fb-nav-btn", has_text="我的反馈").click()
             unread_meta = wait_js(page, "historyMeta", lambda v: v and v["unreadTags"] >= 1, 20)
             record("列表项出现未读标签（我的反馈未读提醒）", unread_meta["unreadTags"] >= 1, json.dumps(unread_meta, ensure_ascii=False))
-            badge = wait_js(page, "launcherBadge", lambda v: v and v["any"], 40)
-            record("入口徽标显示未读数（面板关闭时 30s 摘要轮询供数）", bool(badge and badge["any"]), json.dumps(badge, ensure_ascii=False))
+            # 0.8.2：入口不再显示未读数字角标，改由列表内“一键已读”处理。
+            corner = ev(page, "cornerBadges")
+            record("入口不再显示未读数字角标", corner == 0, json.dumps(corner, ensure_ascii=False))
+            actions = wait_js(page, "historyActions", lambda v: v and v.get("readAllText"), 15)
+            record("我的反馈显示「一键已读」入口",
+                   bool(actions and (actions.get("readAllText") or "").strip() == "一键已读"), json.dumps(actions, ensure_ascii=False))
+            page.locator(".fb-history-read-all").click()
+            acted = wait_js(page, "historyActions", lambda v: v and "已全部标记为已读" in (v.get("hint") or ""), 20)
+            record("一键已读成功并提示", bool(acted), json.dumps(acted, ensure_ascii=False))
+            read_meta = wait_js(page, "historyMeta", lambda v: v and v["unreadTags"] == 0, 20)
+            record("一键已读后列表未读标签清除", bool(read_meta and read_meta["unreadTags"] == 0), json.dumps(read_meta, ensure_ascii=False))
+            st, summary4 = ujs("GET", f"/api/feedback/unread-summary?appId={APP_ID}", token=token)
+            record("一键已读后未读摘要清零", st == 200 and summary4.get("totalUnreadMessages", 0) == 0, f"{st} {summary4}")
 
             # 打开带图片 + 处理说明的反馈对话
             st, dlg_seed = dialogue(token, admin_reply_target)
@@ -1165,6 +1178,10 @@ def phase_browser(ctx, engine: str) -> None:
             page.locator(".fb-history-filter").select_option("resolved")
             metas3 = wait_js(page, "historyMeta", lambda v: v and v["filterValue"] == "resolved", 15)
             record("筛选 resolved 后列表收敛（条目数 < 20）", metas3["items"] < 20, json.dumps(metas3, ensure_ascii=False))
+            colors = wait_js(page, "statusColors", lambda v: v and "resolved" in v, 15)
+            record("已解决状态使用绿色系",
+                   bool(colors and colors.get("resolved", {}).get("greenish")),
+                   json.dumps(colors, ensure_ascii=False)[:240])
             page.locator(".fb-history-item").first.click()
             page.locator(".fb-dialogue-view").wait_for(state="visible", timeout=15000)
             dtext = wait_js(page, "dialogueText", lambda v: v and "处理说明" in v, 20)

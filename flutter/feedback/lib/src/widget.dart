@@ -244,9 +244,20 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     _snappingOrbMorph = false;
   }
 
+  /// 入口是否可见：宿主允许显示入口，且灵感球待机样式不是「隐藏」。
+  ///
+  /// 「隐藏」是 v0.8.2 新增的待机样式，只作用于 `launcherMode == orb` 的灵感球：
+  /// 完整球与收起后的小把手 / 贴边球都不渲染，但面板本身仍常驻（打开过之后），
+  /// 宿主可通过 `controller.open()` 打开并在设置里改回其他样式。
+  /// `launcherMode == tab` 的悬浮按钮不受该偏好影响（与 Web 端语义一致）。
+  bool get _launcherVisible =>
+      widget.config.showLauncher &&
+      !(widget.config.launcherMode == FeedbackLauncherMode.orb &&
+          _idlePreferences.style == FeedbackOrbIdleStyle.hidden);
+
   bool get _orbAvailable =>
       _appResumed &&
-      widget.config.showLauncher &&
+      _launcherVisible &&
       widget.config.launcherMode == FeedbackLauncherMode.orb &&
       !_controller.isOpen &&
       _selectionCapture == null &&
@@ -324,6 +335,15 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
 
   void _idlePreferencesChanged() {
     if (!mounted || _disposed) return;
+    if (_idlePreferences.style == FeedbackOrbIdleStyle.hidden) {
+      // 「隐藏」入口立即消失：抢占进行中的拖动 / 回弹 / 悬停，释放透镜快照
+      // 与唤醒识别，避免卸载后的残留状态。改回其他样式时由 build 重新渲染
+      // 完整球并重新开始 5 秒计时（_syncOrbIdle 在入口恢复后重新计时）。
+      _releaseLensSnapshot(allowPrefetch: true);
+      _wakeRecognizer?.cancel();
+      _orbFocusVisible = false;
+      _resetOrbReleaseState();
+    }
     setState(_resetOrbIdle);
   }
 
@@ -336,7 +356,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
       !_disposed &&
       mounted &&
       _appResumed &&
-      widget.config.showLauncher &&
+      _launcherVisible &&
       widget.config.launcherMode == FeedbackLauncherMode.orb &&
       widget.config.captureMode == FeedbackCaptureMode.viewport &&
       !_controller.isOpen &&
@@ -708,7 +728,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
       _selectionCapture == null &&
       !_temporarilyHideForCapture &&
       _handoff == null &&
-      widget.config.showLauncher &&
+      _launcherVisible &&
       widget.config.launcherMode == FeedbackLauncherMode.orb;
 
   void _invalidateLensTheme() {
@@ -954,11 +974,12 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
       // 换入的控制器可能已打开：入口随即 hidden，抢占进行中的回弹。
       if (_controller.isOpen) _resetOrbReleaseState();
     }
-    if ((oldWidget.config.showLauncher && !widget.config.showLauncher) ||
+    if ((oldWidget.config.showLauncher && !_launcherVisible) ||
         (oldWidget.config.launcherMode == FeedbackLauncherMode.orb &&
             widget.config.launcherMode != FeedbackLauncherMode.orb)) {
-      // 入口变为 hidden（关闭入口或离开 orb 模式）：抢占进行中的回弹，
-      // 恢复可见后从静态起点开始。本次 didUpdateWidget 后必然重建。
+      // 入口变为 hidden（关闭入口、待机样式改为「隐藏」或离开 orb 模式）：
+      // 抢占进行中的回弹，恢复可见后从静态起点开始。本次 didUpdateWidget
+      // 后必然重建（样式变化另外由 _idlePreferencesChanged 处理）。
       _resetOrbReleaseState();
     }
   }
@@ -1018,7 +1039,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
         final int seq = _captureSeq;
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!_captureSessionValid(seq) || _controller.isOpen) return;
-          if (!widget.config.showLauncher ||
+          if (!_launcherVisible ||
               widget.config.launcherMode != FeedbackLauncherMode.orb) {
             return;
           }
@@ -1979,10 +2000,10 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   Widget build(BuildContext context) {
     final FeedbackConfig config = widget.config;
     final bool open = _controller.isOpen;
-    // hidden（面板打开或入口关闭）时清除焦点环锁存：入口不渲染时保留 true
-    // 会让下次显示在没有焦点的情况下画出环；指针关闭路径也依赖这里抑制环
-    //（T7i），不是纯防御。build 内不能 setState。
-    if (open || !config.showLauncher) _orbFocusVisible = false;
+    // hidden（面板打开、入口关闭或待机样式为「隐藏」）时清除焦点环锁存：
+    // 入口不渲染时保留 true 会让下次显示在没有焦点的情况下画出环；指针关闭
+    // 路径也依赖这里抑制环（T7i），不是纯防御。build 内不能 setState。
+    if (open || !_launcherVisible) _orbFocusVisible = false;
     _syncOrbFlow();
     _syncOrbIdle();
     _syncOrbLensCapture(open: open, config: config);
@@ -2163,7 +2184,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
                   ),
                 ),
                 if (!open &&
-                    config.showLauncher &&
+                    _launcherVisible &&
                     !_temporarilyHideForCapture &&
                     _selectionCapture == null)
                   Positioned(
@@ -2291,11 +2312,8 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   }
 
   Widget _buildFab(BuildContext context, FeedbackConfig config) {
-    final int unread = _controller.unreadCount;
-    Widget icon = const Icon(Icons.feedback_outlined);
-    if (unread > 0) {
-      icon = Badge.count(count: unread, child: icon);
-    }
+    // F1：入口不再绘制未读数字角标；未读数仍通过 controller 与
+    // onUnreadCountChange 提供给宿主自绘。
     return Semantics(
       button: true,
       label: '反馈',
@@ -2304,7 +2322,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
         heroTag: 'feedback-widget-fab',
         tooltip: '反馈',
         onPressed: _handleLauncherTap,
-        child: icon,
+        child: const Icon(Icons.feedback_outlined),
       ),
     );
   }
@@ -2404,13 +2422,14 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   }
 
   Widget _buildOrb(BuildContext context, FeedbackConfig config) {
-    final int unread = _controller.unreadCount;
+    // F1：灵感球不再绘制未读数字角标；未读数保留在 Semantics value 与
+    // controller 中，供宿主/读屏使用。
     final bool reduceMotion =
         _orbGlowReduced || MediaQuery.disableAnimationsOf(context);
     final double diameter =
         _isDragging ? kFeedbackOrbDraggingDiameter : kFeedbackOrbIdleDiameter;
     final double target = reduceMotion ? 1 : _orbTargetStateScale;
-    Widget orbBox = AnimatedContainer(
+    final Widget orbBox = AnimatedContainer(
       key: const Key('feedback-orb-body'),
       duration: reduceMotion ? Duration.zero : kFeedbackOrbSizeDuration,
       curve: kFeedbackOrbStateCurve,
@@ -2464,10 +2483,6 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
                         ]));
               })),
     );
-
-    if (unread > 0) {
-      orbBox = Badge.count(count: unread, child: orbBox);
-    }
 
     // 焦点环：等价 CSS outline 2px + offset 2px，描边覆盖 R+2…R+4。
     // Positioned + IgnorePointer 不改变布局尺寸与命中区；无过渡。

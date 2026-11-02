@@ -129,7 +129,7 @@ describe('issue 行式渲染', () => {
     expect(row.getAttribute('data-project-color')).toBe(projectColor('com.example.app'));
   });
 
-  it('四种状态 chip 都有修饰类（open 此前没有，本轮补齐）', async () => {
+  it('四种状态 chip 都有修饰类（0.8.2：open 琥珀 / waiting_user 蓝 / waiting_admin 紫 / resolved 绿）', async () => {
     const m = mount();
     recordFetch(async (url) =>
       url.includes('/api/feedback/mine')
@@ -156,8 +156,16 @@ describe('issue 行式渲染', () => {
       expect.stringContaining('waiting-admin'),
       expect.stringContaining('resolved'),
     ]);
-    expect(STYLES).toMatch(/\.fb-tag\.open \{[^}]*var\(--fb-status-info/);
-    expect(STYLES).toMatch(/\.fb-history-item\.fb-issue-row\.fb-issue--open \{[^}]*var\(--fb-status-info-text\)/);
+    // 行修饰类与状态一一对应（行左边框配色靠它命中）
+    expect(rows.map((r) => Array.from(r.classList).find((c) => c.startsWith('fb-issue--')))).toEqual([
+      'fb-issue--open',
+      'fb-issue--waiting_user',
+      'fb-issue--waiting_admin',
+      'fb-issue--resolved',
+    ]);
+    // 0.8.2：open 从 info 蓝改为 warn 琥珀；行左边框与 chip 同色系
+    expect(STYLES).toMatch(/\.fb-tag\.open \{[^}]*var\(--fb-status-warn/);
+    expect(STYLES).toMatch(/\.fb-history-item\.fb-issue-row\.fb-issue--open \{[^}]*var\(--fb-status-warn-text\)/);
   });
 
   it('组件锁了 app-id 的单项目页：无分组头、也无冗余项目 chip', async () => {

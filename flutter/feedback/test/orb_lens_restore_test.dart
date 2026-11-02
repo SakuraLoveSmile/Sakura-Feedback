@@ -578,7 +578,11 @@ void main() {
     });
   }
 
-  for (final FeedbackOrbIdleStyle style in FeedbackOrbIdleStyle.values) {
+  // hidden 不渲染收起形状，主题刷新连续性只对 handle / edge 有意义。
+  for (final FeedbackOrbIdleStyle style in <FeedbackOrbIdleStyle>[
+    FeedbackOrbIdleStyle.handle,
+    FeedbackOrbIdleStyle.edge,
+  ]) {
     testWidgets(
         'theme refresh keeps the ${style.name} morph geometry continuous',
         (tester) async {
@@ -618,7 +622,7 @@ void main() {
 
   for (final Brightness brightness in Brightness.values) {
     testWidgets(
-        '${brightness.name} high contrast uses the safe system outline and retains badge/focus',
+        '${brightness.name} high contrast uses the safe system outline and retains focus',
         (tester) async {
       final FocusHighlightStrategy highlight =
           FocusManager.instance.highlightStrategy;
@@ -645,7 +649,9 @@ void main() {
       expect(outline.color,
           Theme.of(tester.element(liquidLens)).colorScheme.onSurface);
       liquidPaintState(tester);
-      expect(find.text('3'), findsOneWidget);
+      // v0.8.2：未读数不再绘制数字角标（F1），高对比度下也不出现。
+      expect(find.byType(Badge), findsNothing);
+      expect(find.text('3'), findsNothing);
       expect(find.byType(BackdropFilter), findsNothing);
       await tester.sendKeyEvent(LogicalKeyboardKey.tab);
       await tester.pump();

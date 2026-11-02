@@ -44,7 +44,7 @@ Base URL：`http(s)://<host>:8787`。所有 JSON 请求必须 `Content-Type: app
   `GET /api/feedback/:id`、`GET /api/feedback/:id/screenshot`、`POST /api/auth/login`、
   `GET /api/auth/session`、`POST /api/auth/logout`，以及 v11/v12 对话与附件端点
   （`GET /api/feedback/mine`、`GET /api/feedback/unread-summary`、`GET /api/feedback/:id/dialogue`、
-  `POST /api/feedback/:id/messages`、`POST /api/feedback/:id/read`、
+  `POST /api/feedback/:id/messages`、`POST /api/feedback/:id/read`、`POST /api/feedback/read-all`、
   `GET /api/feedback/messages/attachments/:id`、`GET /api/feedback/:id/images/:imageId`、
   `GET /api/feedback/:id/logs/:logId/download`、`GET /api/feedback/:id/logs/:logId/preview`、
   `GET /api/features`）。
@@ -660,6 +660,14 @@ App 对象：
 - 管理员未读：该反馈存在 `seq > lastReadSeq` 且发送者为用户（`sender_type = 'user'`）的消息。
 - 游标上报：`POST /api/feedback/:id/read` 与 `POST /api/admin/feedback/:id/read` 接收 `{ "lastReadSeq": number }`，服务端取 `max(last_read_seq, input.lastReadSeq)` 写入，旧确认不覆盖新消息。
 - 未读摘要：`GET /api/feedback/unread-summary?appId=` 返回 `{ unreadFeedbacksCount: number, totalUnreadMessages: number }`。
+- 一键已读（0.8.2 新增，兼容旧版）：`POST /api/feedback/read-all?appId=`，鉴权与 `GET /api/feedback/mine` 相同
+  （Bearer 令牌或 Cookie 会话；未登录 `401 unauthorized`）。`appId` 可选，语义与 `unread-summary` 一致：
+  指定时只处理该应用的反馈，缺省处理该账号全部项目。服务端把当前账号所有仍有未读的反馈的读游标
+  推进到该反馈 `sender_type IN ('admin', 'system')` 消息的最大 `seq`；只推进不回退，排除回收站
+  （`mgmt_state = 'trash'`）且只处理本人反馈；没有未读的反馈不写游标。响应
+  `{ "ok": true, "markedFeedbacks": number, "markedMessages": number }`，分别为本次清除的未读反馈数
+  （调用前存在未读的反馈数）与未读消息数。幂等：无未读时再次调用返回 `markedFeedbacks: 0,
+  markedMessages: 0`；之后管理员再发消息会重新计为未读。
 - 轮询策略：面板打开时每 10 秒刷新；已登录但面板关闭时每 30 秒查未读摘要；面板销毁、隐藏或退出登录停止。
 
 ### Kaneo 撤销闭环与重新归档（v11 规则，v12 起停止派发）
@@ -698,13 +706,13 @@ App 对象：
   - Kaneo 不可达返回 `502 kaneo_unavailable`；回收站记录 `403 readonly_trashed`。
 - **管理端批量**：`POST /api/admin/feedback/sync-kaneo`，可选 `{ "limit"?: number }`（默认 50，上限 200）；
   返回 `{ ok: true, checked, resolved, skipped, failed, results: [{ id, kind, message }] }`。批量只处理自动候选集合（已归档 + `open` + 有任务），不会关闭进行中的人工对话。
-- **审计与通知边界**：系统同步写入 `feedback_audit.action = "kaneo_status_sync"`（actor 显示为「系统（Kaneo 同步）」，与人工「标记已解决」区分）；不发邮件/系统推送，用户端通过既有未读徽标感知。
+- **审计与通知边界**：系统同步写入 `feedback_audit.action = "kaneo_status_sync"`（actor 显示为「系统（Kaneo 同步）」，与人工「标记已解决」区分）；不发邮件/系统推送，用户端通过「我的反馈」未读标签与未读摘要感知（0.8.2 起入口不再渲染数字角标）。
 
 ### API 接口清单
 - **用户端接口（需 Bearer 令牌）**：
   - `GET /api/feedback/mine?appId=&page=1&limit=20&issueStatus=`：用户历史列表，按 `lastActivityAt` 倒序。
     - 每条 `items` 新增 `appName`（所属项目显示名，`apps` 表无对应行或已软删时为 `null`，前端回退显示 `appId`）、`imageCount`（图片附件总数 = `feedback_images` 与 `feedback_screenshots` 两表计数之和；旧截图按 `feedback_id` 主键每反馈至多 1 行，无多轮归档重复）、`logCount`（日志附件总数 = `feedback_logs` 行数）。
-  - `GET /api/feedback/unread-summary?appId=`：未读徽标摘要。
+  - `GET /api/feedback/unread-summary?appId=`：未读摘要（0.8.2 起用于「我的反馈」一键已读状态与灵感球无障碍标签，入口不再渲染数字角标）。
   - `GET /api/feedback/:id/dialogue`：获取完整 Issue 时间线及消息附件列表（限本人）。
     - v12：`feedback.images` 返回初始反馈的有序图片列表（每项 `{ id, sort, source, mime, filename, byteSize, sha256, width, height, createdAt }`）；
       历史单图记录经兼容读取进入同一列表（`screenshot` 元数据仍保留返回）。
@@ -712,6 +720,8 @@ App 对象：
   - `POST /api/feedback/:id/messages`：用户回复（纯文本或 multipart，含可选图片/日志），写入幂等。
     - v12：multipart 增加 `metadata`（JSON：`{ text, idempotencyKey?, images?: [...] }`）与 `images` 部件（≤5，规则同首次提交）；旧 `screenshot`/`logs` 字段继续接受，与 `images` 互斥。回复总请求体上限 32 MiB。
   - `POST /api/feedback/:id/read`：用户标记已读 `{ "lastReadSeq": number }`。
+  - `POST /api/feedback/read-all?appId=`：0.8.2 新增，用户一键已读（可选 `appId`，口径同 `unread-summary`；
+    只推进本人非回收站反馈的读游标），返回 `{ "ok": true, "markedFeedbacks": number, "markedMessages": number }`。
   - `GET /api/feedback/messages/attachments/:id`：下载/查看消息附件流（v12：`kind="image"` 按 `mime` 返回 `image/*`）。
   - `GET /api/feedback/:id/images/:imageId`：v12 新增，下载/查看初始反馈某张图片流（按 `mime` 返回，`no-store`）。
   - `GET /api/feedback/:id/logs/:logId/download`：v12 新增，用户下载本人反馈的日志附件（限本人，管理员可读全量）；`GET /api/feedback/:id/logs/:logId/preview` 内联预览纯文本。
@@ -805,7 +815,7 @@ App 对象：
 - 允许跨源的路径仅限：`POST /api/auth/login`、`POST /api/auth/logout`、`GET /api/auth/session`、
   `POST /api/feedback`、`GET /api/feedback/:id`、`GET /api/feedback/:id/screenshot`、
   `GET /api/feedback/mine`、`GET /api/feedback/unread-summary`、`GET /api/feedback/:id/dialogue`、
-  `POST /api/feedback/:id/messages`、`POST /api/feedback/:id/read`、
+  `POST /api/feedback/:id/messages`、`POST /api/feedback/:id/read`、`POST /api/feedback/read-all`、
   `GET /api/feedback/messages/attachments/:id`、`GET /api/feedback/:id/images/:imageId`、
   `GET /api/feedback/:id/logs/:logId/download`、`GET /api/feedback/:id/logs/:logId/preview`、
   `GET /api/features`；

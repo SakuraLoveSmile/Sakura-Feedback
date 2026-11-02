@@ -68,6 +68,11 @@ void main() {
   testWidgets('悬浮按钮存在且带「反馈」语义、点击呼出面板', (tester) async {
     final controller = await pumpHost(tester, surface: const Size(1000, 800));
     expect(find.byKey(const Key('feedback-fab')), findsOneWidget);
+    controller.setUnreadCount(3);
+    await tester.pump();
+    // v0.8.2：FAB 入口不再绘制未读数字角标（F1），未读数由宿主自绘。
+    expect(find.byType(Badge), findsNothing);
+    expect(find.text('3'), findsNothing);
 
     final SemanticsHandle handle = tester.ensureSemantics();
     await tester.pump();

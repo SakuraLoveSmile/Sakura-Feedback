@@ -439,7 +439,7 @@ describe('R3 neutral glass and component theme',()=>{
     expect(m.screenshotThumb.src).toBe(attachment); expect(m.textarea.value).toBe('keep the old description');
     expect(m.root.querySelector('.fb-screenshot-size')!.textContent).toBe('4×4'); expect(provider).toHaveBeenCalledTimes(1);
   });
-  it('stationary material hides the old blue/orange halo, sweep and breathing while preserving badge and focus nodes',async()=>{
+  it('stationary material hides the old blue/orange halo, sweep and breathing while preserving the focus node and removing the unread badge',async()=>{
     const m=mount({'launcher-mode':'orb'}); await settle();
     expect(m.orb.classList.contains('has-lens')).toBe(true);
     expect(window.getComputedStyle(m.orb).animation).toBe('none');
@@ -447,7 +447,8 @@ describe('R3 neutral glass and component theme',()=>{
       expect(window.getComputedStyle(m.orb.querySelector(selector)!).display).toBe('none');
     }
     expect(m.orb.querySelector('.fb-orb-focus-ring')).not.toBeNull();
-    expect(m.orb.querySelector('.fb-launcher-badge')).not.toBeNull();
+    // 0.8.2：入口未读数字角标整体移除，不再有该节点。
+    expect(m.orb.querySelector('.fb-launcher-badge')).toBeNull();
   });
   it('without WebGL the stationary safe outline also suppresses old halos and never starts a backdrop capture',async()=>{
     vi.mocked(OrbLens.create).mockReturnValue(null);

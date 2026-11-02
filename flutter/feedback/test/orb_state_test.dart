@@ -222,37 +222,26 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets('badge隔离：hover及pressed不改变徽标和球体布局', (WidgetTester tester) async {
+  testWidgets('未读数不再绘制徽标：hover及pressed不改变球体布局',
+      (WidgetTester tester) async {
     await pumpHost(tester);
     controller.setUnreadCount(3);
     await tester.pump();
-    final Finder badge = find.descendant(
-      of: find.byType(Badge),
-      matching: find.byWidgetPredicate((Widget widget) =>
-          widget is Container && widget.decoration is ShapeDecoration),
-    );
-    expect(find.text('3'), findsOneWidget);
-    expect(
-        find.descendant(of: _body, matching: find.byType(Badge)), findsNothing);
-    final Rect initialBadge = tester.getRect(badge);
+    // v0.8.2：入口不再绘制数字角标（含 FAB / 灵感球 / 历史 Tab）。
+    expect(find.byType(Badge), findsNothing);
+    expect(find.text('3'), findsNothing);
     final Rect initialBody = tester.getRect(_body);
     final TestGesture mouse = await hover(tester);
-    final Rect hoverBadge = tester.getRect(badge);
     final Rect hoverBody = tester.getRect(_body);
     expect(_painter(tester).scale, closeTo(1.04, 1e-6));
-    expect(hoverBadge, initialBadge);
     expect(hoverBody, initialBody);
     final TestGesture press =
         await tester.startGesture(tester.getCenter(_body));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 160));
-    final Rect pressedBadge = tester.getRect(badge);
     final Rect pressedBody = tester.getRect(_body);
     expect(_painter(tester).scale, closeTo(0.94, 1e-6));
-    expect(pressedBadge, initialBadge);
     expect(pressedBody, initialBody);
-    debugPrint(
-        'T4-4 badge: idle=$initialBadge, hover=$hoverBadge, pressed=$pressedBadge; badgeWidth=${initialBadge.width.toStringAsPrecision(15)}, badgeHeight=${initialBadge.height}; body idle=$initialBody, hover=$hoverBody, pressed=$pressedBody');
     await press.up();
     await mouse.removePointer();
     await tester.pumpWidget(const SizedBox.shrink());

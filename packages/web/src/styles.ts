@@ -32,6 +32,11 @@ export const STYLES = /* css */ `
   --fb-status-warn-border: #fde68a;
   --fb-status-warn-text: #b45309;
 
+  /* 0.8.2 新增：waiting_admin（等待回复）用的紫色系令牌，与其它状态同一组三段式结构。 */
+  --fb-status-accent-bg: #f5f3ff;
+  --fb-status-accent-border: #ddd6fe;
+  --fb-status-accent-text: #6d28d9;
+
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
     "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   font-size: 14px;
@@ -86,6 +91,10 @@ export const STYLES = /* css */ `
   --fb-status-warn-bg: rgba(255, 159, 10, 0.15);
   --fb-status-warn-border: rgba(255, 159, 10, 0.3);
   --fb-status-warn-text: #ff9f0a;
+
+  --fb-status-accent-bg: rgba(191, 90, 242, 0.16);
+  --fb-status-accent-border: rgba(191, 90, 242, 0.4);
+  --fb-status-accent-text: #d8a8ff;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -113,6 +122,10 @@ export const STYLES = /* css */ `
     --fb-status-warn-bg: rgba(255, 159, 10, 0.15);
     --fb-status-warn-border: rgba(255, 159, 10, 0.3);
     --fb-status-warn-text: #ff9f0a;
+
+    --fb-status-accent-bg: rgba(191, 90, 242, 0.16);
+    --fb-status-accent-border: rgba(191, 90, 242, 0.4);
+    --fb-status-accent-text: #d8a8ff;
   }
 }
 
@@ -517,13 +530,6 @@ export const STYLES = /* css */ `
   background: transparent;
   border: 1px solid rgba(255,255,255,.65);
   box-shadow: none;
-}
-
-.fb-orb .fb-launcher-badge {
-  z-index: 5;
-  transform: none;
-  rotate: 0deg;
-  scale: 1;
 }
 
 @keyframes fb-orb-breath {
@@ -1641,6 +1647,11 @@ export const STYLES = /* css */ `
 }
 
 /* ---- v11 对话与历史视图 ---- */
+/*
+ * 行内「未读」文本小标签（.fb-badge.fb-history-unread）的基底。
+ * 0.8.2 起入口不再有未读数字角标（相关角标定位 / 兜底规则已整体删除），
+ * .fb-badge 只服务历史列表行内的小标签。
+ */
 .fb-badge {
   display: inline-flex;
   align-items: center;
@@ -1654,13 +1665,6 @@ export const STYLES = /* css */ `
   font-size: 11px;
   font-weight: 600;
   line-height: 1;
-}
-
-.fb-launcher-badge {
-  position: absolute;
-  top: -4px;
-  right: -4px;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.2);
 }
 
 .fb-nav-tabs {
@@ -1754,18 +1758,22 @@ export const STYLES = /* css */ `
 }
 
 .fb-tag.waiting-admin {
-  background: var(--fb-status-warn-bg);
-  color: var(--fb-status-warn-text);
+  background: var(--fb-status-accent-bg);
+  color: var(--fb-status-accent-text);
+  border: 1px solid var(--fb-status-accent-border);
 }
 
 .fb-tag.waiting-user {
-  background: var(--fb-status-success-bg);
-  color: var(--fb-status-success-text);
+  background: var(--fb-status-info-bg);
+  color: var(--fb-status-info-text);
+  border: 1px solid var(--fb-status-info-border);
 }
 
+/* 0.8.2：已解决从灰改为绿色（与行左边框 success 同源），不再与「无状态」混淆 */
 .fb-tag.resolved {
-  background: var(--fb-bg-subtle-hover);
-  color: var(--fb-text-secondary);
+  background: var(--fb-status-success-bg);
+  color: var(--fb-status-success-text);
+  border: 1px solid var(--fb-status-success-border);
 }
 
 .fb-dialogue-view {
@@ -2157,6 +2165,8 @@ export const STYLES = /* css */ `
 /* ---- v12 我的反馈：筛选与分页 ---- */
 .fb-history-filter-row {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   flex-shrink: 0;
   gap: 8px;
   padding: 8px 0;
@@ -2177,6 +2187,23 @@ export const STYLES = /* css */ `
 .fb-history-filter:focus-visible {
   outline: 2px solid var(--fb-focus-ring);
   outline-offset: 1px;
+}
+
+/*
+ * v0.8.2 一键已读的 role=status 提示（默认 hidden；成功为 success 色，失败加 .is-error）。
+ * 440px 面板里过滤行允许换行（见 .fb-history-filter-row 的 flex-wrap），提示占满一行，
+ * 因此不会把「一键已读」按钮挤出可见区域。
+ */
+.fb-history-read-hint {
+  margin: 0;
+  padding: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--fb-status-success-text);
+}
+
+.fb-history-read-hint.is-error {
+  color: var(--fb-status-error-text);
 }
 
 .fb-history-items {
@@ -2346,24 +2373,30 @@ export const STYLES = /* css */ `
 /* ---- v13 我的反馈：简易 issue 行式列表 + 项目分组 ---- */
 
 /*
- * 「待处理（open）」此前没有 chip 样式（只有 waiting-admin / waiting-user / resolved），
- * 行左边框也需要一个独立色，因此新增 info 令牌。
- * --fb-accent 等既有令牌**未做任何修改**，这里只是新增变量并在两套主题下各给一值；
- * chip 前景对叠加后的背景实测对比度：浅色 5.54:1、深色 5.17:1（均 ≥ WCAG AA 4.5:1）。
+ * 0.8.2：四种问题状态各用一组独立令牌，chip 与行左边框同源（同色系浅底 + 同色文字 + 1px 同色边框）：
+ *   open 待处理 = 琥珀（warn）／waiting_user 待补充 = 蓝（info）
+ *   waiting_admin 等待回复 = 紫（accent）／resolved 已解决 = 绿（success）
+ * info 令牌的 border 在 0.8.2 补齐（此前只有 bg/text）；accent 令牌在主令牌区按三套主题各给一值。
+ * chip 前景对**合成后**背景的 WCAG 对比度（正文口径 ≥ 4.5:1）：
+ *   浅色 open 4.78、waiting_user 6.00、waiting_admin 6.48、resolved 4.79；
+ *   深色 open 6.24、waiting_user 6.17、waiting_admin 7.27、resolved 6.35（见交付报告计算过程）。
  */
 :host {
   --fb-status-info-bg: rgba(0, 113, 227, 0.12);
+  --fb-status-info-border: rgba(0, 113, 227, 0.32);
   --fb-status-info-text: #0057ad;
 }
 
 :host([theme="dark"]) {
   --fb-status-info-bg: rgba(0, 113, 227, 0.22);
+  --fb-status-info-border: rgba(0, 113, 227, 0.5);
   --fb-status-info-text: #6cb2ff;
 }
 
 @media (prefers-color-scheme: dark) {
   :host(:not([theme="light"]):not([theme="dark"])) {
     --fb-status-info-bg: rgba(0, 113, 227, 0.22);
+    --fb-status-info-border: rgba(0, 113, 227, 0.5);
     --fb-status-info-text: #6cb2ff;
   }
 }
@@ -2375,15 +2408,16 @@ export const STYLES = /* css */ `
   transition: background 0.15s ease, border-color 0.15s ease;
 }
 
-.fb-history-item.fb-issue-row.fb-issue--open { border-left-color: var(--fb-status-info-text); }
-.fb-history-item.fb-issue-row.fb-issue--waiting_user { border-left-color: var(--fb-status-success-text); }
-.fb-history-item.fb-issue-row.fb-issue--waiting_admin { border-left-color: var(--fb-status-warn-text); }
-.fb-history-item.fb-issue-row.fb-issue--resolved { border-left-color: var(--fb-text-tertiary); }
+.fb-history-item.fb-issue-row.fb-issue--open { border-left-color: var(--fb-status-warn-text); }
+.fb-history-item.fb-issue-row.fb-issue--waiting_user { border-left-color: var(--fb-status-info-text); }
+.fb-history-item.fb-issue-row.fb-issue--waiting_admin { border-left-color: var(--fb-status-accent-text); }
+.fb-history-item.fb-issue-row.fb-issue--resolved { border-left-color: var(--fb-status-success-text); }
 
-/* open 状态 chip 补修饰类（原来 open 落到 .fb-tag 默认灰，与其他状态不可辨） */
+/* 待处理 chip（open）：琥珀；其余三种在 v11 区块里同样补齐了 1px 同色边框 */
 .fb-tag.open {
-  background: var(--fb-status-info-bg);
-  color: var(--fb-status-info-text);
+  background: var(--fb-status-warn-bg);
+  color: var(--fb-status-warn-text);
+  border: 1px solid var(--fb-status-warn-border);
 }
 
 /* 第一行：#编号 + 标题（省略号）+ 标签区，横向紧凑排布，440px 面板内不溢出 */
@@ -2513,7 +2547,7 @@ export const STYLES = /* css */ `
 
 /* R5: neutral standby, optional idle entry, and compact feedback surfaces. */
 .fb-orb {
-  /* Focus, badge and hit surface sit above the independent glass canvas. */
+  /* Focus and hit surface sit above the independent glass canvas. */
   z-index:calc(var(--fb-z-index, var(--fb-z-index-default)) + 32);
   bottom:clamp(max(16px,env(safe-area-inset-bottom,0px)),var(--fb-launcher-bottom,25%),calc(100dvh - max(72px,env(safe-area-inset-top,0px) + 56px)));
   right:max(20px,env(safe-area-inset-right,0px));
@@ -2526,8 +2560,6 @@ export const STYLES = /* css */ `
 .fb-orb-hit { position:absolute; top:0; right:0; bottom:0; left:0; display:block; border-radius:0; background:transparent; pointer-events:auto; }
 .fb-orb.is-collapsed { height:56px; min-height:56px; overflow:visible; cursor:pointer; }
 .fb-orb.is-collapsed .fb-orb-bloom, .fb-orb.is-collapsed .fb-orb-glow, .fb-orb.is-collapsed .fb-orb-sweep, .fb-orb.is-collapsed .fb-orb-core { display:none; }
-.fb-orb.is-collapsed .fb-launcher-badge { right:16px; top:-4px; }
-:host([side="left"]) .fb-orb.is-collapsed .fb-launcher-badge { left:16px; right:auto; }
 .fb-orb-idle-settings { margin:0; padding:0; border:0; min-width:0; display:flex; flex-direction:column; gap:8px; }
 .fb-orb-idle-options { display:flex; flex-wrap:wrap; gap:8px; }
 .fb-orb-idle-option { flex:1 1 110px; min-height:44px; display:flex; gap:8px; align-items:center; padding:8px 10px; box-sizing:border-box; border:1px solid var(--fb-border); border-radius:12px; background:var(--fb-bg-subtle); cursor:pointer; }

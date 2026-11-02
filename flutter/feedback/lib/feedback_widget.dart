@@ -38,6 +38,7 @@ export 'src/api_client.dart'
         UserFeedbackListItem,
         UserFeedbackListResponse,
         UnreadSummaryResponse,
+        MarkAllReadResult,
         FeedbackDialogueResponse,
         LoginResult,
         SessionInfo;

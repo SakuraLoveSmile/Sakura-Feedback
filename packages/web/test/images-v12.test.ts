@@ -862,7 +862,8 @@ describe('T3 未读摘要轮询', () => {
     } finally {
       vi.useRealTimers();
     }
-    // 徽标数字更新
-    expect(m.root.querySelector('.fb-launcher-badge')?.textContent).toContain('3');
+    // 0.8.2：入口不再渲染未读数字角标；未读数只进入灵感球 aria-label 的读屏提示。
+    expect(m.root.querySelector('.fb-launcher-badge')).toBeNull();
+    expect(m.orb.getAttribute('aria-label')).toContain('3条未读');
   });
 });

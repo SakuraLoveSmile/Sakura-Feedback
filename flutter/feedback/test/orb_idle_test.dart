@@ -56,6 +56,12 @@ void main() {
     for (final FeedbackOrbIdleStyle style in FeedbackOrbIdleStyle.values) {
       expect(decodeOrbIdleStyle(encodeOrbIdleStyle(style)), style);
     }
+    // v0.8.2 第三种待机样式：hidden 可编解码；旧版本只写入 handle / edge，
+    // 读取时都仍然有效（未知值已在上面断言回退 handle）。
+    expect(encodeOrbIdleStyle(FeedbackOrbIdleStyle.hidden),
+        '{"version":1,"style":"hidden"}');
+    expect(decodeOrbIdleStyle(encodeOrbIdleStyle(FeedbackOrbIdleStyle.hidden)),
+        FeedbackOrbIdleStyle.hidden);
   });
 
   test('new choice beats late read and writes finish in selection order',
@@ -173,7 +179,12 @@ void main() {
     await tester.pump(const Duration(milliseconds: 420));
   }
 
-  for (final FeedbackOrbIdleStyle style in FeedbackOrbIdleStyle.values) {
+  // hidden 没有收起几何形状（入口整体不渲染），五秒收起与命中区断言只覆盖
+  // handle / edge；hidden 的入口显隐、controller.open() 与设置切换见文件末尾。
+  for (final FeedbackOrbIdleStyle style in <FeedbackOrbIdleStyle>[
+    FeedbackOrbIdleStyle.handle,
+    FeedbackOrbIdleStyle.edge,
+  ]) {
     for (final FeedbackSide side in FeedbackSide.values) {
       testWidgets(
           '${style.name} on ${side.name}: five seconds, exact target and wake without click-through',
@@ -564,6 +575,105 @@ void main() {
     await host.mount(tester);
     await idle(tester);
     expect(find.byKey(const Key('feedback-orb-idle-handle')), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+      'hidden renders no launcher slot, persists, and host open() still opens the panel',
+      (tester) async {
+    await host.preferences.write(orbIdleStorageKey(host.appId),
+        encodeOrbIdleStyle(FeedbackOrbIdleStyle.hidden));
+    await host.mount(tester);
+    await idle(tester);
+    expect(liquidOrb, findsNothing, reason: '完整球入口不渲染');
+    expect(collapsed, findsNothing, reason: '收起把手也不渲染');
+    expect(find.byKey(const Key('feedback-launcher-slot')), findsNothing);
+    expect(await host.preferences.read(orbIdleStorageKey(host.appId)),
+        encodeOrbIdleStyle(FeedbackOrbIdleStyle.hidden),
+        reason: '读取偏好不得回写默认值');
+
+    host.controller.open();
+    await tester.pump();
+    await tester.pump();
+    expect(host.controller.isOpen, isTrue);
+    expect(find.byKey(const Key('feedback-input')), findsOneWidget,
+        reason: '隐藏入口后仍可由宿主 controller.open() 打开面板');
+    expect(find.byKey(const Key('feedback-close')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('feedback-settings')));
+    await tester.pump();
+    expect(find.byKey(const Key('feedback-orb-idle-hidden')), findsOneWidget);
+    expect(find.text('隐藏'), findsOneWidget);
+    final Finder handle = find.byKey(const Key('feedback-orb-idle-handle'));
+    await tester.ensureVisible(handle);
+    await tester.tap(handle);
+    await tester.pump();
+    expect(await host.preferences.read(orbIdleStorageKey(host.appId)),
+        encodeOrbIdleStyle(FeedbackOrbIdleStyle.handle));
+
+    host.controller.close();
+    await tester.pump();
+    await tester.pump();
+    expect(liquidOrb, findsOneWidget, reason: '改回小把手后入口立即恢复');
+    await idle(tester);
+    expect(find.byKey(const Key('feedback-orb-idle-handle')), findsOneWidget,
+        reason: '恢复后重新开始闲置计时');
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+      'choosing hidden in settings removes the entry immediately and survives remount',
+      (tester) async {
+    await host.mount(tester);
+    await idle(tester);
+    expect(find.byKey(const Key('feedback-orb-idle-handle')), findsOneWidget,
+        reason: '默认小把手在闲置后收起');
+    host.controller.open();
+    await tester.pump();
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('feedback-settings')));
+    await tester.pump();
+    final Finder hidden = find.byKey(const Key('feedback-orb-idle-hidden'));
+    await tester.ensureVisible(hidden);
+    await tester.tap(hidden);
+    await tester.pump();
+    expect(await host.preferences.read(orbIdleStorageKey(host.appId)),
+        encodeOrbIdleStyle(FeedbackOrbIdleStyle.hidden));
+
+    host.controller.close();
+    await tester.pump();
+    await tester.pump();
+    expect(liquidOrb, findsNothing);
+    expect(collapsed, findsNothing);
+    await idle(tester);
+    expect(collapsed, findsNothing, reason: '隐藏样式不得重新出现收起把手');
+
+    // 持久化：重新挂载后仍是隐藏，且宿主仍可 open()。
+    await tester.pumpWidget(const SizedBox.shrink());
+    await host.mount(tester);
+    await idle(tester);
+    expect(find.byKey(const Key('feedback-launcher-slot')), findsNothing);
+    host.controller.open();
+    await tester.pump();
+    await tester.pump();
+    expect(find.byKey(const Key('feedback-input')), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+      'hidden only hides the inspiration orb entry; tab-mode FAB keeps working',
+      (tester) async {
+    // 「隐藏」是灵感球待机样式：tab 模式的悬浮按钮不属于灵感球，不能被该偏好
+    // 一起隐藏（与 Web 端 canUseOrbLauncher 只影响 orb 入口的语义一致）。
+    host.launcherMode = FeedbackLauncherMode.tab;
+    await host.preferences.write(orbIdleStorageKey(host.appId),
+        encodeOrbIdleStyle(FeedbackOrbIdleStyle.hidden));
+    await host.mount(tester);
+    await idle(tester);
+    expect(find.byKey(const Key('feedback-fab')), findsOneWidget,
+        reason: 'tab 模式入口由宿主配置决定，不受灵感球隐藏偏好影响');
+    expect(find.byKey(const Key('feedback-launcher-slot')), findsOneWidget);
+    expect(liquidOrb, findsNothing);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 }

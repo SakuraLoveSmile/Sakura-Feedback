@@ -1,7 +1,13 @@
 /** Local launcher appearance only; no host configuration or capture authority. */
 import { liquidBoundary, type LiquidShape } from './orb-liquid';
 
-export type OrbIdleStyle = 'handle' | 'edge';
+/**
+ * 本机灵感球待机样式：`handle` 小把手 / `edge` 球体贴边 / `hidden` 隐藏入口。
+ * `hidden` 是 0.8.2 新增的第三种选项：选中后灵感球整体不显示（无任何入口形态），
+ * 但反馈面板仍可由宿主 `openFeedback()` / `widget.open()` 打开并改回其它样式。
+ * 旧版组件读到 `hidden` 会按非法值回退 `handle`（安全降级，不会白屏）。
+ */
+export type OrbIdleStyle = 'handle' | 'edge' | 'hidden';
 
 export interface OrbIdleVisual {
   x: number;
@@ -60,7 +66,16 @@ export function orbIdlePreferenceKey(appId: string): string {
 export function parseOrbIdlePreference(value: string | null): OrbIdleStyle {
   try {
     const data: unknown = JSON.parse(value ?? 'null');
-    if (data && typeof data === 'object' && 'version' in data && data.version === 1 && 'style' in data && (data.style === 'handle' || data.style === 'edge')) return data.style;
+    if (
+      data &&
+      typeof data === 'object' &&
+      'version' in data &&
+      data.version === 1 &&
+      'style' in data &&
+      (data.style === 'handle' || data.style === 'edge' || data.style === 'hidden')
+    ) {
+      return data.style;
+    }
   } catch { /* Invalid local values use the default. */ }
   return 'handle';
 }

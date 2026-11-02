@@ -226,7 +226,7 @@ describe('液态球拖动与会话', () => {
     expect(orb.classList.contains('is-unpressing')).toBe(false);
   });
 
-  it('渲染Canvas不抢焦点/指针，原badge与焦点环保留独立节点', async () => {
+  it('渲染Canvas不抢焦点/指针，命中层与焦点环保留独立节点且无未读角标', async () => {
     const { orb,root } = await mountFresh();
     const canvas = root.querySelector('.fb-orb-lens');
     expect(canvas?.getAttribute('aria-hidden')).toBe('true');
@@ -235,7 +235,9 @@ describe('液态球拖动与会话', () => {
       expect(orb.querySelector(selector)?.getAttribute('aria-hidden')).toBe('true');
       expect(orb.querySelector(selector)?.parentElement).toBe(orb);
     }
-    expect(orb.lastElementChild).toBe(orb.querySelector('.fb-launcher-badge'));
+    // 0.8.2：数字角标节点已移除，最后一个子元素是命中层（保留原有点击/命中语义）。
+    expect(orb.querySelector('.fb-launcher-badge')).toBeNull();
+    expect(orb.lastElementChild).toBe(orb.querySelector('.fb-orb-hit'));
   });
 });
 
@@ -248,7 +250,9 @@ describe('焦点环几何', () => {
     expect(ring).not.toBeNull();
     expect(ring?.parentElement).toBe(orb);
     expect(ring?.getAttribute('aria-hidden')).toBe('true');
-    expect(orb.lastElementChild?.classList.contains('fb-launcher-badge')).toBe(true);
+    // 0.8.2：角标移除后，球的最后一个子元素是命中层而非 badge。
+    expect(orb.querySelector('.fb-launcher-badge')).toBeNull();
+    expect(orb.lastElementChild?.classList.contains('fb-orb-hit')).toBe(true);
 
     const style = window.getComputedStyle(ring!);
     expect(style.opacity).toBe('0');
