@@ -1,7 +1,7 @@
 /**
  * T2.4–T2.6 / T4 面板呈现验收：
  * - 面板组件顺序：标题与页签 → 反馈描述 → 图片证据 → 可折叠日志 → 固定提交区；
- * - 图片缩略图完整显示（contain）、角标（局部截图 / 已编辑）与尺寸、操作在图片下方；
+ * - R5 图片缩略图完整显示（contain）、类型与尺寸、操作位于相邻信息栏；
  * - 未应用选区时保存禁用的原因可见（编辑器侧断言见 editor-crop.test.ts）；
  * - 日志默认只显示简短摘要，展开后可查看 / 移除 / 重新采集，出错自动展开；
  * - 冻结视觉规格（宽度 440 / 最大高 720、灵感球 56→84 与光晕、reduced-motion、44px 目标、
@@ -12,7 +12,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { beforeEach } from 'vitest';
 import '../src/index';
 import { STYLES } from '../src/styles';
-import { cleanup, mount } from './helpers';
+import { cleanup, mount, setTextarea } from './helpers';
 import { blobToPng, createState, encodePng, stubCreateElementCanvas } from './pixel-fixture';
 
 const ELEMENT_SOURCE = readFileSync('src/element.ts', 'utf8');
@@ -88,7 +88,7 @@ describe('T2.6 面板组件顺序', () => {
 });
 
 describe('T2.5 图片缩略图完整显示与角标', () => {
-  it('缩略图 contain、编辑/删除在图片下方、角标含标记与尺寸', async () => {
+  it('R5真实72px缩略图contain，编辑/删除位于相邻信息栏且有44px命中', async () => {
     const m = mount();
     m.widget.open();
     const input = m.root.querySelector<HTMLInputElement>('.fb-image-input')!;
@@ -106,15 +106,24 @@ describe('T2.5 图片缩略图完整显示与角标', () => {
     expect(STYLES).toMatch(/\.fb-screenshot-thumb \{[^}]*object-fit: contain/);
     expect(STYLES).not.toMatch(/\.fb-screenshot-thumb \{[^}]*object-fit: cover/);
 
-    // 操作按钮在图片框之外（图片下方），不遮挡内容
+    // 用户批准R5横向附件卡，取代旧“操作在图片下方”的结构；仍不能覆盖图片。
     const frame = cell.querySelector('.fb-thumb-frame')!;
     expect(frame.querySelector('.fb-thumb-edit')).toBeNull();
     expect(frame.querySelector('.fb-thumb-remove')).toBeNull();
     const actions = cell.querySelector('.fb-thumb-actions')!;
     expect(actions).not.toBeNull();
-    expect(Array.from(cell.children).indexOf(frame)).toBeLessThan(
-      Array.from(cell.children).indexOf(actions),
-    );
+    const info=cell.querySelector('.fb-thumb-info')!;
+    expect(Array.from(cell.children)).toEqual([frame,info]);
+    expect(info.contains(actions)).toBe(true);
+    expect(getComputedStyle(cell).flexDirection).toBe('row');
+    expect(getComputedStyle(cell).padding).toBe('8px');
+    expect(getComputedStyle(cell).borderRadius).toBe('12px');
+    expect(getComputedStyle(frame).width).toBe('72px');
+    expect(getComputedStyle(frame).height).toBe('72px');
+    for(const button of actions.querySelectorAll('button')) {
+      expect(getComputedStyle(button).minHeight).toBe('44px');
+      expect(getComputedStyle(button).minWidth).toBe('44px');
+    }
     expect(actions.querySelector('.fb-thumb-edit')).not.toBeNull();
 
     // 角标 + 尺寸读数
@@ -223,12 +232,12 @@ describe('冻结视觉规格（styles.ts 字符串断言）', () => {
     expect(STYLES).toMatch(/@media \(max-width: 767\.98px\)/);
   });
 
-  it('灵感球冻结为 56px，拖动视觉组放大到 84px 并按方向拉伸', () => {
+  it('液态球沿用56px命中，104px活动透镜不叠旧椭圆', () => {
     expect(STYLES).toMatch(/\.fb-orb \{[^}]*width: 56px/);
     expect(STYLES).toMatch(/\.fb-orb \{[^}]*height: 56px/);
     expect(STYLES).toMatch(/\.fb-orb \{[^}]*min-width: 56px/);
     expect(STYLES).toMatch(/\.fb-orb \{[^}]*min-height: 56px/);
-    expect(STYLES).toMatch(/\.fb-orb\.is-dragging \{[^}]*--fb-orb-state-scale: 1\.5/);
+    expect(STYLES).toMatch(/\.fb-orb\.is-dragging \{[^}]*--fb-orb-state-scale: 1\.8571428571/);
 
     // 四层视觉组共用 R(angle) × Scale(stretchAlong, 1) × R(-angle)，badge 不在组内。
     expect(STYLES).toMatch(
@@ -337,7 +346,9 @@ describe('冻结视觉规格（styles.ts 字符串断言）', () => {
     expect(STYLES).toMatch(/\.fb-btn-secondary \{[^}]*min-height: 44px/);
     expect(STYLES).toMatch(/\.fb-editor-tool \{[^}]*min-height: 44px/);
     expect(STYLES).toMatch(/\.fb-editor-btn \{[^}]*min-height: 44px/);
-    expect(STYLES).toMatch(/\.fb-region-btn \{[^}]*min-height: 44px/);
+    // R5统一为44px工具按钮，粗指针仍保留44px角点/关闭命中。
+    expect(STYLES).toMatch(/@media \(pointer:coarse\)/);
+    expect(STYLES).toContain('.fb-region-use, .fb-region-all { min-height:44px; }');
     // 关闭 / 图标按钮用命中区扩展
     expect(STYLES).toMatch(/\.fb-close::after/);
   });
@@ -350,10 +361,11 @@ describe('冻结视觉规格（styles.ts 字符串断言）', () => {
     expect(STYLES).toContain('.fb-editor-save-hint');
   });
 
-  it('选区覆盖层：冻结位图铺满 + 外部暗化 + 三个 ≥44px 操作', () => {
+  it('选区覆盖层：冻结位图、独立紫色遮罩、四角与独立关闭', () => {
     expect(STYLES).toContain('.fb-region-overlay');
     expect(STYLES).toMatch(/\.fb-region-bg \{[^}]*object-fit: fill/);
-    expect(STYLES).toMatch(/\.fb-region-frame \{[^}]*box-shadow: 0 0 0 9999px/);
+    expect(STYLES).toContain('background:#635d92');
+    expect(STYLES).toContain('.fb-region-dim');
     expect(STYLES).toMatch(/\.fb-region-handle\[data-handle="nw"\]/);
     expect(STYLES).toMatch(/\.fb-region-handle\[data-handle="se"\]/);
   });
@@ -361,8 +373,30 @@ describe('冻结视觉规格（styles.ts 字符串断言）', () => {
   it('主色与品牌令牌保持不变（#0071E3，间距 4/8/12/16/24/32）', () => {
     expect(STYLES).toContain('--fb-accent: #0071e3');
     expect(STYLES).toContain('--fb-z-index-default');
-    // 圆角规格：面板 16px、图片 10px
+    // R5附件卡12px；桌面面板仍16px。
     expect(STYLES).toMatch(/\.fb-panel \{[^}]*border-radius: 16px/);
-    expect(STYLES).toMatch(/\.fb-screenshot-thumb-box \{[^}]*border-radius: 10px/);
+    const m=mount();
+    expect(getComputedStyle(m.root.querySelector('.fb-screenshot-thumb-box')!).borderRadius).toBe('12px');
+  });
+});
+
+describe('R5紧凑撰写与操作层级',()=>{
+  it('标题/44px分段与操作命中，输入不再撑满且保留长度、滚动和固定提交',()=>{
+    const m=mount(); m.widget.open();
+    expect(getComputedStyle(m.root.querySelector('.fb-header h2')!).fontSize).toBe('18px');
+    expect(getComputedStyle(m.root.querySelector('.fb-nav-tabs')!).height).toBe('44px');
+    for(const selector of ['.fb-settings-btn','.fb-close']) {
+      const css=getComputedStyle(m.root.querySelector(selector)!);
+      expect(css.width).toBe('44px'); expect(css.height).toBe('44px');
+    }
+    const css=getComputedStyle(m.textarea);
+    expect(css.minHeight).toBe('132px'); expect(css.maxHeight).toBe('200px');
+    expect(css.borderRadius).toBe('14px'); expect(css.overflowY).toBe('auto');
+    expect(getComputedStyle(m.root.querySelector('.fb-textarea-wrap')!).flexGrow).toBe('0');
+    setTextarea(m,'😀'.repeat(10001));
+    expect(m.counter.textContent).toBe('10001/10000');
+    expect(m.submitBtn.disabled).toBe(true);
+    expect(getComputedStyle(m.root.querySelector('.fb-footer')!).position).toBe('sticky');
+    expect(getComputedStyle(m.root.querySelector('.fb-counter')!).fontSize).toBe('11px');
   });
 });

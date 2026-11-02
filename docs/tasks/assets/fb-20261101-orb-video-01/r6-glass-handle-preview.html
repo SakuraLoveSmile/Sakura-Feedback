@@ -1,0 +1,193 @@
+<div id="orb-glass-style-preview">
+  <div class="viz-carousel viz-dotted-background" aria-label="灵感球玻璃材质" data-previous-label="上一种材质" data-next-label="下一种材质">
+    <section data-variant="通透玻璃" aria-label="通透玻璃预览">
+      <div class="glass-stage" data-material="clear">
+        <div class="glass-phone" aria-label="通透玻璃灵感球">
+          <canvas class="glass-scene" role="img" aria-label="与拖动球相同的透明折射、细亮边；待机与收边形态可切换">液态玻璃灵感球预览</canvas>
+          <button class="glass-hit cursor-interaction" type="button" aria-label="唤醒灵感球"></button>
+        </div>
+        <div class="glass-modes" aria-label="查看形态">
+          <button type="button" class="cursor-interaction" data-mode="idle" aria-pressed="false">待机球</button>
+          <button type="button" class="cursor-interaction" data-mode="edge" aria-pressed="false">球体贴边</button>
+          <button type="button" class="cursor-interaction" data-mode="handle" aria-pressed="true">小把手</button>
+        </div>
+        <div class="glass-state" role="status" aria-live="polite">玻璃小把手 · 轻点展开</div>
+      </div>
+    </section>
+    <section data-variant="柔雾玻璃" aria-label="柔雾玻璃预览" hidden>
+      <div class="glass-stage" data-material="frost">
+        <div class="glass-phone" aria-label="柔雾玻璃灵感球">
+          <canvas class="glass-scene" role="img" aria-label="带柔和背景模糊的液态玻璃，收边时保持相同材质">柔雾玻璃灵感球预览</canvas>
+          <button class="glass-hit cursor-interaction" type="button" aria-label="唤醒灵感球"></button>
+        </div>
+        <div class="glass-modes" aria-label="查看形态">
+          <button type="button" class="cursor-interaction" data-mode="idle" aria-pressed="false">待机球</button>
+          <button type="button" class="cursor-interaction" data-mode="edge" aria-pressed="false">球体贴边</button>
+          <button type="button" class="cursor-interaction" data-mode="handle" aria-pressed="true">小把手</button>
+        </div>
+        <div class="glass-state" role="status" aria-live="polite">玻璃小把手 · 轻点展开</div>
+      </div>
+    </section>
+  </div>
+  <div class="glass-error" role="alert" hidden></div>
+</div>
+<style>
+  #orb-glass-style-preview { width:100%; }
+  #orb-glass-style-preview .glass-stage { display:flex; flex-direction:column; align-items:center; gap:14px; padding:24px 12px 8px; color:light-dark(#303441,#e4e6ef); font:400 14px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif; }
+  #orb-glass-style-preview .glass-phone { width:min(360px,100%); aspect-ratio:360/548; position:relative; overflow:hidden; border-radius:30px; background:light-dark(#f3f4fa,#191b24); box-shadow:0 0 0 1px light-dark(#2028371a,#e2e8ff20),0 14px 38px light-dark(#20345c12,#00000030); }
+  #orb-glass-style-preview .glass-scene { display:block; width:100%; height:100%; }
+  #orb-glass-style-preview .glass-hit { position:absolute; padding:0; border:0; border-radius:50%; background:transparent; touch-action:none; -webkit-tap-highlight-color:transparent; cursor:grab; }
+  #orb-glass-style-preview .glass-hit:active { cursor:grabbing; }
+  #orb-glass-style-preview .glass-modes { display:flex; max-width:100%; gap:4px; padding:4px; border-radius:14px; background:light-dark(#e9ebf2,#2b2e39); }
+  #orb-glass-style-preview .glass-modes button { appearance:none; border:0; border-radius:10px; min-height:44px; padding:8px 13px; color:inherit; background:transparent; font:500 13px/1.3 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif; }
+  #orb-glass-style-preview .glass-modes button[aria-pressed="true"] { color:light-dark(#255ec3,#c6d8ff); background:light-dark(#ffffff,#3c4353); box-shadow:0 1px 3px light-dark(#18244110,#0000001a); }
+  #orb-glass-style-preview .glass-state { min-height:18px; color:light-dark(#687182,#aab3c5); font-size:12px; text-align:center; }
+  #orb-glass-style-preview .glass-error { color:light-dark(#a42626,#ffa3a3); font:400 14px/1.5 sans-serif; }
+  #orb-glass-style-preview [hidden] { display:none!important; }
+  @media(max-width:360px) { #orb-glass-style-preview .glass-stage { padding-left:8px; padding-right:8px; } #orb-glass-style-preview .glass-modes button { padding-left:10px; padding-right:10px; } }
+</style>
+<script>
+(()=>{
+  const root=document.getElementById('orb-glass-style-preview');
+  const W=360,H=548,S=2,reduce=matchMedia('(prefers-reduced-motion:reduce)'),appearance=matchMedia('(prefers-color-scheme:dark)');
+  const shared={theme:'system',auto:false},previews=[];
+  let saveSignature='';
+  const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+  function save(){
+    const privateContent={revision:3,theme:shared.theme,auto:shared.auto,variants:previews.map(p=>({material:p.material,mode:p.mode(),mist:p.settings.mist}))};
+    const signature=JSON.stringify(privateContent);if(signature===saveSignature)return;saveSignature=signature;
+    window.openai?.setWidgetState?.({modelContent:{preview:'待机球与收边入口的玻璃材质',theme:shared.theme,variants:privateContent.variants},privateContent}).catch(()=>{});
+  }
+  function create(stage){
+    const phone=stage.querySelector('.glass-phone'),canvas=stage.querySelector('canvas'),hit=stage.querySelector('.glass-hit'),label=stage.querySelector('.glass-state');
+    const material=stage.dataset.material,settings={mist:material==='clear'?18:74};
+    const scene=document.createElement('canvas'),soft=document.createElement('canvas');
+    scene.width=soft.width=canvas.width=W*S;scene.height=soft.height=canvas.height=H*S;
+    const ctx=scene.getContext('2d'),blur=soft.getContext('2d');
+    const gl=canvas.getContext('webgl',{alpha:false,antialias:true});
+    if(!gl)throw new Error('当前环境无法显示玻璃预览。');
+    const vert='attribute vec2 aPosition;void main(){gl_Position=vec4(aPosition,0.,1.);}';
+    const frag=`precision highp float;
+      uniform sampler2D uScene; uniform sampler2D uSoft;
+      uniform vec2 uResolution; uniform vec2 uCenter; uniform vec2 uHalf; uniform vec2 uDirection;
+      uniform float uDeform; uniform float uMist; uniform float uDark; uniform float uHandle;
+      float sq(float x){return x*x;}
+      vec3 sampleScene(vec2 p){return texture2D(uScene,clamp(p/vec2(360.,548.),vec2(.001),vec2(.999))).rgb;}
+      vec3 sampleGlass(vec2 p){vec2 uv=clamp(p/vec2(360.,548.),vec2(.001),vec2(.999));return mix(texture2D(uScene,uv).rgb,texture2D(uSoft,uv).rgb,uMist);}
+      void main(){
+        vec2 p=vec2(gl_FragCoord.x/uResolution.x*360.,(1.-gl_FragCoord.y/uResolution.y)*548.);
+        vec2 offset=p-uCenter;vec2 axis=normalize(uDirection+vec2(.00001,0.));vec2 tangent=vec2(-axis.y,axis.x);
+        vec2 q=vec2(dot(offset,axis),dot(offset,tangent))/uHalf;
+        float stretch=1.+uDeform*.20;q=vec2(q.x/stretch,q.y*sqrt(stretch));
+        float angle=atan(q.y,q.x);float contour=1.+uDeform*(.045*cos(3.*angle)-.035*cos(angle));
+        float stem=max(0.,uHalf.y-uHalf.x);vec2 capsuleOffset=vec2(offset.x,offset.y-clamp(offset.y,-stem,stem));
+        float r=mix(length(q)/contour,length(capsuleOffset)/uHalf.x,uHandle);
+        vec2 surface=mix(q,capsuleOffset/uHalf.x,uHandle);float surfaceAngle=atan(surface.y,surface.x+.00001);
+        float aa=.65/min(uHalf.x,uHalf.y);float inside=1.-smoothstep(1.-aa,1.+aa,r);
+        float shadowWidth=mix(.15,2.6/uHalf.x,uHandle);
+        vec3 background=sampleScene(p);float shadowOutside=exp(-sq((r-1.08)/shadowWidth))*(.10-.045*uDark+.04*uHandle)*(.5+.5*sin(surfaceAngle));
+        vec3 color=background*(1.-shadowOutside*(1.-inside));
+        float glow=exp(-sq((r-1.035)/.065))*.055;color=mix(color,vec3(.95,.965,1.),glow*(1.-inside));
+        if(r<1.06){
+          float rr=clamp(r,0.,1.);float bend=1./1.62+.54*pow(rr,7.);vec2 lensOffset=mix(offset,capsuleOffset,uHandle);vec2 source=p+lensOffset*(bend-1.);
+          vec2 ray=normalize(lensOffset+vec2(.001));float dispersion=.52*pow(rr,8.);
+          vec3 glass=vec3(sampleGlass(source+ray*dispersion).r,sampleGlass(source).g,sampleGlass(source-ray*dispersion).b);
+          float theta=atan(lensOffset.y,lensOffset.x+.00001);float light=.55+.45*cos(theta+2.25);
+          float rimWidth=mix(.012,.55/uHalf.x,uHandle);float rimPosition=mix(.992,1.-.35/uHalf.x,uHandle);
+          float rim=exp(-sq((r-rimPosition)/rimWidth));float inner=exp(-sq((r-.943)/.030));
+          float caustic=exp(-sq((r-.84)/.095))*(.5+.5*sin(theta-.6));float shadow=exp(-sq((r-.973)/.018))*(1.-light);
+          glass*=1.-shadow*.19;glass=mix(glass,vec3(.99,.995,1.),rim*(.28+.5*light)*.64+inner*.10*light+caustic*.12);
+          float haze=uMist*(.045+.035*uDark);glass=mix(glass,vec3(.965,.98,1.),haze);
+          float sheen=exp(-sq((r-.91)/.065))*pow(max(0.,cos(surfaceAngle+2.25)),8.)*(.13+.10*uHandle);
+          glass=mix(glass,vec3(1.),sheen);glass=clamp(glass+vec3(.002,.003,.009)*(1.-uDark*.5),0.,1.);
+          color=mix(color,glass,inside);
+        }
+        gl_FragColor=vec4(color,1.);
+      }`;
+    function shader(kind,code){const s=gl.createShader(kind);gl.shaderSource(s,code);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw new Error(gl.getShaderInfoLog(s));return s;}
+    const program=gl.createProgram();gl.attachShader(program,shader(gl.VERTEX_SHADER,vert));gl.attachShader(program,shader(gl.FRAGMENT_SHADER,frag));gl.linkProgram(program);
+    if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(program));gl.useProgram(program);
+    const buffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]),gl.STATIC_DRAW);
+    const attr=gl.getAttribLocation(program,'aPosition');gl.enableVertexAttribArray(attr);gl.vertexAttribPointer(attr,2,gl.FLOAT,false,0,0);
+    const u=Object.fromEntries(['uScene','uSoft','uResolution','uCenter','uHalf','uDirection','uDeform','uMist','uDark','uHandle'].map(k=>[k,gl.getUniformLocation(program,k)]));
+    const textures=[0,1].map(i=>{const t=gl.createTexture();gl.activeTexture(gl.TEXTURE0+i);gl.bindTexture(gl.TEXTURE_2D,t);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);return t;});
+    let mode='handle',raf=0,last=0,drag=null,morph=null,timer=0;
+    const model={x:351,y:337,hx:6,hy:28,handle:1,vx:0,vy:0,tx:351,ty:337,dx:1,dy:0,deform:0};
+    function dark(){return shared.theme==='dark'||shared.theme==='system'&&appearance.matches;}
+    function round(x,y,w,h,r,color){ctx.fillStyle=color;ctx.beginPath();ctx.roundRect(x,y,w,h,r);ctx.fill();}
+    function text(t,x,y,size,color,weight=400){ctx.fillStyle=color;ctx.font=weight+' '+size+'px -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif';ctx.fillText(t,x,y);}
+    function repaint(){
+      const d=dark(),p=d?{bg:'#191c25',card:'#262a36',ink:'#f1f3fa',muted:'#abb3c5'}:{bg:'#f2f4fa',card:'#fcfdff',ink:'#242936',muted:'#6e788c'};
+      phone.style.colorScheme=d?'dark':'light';ctx.setTransform(S,0,0,S,0,0);ctx.fillStyle=p.bg;ctx.fillRect(0,0,W,H);
+      const ambient=ctx.createRadialGradient(371,338,8,371,338,180);ambient.addColorStop(0,d?'#5c6f9b42':'#87a8e33b');ambient.addColorStop(1,d?'#191c2500':'#f2f4fa00');ctx.fillStyle=ambient;ctx.fillRect(0,160,W,360);
+      text('9:41',24,30,14,p.ink,500);text('5G  ▰',292,30,14,p.ink);round(129,13,102,23,13,'#101219');
+      text('把灵感留在此刻',24,80,19,p.ink,500);
+      text('每一个体验，',24,140,27,p.ink,500);text('都值得被看见。',24,177,27,p.ink,500);
+      text('灵感，来自每一个细节。',24,209,14,p.muted);
+      round(22,238,316,205,20,p.card);text('让细节更清晰',40,271,16,p.ink,500);
+      text('Aa Bb 0123456789',40,313,22,p.ink);text('灵感，来自每一个被看见的细节',40,348,20,p.ink);
+      ['#567fdf','#a693dc','#e0b579','#77b7a2'].forEach((c,i)=>round(40+i*70,373,70,10,0,c));
+      text('随手记录，自然衔接',40,416,14,p.muted);
+      text('把此刻的想法，留在页面上。',24,487,14,p.muted);round(124,531,112,4,2,p.ink);
+      blur.setTransform(1,0,0,1,0,0);blur.clearRect(0,0,soft.width,soft.height);blur.filter='blur(10px)';blur.drawImage(scene,0,0);blur.filter='none';
+      [scene,soft].forEach((image,i)=>{gl.activeTexture(gl.TEXTURE0+i);gl.bindTexture(gl.TEXTURE_2D,textures[i]);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,image);});draw();
+    }
+    function draw(){
+      gl.useProgram(program);gl.viewport(0,0,canvas.width,canvas.height);gl.uniform1i(u.uScene,0);gl.uniform1i(u.uSoft,1);gl.uniform2f(u.uResolution,canvas.width,canvas.height);
+      gl.uniform2f(u.uCenter,model.x,model.y);gl.uniform2f(u.uHalf,model.hx,model.hy);gl.uniform2f(u.uDirection,model.dx,model.dy);
+      gl.uniform1f(u.uDeform,model.deform*.72);gl.uniform1f(u.uMist,drag?.moved?0:settings.mist/100);gl.uniform1f(u.uDark,dark()?1:0);gl.uniform1f(u.uHandle,model.handle);gl.drawArrays(gl.TRIANGLES,0,6);
+      const collapsed=mode!=='idle';hit.style.left=((collapsed?W-44:model.x-28)/W*100)+'%';hit.style.top=((model.y-28)/H*100)+'%';hit.style.width=((collapsed?44:56)/W*100)+'%';hit.style.height=(56/H*100)+'%';
+      hit.setAttribute('aria-label',collapsed?'唤醒灵感球':'拖动灵感球');phone.dataset.mode=mode;phone.dataset.center=model.x.toFixed(2)+','+model.y.toFixed(2);
+    }
+    function cancelTimer(){clearTimeout(timer);timer=0;}
+    function arm(){cancelTimer();if(shared.auto&&mode==='idle'&&!drag&&!document.hidden)timer=setTimeout(()=>setMode('handle'),5000);}
+    function target(next){return next==='idle'?{x:312,y:337,hx:28,hy:28,handle:0}:next==='edge'?{x:360,y:337,hx:28,hy:28,handle:0}:{x:351,y:337,hx:6,hy:28,handle:1};}
+    function setMode(next,remember=true,animate=true){
+      if(!['idle','edge','handle'].includes(next))return;cancelTimer();drag=null;mode=next;
+      const end=target(next);morph=animate&&!reduce.matches?{at:performance.now(),from:{...model},to:end}:null;
+      if(!morph)Object.assign(model,end,{tx:end.x,ty:end.y,vx:0,vy:0,dx:1,dy:0,deform:0});
+      stage.querySelectorAll('button[data-mode]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.mode===next)));
+      label.textContent=next==='idle'?'待机 · 可拖动球体':next==='edge'?'球体贴边 · 轻点展开':'玻璃小把手 · 轻点展开';
+      draw();if(morph)kick();else arm();if(remember)save();
+    }
+    function tick(time){
+      raf=0;const dt=Math.min(.032,Math.max(.001,(time-last)/1000));last=time;
+      if(morph){const p=clamp((time-morph.at)/420,0,1),e=1-Math.pow(1-p,3);for(const k of ['x','y','hx','hy','handle'])model[k]=morph.from[k]+(morph.to[k]-morph.from[k])*e;model.dx=1;model.dy=0;model.deform=0;if(p===1){morph=null;model.tx=model.x;model.ty=model.y;arm();}}
+      if(drag){const step=dt/8;for(let i=0;i<8;i++){model.vx+=((model.tx-model.x)*290-model.vx*24)*step;model.vy+=((model.ty-model.y)*290-model.vy*24)*step;model.x+=model.vx*step;model.y+=model.vy*step;}
+        const speed=Math.hypot(model.vx,model.vy);if(speed>12){model.dx=model.vx/speed;model.dy=model.vy/speed;}model.deform+=(Math.min(speed/530,1.3)-model.deform)*Math.min(dt*12,1);const size=drag.moved?52:28;model.hx+=(size-model.hx)*Math.min(dt*12,1);model.hy=model.hx;
+        if(reduce.matches){model.x=model.tx;model.y=model.ty;model.hx=model.hy=size;model.deform=0;}}
+      draw();if(morph||drag)raf=requestAnimationFrame(tick);
+    }
+    function kick(){if(!raf){last=performance.now();raf=requestAnimationFrame(tick);}}
+    function point(e){const r=phone.getBoundingClientRect();return{x:(e.clientX-r.x)*W/r.width,y:(e.clientY-r.y)*H/r.height};}
+    hit.addEventListener('pointerdown',e=>{
+      if(e.button!==0||!e.isPrimary)return;if(mode!=='idle'){setMode('idle');return;}if(morph)return;
+      const p=point(e);cancelTimer();drag={id:e.pointerId,x:p.x,y:p.y,ox:p.x-model.x,oy:p.y-model.y,moved:false};hit.setPointerCapture(e.pointerId);kick();
+    });
+    hit.addEventListener('pointermove',e=>{if(!drag||e.pointerId!==drag.id)return;const p=point(e);drag.moved||=Math.hypot(p.x-drag.x,p.y-drag.y)>6;model.tx=clamp(p.x-drag.ox,54,W-54);model.ty=clamp(p.y-drag.oy,115,H-70);if(drag.moved)label.textContent='拖动 · 首版液态玻璃';kick();});
+    function finish(e){if(!drag||drag.id!==e.pointerId)return;drag=null;if(hit.hasPointerCapture(e.pointerId))hit.releasePointerCapture(e.pointerId);setMode('idle');}
+    hit.addEventListener('pointerup',finish);hit.addEventListener('pointercancel',finish);
+    hit.addEventListener('click',e=>{if(e.detail===0&&mode!=='idle')setMode('idle');});
+    hit.addEventListener('focus',cancelTimer);hit.addEventListener('blur',arm);
+    stage.querySelectorAll('button[data-mode]').forEach(b=>b.addEventListener('click',()=>setMode(b.dataset.mode)));
+    repaint();
+    return {material,settings,repaint,mode:()=>mode,setMode,arm,pause:()=>{cancelTimer();cancelAnimationFrame(raf);raf=0;if(drag){drag=null;setMode('idle',false,false);}else if(morph){morph=null;setMode(mode,false,false);}},active:()=>Boolean(drag||morph)};
+  }
+  try {root.querySelectorAll('.glass-stage').forEach(stage=>previews.push(create(stage)));}
+  catch(error){const el=root.querySelector('.glass-error');el.hidden=false;el.textContent=String(error.message||error);}
+  function restore(saved){const v=saved?.privateContent;if(v?.revision!==3||previews.some(p=>p.active()))return;const signature=JSON.stringify(v);if(signature===saveSignature)return;
+    shared.theme=['system','light','dark'].includes(v.theme)?v.theme:'system';shared.auto=v.auto===true;
+    for(const p of previews){const item=v.variants?.find(x=>x.material===p.material);if(item){p.settings.mist=clamp(Number(item.mist)||0,0,100);p.setMode(item.mode,false,false);}p.repaint();}saveSignature=signature;
+  }
+  restore(window.openai?.widgetState);
+  window.addEventListener('openai:set_globals',e=>{if(e.detail?.globals?.widgetState)restore(e.detail.globals.widgetState);});
+  appearance.addEventListener('change',()=>{if(shared.theme==='system')previews.forEach(p=>p.repaint());});
+  document.addEventListener('visibilitychange',()=>previews.forEach(p=>document.hidden?p.pause():p.arm()));
+  if(globalThis.Tweak){
+    const common=new Tweak({container:root,onChange:()=>{previews.forEach(p=>{p.repaint();p.arm();});save();}});
+    common.addSelect(shared,'theme',{label:'页面明暗',options:[{label:'跟随界面',value:'system'},{label:'浅色',value:'light'},{label:'深色',value:'dark'}]});
+    common.addToggle(shared,'auto',{label:'闲置5秒后收起'});
+    for(let i=0;i<previews.length;i++){const p=previews[i],phone=root.querySelectorAll('.glass-phone')[i];const tweak=new Tweak({container:phone,onChange:()=>{p.repaint();save();}});tweak.addSlider(p.settings,'mist',{label:'玻璃雾感',min:0,max:100,step:1,unit:'%'});}
+  }
+})();
+</script>

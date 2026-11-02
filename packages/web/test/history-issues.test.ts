@@ -113,6 +113,17 @@ describe('issue 行式渲染', () => {
     expect(row.querySelector('.fb-history-preview')?.textContent).toBe('管理员: 已收到，正在复现');
     expect(row.querySelector('.fb-history-title')?.textContent).toBe('登录页白屏');
     expect(row.querySelector('.fb-history-date')).not.toBeNull();
+    // R5 changes the surface hierarchy while preserving this real loaded record and unread meaning.
+    expect(getComputedStyle(row).padding).toBe('14px');
+    expect(getComputedStyle(row).borderRadius).toBe('14px');
+    expect(getComputedStyle(row).borderTopWidth).toBe('1px');
+    expect(getComputedStyle(row.querySelector('.fb-history-title')!).fontSize).toBe('15px');
+    expect(getComputedStyle(row.querySelector('.fb-history-preview')!).fontSize).toBe('13px');
+    expect(row.querySelector('.fb-history-unread')?.textContent).toBe('未读');
+    const filter=m.root.querySelector<HTMLSelectElement>('.fb-history-filter')!;
+    expect(getComputedStyle(filter).height).toBe('44px');
+    expect(getComputedStyle(filter).borderTopWidth).toBe('6px'); // 32px visual within44px target
+    expect(Array.from(filter.options).map(option=>option.value)).toEqual(['','open','waiting_user','waiting_admin','resolved']);
     // 行带状态修饰类与项目色 data 属性
     expect(row.classList.contains('fb-issue--waiting_user')).toBe(true);
     expect(row.getAttribute('data-project-color')).toBe(projectColor('com.example.app'));

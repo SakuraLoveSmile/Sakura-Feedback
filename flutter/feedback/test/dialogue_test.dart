@@ -113,6 +113,19 @@ void main() {
     expect(find.text('待补充'), findsOneWidget);
     expect(find.text('未读'), findsOneWidget);
     expect(find.text('管理员: 请问是哪款系统版本？'), findsOneWidget);
+    final Text title = tester.widget(find.text('闪退问题'));
+    final Text summary = tester.widget(find.text('管理员: 请问是哪款系统版本？'));
+    expect(title.style!.fontSize, 15);
+    expect(title.maxLines, 2);
+    expect(summary.style!.fontSize, 13);
+    expect(summary.maxLines, 2);
+    final Material card = tester.widget(find
+        .ancestor(
+            of: find.byKey(const Key('feedback-item-fb-201')),
+            matching: find.byType(Material))
+        .first);
+    expect((card.shape! as RoundedRectangleBorder).borderRadius,
+        BorderRadius.circular(14));
 
     // 点击反馈卡片进入对话详情
     await tester.tap(find.byKey(const Key('feedback-item-fb-201')));
@@ -121,6 +134,18 @@ void main() {
     // 验证展示原话与管理员消息
     expect(find.text('进入设置界面时闪退'), findsOneWidget);
     expect(find.text('请问是哪款系统版本？'), findsOneWidget);
+    final Finder bubble = find
+        .ancestor(
+            of: find.text('请问是哪款系统版本？'),
+            matching: find.byType(FractionallySizedBox))
+        .first;
+    final double localWidth =
+        tester.getSize(find.byKey(const Key('feedback-dialogue-list'))).width -
+            32;
+    expect(
+        tester.getSize(bubble).width, lessThanOrEqualTo(localWidth * .85 + .01),
+        reason:
+            'message width uses its local list, including in a narrow panel');
 
     // 验证调用了已读上报接口
     expect(server.count('POST /api/feedback/fb-201/read'), 1);
@@ -177,21 +202,24 @@ void main() {
       'messages': <Map<String, Object?>>[],
       'lastReadSeq': 0,
     });
-    server.respond('POST /api/feedback/fb-202/messages', {
-      'ok': true,
-      'message': {
-        'id': 'msg-reply-1',
-        'seq': 1,
-        'senderType': 'user',
-        'senderId': 'u1',
-        'senderName': '我',
-        'text': '已在 Android 14 上复现',
-        'createdAt': DateTime.now().toIso8601String(),
-        'attachments': <Map<String, Object?>>[],
-      },
-      'dialogueVersion': 2,
-      'issueStatus': 'waiting_admin',
-    }, 201);
+    server.respond(
+        'POST /api/feedback/fb-202/messages',
+        {
+          'ok': true,
+          'message': {
+            'id': 'msg-reply-1',
+            'seq': 1,
+            'senderType': 'user',
+            'senderId': 'u1',
+            'senderName': '我',
+            'text': '已在 Android 14 上复现',
+            'createdAt': DateTime.now().toIso8601String(),
+            'attachments': <Map<String, Object?>>[],
+          },
+          'dialogueVersion': 2,
+          'issueStatus': 'waiting_admin',
+        },
+        201);
 
     await pumpPanel(tester, server: server, tokenStore: tokenStore);
     await tester.pumpAndSettle();
@@ -221,11 +249,10 @@ void main() {
         contains('已在 Android 14 上复现'));
 
     // 验证输入框被清空
-    final EditableText replyInput =
-        tester.widget(find.descendant(
-          of: find.byKey(const Key('feedback-reply-input')),
-          matching: find.byType(EditableText),
-        ));
+    final EditableText replyInput = tester.widget(find.descendant(
+      of: find.byKey(const Key('feedback-reply-input')),
+      matching: find.byType(EditableText),
+    ));
     expect(replyInput.controller.text, isEmpty);
 
     await teardownPanel(tester);

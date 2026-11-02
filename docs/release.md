@@ -70,7 +70,7 @@
 | `channel` | string | 稳定清单恒为 `"stable"`；非 stable 时根本不产出清单 |
 | `services.feedback.image` / `.digest` | string | `ghcr.io/sakuralovesmile/sakura-feedback` + `sha256:<64 位小写十六进制>`（必填） |
 | `platform` | string | 固定 `linux/amd64` |
-| `dbSchemaVersion` | number | 服务端 `PRAGMA user_version` 的当前值（现为 `10`），见下 |
+| `dbSchemaVersion` | number | 服务端 `PRAGMA user_version` 的当前值（现为 `14`），见下 |
 | `publishedAt` | string | 生成清单的时刻（UTC，`YYYY-MM-DDTHH:MM:SSZ`） |
 | `releaseNotes` | string | 可选；发布说明（当前由 `gh release` 正文承载，清单内可不填） |
 
@@ -93,7 +93,7 @@
     }
   },
   "platform": "linux/amd64",
-  "dbSchemaVersion": 10,
+  "dbSchemaVersion": 14,
   "publishedAt": "2026-09-19T05:55:17Z"
 }
 ```
@@ -101,7 +101,7 @@
 要点：
 
 - **`dbSchemaVersion` 读自源码**：生成脚本解析 `apps/server/src/db/db.ts` 里所有 `PRAGMA user_version = N`，
-  取最大值（现为 `10`）。不是硬编码，也不是猜的；读不到就失败退出。
+  取最大值（现为 `14`）。不是硬编码，也不是猜的；读不到就失败退出。
 - **镜像 digest 必须存在且非空**：`publish` job digest 为空或格式非法就失败退出，
   后续 `manifest` job 根本不会运行；`manifest` job 还会把 digest 与记录文件、job output 交叉核对。
 - **清单必须能被服务端接受**：生成后立刻按「检查更新」的解析规则验收

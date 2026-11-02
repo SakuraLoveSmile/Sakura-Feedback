@@ -73,10 +73,9 @@
 - 一个软件配置里把**开发与生产的全部来源**都登记齐，例如
   `http://localhost:5173`、`http://127.0.0.1:5173`、`https://app.example.com`。
 - 端口、协议都要写全。漏掉一个的典型后果：登录窗口报 `origin_not_allowed`
-  （HTTP 403；来源写法本身非法时是 400），或浏览器因为拿不到 CORS 头而直接拦掉提交请求（见 8.3 第 2、3 条）。
-- 跨源规则：`/api/feedback*` 只对**已在任一软件配置中登记的 Origin** 回显 CORS 头（含 `OPTIONS` 预检）；
-  管理接口与登录接口不开放跨源。规则细节见 [`docs/api.md`](api.md) 的「跨源（CORS）」一节。
-- Flutter 原生（非浏览器）不受 CORS 约束，但 **Web 平台的登录握手仍需登记来源**。
+  （HTTP 403；来源写法本身非法时是 400）。这只针对旧握手；当前组件的 Bearer 登录与提交不以登记来源为前置。
+- 跨源规则：当前组件的 Bearer 登录、会话、反馈及附件端点对合法 http(s) Origin 回显 CORS，使用 `credentials: omit`；Cookie 管理接口仍不开放跨源。精确端点见 [`docs/api.md`](api.md) 的「跨源（CORS）」一节。
+- Flutter 原生（非浏览器）不受 CORS 约束；Flutter Web 使用当前 Bearer 流程时无需预登记来源，旧窗口握手仍按白名单校验。
 
 ### 1.4 客户端绝不持有 AI 或 Kaneo 密钥
 
@@ -182,14 +181,23 @@ Shadow DOM 查询节点或覆盖内部样式）；`test/` 下的测试辅助文�
 
 ### 2.1 Web：通过构建出的 npm tarball 安装（打包器宿主推荐）
 
-包名 `@feedback/web`，当前版本 `0.5.0`，因此 tarball 文件名为 **`feedback-web-0.5.0.tgz`**（版本变了文件名跟着变）。
+包名 `@feedback/web`，当前版本 `0.7.0`，因此 tarball 文件名为 **`feedback-web-0.7.0.tgz`**（版本变了文件名跟着变）。
+
+优先安装正式 Release 的固定产物（保留锁文件）；不要把工作区源码或 `main` 当成稳定版本：
+
+```bash
+pnpm add https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/download/v0.7.0/feedback-web-0.7.0.tgz
+```
+
+完整 Web dist、SHA256 与服务端镜像清单均在 [v0.7.0 Release](https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/tag/v0.7.0)。
+需要自行构建时，先检出 `v0.7.0`，再执行：
 
 ```bash
 # ① 在仓库根构建组件包
 pnpm install
 pnpm --filter @feedback/web build
 
-# ② 打成 tarball（真实产物：/tmp/fbpack/feedback-web-0.5.0.tgz）
+# ② 打成 tarball（真实产物：/tmp/fbpack/feedback-web-0.7.0.tgz）
 mkdir -p /tmp/fbpack
 pnpm --filter @feedback/web pack --pack-destination /tmp/fbpack
 ```
@@ -198,8 +206,8 @@ tarball 内含 `dist/` 全部产物（含 ESM 懒加载分块）、`package.json
 
 ```bash
 # ③ 在你的宿主项目里安装这个 tgz
-pnpm add /tmp/fbpack/feedback-web-0.5.0.tgz
-# 等价写法：npm install /tmp/fbpack/feedback-web-0.5.0.tgz
+pnpm add /tmp/fbpack/feedback-web-0.7.0.tgz
+# 等价写法：npm install /tmp/fbpack/feedback-web-0.7.0.tgz
 ```
 
 ```ts
@@ -259,8 +267,8 @@ dependencies:
 dependencies:
   feedback_widget:
     git:
-      url: git@github.com:SakuraLoveSmile/Sakura-Feedback.git
-      ref: <固定的 commit sha>      # 不要用分支名，避免"昨天能编、今天不能编"
+      url: https://github.com/SakuraLoveSmile/Sakura-Feedback.git
+      ref: v0.7.0                    # 或该标签对应的完整 commit SHA
       path: flutter/feedback        # 包在仓库的子目录里
 ```
 
@@ -928,7 +936,7 @@ Flutter 端：宿主传入新 `apiBase` / `appId` 重建 `FeedbackWidget` 时走
 
 #### 5.3.1 用户自定义服务器（本机覆盖，两端一致）
 
-两端面板头部都有「服务器设置」入口（未登录也可进入）：地址输入、保存、
+两端面板头部都有「设置」入口（未登录也可进入），其中服务器区块提供地址输入、保存、
 恢复默认、当前有效地址展示，保存后探测 `GET /healthz` 给出连通性提示
 （**不静默回切**——连接失败只是提示，仍可稍后重试提交）。
 
@@ -956,6 +964,20 @@ Flutter 端：宿主传入新 `apiBase` / `appId` 重建 `FeedbackWidget` 时走
 - **可观察**：Web 读 `element.effectiveApiBase`；Flutter 读
   `controller.effectiveApiBase`（`FeedbackController` 是 `ChangeNotifier`，
   变化会触发监听通知）。
+
+#### 5.3.2 用户选择唤醒手势（本机偏好）
+
+在「设置 → 唤醒方式」中可分别开启双指长按、三指上滑、双指双击，也可以同时开启。
+默认全部关闭，原有悬浮入口和宿主控制器方法仍可使用。此入口要求宿主启用
+`capture-mode="viewport"` / `FeedbackCaptureMode.viewport`；关闭时界面会说明不可用。
+
+- 识别成功后提示松开手指，全部手指抬起后只唤醒灵感球，回到配置的停靠位置；再拖动球才进入截图选区，确认后更新真实附件并打开反馈面板。手势本身不截图，也不改变草稿。
+- 手势仅限当前宿主内容；反馈面板、选区及球体拖动时暂停识别。Web 排除输入框、链接、按钮等交互起点；单指滚动和正常双指缩放不会被保留为唤醒手势。启用三指上滑时，及时到齐且尚未滚动的三指序列保留给该手势。
+- 选择即时生效、按本机宿主的 `appId` 保存，切换 Feedback 服务器不重置手势。存储失败时提示「仅本次生效」。根组件初始化即恢复偏好，不要求先打开反馈面板。
+- 「设置 → 灵感球」可选择闲置后显示“小把手”或“球体贴边”。默认先显示完整球，闲置5秒后收起；点收起入口只展开，手势也可唤醒。待机与收起入口使用柔雾玻璃，小把手为完整竖向胶囊；拖动时切换为清晰液态玻璃。拖动、焦点、截图或面板期间暂停收起。偏好按本机appId独立保存，具体视觉参数与验收以[液态灵感球双端落地计划](tasks/液态灵感球双端落地_032e28ef.plan.md)的R9为准。
+- 不监听其他应用，不使用传感器或系统级截图。系统先截获的多指操作可能无法到达组件。
+
+具体识别阈值、首版形变参数和本次验证范围统一维护在[任务计划 R2](tasks/液态灵感球双端落地_032e28ef.plan.md)。
 
 ### 5.4 交互约定
 

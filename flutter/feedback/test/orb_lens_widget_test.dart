@@ -2,6 +2,7 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:feedback_widget/feedback_widget.dart';
+import 'package:feedback_widget/src/orb.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -12,24 +13,23 @@ import 'package:http/http.dart' as http;
 
 import 'capture_test_utils.dart';
 
-/// T-L3a：A 路线透镜（BackdropFilter + ImageFilter.matrix）的 widget 级验收。
+/// 已遮挡快照透镜的真实 widget 像素回归。
 ///
 /// 三条证据：
-/// 1. 条纹周期：球心放大倍率 = 球外周期 × 1.70（±5%），同时反推放大中心
+/// 1. 条纹周期：球心放大倍率 = 球外周期 × 1.62（±5%），同时反推放大中心
 ///    与球心对齐（≤1 逻辑像素）。
 /// 2. 对比度保持率：沿用 spec 12.3.1 口径（`orb_contrast_test.dart`），
-///    球内 std / 球外 std 与受控口径都 ≥ 0.85。
+///    真实清晰拖动态球内 std / 球外 std 与受控口径都 ≥ 0.85。
 /// 3. 七态层存在矩阵：idle / hover / pressed / focus-visible / dragging /
 ///    releasing 有，hidden 无；reduced-motion 不关放大。
 ///
-/// 像素证据走「挂真 widget → 整屏 toImage → 逐像素」路线；不是只断言
-/// BackdropFilter 存在，因为层在而矩阵错的情况正是本卡要防的回归。
+/// 像素证据走「挂真 widget → 等待遮挡快照 → 整屏 toImage → 逐像素」路线，
+/// 不以渲染层存在代替倍率、中心和对比度的检查。
 const double _logicalWidth = 800;
 const double _logicalHeight = 600;
 const double _pixelRatio = 2;
 const double _orbCenterX = 400;
 const double _orbCenterY = 300;
-const double _radiusDev = 28 * _pixelRatio;
 // 条纹周期 8 逻辑像素（4 深 4 浅），相位对齐球心，球内外同相位。
 const double _stripePeriod = 8;
 const double _minRetention = 0.85;
@@ -137,7 +137,39 @@ Future<GlobalKey> _pumpHost(
     ),
   ));
   await tester.pump();
+  if (showLauncher && !controller.isOpen) {
+    await pumpUntil(
+        tester,
+        () => find
+            .byKey(const Key('feedback-orb-lens-shader'))
+            .evaluate()
+            .isNotEmpty);
+  }
   return root;
+}
+
+/// R7 keeps optical/contrast assertions on the real mounted clear drag state.
+/// The pointer stays down while the production liquid spring settles.
+Future<(TestGesture, OrbLiquidLensPainter)> _holdClearDrag(
+    WidgetTester tester) async {
+  final TestGesture pointer = await tester.startGesture(tester.getCenter(_orb));
+  await pointer.moveBy(const Offset(32, 0));
+  await tester.pump();
+  await pointer.moveTo(const Offset(_orbCenterX, _orbCenterY));
+  for (int i = 0; i < 100; i++) {
+    await tester.pump(const Duration(milliseconds: 16));
+  }
+  final OrbLiquidLensPainter paint = tester
+      .widget<CustomPaint>(find.byKey(const Key('feedback-orb-lens-shader')))
+      .painter! as OrbLiquidLensPainter;
+  expect(paint.mist, 0);
+  expect(paint.idleMix, 0);
+  expect(tester.getSize(_body), const Size(104, 104));
+  expect(
+      paint.center,
+      offsetMoreOrLessEquals(const Offset(_orbCenterX, _orbCenterY),
+          epsilon: .01));
+  return (pointer, paint);
 }
 
 Future<_Frame> _capture(WidgetTester tester, GlobalKey root) async {
@@ -205,7 +237,7 @@ void main() {
   setUp(() {
     // A 路线的像素证据必须在没有 C 接管时采集：首次可见的一次性捕获会把
     // 透镜换成着色器路线，倍率曲线随之不同。
-    debugDisableOrbLensCapture = true;
+    debugDisableOrbLensCapture = false;
     controller = FeedbackController();
     client = captureMockClient();
     savedStrategy = FocusManager.instance.highlightStrategy;
@@ -220,7 +252,7 @@ void main() {
     FocusManager.instance.highlightStrategy = savedStrategy;
   });
 
-  testWidgets('球心条纹周期 = 球外周期 × 1.70，放大中心与球心对齐 ≤1 逻辑像素',
+  testWidgets('球心条纹周期 = 球外周期 × 1.62，放大中心与球心对齐 ≤1 逻辑像素',
       (WidgetTester tester) async {
     // 红蓝条纹：色差通道不受白壳 / 发光影响，边沿位置可直接反推。
     const _StripesPainter stripes = _StripesPainter(
@@ -232,8 +264,11 @@ void main() {
     final GlobalKey withOrb = await _pumpHost(tester,
         controller: controller, client: client, stripes: stripes);
     expect(_lens, findsOneWidget, reason: 'idle 必须有透镜层');
+    final (TestGesture pointer, OrbLiquidLensPainter clear) =
+        await _holdClearDrag(tester);
+    final double radiusDev = clear.radius * _pixelRatio;
     final _Frame lensed = await _capture(tester, withOrb);
-    expect(tester.getCenter(_body), const Offset(_orbCenterX, _orbCenterY));
+    await pointer.cancel();
 
     final GlobalKey plain = await _pumpHost(
       tester,
@@ -256,8 +291,8 @@ void main() {
 
     // 球外周期自检：逻辑 8 → 设备 16，边沿间隔 8。
     final List<int> outsideEdges = <int>[];
-    for (int x = cx + (1.6 * _radiusDev).round();
-        x < cx + (3.0 * _radiusDev).round();
+    for (int x = cx + (1.6 * radiusDev).round();
+        x < cx + (3.0 * radiusDev).round();
         x++) {
       if ((bgRow[x] < 0) != (bgRow[x + 1] < 0)) outsideEdges.add(x);
     }
@@ -269,8 +304,8 @@ void main() {
         reason: '球外周期应为 16 设备像素（8 逻辑像素）');
 
     // 拟合窗口限制在 r ≤ 0.5R：球缘白环、扫光不进入证据区。
-    final int from = (cx - 0.5 * _radiusDev).ceil();
-    final int to = (cx + 0.5 * _radiusDev).floor();
+    final int from = (cx - 0.5 * radiusDev).ceil();
+    final int to = (cx + 0.5 * radiusDev).floor();
     final List<double> inside = <double>[
       for (int x = from; x <= to; x++) insideRow[x]
     ];
@@ -298,13 +333,13 @@ void main() {
     // 若透镜没生效（没有 backdrop 采样），最佳拟合会退回 m≈1.0。
     expect(best, greaterThan(atIdentity + 0.15),
         reason: '球内应与球心周围背景高度相关，而不是与球外原始相位相关');
-    expect(bestM, closeTo(1.70, 1.70 * 0.05), reason: '球心条纹倍率应等于球外周期 × 1.70');
+    expect(bestM, closeTo(1.62, 1.62 * 0.05), reason: '球心条纹倍率应等于球外周期 × 1.62');
     expect(bestP, closeTo(cx.toDouble(), _pixelRatio),
         reason: '放大中心与球心对齐误差不得超过 1 逻辑像素');
   });
 
   for (final Brightness brightness in Brightness.values) {
-    testWidgets('spec 12.3.1 ${brightness.name}：透镜下核心对比度保持率 ≥ 0.85',
+    testWidgets('spec 12.3.1 ${brightness.name}：真实清晰拖动态核心对比度保持率 ≥ 0.85',
         (WidgetTester tester) async {
       final (Color base, Color stripe) = brightness == Brightness.light
           ? (const Color(0xFFC9C9C9), const Color(0xFF303030))
@@ -321,7 +356,11 @@ void main() {
           stripes: stripes,
           brightness: brightness);
       expect(_lens, findsOneWidget);
+      final (TestGesture pointer, OrbLiquidLensPainter clear) =
+          await _holdClearDrag(tester);
+      final double radiusDev = clear.radius * _pixelRatio;
       final _Frame lensed = await _capture(tester, withOrb);
+      await pointer.cancel();
 
       final GlobalKey plain = await _pumpHost(tester,
           controller: controller,
@@ -333,7 +372,7 @@ void main() {
 
       final double cx = _orbCenterX * _pixelRatio;
       final double cy = _orbCenterY * _pixelRatio;
-      final double bandHalf = 0.45 * _radiusDev;
+      final double bandHalf = 0.45 * radiusDev;
       List<double> sample(_Frame frame, double inner, double outer) {
         final List<double> out = <double>[];
         for (int y = math.max(0, (cy - bandHalf).ceil());
@@ -350,12 +389,12 @@ void main() {
         return out;
       }
 
-      final List<double> inside = sample(lensed, 0, 0.55 * _radiusDev);
+      final List<double> inside = sample(lensed, 0, 0.55 * radiusDev);
       final List<double> outside =
-          sample(lensed, 1.6 * _radiusDev, 3.2 * _radiusDev);
-      final List<double> insidePlain = sample(background, 0, 0.55 * _radiusDev);
+          sample(lensed, 1.6 * radiusDev, 3.2 * radiusDev);
+      final List<double> insidePlain = sample(background, 0, 0.55 * radiusDev);
       final List<double> outsidePlain =
-          sample(background, 1.6 * _radiusDev, 3.2 * _radiusDev);
+          sample(background, 1.6 * radiusDev, 3.2 * radiusDev);
       expect(inside.length, greaterThan(500), reason: '球内采样过少');
       expect(outside.length, greaterThan(5000), reason: '球外采样过少');
 
@@ -434,8 +473,8 @@ void main() {
     await press.moveBy(const Offset(-40, -40));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 260));
-    expect(tester.getSize(_body).width, closeTo(84, 0.01),
-        reason: 'dragging 直径 84');
+    expect(tester.getSize(_body).width, closeTo(104, 0.01),
+        reason: 'dragging 直径 104');
     expectLens('dragging', present: true);
 
     // 取消而不是抬起：抬起会冻结选区覆盖层，覆盖层期间按契约不挂透镜。

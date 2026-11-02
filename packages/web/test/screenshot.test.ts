@@ -10,6 +10,8 @@ import {
 
 describe('灵感球与视口截图组件测试', () => {
   beforeEach(() => {
+    // Existing capture-contract cases use the supported immediate reduced-motion path.
+    vi.stubGlobal('matchMedia',(media:string) => ({ matches:media === '(prefers-reduced-motion: reduce)', media, addEventListener:vi.fn(),removeEventListener:vi.fn() }));
     // Mock URL.createObjectURL and revokeObjectURL in Happy-DOM
     if (!URL.createObjectURL) {
       URL.createObjectURL = vi.fn((blob: Blob | MediaSource) => `blob:mock-${(blob as Blob).size ?? 0}`);
@@ -62,7 +64,7 @@ describe('灵感球与视口截图组件测试', () => {
 
     // 1. Pointerdown
     orb.dispatchEvent(
-      new PointerEvent('pointerdown', {
+      new PointerEvent('pointerdown', { isPrimary: true,
         clientX: 100,
         clientY: 200,
         button: 0,
@@ -131,7 +133,7 @@ describe('灵感球与视口截图组件测试', () => {
     const orb = m.orb;
 
     orb.dispatchEvent(
-      new PointerEvent('pointerdown', {
+      new PointerEvent('pointerdown', { isPrimary: true,
         clientX: 100,
         clientY: 100,
         button: 0,
@@ -157,7 +159,7 @@ describe('灵感球与视口截图组件测试', () => {
     const orb = m.orb;
 
     orb.dispatchEvent(
-      new PointerEvent('pointerdown', {
+      new PointerEvent('pointerdown', { isPrimary: true,
         clientX: 100,
         clientY: 100,
         button: 0,

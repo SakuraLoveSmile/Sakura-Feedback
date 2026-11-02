@@ -8,17 +8,13 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 
 import 'capture_test_utils.dart';
+import 'orb_liquid_test_utils.dart';
 
 final Finder _orb = find.byKey(const Key('feedback-orb'));
 final Finder _body = find.byKey(const Key('feedback-orb-body'));
 final Finder _ring = find.byKey(const Key('feedback-orb-focus-ring'));
 
-OrbPainter _painter(WidgetTester tester) => tester
-    .widgetList<CustomPaint>(
-        find.descendant(of: _body, matching: find.byType(CustomPaint)))
-    .map((CustomPaint paint) => paint.painter)
-    .whereType<OrbPainter>()
-    .single;
+LiquidPaintState _painter(WidgetTester tester) => liquidPaintState(tester);
 
 // 只记录点击分流，不真的展开面板：入口保持在树上，便于断言「环没有出现」。
 class _VisualController extends FeedbackController {
@@ -67,8 +63,8 @@ void main() {
     await tester.pumpWidget(MaterialApp(
       home: Builder(
         builder: (BuildContext context) => MediaQuery(
-          data: MediaQuery.of(context)
-              .copyWith(disableAnimations: reducedMotion),
+          data:
+              MediaQuery.of(context).copyWith(disableAnimations: reducedMotion),
           child: FeedbackWidget(
             config: FeedbackConfig(
               'https://svc.test',
@@ -148,8 +144,8 @@ void main() {
     expect(border.top.style, BorderStyle.solid);
     expect(border.top.width, kFeedbackOrbFocusWidth);
     expect(border.top.width, 2.0);
-    expect(border.top.color,
-        Theme.of(tester.element(_ring)).colorScheme.primary);
+    expect(
+        border.top.color, Theme.of(tester.element(_ring)).colorScheme.primary);
 
     // 用户可见契约：取样点必须真的落在「可见环带」内、且在球体 56 命中盒
     // 之外；环本身不参与命中。否则「点了没反应」只是点在了空白处。
@@ -160,15 +156,15 @@ void main() {
         reason: '取样点必须在球体 56 命中盒之外');
     // 最近祖先才是环自己的守卫；find.ancestor(...).first 取到的是外层
     // IgnorePointer（ignoring=false），断言会空转（T7h 变异自检发现）。
-    final IgnorePointer? ringGuard = tester
-        .element(_ring)
-        .findAncestorWidgetOfExactType<IgnorePointer>();
+    final IgnorePointer? ringGuard =
+        tester.element(_ring).findAncestorWidgetOfExactType<IgnorePointer>();
     expect(ringGuard, isNotNull, reason: '环必须包在 IgnorePointer 内');
     expect(ringGuard!.ignoring, isTrue, reason: '环的 IgnorePointer 必须生效');
     final RenderObject ringRender = tester.renderObject<RenderObject>(_ring);
     final HitTestResult hit = tester.hitTestOnBinding(bandPoint);
     expect(hit.path.any((HitTestEntry entry) => entry.target == ringRender),
-        isFalse, reason: '环的 render object 不得进入该点的命中路径');
+        isFalse,
+        reason: '环的 render object 不得进入该点的命中路径');
     await tester.tapAt(bandPoint);
     await tester.pump();
     expect(controller.openRequests, 0, reason: '点击环带不得触发入口');
@@ -189,14 +185,13 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets('T7a-2 鼠标点击不出现焦点环，键盘聚焦才出现',
-      (WidgetTester tester) async {
+  testWidgets('T7a-2 鼠标点击不出现焦点环，键盘聚焦才出现', (WidgetTester tester) async {
     final _VisualController controller = _VisualController();
     addTearDown(controller.dispose);
     await pumpHost(tester, controller);
 
-    final TestGesture mouse =
-        await tester.startGesture(tester.getCenter(_orb), kind: PointerDeviceKind.mouse);
+    final TestGesture mouse = await tester.startGesture(tester.getCenter(_orb),
+        kind: PointerDeviceKind.mouse);
     await tester.pump();
     await mouse.up();
     await tester.pump();
@@ -221,20 +216,19 @@ void main() {
     await focusOrb(tester);
     expect(_ring, findsOneWidget);
 
-    final TestGesture press =
-        await tester.startGesture(tester.getCenter(_orb));
+    final TestGesture press = await tester.startGesture(tester.getCenter(_orb));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 140));
-    expect(_painter(tester).stateScale, closeTo(0.94, 1e-6));
+    expect(_painter(tester).scale, closeTo(0.94, 1e-6));
     expect(_ring, findsOneWidget, reason: 'pressed 不得移除焦点环（spec 5）');
     expect(tester.getSize(_body), const Size(56, 56));
 
-    debugPrint('T7a PRESS stateScale=${_painter(tester).stateScale} ring=true');
+    debugPrint('T7a PRESS stateScale=${_painter(tester).scale} ring=true');
     await press.cancel();
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets('T7a-4 键盘聚焦后拖动 >8px：球 84、环随外扩、badge 不变形',
+  testWidgets('T7a-4 键盘聚焦后拖动 >8px：球 104、环随外扩、badge 不变形',
       (WidgetTester tester) async {
     final _VisualController controller = _VisualController();
     addTearDown(controller.dispose);
@@ -247,7 +241,7 @@ void main() {
     // 对照组：无焦点拖动，记录 badge 几何。
     TestGesture gesture = await dragBeyondThreshold(tester);
     expect(_ring, findsNothing, reason: '未聚焦拖动不得出现环');
-    expect(tester.getSize(_body), const Size(84, 84));
+    expect(tester.getSize(_body), const Size(104, 104));
     final Rect idleBadge = tester.getRect(badge);
     final Rect idleBody = tester.getRect(_body);
     await gesture.cancel();
@@ -259,16 +253,17 @@ void main() {
     await focusOrb(tester);
     expect(_ring, findsOneWidget);
     gesture = await dragBeyondThreshold(tester);
-    expect(tester.getSize(_body), const Size(84, 84));
+    expect(tester.getSize(_body), const Size(104, 104));
     expect(_ring, findsOneWidget, reason: 'dragging 不得移除焦点环');
     final Rect ring = tester.getRect(_ring);
-    expect(ring.width, 92.0, reason: '环随 84 球体外扩 8');
-    expect(ring.height, 92.0);
-    expect(ring.center, tester.getRect(_body).center);
+    expect(ring.width, 112.0, reason: '环随104球体外扩8');
+    expect(ring.height, 112.0);
+    expect(ring.center,
+        tester.getCenter(find.byKey(const Key('feedback-orb-lens'))));
     expect(tester.getRect(badge), idleBadge, reason: 'badge 不随焦点环改变');
     expect(tester.getRect(_body), idleBody, reason: '球体几何不受环影响');
 
-    debugPrint('T7a DRAG body=84 ring=$ring badge=${tester.getRect(badge)}');
+    debugPrint('T7a DRAG body=104 ring=$ring badge=${tester.getRect(badge)}');
     await gesture.cancel();
     await tester.pumpWidget(const SizedBox.shrink());
   });
@@ -333,7 +328,8 @@ void main() {
     await tester.sendKeyDownEvent(LogicalKeyboardKey.enter);
     await tester.sendKeyUpEvent(LogicalKeyboardKey.enter);
     await tester.pump();
-    expect(controller.openRequests, 2, reason: 'Enter 与 Space 走同一 ActivateIntent');
+    expect(controller.openRequests, 2,
+        reason: 'Enter 与 Space 走同一 ActivateIntent');
     expect(controller.isOpen, isTrue);
     expect(find.byType(CaptureSelectionOverlay), findsNothing);
 

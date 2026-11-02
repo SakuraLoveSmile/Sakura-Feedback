@@ -1,0 +1,286 @@
+<div id="liquid-orb-preview">
+  <div class="orb-stage viz-dotted-background">
+    <div class="orb-phone" aria-label="视频中的透明液态灵感球复刻预览">
+      <canvas class="orb-scene" role="img" aria-label="浅色手机设置页，透明灵感球使下方文字放大并在边缘折射。">透明灵感球预览需要支持 WebGL 的浏览器。</canvas>
+      <button class="orb-handle" type="button" aria-label="拖动灵感球；方向键移动，空格回弹，Home 回到文字上方"></button>
+    </div>
+  </div>
+  <div class="orb-actions">
+    <button class="btn btn-primary" type="button" data-action="demo">演示拖动</button>
+    <label class="form-check"><input class="form-check-input" type="checkbox" data-action="slow"><span class="form-check-label">慢放</span></label>
+    <span class="text-small text-muted" aria-live="polite" data-status>可直接拖动球体</span>
+  </div>
+  <div class="text-destructive" role="alert" data-error hidden></div>
+</div>
+<style>
+  #liquid-orb-preview { width:100%; }
+  #liquid-orb-preview .orb-stage { display:flex; justify-content:center; padding:20px 12px; }
+  #liquid-orb-preview .orb-phone { position:relative; width:min(350px,100%); aspect-ratio:360/592; border-radius:34px; overflow:hidden; box-shadow:0 0 0 1px light-dark(#d5d8e1,#555866),0 12px 35px #14152c12; background:light-dark(#f3f4fa,#191b24); }
+  #liquid-orb-preview .orb-scene { display:block; width:100%; height:100%; }
+  #liquid-orb-preview .orb-handle { position:absolute; width:30%; height:18.25%; padding:0; border:0; border-radius:50%; background:transparent; cursor:grab; touch-action:none; -webkit-tap-highlight-color:transparent; }
+  #liquid-orb-preview .orb-handle:active { cursor:grabbing; }
+  #liquid-orb-preview .orb-actions { display:flex; align-items:center; justify-content:center; flex-wrap:wrap; gap:14px; margin-top:16px; }
+  #liquid-orb-preview [data-error] { margin-top:12px; }
+</style>
+<script>
+(() => {
+  const root = document.getElementById('liquid-orb-preview');
+  const canvas = root.querySelector('.orb-scene');
+  const phone = root.querySelector('.orb-phone');
+  const handle = root.querySelector('.orb-handle');
+  const demoButton = root.querySelector('[data-action="demo"]');
+  const slowInput = root.querySelector('[data-action="slow"]');
+  const status = root.querySelector('[data-status]');
+  const gl = canvas.getContext('webgl', { alpha:false, antialias:true, preserveDrawingBuffer:true });
+  if (!gl) {
+    root.querySelector('[data-error]').hidden = false;
+    root.querySelector('[data-error]').textContent = '当前浏览器无法绘制透镜，请在支持 WebGL 的浏览器中打开。';
+    demoButton.disabled = true;
+    handle.hidden = true;
+    return;
+  }
+  const W = 360, H = 592;
+  const scale = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = W * scale;
+  canvas.height = H * scale;
+  const scene = document.createElement('canvas');
+  scene.width = W * scale;
+  scene.height = H * scale;
+  const ctx = scene.getContext('2d');
+  const darkMedia = matchMedia('(prefers-color-scheme: dark)');
+  const motionMedia = matchMedia('(prefers-reduced-motion: reduce)');
+  const settings = { magnification:1.62, liquid:0.72, rim:0.64, appearance:'light' };
+  const vertexSource = `attribute vec2 aPosition; void main(){gl_Position=vec4(aPosition,0.,1.);}`;
+  const fragmentSource = `
+    precision highp float;
+    uniform sampler2D uScene;
+    uniform vec2 uResolution;
+    uniform vec2 uCenter;
+    uniform vec2 uDirection;
+    uniform float uRadius;
+    uniform float uDeform;
+    uniform float uWobble;
+    uniform float uMagnification;
+    uniform float uRim;
+    uniform float uDark;
+    vec3 sampleScene(vec2 p){return texture2D(uScene,clamp(p/vec2(360.,592.),vec2(.001),vec2(.999))).rgb;}
+    void main(){
+      vec2 p=vec2(gl_FragCoord.x/uResolution.x*360.,(1.-gl_FragCoord.y/uResolution.y)*592.);
+      vec2 offset=p-uCenter;
+      vec2 axis=normalize(uDirection+vec2(.00001,0.));
+      vec2 tangent=vec2(-axis.y,axis.x);
+      vec2 q=vec2(dot(offset,axis),dot(offset,tangent))/uRadius;
+      float stretch=1.+uDeform*.20;
+      q=vec2(q.x/stretch,q.y*sqrt(stretch));
+      float angle=atan(q.y,q.x);
+      float contour=1.+uDeform*(.045*cos(3.*angle)-.035*cos(angle))
+                       +uWobble*.028*cos(2.*angle+.7);
+      float r=length(q)/contour;
+      float aa=1.1/uRadius;
+      float inside=1.-smoothstep(1.-aa,1.+aa,r);
+      vec3 background=sampleScene(p);
+      float outerGlow=exp(-pow((r-1.04)/.065,2.))*.055;
+      vec3 color=mix(background,vec3(.95,.965,1.),outerGlow*(1.-inside));
+      if(r<1.05){
+        float bend=1./uMagnification+.54*pow(clamp(r,0.,1.),7.);
+        vec2 source=uCenter+offset*bend;
+        vec2 ray=normalize(offset+vec2(.001));
+        float dispersion=.52*pow(clamp(r,0.,1.),8.);
+        vec3 glass=vec3(sampleScene(source+ray*dispersion).r,sampleScene(source).g,sampleScene(source-ray*dispersion).b);
+        float theta=atan(offset.y,offset.x);
+        float light=.55+.45*cos(theta+2.25);
+        float rim=exp(-pow((r-.992)/.012,2.));
+        float inner=exp(-pow((r-.943)/.030,2.));
+        float caustic=exp(-pow((r-.84)/.095,2.))*(.5+.5*sin(theta-.6));
+        float shadow=exp(-pow((r-.973)/.018,2.))*(1.-light);
+        glass*=1.-shadow*.19;
+        glass=mix(glass,vec3(.99,.995,1.),rim*(.28+.5*light)*uRim+inner*.10*light+caustic*.12);
+        glass+=vec3(.002,.003,.009)*(1.-uDark*.5);
+        color=mix(color,glass,inside);
+      }
+      gl_FragColor=vec4(color,1.);
+    }
+  `;
+  function shader(kind, source) {
+    const s = gl.createShader(kind);
+    gl.shaderSource(s, source);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    return s;
+  }
+  const program = gl.createProgram();
+  gl.attachShader(program, shader(gl.VERTEX_SHADER, vertexSource));
+  gl.attachShader(program, shader(gl.FRAGMENT_SHADER, fragmentSource));
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
+  gl.useProgram(program);
+  const buffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]), gl.STATIC_DRAW);
+  const position = gl.getAttribLocation(program, 'aPosition');
+  gl.enableVertexAttribArray(position);
+  gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
+  const uniforms = Object.fromEntries(['uScene','uResolution','uCenter','uDirection','uRadius','uDeform','uWobble','uMagnification','uRim','uDark'].map(n=>[n,gl.getUniformLocation(program,n)]));
+  const texture = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  const model = { x:214,y:171,tx:214,ty:171,vx:0,vy:0,dirX:1,dirY:0,deform:0,wobble:0,radius:52 };
+  let frame = 0, previousTime = 0, drag = null, demo = null, releaseAt = 0;
+  let lastSaved = null;
+  const clamp = (v,min,max)=>Math.max(min,Math.min(max,v));
+  function roundedRect(x,y,w,h,r,fill) { ctx.fillStyle=fill; ctx.beginPath();ctx.roundRect(x,y,w,h,r);ctx.fill(); }
+  function text(value,x,y,size,color,weight=400,align='left') { ctx.font=`${weight} ${size}px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif`;ctx.fillStyle=color;ctx.textAlign=align;ctx.fillText(value,x,y); }
+  function paintScene() {
+    const dark=settings.appearance==='dark';
+    const p=dark?{bg:'#191b24',ink:'#f2f2f7',muted:'#a5a8b8',card:'#242631',line:'#343743'}:{bg:'#f3f4fa',ink:'#171925',muted:'#85899c',card:'#fcfcff',line:'#e7e9f1'};
+    ctx.setTransform(scale,0,0,scale,0,0);
+    ctx.fillStyle=p.bg;ctx.fillRect(0,0,W,H);
+    text('16:50',24,30,12,p.ink,500);
+    text('5G  ▰',314,30,11,p.ink,500);
+    roundedRect(122,14,116,24,12,'#111219');
+    for(let i=0;i<5;i++) roundedRect(134+i*3,23-(i%3)*2,1.5,5+(i%3)*4,1,i%2?'#9c91e9':'#c7c2f5');
+    text('我在听',183,30,10,'#e2e3ec',500);
+    const dot=ctx.createRadialGradient(228,22,1,228,25,8);dot.addColorStop(0,'#eeeaff');dot.addColorStop(.5,'#726e9c');dot.addColorStop(1,'#252535');
+    ctx.fillStyle=dot;ctx.beginPath();ctx.arc(227,26,7,0,Math.PI*2);ctx.fill();
+    text('‹',23,70,26,p.ink);
+    text('关于本机',180,69,14,p.ink,500,'center');
+    ctx.font='400 30px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
+    const nameWidth=ctx.measureText('Xiaomi HyperOS').width;
+    const start=(W-nameWidth)/2;
+    text('Xiaomi Hyper',start,174,30,p.ink,400);
+    const osX=start+ctx.measureText('Xiaomi Hyper').width;
+    text('OS',osX,174,30,dark?'#b9a9ff':'#5e36d7');
+    text('4.0.4.0',180,204,12,p.muted,400,'center');
+    roundedRect(28,258,304,46,17,p.card);
+    text('检查更新',180,286,13,p.ink,500,'center');
+    roundedRect(20,331,320,147,20,p.card);
+    const rows=[['设备名称','Xiaomi 17 Pro Max'],['存储空间','已用 62.4 GB / 512 GB'],['OS 版本','4.0.4.0'],['处理器','骁龙 8 Elite']];
+    rows.forEach(([label,value],i)=>{
+      const y=356+i*34;
+      text(label,36,y,12,p.ink);
+      text(value,322,y,11,p.muted,400,'right');
+      if(i<3){ctx.fillStyle=p.line;ctx.fillRect(36,y+13,286,.5);}
+    });
+    text('Xiaomi 17 Pro Max',27,513,17,p.ink,500);
+    text('把灵感留在此刻',27,541,12,p.muted);
+    roundedRect(133,576,94,4,2,p.ink);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,scene);
+    draw();
+  }
+  function draw() {
+    gl.viewport(0,0,canvas.width,canvas.height);
+    gl.uniform1i(uniforms.uScene,0);
+    gl.uniform2f(uniforms.uResolution,canvas.width,canvas.height);
+    gl.uniform2f(uniforms.uCenter,model.x,model.y);
+    gl.uniform2f(uniforms.uDirection,model.dirX,model.dirY);
+    gl.uniform1f(uniforms.uRadius,model.radius);
+    gl.uniform1f(uniforms.uDeform,model.deform*settings.liquid);
+    gl.uniform1f(uniforms.uWobble,model.wobble);
+    gl.uniform1f(uniforms.uMagnification,settings.magnification);
+    gl.uniform1f(uniforms.uRim,settings.rim);
+    gl.uniform1f(uniforms.uDark,settings.appearance==='dark'?1:0);
+    gl.drawArrays(gl.TRIANGLES,0,6);
+    handle.style.left=`${(model.x-54)/W*100}%`;
+    handle.style.top=`${(model.y-54)/H*100}%`;
+    root.dataset.position=`${Math.round(model.x)},${Math.round(model.y)}`;
+  }
+  function save() {
+    const snapshot={x:Math.round(model.tx),y:Math.round(model.ty),slow:slowInput.checked};
+    if (JSON.stringify(snapshot)===lastSaved) return;
+    lastSaved=JSON.stringify(snapshot);
+    window.openai?.setWidgetState?.({modelContent:{preview:'透明液态灵感球',slow:snapshot.slow},privateContent:snapshot}).catch(()=>{});
+  }
+  function restore(saved) {
+    const v=saved?.privateContent;
+    if(!v) return;
+    if(Number.isFinite(v.x)&&Number.isFinite(v.y)) {
+      model.x=model.tx=clamp(v.x,70,W-70);model.y=model.ty=clamp(v.y,94,H-76);
+    }
+    slowInput.checked=Boolean(v.slow);
+    draw();
+  }
+  function kick() { if(!frame){previousTime=performance.now();frame=requestAnimationFrame(tick);} }
+  function endDemo() { demo=null;demoButton.textContent='演示拖动';demoButton.setAttribute('aria-pressed','false');root.dataset.playing='false'; }
+  function tick(now) {
+    frame=0;
+    if (!root.isConnected) return;
+    const dt=Math.min((now-previousTime)/1000,.032);previousTime=now;
+    if(demo){
+      const p=clamp((now-demo.start)/demo.duration,0,1);
+      const path=p*Math.PI*2;
+      model.tx=180+90*Math.sin(path);
+      model.ty=171+122*Math.sin(path/2)*Math.sin(path/2);
+      if(p>=1){endDemo();releaseAt=now;status.textContent='松手回弹';}
+    }
+    const moving=Boolean(drag||demo);
+    const speed=Math.hypot(model.vx,model.vy);
+    const stiffness=moving?290:240, damping=moving?24:19;
+    model.vx+=(model.tx-model.x)*stiffness*dt-model.vx*damping*dt;
+    model.vy+=(model.ty-model.y)*stiffness*dt-model.vy*damping*dt;
+    if(motionMedia.matches){model.x=model.tx;model.y=model.ty;model.vx=model.vy=0;}
+    else {model.x+=model.vx*dt;model.y+=model.vy*dt;}
+    if(speed>12){model.dirX=model.vx/speed;model.dirY=model.vy/speed;}
+    const desired=motionMedia.matches?0:Math.min(speed/530,1.3);
+    model.deform+=(desired-model.deform)*Math.min(dt*12,1);
+    const elapsed=(now-releaseAt)/1000;
+    model.wobble=releaseAt&&!moving&&!motionMedia.matches?Math.sin(elapsed*23)*Math.exp(-elapsed*6):0;
+    model.radius+=(52+(moving?2:0)-model.radius)*Math.min(dt*12,1);
+    draw();
+    const active=moving||Math.hypot(model.x-model.tx,model.y-model.ty)>.03||speed>.2||Math.abs(model.wobble)>.002||model.deform>.002;
+    if(active) frame=requestAnimationFrame(tick);
+    else {model.x=model.tx;model.y=model.ty;model.deform=0;model.wobble=0;model.radius=52;draw();status.textContent='可直接拖动球体';save();}
+  }
+  function point(e) {const r=phone.getBoundingClientRect();return {x:(e.clientX-r.left)*W/r.width,y:(e.clientY-r.top)*H/r.height};}
+  handle.addEventListener('pointerdown',e=>{
+    if(e.button!==0||!e.isPrimary||drag) return;
+    endDemo();
+    const p=point(e);drag={id:e.pointerId,dx:p.x-model.x,dy:p.y-model.y};
+    handle.setPointerCapture(e.pointerId);status.textContent='拖动中';releaseAt=0;kick();
+  });
+  handle.addEventListener('pointermove',e=>{
+    if(!drag||drag.id!==e.pointerId) return;
+    const p=point(e);model.tx=clamp(p.x-drag.dx,70,W-70);model.ty=clamp(p.y-drag.dy,94,H-76);kick();
+  });
+  function finish(e){
+    if(!drag||e.pointerId!==drag.id) return;
+    drag=null;releaseAt=performance.now();status.textContent='松手回弹';
+    if(handle.hasPointerCapture(e.pointerId))handle.releasePointerCapture(e.pointerId);
+    kick();
+  }
+  handle.addEventListener('pointerup',finish);
+  handle.addEventListener('pointercancel',finish);
+  handle.addEventListener('lostpointercapture',finish);
+  handle.addEventListener('keydown',e=>{
+    const delta={ArrowLeft:[-18,0],ArrowRight:[18,0],ArrowUp:[0,-18],ArrowDown:[0,18]}[e.key];
+    if(delta){e.preventDefault();endDemo();model.tx=clamp(model.tx+delta[0],70,W-70);model.ty=clamp(model.ty+delta[1],94,H-76);releaseAt=performance.now();kick();}
+    else if(e.key==='Home'){e.preventDefault();endDemo();model.tx=214;model.ty=171;releaseAt=performance.now();kick();}
+    else if(e.key==='Escape'){e.preventDefault();endDemo();drag=null;model.tx=model.x;model.ty=model.y;releaseAt=performance.now();kick();}
+  });
+  handle.addEventListener('click',()=>{if(!drag){releaseAt=performance.now();kick();}});
+  demoButton.addEventListener('click',()=>{
+    if(demo){endDemo();model.tx=model.x;model.ty=model.y;releaseAt=performance.now();status.textContent='已暂停';kick();return;}
+    if(motionMedia.matches){model.tx=model.x>180?120:240;model.ty=171;status.textContent='已启用减少动态效果';kick();return;}
+    demo={start:performance.now(),duration:slowInput.checked?12000:4000};
+    demoButton.textContent='暂停演示';demoButton.setAttribute('aria-pressed','true');root.dataset.playing='true';status.textContent='拖动 → 形变 → 回弹';kick();
+  });
+  slowInput.addEventListener('change',()=>{
+    if(demo){const now=performance.now();const progress=(now-demo.start)/demo.duration;demo.duration=slowInput.checked?12000:4000;demo.start=now-progress*demo.duration;}
+    save();
+  });
+  darkMedia.addEventListener('change',paintScene);
+  window.addEventListener('blur',()=>{if(drag||demo){drag=null;endDemo();model.tx=model.x;model.ty=model.y;releaseAt=performance.now();kick();}});
+  window.addEventListener('openai:set_globals',e=>{if(!drag&&!demo&&e.detail?.globals?.widgetState)restore(e.detail.globals.widgetState);});
+  paintScene();restore(window.openai?.widgetState);
+  if(globalThis.Tweak){
+    const tweak=new Tweak({container:phone,onChange:paintScene});
+    tweak.addSlider(settings,'magnification',{label:'中心放大',min:1.1,max:2,step:.05});
+    tweak.addSlider(settings,'liquid',{label:'液体形变',min:0,max:1.2,step:.05});
+    tweak.addSlider(settings,'rim',{label:'边缘亮度',min:.2,max:1,step:.05});
+    tweak.addSelect(settings,'appearance',{label:'背景',options:[{label:'视频浅色',value:'light'},{label:'深色对照',value:'dark'}]});
+  }
+})();
+</script>

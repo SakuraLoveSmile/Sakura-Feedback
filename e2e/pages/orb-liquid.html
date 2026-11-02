@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>灵感球 · 反馈流程</title>
+    <style>
+      * { box-sizing: border-box; }
+      html { color-scheme: light; background: #f3f4fa; }
+      body { margin: 0; color: #171925; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      main { width: min(100%, 680px); min-height: 100vh; margin: auto; padding: 28px 24px 120px; }
+      header { display: flex; align-items: center; justify-content: space-between; color: #85899c; font-size: 13px; }
+      h1 { margin: 66px 0 10px; font-size: clamp(28px, 6vw, 42px); font-weight: 500; letter-spacing: -.8px; }
+      h1 span { color: #5e36d7; }
+      .intro { color: #85899c; line-height: 1.8; font-size: 14px; }
+      article { margin-top: 28px; padding: 20px; border-radius: 20px; background: #fcfcff; }
+      h2 { margin: 0 0 12px; font-size: 17px; font-weight: 500; }
+      p { margin: 10px 0; line-height: 1.7; }
+      .sample { font-size: 24px; letter-spacing: 2px; overflow-wrap: anywhere; }
+      .colors { display: flex; margin: 16px 0; height: 12px; border-radius: 6px; overflow: hidden; }
+      .colors i { flex: 1; background: #0071e3; }
+      .colors i:nth-child(2) { background: #5e36d7; }
+      .colors i:nth-child(3) { background: #f2b94b; }
+      .colors i:nth-child(4) { background: #38ad87; }
+      dl { margin: 0; }
+      dl div { display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #e7e9f1; gap: 18px; font-size: 13px; }
+      dl div:last-child { border: 0; }
+      dd { margin: 0; color: #85899c; text-align: right; }
+      .masked { margin-top: 22px; border-radius: 12px; padding: 14px; background: #e7dcfb; font-size: 13px; }
+      footer { margin-top: 24px; font-size: 12px; color: #85899c; line-height: 1.7; }
+      html.dark { background: #191b24; color-scheme: dark; }
+      html.dark body { color: #f2f2f7; }
+      html.dark article { background: #242631; }
+      html.dark h1 span { color: #b9a9ff; }
+      html.dark .masked { background: #423950; }
+      html.dark dl div { border-color: #343743; }
+      .preview-actions { display: flex; gap: 10px; flex-wrap: wrap; margin: 20px 0 8px; }
+      .preview-actions button, #theme-toggle { border: 0; border-radius: 12px; padding: 10px 14px; min-height: 44px; color: #0071e3; background: #0071e313; font: inherit; cursor: pointer; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header><span>Feedback</span><button id="theme-toggle" type="button">切换深色</button></header>
+      <h1>每一个体验，都值得<span>被看见。</span></h1>
+      <p class="intro">拖动灵感球到想记录的位置，松手调整截图，继续填写反馈。</p>
+      <p class="intro">也可以打开反馈面板右上角的设置，选择双指长按、三指上滑或双指双击。手势先唤醒球，拖动球后再截图。闲置后可选择贴边或小把手。</p>
+      <div class="preview-actions"><button id="open-demo" type="button">打开反馈面板 · 查看示例</button></div>
+      <p class="intro" id="demo-status" role="status">正在准备示例反馈…</p>
+      <article>
+        <h2>让细节更清晰</h2>
+        <p class="sample">Aa Bb 0123456789<br />灵感，从这里开始</p>
+        <div class="colors" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+        <p>观察文字穿过球心与球缘时的变化。移动、转弯、停下，再选中想留下的片段。</p>
+      </article>
+      <article>
+        <h2>这次的体验</h2>
+        <dl>
+          <div><dt>界面</dt><dd>细腻而轻盈</dd></div>
+          <div><dt>交互</dt><dd>随手记录，自然衔接</dd></div>
+          <div><dt>下一步</dt><dd>描述感受，附上截图</dd></div>
+        </dl>
+        <div class="masked" data-feedback-capture-mask>遮挡测试内容：PRIVATE-ORB-TEST</div>
+      </article>
+      <footer>本地体验页使用实际 Feedback 组件。提交仅进入本任务的隔离测试环境。</footer>
+    </main>
+    <script src="/sdk/feedback-web.umd.js"></script>
+    <feedback-widget
+      api-base="http://127.0.0.1:53947"
+      app-id="com.example.orb-liquid"
+      app-name="液态灵感球本地体验"
+      app-version="0.7.0"
+      page-label="灵感球"
+      theme="light"
+      launcher-mode="orb"
+      capture-mode="viewport"
+      launcher-bottom="42%"
+    ></feedback-widget>
+    <script>
+      const widget = document.querySelector('feedback-widget');
+      const demoStatus = document.querySelector('#demo-status');
+      const demoReady = (async () => {
+        try {
+          const response = await fetch('http://127.0.0.1:53947/api/auth/login', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ username: 'orb-demo', password: 'orb-demo-local-20261102',
+              clientLabel: '灵感球网页体验 · 示例账号', appId: 'com.example.orb-liquid' }),
+            signal: AbortSignal.timeout(5000),
+          });
+          if (!response.ok) throw new Error('demo unavailable');
+          const session = await response.json();
+          widget.adoptSession({ accessToken: session.token, expiresAt: session.expiresAt });
+          demoStatus.textContent = '示例账号已就绪 · 打开面板后选择“我的反馈”查看。';
+        } catch {
+          demoStatus.textContent = '示例服务暂时不可用，球体与截图仍可体验。';
+        }
+      })();
+      document.querySelector('#open-demo').addEventListener('click', async () => {
+        await demoReady; widget.open();
+      });
+      document.querySelector('#theme-toggle').addEventListener('click', event => {
+        const dark = document.documentElement.classList.toggle('dark');
+        widget.setAttribute('theme', dark ? 'dark' : 'light');
+        event.currentTarget.textContent = dark ? '切换浅色' : '切换深色';
+      });
+    </script>
+  </body>
+</html>

@@ -1,10 +1,10 @@
 import 'dart:async';
 import 'dart:convert' show jsonEncode, utf8;
-import 'dart:math' as math;
 
 import 'package:file_selector/file_selector.dart' as fs;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderAbstractViewport;
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
@@ -16,6 +16,8 @@ import 'image_editor.dart';
 import 'images.dart';
 import 'platform.dart';
 import 'server_pref.dart';
+import 'wake_gestures.dart';
+import 'orb_idle.dart';
 import 'token_coordination.dart';
 import 'token_store.dart';
 
@@ -195,6 +197,12 @@ class FeedbackPanel extends StatefulWidget {
     this.tokenStore,
     this.tokenStoreFactory,
     this.serverPrefStore,
+    this.wakeGestures = const <FeedbackWakeGesture>{},
+    this.wakeGesturesSessionOnly = false,
+    this.onWakeGesturesChanged,
+    this.orbIdleStyle = FeedbackOrbIdleStyle.handle,
+    this.orbIdleSessionOnly = false,
+    this.onOrbIdleStyleChanged,
     this.onEffectiveApiBaseChange,
     this.onUnreadCountChange,
     this.visible,
@@ -238,6 +246,14 @@ class FeedbackPanel extends StatefulWidget {
   /// T6：注入的服务器覆盖偏好仓库（主要面向测试）；
   /// 缺省用平台默认（原生安全存储 / Web localStorage）。
   final FeedbackServerPrefStore? serverPrefStore;
+
+  /// Internal root-owned settings; absent callbacks preserve standalone use.
+  final FeedbackOrbIdleStyle orbIdleStyle;
+  final bool orbIdleSessionOnly;
+  final ValueChanged<FeedbackOrbIdleStyle>? onOrbIdleStyleChanged;
+  final Set<FeedbackWakeGesture> wakeGestures;
+  final bool wakeGesturesSessionOnly;
+  final ValueChanged<Set<FeedbackWakeGesture>>? onWakeGesturesChanged;
 
   /// T6：实际使用地址变化回调（覆盖保存 / 恢复默认 / 偏好加载完成后触发）；
   /// 宿主（[FeedbackWidget]）据此更新控制器的 `effectiveApiBase`。
@@ -287,6 +303,80 @@ class FeedbackPanelState extends State<FeedbackPanel>
   String? _serverHint;
 
   final TextEditingController _draft = TextEditingController();
+  final GlobalKey _captureThumbnailKey = GlobalKey();
+  bool _captureHandoffActive = false;
+  double _captureHandoffOpacity = 1;
+
+  /// Internal widget handoff: measure the real capture slot, including replace.
+  Rect? get captureThumbnailRect {
+    final RenderObject? object =
+        _captureThumbnailKey.currentContext?.findRenderObject();
+    if (object is! RenderBox ||
+        !object.attached ||
+        !object.hasSize ||
+        widget.visible == false ||
+        _panelTab != _PanelTab.compose ||
+        !hasScreenshot) {
+      return null;
+    }
+    final Rect rect = object.localToGlobal(Offset.zero) & object.size;
+    final RenderObject? viewport = RenderAbstractViewport.maybeOf(object);
+    if (viewport is RenderBox && viewport.attached) {
+      final Rect visible =
+          (viewport.localToGlobal(Offset.zero) & viewport.size).inflate(.01);
+      if (!visible.contains(rect.topLeft) ||
+          !visible.contains(rect.bottomRight)) {
+        return null;
+      }
+    }
+    return rect;
+  }
+
+  void beginCaptureHandoff() {
+    _draftFocus.unfocus();
+    // A confirmed capture belongs to the new-feedback composer. Reuse tab
+    // navigation so leaving a dialogue saves its reply draft and cancels its
+    // polling; capture start and selection cancellation never call this.
+    if (_settingsOpen) _closeSettings();
+    _switchTab(_PanelTab.compose);
+    setState(() {
+      _stage = FeedbackStage.compose;
+      _captureHandoffActive = true;
+      _captureHandoffOpacity = 0;
+    });
+  }
+
+  void setCaptureHandoffProgress(double opacity) {
+    if (!mounted || _captureHandoffOpacity == opacity) return;
+    setState(() => _captureHandoffOpacity = opacity);
+  }
+
+  void endCaptureHandoff() {
+    if (!mounted || (!_captureHandoffActive && _captureHandoffOpacity == 1)) {
+      return;
+    }
+    setState(() {
+      _captureHandoffActive = false;
+      _captureHandoffOpacity = 1;
+    });
+  }
+
+  void requestDraftInputFocus({bool Function()? isCurrent}) {
+    final int identity = _identitySeq;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted ||
+          _captureHandoffActive ||
+          (isCurrent != null && !isCurrent()) ||
+          identity != _identitySeq ||
+          widget.visible == false ||
+          _panelTab != _PanelTab.compose ||
+          _stage != FeedbackStage.compose) {
+        return;
+      }
+      _draftFocus.requestFocus();
+    });
+  }
+
   final FocusNode _draftFocus = FocusNode();
   final TextEditingController _username = TextEditingController();
   final TextEditingController _password = TextEditingController();
@@ -655,6 +745,10 @@ class FeedbackPanelState extends State<FeedbackPanel>
   @visibleForTesting
   int get imageCount => _images.length;
 
+  @visibleForTesting
+  String? get captureImageId =>
+      _captureIndex < 0 ? null : _images[_captureIndex].id;
+
   /// 是否处于单图降级模式（测试可见）。
   @visibleForTesting
   bool get singleImageMode => _singleImageMode;
@@ -879,6 +973,23 @@ class FeedbackPanelState extends State<FeedbackPanel>
       for (final FocusNode node in _managedFocusNodes) {
         final BuildContext? ctx = node.context;
         if (node.hasFocus && ctx != null) {
+          final RenderObject? field = ctx.findRenderObject();
+          final RenderObject? viewport =
+              field == null ? null : RenderAbstractViewport.maybeOf(field);
+          if (field is RenderBox &&
+              viewport is RenderBox &&
+              field.attached &&
+              viewport.attached) {
+            final Rect rect = field.localToGlobal(Offset.zero) & field.size;
+            final Rect visible =
+                viewport.localToGlobal(Offset.zero) & viewport.size;
+            // Do not start a scroll activity (which temporarily ignores field
+            // taps) when the focused field is already visible after handoff.
+            if (visible.contains(rect.topLeft) &&
+                visible.contains(rect.bottomRight)) {
+              break;
+            }
+          }
           Scrollable.ensureVisible(
             ctx,
             duration: const Duration(milliseconds: 160),
@@ -977,7 +1088,7 @@ class FeedbackPanelState extends State<FeedbackPanel>
 
   void _focusFirstField() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
+      if (!mounted || _captureHandoffActive || widget.visible == false) return;
       if (_signedIn && _stage == FeedbackStage.compose) {
         _draftFocus.requestFocus();
       } else if (!_signedIn && _showLoginForm) {
@@ -2689,116 +2800,139 @@ class FeedbackPanelState extends State<FeedbackPanel>
     return Material(
       color: Theme.of(context).colorScheme.surface,
       child: SafeArea(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: <Widget>[
-            _buildHeader(context),
-            const Divider(height: 1),
-            Expanded(child: _buildBody(context)),
-          ],
-        ),
+        child: LayoutBuilder(builder: (context, constraints) {
+          // A landscape keyboard can leave only 130px. Let the composer
+          // header scroll with its content, keeping the submit bar fixed and
+          // a full 44px login action reachable in the remaining viewport.
+          final bool scrollHeader = constraints.maxHeight < 320 &&
+              (_settingsOpen ||
+                  (_serverPrefsReady &&
+                      _authReady &&
+                      _selectedDialogueId == null &&
+                      _panelTab == _PanelTab.compose &&
+                      (!_signedIn ||
+                          (!_busy &&
+                              (_stage == FeedbackStage.compose ||
+                                  _stage == FeedbackStage.notSent)))));
+          return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: <Widget>[
+                if (!scrollHeader) _buildHeader(context),
+                Expanded(
+                    key: const Key('feedback-panel-body'),
+                    child: _buildBody(context, scrollHeader: scrollHeader)),
+              ]);
+        }),
       ),
     );
   }
 
-  Widget _buildHeader(BuildContext context) {
+  Widget _buildHeader(BuildContext context, {bool inset = true}) {
     final ColorScheme scheme = Theme.of(context).colorScheme;
-    final bool inDialogue = _selectedDialogueId != null;
+    final bool detail = _selectedDialogueId != null;
+    final String secondary = <String>[
+      if (widget.config.appVersion != null) 'v${widget.config.appVersion}',
+      if (widget.config.pageLabel != null) widget.config.pageLabel!,
+    ].join(' · ');
     return Padding(
-      padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
-      child: Row(
-        children: <Widget>[
-          if (inDialogue) ...<Widget>[
-            IconButton(
-              key: const Key('feedback-dialogue-back'),
-              tooltip: '返回反馈列表',
-              onPressed: _closeDialogue,
-              icon: const Icon(Icons.arrow_back),
-            ),
-            const SizedBox(width: 4),
-            Expanded(
-              child: Text(
-                '反馈详情',
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
-            ),
-          ] else ...<Widget>[
-            const SizedBox(width: 8),
-            Icon(Icons.feedback_outlined, color: scheme.primary),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Row(
-                children: <Widget>[
-                  TextButton(
-                    key: const Key('tab-compose'),
-                    style: TextButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      // 点击目标至少 48dp（冻结视觉规格）。
-                      minimumSize: const Size(48, 48),
-                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      foregroundColor: _panelTab == _PanelTab.compose
-                          ? scheme.primary
-                          : scheme.onSurfaceVariant,
-                      textStyle: TextStyle(
-                        fontWeight: _panelTab == _PanelTab.compose
-                            ? FontWeight.bold
-                            : FontWeight.normal,
-                        fontSize: 15,
-                      ),
-                    ),
-                    onPressed: () => _switchTab(_PanelTab.compose),
-                    child: const Text('新建反馈'),
-                  ),
-                  const SizedBox(width: 4),
-                  TextButton(
-                    key: const Key('tab-history'),
-                    style: TextButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      minimumSize: const Size(48, 48),
-                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      foregroundColor: _panelTab == _PanelTab.history
-                          ? scheme.primary
-                          : scheme.onSurfaceVariant,
-                      textStyle: TextStyle(
-                        fontWeight: _panelTab == _PanelTab.history
-                            ? FontWeight.bold
-                            : FontWeight.normal,
-                        fontSize: 15,
-                      ),
-                    ),
-                    onPressed: () => _switchTab(_PanelTab.history),
-                    child: _unreadCount > 0
-                        ? Badge.count(
-                            count: _unreadCount,
-                            child: const Text('我的反馈'),
-                          )
-                        : const Text('我的反馈'),
-                  ),
-                ],
-              ),
-            ),
-          ],
-          // T6：服务器设置入口（未登录也可进入；设置视图自带返回）。
-          IconButton(
-            key: const Key('feedback-settings'),
-            tooltip: '服务器设置',
-            onPressed: _settingsOpen ? null : _openSettings,
-            icon: const Icon(Icons.settings_outlined),
-          ),
-          IconButton(
-            key: const Key('feedback-close'),
-            tooltip: '关闭',
-            onPressed: widget.onRequestClose,
-            icon: const Icon(Icons.close),
-          ),
-        ],
-      ),
-    );
+        padding: EdgeInsets.fromLTRB(inset ? 16 : 0, 8, inset ? 16 : 0, 8),
+        child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              Row(children: <Widget>[
+                if (detail)
+                  IconButton(
+                      key: const Key('feedback-dialogue-back'),
+                      tooltip: '返回反馈列表',
+                      onPressed: _closeDialogue,
+                      icon: const Icon(Icons.arrow_back, size: 20)),
+                if (!detail)
+                  Icon(Icons.chat_bubble_outline_rounded,
+                      size: 19, color: scheme.primary),
+                const SizedBox(width: 8),
+                Expanded(
+                    child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: <Widget>[
+                      Text(detail ? '反馈详情' : '记录体验',
+                          style: const TextStyle(
+                              fontSize: 18, fontWeight: FontWeight.w600)),
+                      if (secondary.isNotEmpty && !detail)
+                        Text(secondary,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                                fontSize: 11, color: scheme.onSurfaceVariant)),
+                    ])),
+                IconButton(
+                    key: const Key('feedback-settings'),
+                    tooltip: '设置',
+                    style: IconButton.styleFrom(
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+                    constraints:
+                        const BoxConstraints(minWidth: 44, minHeight: 44),
+                    iconSize: 20,
+                    onPressed: _settingsOpen ? null : _openSettings,
+                    icon: const Icon(Icons.settings_outlined)),
+                IconButton(
+                    key: const Key('feedback-close'),
+                    tooltip: '关闭',
+                    style: IconButton.styleFrom(
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+                    constraints:
+                        const BoxConstraints(minWidth: 44, minHeight: 44),
+                    iconSize: 20,
+                    onPressed: widget.onRequestClose,
+                    icon: const Icon(Icons.close)),
+              ]),
+              if (!detail) ...<Widget>[
+                const SizedBox(height: 8),
+                DecoratedBox(
+                    decoration: BoxDecoration(
+                        color: scheme.surfaceContainerHighest,
+                        borderRadius: BorderRadius.circular(12)),
+                    child: Row(children: <Widget>[
+                      for (final _PanelTab tab in _PanelTab.values)
+                        Expanded(
+                            child: TextButton(
+                                key: Key(tab == _PanelTab.compose
+                                    ? 'tab-compose'
+                                    : 'tab-history'),
+                                style: TextButton.styleFrom(
+                                    tapTargetSize:
+                                        MaterialTapTargetSize.shrinkWrap,
+                                    minimumSize: const Size(0, 44),
+                                    backgroundColor: _panelTab == tab
+                                        ? scheme.surface
+                                        : Colors.transparent,
+                                    foregroundColor: _panelTab == tab
+                                        ? scheme.primary
+                                        : scheme.onSurfaceVariant,
+                                    shape: RoundedRectangleBorder(
+                                        borderRadius:
+                                            BorderRadius.circular(10)),
+                                    textStyle: const TextStyle(
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w600)),
+                                onPressed: () => _switchTab(tab),
+                                child:
+                                    tab == _PanelTab.history && _unreadCount > 0
+                                        ? Badge.count(
+                                            count: _unreadCount,
+                                            child: const Text('我的反馈'))
+                                        : Text(tab == _PanelTab.compose
+                                            ? '新建反馈'
+                                            : '我的反馈'))),
+                    ])),
+              ],
+            ]));
   }
 
-  Widget _buildBody(BuildContext context) {
+  Widget _buildBody(BuildContext context, {bool scrollHeader = false}) {
     // T6：设置视图独立于登录态（未登录也可进入）。
-    if (_settingsOpen) return _buildSettingsView(context);
+    if (_settingsOpen) {
+      return _buildSettingsView(context, scrollHeader: scrollHeader);
+    }
     // T6：覆盖偏好加载完成 + 会话恢复完成前不渲染可操作内容，
     // 保证不启动任何依赖服务器的请求。
     if (!_serverPrefsReady || !_authReady) {
@@ -2811,7 +2945,9 @@ class FeedbackPanelState extends State<FeedbackPanel>
       return _buildHistoryView(context);
     }
     // 未登录也可继续编辑：登录表单在撰写视图底部按需展开（不打开任何窗口）。
-    if (!_signedIn) return _buildComposeView(context);
+    if (!_signedIn) {
+      return _buildComposeView(context, scrollHeader: scrollHeader);
+    }
     if (_busy &&
         (_stage == FeedbackStage.compose || _stage == FeedbackStage.notSent)) {
       return _buildStatusNotice(
@@ -2827,7 +2963,7 @@ class FeedbackPanelState extends State<FeedbackPanel>
       case FeedbackStage.notSent:
         // Class A（未送达）与常规撰写共用撰写视图：草稿留在输入框内可继续
         // 编辑，提交按钮即"同 key 同字节"重试（快照变化则自动换新 key）。
-        return _buildComposeView(context);
+        return _buildComposeView(context, scrollHeader: scrollHeader);
       case FeedbackStage.accepted:
         // T4：等待管理员配置/确认/归档时明确说明等待什么，并提供手动刷新；
         // 等待不是失败，也不是「正在处理」，因此不轮询。
@@ -2904,7 +3040,7 @@ class FeedbackPanelState extends State<FeedbackPanel>
 
   /// T6：服务器设置视图——地址输入 / 保存 / 恢复默认 / 当前有效地址 /
   /// 连通性提示；覆盖仅保存于本机，不回写宿主默认配置。
-  Widget _buildSettingsView(BuildContext context) {
+  Widget _buildSettingsView(BuildContext context, {bool scrollHeader = false}) {
     final ThemeData theme = Theme.of(context);
     return SingleChildScrollView(
       key: const Key('feedback-settings-view'),
@@ -2912,6 +3048,91 @@ class FeedbackPanelState extends State<FeedbackPanel>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
+          if (scrollHeader) _buildHeader(context, inset: false),
+          if (widget.onOrbIdleStyleChanged != null) ...<Widget>[
+            Text('灵感球', style: theme.textTheme.titleSmall),
+            const SizedBox(height: 4),
+            Text('闲置5秒后收起，轻点或使用手势唤醒', style: theme.textTheme.bodySmall),
+            const SizedBox(height: 8),
+            for (final FeedbackOrbIdleStyle style
+                in FeedbackOrbIdleStyle.values)
+              Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Semantics(
+                      checked: widget.orbIdleStyle == style,
+                      inMutuallyExclusiveGroup: true,
+                      child: Material(
+                          color: widget.orbIdleStyle == style
+                              ? theme.colorScheme.primaryContainer
+                              : theme.colorScheme.surfaceContainerLow,
+                          borderRadius: BorderRadius.circular(12),
+                          child: ListTile(
+                              key: Key('feedback-orb-idle-${style.name}'),
+                              minVerticalPadding: 8,
+                              leading: Icon(
+                                  widget.orbIdleStyle == style
+                                      ? Icons.radio_button_checked
+                                      : Icons.radio_button_off,
+                                  color: theme.colorScheme.primary),
+                              title: Text(style == FeedbackOrbIdleStyle.handle
+                                  ? '小把手'
+                                  : '球体贴边'),
+                              onTap: () =>
+                                  widget.onOrbIdleStyleChanged!(style))))),
+            if (widget.orbIdleSessionOnly)
+              Text('仅本次生效，偏好未保存',
+                  key: const Key('feedback-orb-idle-session-only'),
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: theme.colorScheme.primary)),
+            const SizedBox(height: 16),
+          ],
+          if (widget.onWakeGesturesChanged != null) ...<Widget>[
+            Text('唤醒方式', style: theme.textTheme.titleSmall),
+            const SizedBox(height: 4),
+            Text('可同时开启，仅在当前应用内生效；悬浮入口仍可使用。',
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+            if (widget.config.captureMode != FeedbackCaptureMode.viewport)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text('应用未开启截图，手势暂不可用',
+                    key: const Key('feedback-wake-disabled'),
+                    style: theme.textTheme.bodySmall),
+              ),
+            for (final FeedbackWakeGesture gesture
+                in FeedbackWakeGesture.values)
+              ConstrainedBox(
+                constraints: const BoxConstraints(minHeight: 44),
+                child: CheckboxListTile(
+                  key: Key('feedback-wake-${gesture.id}'),
+                  contentPadding: EdgeInsets.zero,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  title: Text(gesture.title, style: theme.textTheme.bodyMedium),
+                  subtitle: Text(gesture.description,
+                      style: theme.textTheme.bodySmall),
+                  value: widget.wakeGestures.contains(gesture),
+                  onChanged: widget.config.captureMode !=
+                          FeedbackCaptureMode.viewport
+                      ? null
+                      : (bool? checked) {
+                          final Set<FeedbackWakeGesture> next =
+                              Set<FeedbackWakeGesture>.of(widget.wakeGestures);
+                          if (checked == true) {
+                            next.add(gesture);
+                          } else {
+                            next.remove(gesture);
+                          }
+                          widget.onWakeGesturesChanged!(next);
+                        },
+                ),
+              ),
+            if (widget.wakeGesturesSessionOnly)
+              Text('仅本次生效',
+                  key: const Key('feedback-wake-session-only'),
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: theme.colorScheme.primary)),
+            const SizedBox(height: 20),
+          ],
           Text('Feedback 服务器', style: theme.textTheme.titleSmall),
           const SizedBox(height: 4),
           Text(
@@ -3230,112 +3451,111 @@ class FeedbackPanelState extends State<FeedbackPanel>
   /// 撰写视图（T2.7 组件顺序）：标题与页签（Header）→ 反馈描述 →
   /// 图片证据 → 可折叠日志 → **固定提交区**。技术信息（日志详情）与
   /// 账户信息（额度/用户名）弱化展示。
-  Widget _buildComposeView(BuildContext context) {
+  Widget _buildComposeView(BuildContext context, {bool scrollHeader = false}) {
     final ThemeData theme = Theme.of(context);
     final int runes = _draft.text.runes.length;
     final bool nearLimit = runes >= kFeedbackMaxTextRunes;
-    // T9：有界可滚动内容区 + 固定提交区——高度充足时输入区占满剩余空间；
-    // 高度不足（键盘展开 / 小屏 / 放大字体 / 截图+日志+登录表单）时内容区
-    // 整体可滚动，底部提交区固定始终可达，不再溢出裁剪。
+    final ColorScheme scheme = theme.colorScheme;
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: <Widget>[
-        Expanded(
-          child: LayoutBuilder(
-            builder: (BuildContext context, BoxConstraints constraints) {
-              // 预留固定提交区高度，内容不足时仍铺满可用空间。
-              final double minHeight = constraints.maxHeight.isFinite
-                  ? math.max(0.0, constraints.maxHeight - 56)
-                  : 0.0;
-              return SingleChildScrollView(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Expanded(child: LayoutBuilder(builder: (context, constraints) {
+            final double inputHeight =
+                (constraints.maxHeight * .42).clamp(132, 200);
+            return SingleChildScrollView(
                 key: const Key('feedback-compose-scroll'),
-                padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-                child: ConstrainedBox(
-                  constraints: BoxConstraints(minHeight: minHeight),
-                  child: IntrinsicHeight(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: <Widget>[
-                        if (_composeError != null) ...<Widget>[
-                          Container(
-                            key: const Key('feedback-compose-error'),
-                            margin: const EdgeInsets.only(bottom: 12),
-                            padding: const EdgeInsets.all(10),
-                            decoration: BoxDecoration(
-                              color: theme.colorScheme.errorContainer,
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: Row(
-                              children: <Widget>[
-                                Icon(Icons.warning_amber_rounded,
-                                    size: 18,
-                                    color: theme.colorScheme.onErrorContainer),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: Text(
-                                    _composeError!,
-                                    style: TextStyle(
-                                        color:
-                                            theme.colorScheme.onErrorContainer),
-                                  ),
-                                ),
-                              ],
-                            ),
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: <Widget>[
+                      if (scrollHeader) _buildHeader(context, inset: false),
+                      if (_composeError != null) ...<Widget>[
+                        Container(
+                          key: const Key('feedback-compose-error'),
+                          margin: const EdgeInsets.only(bottom: 12),
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: theme.colorScheme.errorContainer,
+                            borderRadius: BorderRadius.circular(8),
                           ),
-                        ],
-                        // ① 反馈描述（主输入区）。
-                        Expanded(
-                          child: TextField(
-                            key: const Key('feedback-input'),
-                            controller: _draft,
-                            focusNode: _draftFocus,
-                            expands: true,
-                            maxLines: null,
-                            minLines: null,
-                            textAlignVertical: TextAlignVertical.top,
-                            keyboardType: TextInputType.multiline,
-                            inputFormatters: <TextInputFormatter>[
-                              const _RuneLimitFormatter(kFeedbackMaxTextRunes),
+                          child: Row(
+                            children: <Widget>[
+                              Icon(Icons.warning_amber_rounded,
+                                  size: 18,
+                                  color: theme.colorScheme.onErrorContainer),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  _composeError!,
+                                  style: TextStyle(
+                                      color:
+                                          theme.colorScheme.onErrorContainer),
+                                ),
+                              ),
                             ],
-                            decoration: const InputDecoration(
-                              hintText: '刚才哪里不顺手？你希望它怎样改进？',
-                              border: OutlineInputBorder(),
-                              isDense: true,
-                            ),
                           ),
                         ),
-                        const SizedBox(height: 12),
-                        // ② 图片证据。
-                        _buildImagesArea(context),
-                        const SizedBox(height: 4),
-                        // ③ 可折叠日志（技术信息弱化：默认只显示摘要）。
-                        _buildLogsArea(context),
-                        const SizedBox(height: 8),
-                        // 登录表单与额度提示（账户信息弱化展示）。
-                        if (!_signedIn && _showLoginForm)
-                          _buildInlineLoginForm(context),
-                        if (_signedIn && _quotaBlocked)
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: 8),
-                            child: Text(
-                              '今日提交次数已用完，额度刷新后可继续提交',
-                              key: const Key('feedback-quota-blocked'),
-                              style: theme.textTheme.bodySmall
-                                  ?.copyWith(color: theme.colorScheme.error),
-                            ),
-                          ),
                       ],
-                    ),
-                  ),
-                ),
-              );
-            },
-          ),
-        ),
-        // ④ 固定提交区：计数 / 账户信息（弱化）/ 提交按钮常驻底部。
-        _buildSubmitBar(context, runes: runes, nearLimit: nearLimit),
-      ],
-    );
+                      const Text('哪里不顺手，或者有什么新想法？',
+                          style: TextStyle(fontSize: 14)),
+                      const SizedBox(height: 8),
+                      SizedBox(
+                          height: inputHeight,
+                          child: TextField(
+                              key: const Key('feedback-input'),
+                              controller: _draft,
+                              focusNode: _draftFocus,
+                              expands: true,
+                              maxLines: null,
+                              textAlignVertical: TextAlignVertical.top,
+                              keyboardType: TextInputType.multiline,
+                              inputFormatters: <TextInputFormatter>[
+                                const _RuneLimitFormatter(kFeedbackMaxTextRunes)
+                              ],
+                              decoration: InputDecoration(
+                                  hintText: '刚才哪里不顺手？你希望它怎样改进？',
+                                  filled: true,
+                                  fillColor: scheme.surfaceContainerLow,
+                                  contentPadding: const EdgeInsets.all(14),
+                                  border: OutlineInputBorder(
+                                      borderRadius: BorderRadius.circular(14)),
+                                  enabledBorder: OutlineInputBorder(
+                                      borderRadius: BorderRadius.circular(14),
+                                      borderSide: BorderSide(
+                                          color: scheme.outlineVariant)),
+                                  focusedBorder: OutlineInputBorder(
+                                      borderRadius: BorderRadius.circular(14),
+                                      borderSide: BorderSide(
+                                          color: scheme.primary,
+                                          width: 1.5))))),
+                      Align(
+                          alignment: Alignment.centerRight,
+                          child: Padding(
+                              padding: const EdgeInsets.only(top: 4, bottom: 8),
+                              child: Text('$runes / $kFeedbackMaxTextRunes',
+                                  key: const Key('feedback-counter'),
+                                  style: TextStyle(
+                                      fontSize: 11,
+                                      color: nearLimit
+                                          ? scheme.error
+                                          : scheme.onSurfaceVariant)))),
+                      _buildImagesArea(context),
+                      const SizedBox(height: 4),
+                      _buildLogsArea(context),
+                      const SizedBox(height: 8),
+                      if (!_signedIn && _showLoginForm)
+                        _buildInlineLoginForm(context),
+                      if (_signedIn && _quotaBlocked)
+                        Padding(
+                            padding: const EdgeInsets.only(bottom: 8),
+                            child: Text('今日提交次数已用完，额度刷新后可继续提交',
+                                key: const Key('feedback-quota-blocked'),
+                                style: theme.textTheme.bodySmall
+                                    ?.copyWith(color: scheme.error))),
+                    ]));
+          })),
+          _buildSubmitBar(context, runes: runes, nearLimit: nearLimit),
+        ]);
   }
 
   /// 固定提交区（T2.7）：细边框分隔，阴影只用于浮层——这里只用边框。
@@ -3356,15 +3576,6 @@ class FeedbackPanelState extends State<FeedbackPanel>
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
       child: Row(
         children: <Widget>[
-          Text(
-            '$runes / $kFeedbackMaxTextRunes',
-            key: const Key('feedback-counter'),
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: nearLimit
-                  ? theme.colorScheme.error
-                  : theme.colorScheme.onSurfaceVariant,
-            ),
-          ),
           if (_signedIn && _quota != null) ...<Widget>[
             const SizedBox(width: 10),
             Expanded(
@@ -3415,8 +3626,10 @@ class FeedbackPanelState extends State<FeedbackPanel>
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
       children: <Widget>[
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        Wrap(
+          spacing: 8,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          alignment: WrapAlignment.spaceBetween,
           children: <Widget>[
             Text(
               '图片附件 (${_images.length}/$limit)',
@@ -3467,142 +3680,114 @@ class FeedbackPanelState extends State<FeedbackPanel>
         if (_images.isNotEmpty)
           Padding(
             padding: const EdgeInsets.only(top: 6, bottom: 10),
-            child: Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: <Widget>[
-                for (int i = 0; i < _images.length; i++)
-                  _buildImageThumb(context, _images, i),
-              ],
-            ),
+            child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
+                  for (int i = 0; i < _images.length; i++)
+                    Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: _buildImageThumb(context, _images, i)),
+                ]),
           ),
       ],
     );
   }
 
-  /// 单张图片卡片（T2.6）：缩略图**完整显示**（`BoxFit.contain`，禁止
-  /// cover 二次裁切），左上角「局部截图／已编辑／截图」标记、右下角
-  /// 输出尺寸；编辑、删除放在图片**下方**（≥48dp），不遮挡内容；
-  /// capture 槽位支持重拍。
+  /// Compact evidence row; the stable capture key measures the real 72px image.
   Widget _buildImageThumb(
-    BuildContext context,
-    List<FeedbackImageFile> list,
-    int index,
-  ) {
+      BuildContext context, List<FeedbackImageFile> list, int index) {
     final FeedbackImageFile image = list[index];
-    final ThemeData theme = Theme.of(context);
-    final bool isCapture = image.source == 'capture';
-    final bool isRegionCapture = isCapture && _captureInfo?.region != null;
+    final ColorScheme scheme = Theme.of(context).colorScheme;
+    final bool capture = image.source == 'capture';
     final String badge = image.source == 'edited'
         ? '已编辑'
-        : isRegionCapture
-            ? '局部截图'
-            : (isCapture ? '截图' : '');
-    return SizedBox(
-      key: isCapture
-          ? const Key('feedback-screenshot-wrap')
-          : Key('feedback-image-$index'),
-      width: 152,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: <Widget>[
-          SizedBox(
-            height: 96,
-            child: ClipRRect(
-              // 面板规格：图片圆角 10。
-              borderRadius: BorderRadius.circular(10),
-              child: Stack(
-                fit: StackFit.expand,
-                children: <Widget>[
-                  ColoredBox(color: theme.colorScheme.surfaceContainerHighest),
-                  GestureDetector(
-                    key: isCapture
-                        ? const Key('feedback-screenshot-thumb')
-                        : Key('feedback-image-thumb-$index'),
-                    onTap: () => _openImageZoom(context, image),
-                    child: _ThumbnailImageView(bytes: image.bytes),
-                  ),
-                  if (badge.isNotEmpty)
-                    Positioned(
-                      top: 4,
-                      left: 4,
-                      child: DecoratedBox(
-                        decoration: const BoxDecoration(
-                          color: Colors.black54,
-                          borderRadius: BorderRadius.all(Radius.circular(4)),
-                        ),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 4, vertical: 1),
-                          child: Text(
-                            badge,
-                            key: isCapture
-                                ? const Key('feedback-screenshot-badge')
-                                : Key('feedback-image-badge-$index'),
-                            style: const TextStyle(
-                                color: Colors.white, fontSize: 9),
-                          ),
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: 4),
-          // 操作行：图片下方固定，不遮挡图片内容。
-          SizedBox(
-            height: 48,
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: <Widget>[
-                if (isCapture && widget.onRetakeScreenshot != null)
-                  IconButton(
-                    key: const Key('feedback-retake-btn'),
-                    tooltip: '重新截图',
-                    padding: EdgeInsets.zero,
-                    constraints:
-                        const BoxConstraints(minWidth: 48, minHeight: 48),
-                    icon: const Icon(Icons.refresh, size: 16),
-                    onPressed: widget.onRetakeScreenshot,
-                  ),
-                IconButton(
-                  key: Key('feedback-image-edit-$index'),
-                  tooltip: '编辑',
-                  padding: EdgeInsets.zero,
-                  constraints:
-                      const BoxConstraints(minWidth: 48, minHeight: 48),
-                  icon: const Icon(Icons.edit_outlined, size: 16),
-                  onPressed: _busy ? null : () => _editImage(list, index),
-                ),
-                IconButton(
-                  key: isCapture
-                      ? const Key('feedback-remove-screenshot-btn')
-                      : Key('feedback-image-remove-$index'),
-                  tooltip: '移除',
-                  padding: EdgeInsets.zero,
-                  constraints:
-                      const BoxConstraints(minWidth: 48, minHeight: 48),
-                  icon: const Icon(Icons.delete_outline, size: 16),
-                  onPressed: _busy
-                      ? null
-                      : () {
-                          setState(() {
-                            list.removeAt(index);
-                            if (isCapture) {
-                              _captureInfo = null;
-                              _undrawableNotice = false;
-                            }
-                          });
-                        },
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
+        : capture
+            ? (_captureInfo?.region != null ? '局部截图' : '截图')
+            : '图片';
+    return Container(
+        key: capture
+            ? const Key('feedback-screenshot-wrap')
+            : Key('feedback-image-$index'),
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+            color: scheme.surfaceContainerLow,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: scheme.outlineVariant)),
+        child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: <Widget>[
+              SizedBox(
+                  width: 72,
+                  height: 72,
+                  child: Opacity(
+                      opacity: capture ? _captureHandoffOpacity : 1,
+                      child: ClipRRect(
+                          key: capture ? _captureThumbnailKey : null,
+                          borderRadius: BorderRadius.circular(8),
+                          child: ColoredBox(
+                              color: scheme.surfaceContainerHighest,
+                              child: GestureDetector(
+                                  key: capture
+                                      ? const Key('feedback-screenshot-thumb')
+                                      : Key('feedback-image-thumb-$index'),
+                                  onTap: () => _openImageZoom(context, image),
+                                  child: Image.memory(image.bytes,
+                                      fit: BoxFit.contain)))))),
+              const SizedBox(width: 8),
+              Expanded(
+                  child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                    Text(badge,
+                        key: capture
+                            ? const Key('feedback-screenshot-badge')
+                            : Key('feedback-image-badge-$index'),
+                        style: const TextStyle(
+                            fontSize: 12, fontWeight: FontWeight.w600)),
+                    _ThumbnailImageView(bytes: image.bytes, details: true),
+                    Wrap(children: <Widget>[
+                      if (capture && widget.onRetakeScreenshot != null)
+                        IconButton(
+                            key: const Key('feedback-retake-btn'),
+                            tooltip: '重新截图',
+                            onPressed: _busy ? null : widget.onRetakeScreenshot,
+                            constraints: const BoxConstraints(
+                                minWidth: 44, minHeight: 44),
+                            padding: EdgeInsets.zero,
+                            icon: const Icon(Icons.refresh, size: 18)),
+                      IconButton(
+                          key: Key('feedback-image-edit-$index'),
+                          tooltip: '编辑',
+                          onPressed:
+                              _busy ? null : () => _editImage(list, index),
+                          constraints:
+                              const BoxConstraints(minWidth: 44, minHeight: 44),
+                          padding: EdgeInsets.zero,
+                          icon: const Icon(Icons.edit_outlined, size: 18)),
+                      IconButton(
+                          key: capture
+                              ? const Key('feedback-remove-screenshot-btn')
+                              : Key('feedback-image-remove-$index'),
+                          tooltip: '移除',
+                          onPressed: _busy
+                              ? null
+                              : () {
+                                  setState(() {
+                                    list.removeAt(index);
+                                    if (capture) {
+                                      _captureInfo = null;
+                                      _undrawableNotice = false;
+                                    }
+                                  });
+                                },
+                          constraints:
+                              const BoxConstraints(minWidth: 44, minHeight: 44),
+                          padding: EdgeInsets.zero,
+                          icon: const Icon(Icons.delete_outline, size: 18)),
+                    ]),
+                  ])),
+            ]));
   }
 
   /// T4：可折叠日志区——默认只显示「已附诊断日志／暂无日志」摘要，
@@ -3627,8 +3812,10 @@ class FeedbackPanelState extends State<FeedbackPanel>
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: <Widget>[
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
+                  Wrap(
+                    spacing: 4,
+                    runSpacing: 4,
+                    crossAxisAlignment: WrapCrossAlignment.center,
                     children: <Widget>[
                       Text(
                         '日志附件 (${_logs.length}/$kFeedbackMaxLogFiles)',
@@ -4200,9 +4387,9 @@ class FeedbackPanelState extends State<FeedbackPanel>
       listBody = RefreshIndicator(
         onRefresh: () => _loadHistoryList(),
         child: ListView.separated(
-          padding: const EdgeInsets.all(12),
+          padding: const EdgeInsets.all(16),
           itemCount: _myFeedbacks.length,
-          separatorBuilder: (_, __) => const Divider(height: 1),
+          separatorBuilder: (_, __) => const SizedBox(height: 16),
           itemBuilder: (BuildContext context, int index) {
             final UserFeedbackListItem item = _myFeedbacks[index];
             return _buildHistoryItem(context, item);
@@ -4274,170 +4461,138 @@ class FeedbackPanelState extends State<FeedbackPanel>
     final bool selected = _historyFilter == status;
     final ColorScheme scheme = Theme.of(context).colorScheme;
     return Padding(
-      padding: const EdgeInsets.only(right: 6),
-      child: Material(
-        color: selected ? scheme.primaryContainer : Colors.transparent,
-        borderRadius: BorderRadius.circular(8),
+        padding: const EdgeInsets.only(right: 6),
         child: InkWell(
-          key: Key('feedback-filter-${status?.toWire() ?? 'all'}'),
-          borderRadius: BorderRadius.circular(8),
-          onTap: () => _setHistoryFilter(status),
-          // 状态筛选点击目标 ≥48dp（冻结视觉规格）。
-          child: SizedBox(
-            height: 48,
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: <Widget>[
-                const SizedBox(width: 10),
-                Text(
-                  label,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: selected
-                        ? scheme.onPrimaryContainer
-                        : scheme.onSurfaceVariant,
-                    fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
-                  ),
-                ),
-                const SizedBox(width: 10),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
+            key: Key('feedback-filter-${status?.toWire() ?? 'all'}'),
+            borderRadius: BorderRadius.circular(10),
+            onTap: () => _setHistoryFilter(status),
+            child: SizedBox(
+                height: 44,
+                child: Center(
+                    child: Container(
+                        height: 32,
+                        padding: const EdgeInsets.symmetric(horizontal: 10),
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                            color: selected
+                                ? scheme.primaryContainer
+                                : scheme.surfaceContainerLow,
+                            borderRadius: BorderRadius.circular(10)),
+                        child: Text(label,
+                            style: TextStyle(
+                                fontSize: 12,
+                                color: selected
+                                    ? scheme.primary
+                                    : scheme.onSurfaceVariant,
+                                fontWeight: selected
+                                    ? FontWeight.w600
+                                    : FontWeight.normal)))))));
   }
 
   Widget _buildHistoryItem(BuildContext context, UserFeedbackListItem item) {
     final ColorScheme scheme = Theme.of(context).colorScheme;
-    // v12 用户端统一文案：open→待处理、waiting_user→待补充、
-    // waiting_admin→待管理员回复、resolved→已解决（含状态图标）。
-    final (Color tagBg, Color tagFg, String tagText, IconData tagIcon) =
-        switch (item.issueStatus) {
+    final (Color bg, Color fg) = switch (item.issueStatus) {
       IssueStatus.waitingUser => (
-          Colors.orange.shade100,
-          Colors.orange.shade900,
-          '待补充',
-          Icons.edit_note,
+          scheme.secondaryContainer,
+          scheme.onSecondaryContainer
         ),
       IssueStatus.waitingAdmin => (
           scheme.primaryContainer,
-          scheme.onPrimaryContainer,
-          '待管理员回复',
-          Icons.support_agent,
+          scheme.onPrimaryContainer
         ),
       IssueStatus.resolved => (
-          Colors.green.shade100,
-          Colors.green.shade900,
-          '已解决',
-          Icons.check_circle_outline,
+          scheme.tertiaryContainer,
+          scheme.onTertiaryContainer
         ),
       IssueStatus.open => (
           scheme.surfaceContainerHighest,
-          scheme.onSurfaceVariant,
-          '待处理',
-          Icons.hourglass_empty,
+          scheme.onSurfaceVariant
         ),
     };
-
-    final String displayTitle =
-        item.title?.isNotEmpty == true ? item.title! : item.text;
-
-    return InkWell(
-      key: Key('feedback-item-${item.id}'),
-      onTap: () => _openDialogue(item.id),
-      borderRadius: BorderRadius.circular(8),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Wrap(
-              spacing: 8,
-              runSpacing: 4,
-              children: <Widget>[
-                Text('#${item.id}',
-                    style: Theme.of(context).textTheme.bodySmall),
-                Text('${item.messageCount} 条动态',
-                    style: Theme.of(context).textTheme.bodySmall),
-              ],
-            ),
-            const SizedBox(height: 6),
-            Row(
-              children: <Widget>[
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: tagBg,
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
+    return Material(
+        color: scheme.surface,
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+            side: BorderSide(color: scheme.outlineVariant)),
+        child: InkWell(
+            key: Key('feedback-item-${item.id}'),
+            onTap: () => _openDialogue(item.id),
+            borderRadius: BorderRadius.circular(14),
+            child: Padding(
+                padding: const EdgeInsets.all(14),
+                child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
-                      Icon(tagIcon, size: 11, color: tagFg),
-                      const SizedBox(width: 3),
-                      // 裸 RichText（非 Text/Text.rich）：状态筛选行的同名
-                      // chip 与本标签并存时，find.text 只命中 chip 不误伤。
-                      RichText(
-                        text: TextSpan(
-                          text: tagText,
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.bold,
-                            color: tagFg,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                if (item.unread) ...<Widget>[
-                  const SizedBox(width: 6),
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: Colors.red.shade600,
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: const Text(
-                      '未读',
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.white,
-                      ),
-                    ),
-                  ),
-                ],
-              ],
-            ),
-            const SizedBox(height: 6),
-            Text('最近更新：${_formatTime(item.lastActivityAt)}',
-                style: Theme.of(context).textTheme.bodySmall),
-            const SizedBox(height: 6),
-            Text(
-              displayTitle,
-              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
-            ),
-            if (item.latestMessageText != null) ...<Widget>[
-              const SizedBox(height: 4),
-              Text(
-                '${_messageRole(item.latestMessageSender)}: ${item.latestMessageText}',
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: item.latestMessageSender == 'admin'
-                          ? scheme.primary
-                          : Colors.grey.shade700,
-                    ),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
+                      Text(
+                          item.title?.isNotEmpty == true
+                              ? item.title!
+                              : item.text,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              fontSize: 15, fontWeight: FontWeight.w600)),
+                      const SizedBox(height: 8),
+                      Wrap(
+                          spacing: 8,
+                          runSpacing: 4,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: <Widget>[
+                            Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 8, vertical: 3),
+                                decoration: BoxDecoration(
+                                    color: bg,
+                                    borderRadius: BorderRadius.circular(8)),
+                                child: RichText(
+                                    text: TextSpan(
+                                        text: item.issueStatus.label,
+                                        style: TextStyle(
+                                            fontSize: 12, color: fg)))),
+                            if (item.unread)
+                              Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: <Widget>[
+                                    Container(
+                                        width: 6,
+                                        height: 6,
+                                        decoration: BoxDecoration(
+                                            color: scheme.primary,
+                                            shape: BoxShape.circle)),
+                                    const SizedBox(width: 4),
+                                    Text('未读',
+                                        style: TextStyle(
+                                            fontSize: 12,
+                                            color: scheme.primary))
+                                  ]),
+                          ]),
+                      if (item.latestMessageText != null ||
+                          item.title?.isNotEmpty == true) ...<Widget>[
+                        const SizedBox(height: 8),
+                        Text(
+                            item.latestMessageText != null
+                                ? '${_messageRole(item.latestMessageSender)}: ${item.latestMessageText}'
+                                : item.text,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                                fontSize: 13, color: scheme.onSurfaceVariant)),
+                      ],
+                      const SizedBox(height: 8),
+                      Wrap(spacing: 8, runSpacing: 4, children: <Widget>[
+                        Text(item.appId,
+                            style: TextStyle(
+                                fontSize: 11, color: scheme.onSurfaceVariant)),
+                        Text('#${item.id}',
+                            style: TextStyle(
+                                fontSize: 11, color: scheme.onSurfaceVariant)),
+                        Text('${item.messageCount} 条动态',
+                            style: TextStyle(
+                                fontSize: 11, color: scheme.onSurfaceVariant)),
+                        Text('最近更新：${_formatTime(item.lastActivityAt)}',
+                            style: TextStyle(
+                                fontSize: 11, color: scheme.onSurfaceVariant)),
+                      ]),
+                    ]))));
   }
 
   String _messageRole(String? sender) => switch (sender) {
@@ -4505,12 +4660,13 @@ class FeedbackPanelState extends State<FeedbackPanel>
           child: ListView(
             key: const Key('feedback-dialogue-list'),
             controller: _dialogueScroll,
-            padding: const EdgeInsets.all(12),
+            padding: const EdgeInsets.all(16),
             children: <Widget>[
               Text(
                   dialogue.title?.isNotEmpty == true ? dialogue.title! : '反馈详情',
                   key: const Key('feedback-dialogue-title'),
-                  style: Theme.of(context).textTheme.titleMedium),
+                  style: const TextStyle(
+                      fontSize: 15, fontWeight: FontWeight.w600)),
               const SizedBox(height: 6),
               SelectableText('#${dialogue.feedbackId}',
                   key: const Key('feedback-dialogue-id'),
@@ -4522,7 +4678,9 @@ class FeedbackPanelState extends State<FeedbackPanel>
               const SizedBox(height: 8),
               Text(dialogue.issueStatus.label,
                   style: TextStyle(
-                      color: scheme.primary, fontWeight: FontWeight.bold)),
+                      color: scheme.primary,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600)),
               const SizedBox(height: 4),
               Text(_nextStep(dialogue.issueStatus),
                   key: const Key('feedback-next-step'),
@@ -4531,7 +4689,7 @@ class FeedbackPanelState extends State<FeedbackPanel>
               const SizedBox(height: 16),
               // 原话卡片
               Container(
-                padding: const EdgeInsets.all(12),
+                padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
                   color: scheme.surfaceContainerHighest.withValues(alpha: 0.5),
                   borderRadius: BorderRadius.circular(8),
@@ -4710,7 +4868,7 @@ class FeedbackPanelState extends State<FeedbackPanel>
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
           decoration: BoxDecoration(
             color: scheme.surfaceContainerHighest,
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: BorderRadius.circular(14),
           ),
           child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -4732,141 +4890,155 @@ class FeedbackPanelState extends State<FeedbackPanel>
     final String displayName =
         isUser ? '我' : (msg.senderName.isNotEmpty ? msg.senderName : '管理员');
 
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-            child: Wrap(
-              spacing: 8,
-              runSpacing: 4,
-              children: <Widget>[
-                Text(
-                  displayName,
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold,
-                    color: isUser ? scheme.primary : scheme.secondary,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Text(
-                  _formatTime(msg.createdAt),
-                  style: const TextStyle(fontSize: 10, color: Colors.grey),
-                ),
-              ],
-            ),
-          ),
-          Container(
-            constraints: BoxConstraints(
-              maxWidth: MediaQuery.of(context).size.width * 0.85,
-            ),
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            decoration: BoxDecoration(
-              color: isUser ? scheme.primary : scheme.surfaceContainerHighest,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                if (msg.text.isNotEmpty)
-                  SelectableText(
-                    msg.text,
-                    style: TextStyle(
-                      fontSize: 14,
-                      color: isUser ? scheme.onPrimary : scheme.onSurface,
-                      height: 1.3,
-                    ),
-                  ),
-                // v12：处理说明（随解决动作入库并对用户可见）。
-                if (msg.resolutionNote != null &&
-                    msg.resolutionNote!.isNotEmpty &&
-                    msg.text.trim() != msg.resolutionNote!.trim()) ...<Widget>[
-                  const SizedBox(height: 6),
-                  Container(
-                    padding: const EdgeInsets.all(6),
-                    decoration: BoxDecoration(
-                      color: isUser
-                          ? Colors.white.withValues(alpha: 0.15)
-                          : Colors.green.shade50,
-                      borderRadius: BorderRadius.circular(6),
-                    ),
-                    child: Text(
-                      '处理说明：${msg.resolutionNote}',
-                      key: Key('feedback-msg-resolution-${msg.id}'),
-                      style: TextStyle(
-                        fontSize: 11,
-                        color:
-                            isUser ? scheme.onPrimary : Colors.green.shade900,
-                      ),
-                    ),
-                  ),
-                ],
-                if (msg.attachments.isNotEmpty) ...<Widget>[
-                  const SizedBox(height: 6),
-                  Wrap(
-                    spacing: 6,
-                    runSpacing: 6,
-                    children:
-                        msg.attachments.map((FeedbackMessageAttachment att) {
-                      // v12：附件一律 Bearer 取回字节渲染（URL 不带凭据，
-                      // Image.network 跨源必然 401）；失败显示占位 + 重试。
-                      if (att.isImage) {
-                        return _FeedbackBearerImage(
-                          key: Key('feedback-msg-img-${att.id}'),
-                          bytesLoader: () =>
-                              _api.fetchMessageAttachment(att.id),
-                          width: 72,
-                          height: 72,
-                          onRetry: _showToast,
-                        );
-                      }
-                      return InkWell(
-                        onTap: () => _openRemoteAttachment(att),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 6, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: isUser
-                                ? Colors.white.withValues(alpha: 0.2)
-                                : scheme.surface,
-                            borderRadius: BorderRadius.circular(4),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: <Widget>[
-                              Icon(
-                                att.isImage ? Icons.image : Icons.description,
-                                size: 12,
-                                color: isUser
-                                    ? scheme.onPrimary
-                                    : scheme.onSurface,
-                              ),
-                              const SizedBox(width: 4),
-                              Text(
-                                att.filename,
-                                style: TextStyle(
-                                  fontSize: 11,
-                                  color: isUser
-                                      ? scheme.onPrimary
-                                      : scheme.onSurface,
-                                ),
-                              ),
-                            ],
+    return Align(
+        alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+        child: FractionallySizedBox(
+            widthFactor: .85,
+            child: Container(
+              margin: const EdgeInsets.only(bottom: 10),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Padding(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                    child: Wrap(
+                      spacing: 8,
+                      runSpacing: 4,
+                      children: <Widget>[
+                        Text(
+                          displayName,
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold,
+                            color: isUser ? scheme.primary : scheme.secondary,
                           ),
                         ),
-                      );
-                    }).toList(),
+                        const SizedBox(width: 8),
+                        Text(
+                          _formatTime(msg.createdAt),
+                          style:
+                              const TextStyle(fontSize: 10, color: Colors.grey),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Container(
+                    constraints: BoxConstraints(
+                      maxWidth: MediaQuery.of(context).size.width * 0.85,
+                    ),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: isUser
+                          ? scheme.primary
+                          : scheme.surfaceContainerHighest,
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        if (msg.text.isNotEmpty)
+                          SelectableText(
+                            msg.text,
+                            style: TextStyle(
+                              fontSize: 14,
+                              color:
+                                  isUser ? scheme.onPrimary : scheme.onSurface,
+                              height: 1.3,
+                            ),
+                          ),
+                        // v12：处理说明（随解决动作入库并对用户可见）。
+                        if (msg.resolutionNote != null &&
+                            msg.resolutionNote!.isNotEmpty &&
+                            msg.text.trim() !=
+                                msg.resolutionNote!.trim()) ...<Widget>[
+                          const SizedBox(height: 6),
+                          Container(
+                            padding: const EdgeInsets.all(6),
+                            decoration: BoxDecoration(
+                              color: isUser
+                                  ? Colors.white.withValues(alpha: 0.15)
+                                  : Colors.green.shade50,
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: Text(
+                              '处理说明：${msg.resolutionNote}',
+                              key: Key('feedback-msg-resolution-${msg.id}'),
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: isUser
+                                    ? scheme.onPrimary
+                                    : Colors.green.shade900,
+                              ),
+                            ),
+                          ),
+                        ],
+                        if (msg.attachments.isNotEmpty) ...<Widget>[
+                          const SizedBox(height: 6),
+                          Wrap(
+                            spacing: 6,
+                            runSpacing: 6,
+                            children: msg.attachments
+                                .map((FeedbackMessageAttachment att) {
+                              // v12：附件一律 Bearer 取回字节渲染（URL 不带凭据，
+                              // Image.network 跨源必然 401）；失败显示占位 + 重试。
+                              if (att.isImage) {
+                                return _FeedbackBearerImage(
+                                  key: Key('feedback-msg-img-${att.id}'),
+                                  bytesLoader: () =>
+                                      _api.fetchMessageAttachment(att.id),
+                                  width: 72,
+                                  height: 72,
+                                  onRetry: _showToast,
+                                );
+                              }
+                              return InkWell(
+                                onTap: () => _openRemoteAttachment(att),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 6, vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: isUser
+                                        ? Colors.white.withValues(alpha: 0.2)
+                                        : scheme.surface,
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: <Widget>[
+                                      Icon(
+                                        att.isImage
+                                            ? Icons.image
+                                            : Icons.description,
+                                        size: 12,
+                                        color: isUser
+                                            ? scheme.onPrimary
+                                            : scheme.onSurface,
+                                      ),
+                                      const SizedBox(width: 4),
+                                      Text(
+                                        att.filename,
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          color: isUser
+                                              ? scheme.onPrimary
+                                              : scheme.onSurface,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            }).toList(),
+                          ),
+                        ],
+                      ],
+                    ),
                   ),
                 ],
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
+              ),
+            )));
   }
 
   Widget _buildReplyComposer(BuildContext context) {
@@ -5054,7 +5226,9 @@ class FeedbackPanelState extends State<FeedbackPanel>
 /// 缩略图视图（T2.6）：`BoxFit.contain` **完整显示**（禁止 cover 二次
 /// 裁切），右下角解析并显示输出尺寸（`宽×高` 像素）。
 class _ThumbnailImageView extends StatefulWidget {
-  const _ThumbnailImageView({required this.bytes});
+  const _ThumbnailImageView({required this.bytes, this.details = false});
+
+  final bool details;
 
   final Uint8List bytes;
 
@@ -5089,11 +5263,15 @@ class _ThumbnailImageViewState extends State<_ThumbnailImageView> {
     final ImageStream stream = provider.resolve(const ImageConfiguration());
     final ImageStreamListener listener = ImageStreamListener(
       (ImageInfo info, bool synchronousCall) {
-        if (!mounted) return;
-        setState(() {
-          _width = info.image.width;
-          _height = info.image.height;
-        });
+        try {
+          if (!mounted) return;
+          setState(() {
+            _width = info.image.width;
+            _height = info.image.height;
+          });
+        } finally {
+          info.dispose();
+        }
       },
       onError: (Object error, StackTrace? stackTrace) {
         // 解码失败：不显示尺寸标签（缩略图本身由 Image.memory 报错）。
@@ -5121,6 +5299,13 @@ class _ThumbnailImageViewState extends State<_ThumbnailImageView> {
 
   @override
   Widget build(BuildContext context) {
+    if (widget.details) {
+      return Text(_width == null ? '图片' : '$_width×$_height',
+          key: _width == null ? null : const Key('feedback-image-size'),
+          style: TextStyle(
+              fontSize: 11,
+              color: Theme.of(context).colorScheme.onSurfaceVariant));
+    }
     return Stack(
       fit: StackFit.expand,
       children: <Widget>[

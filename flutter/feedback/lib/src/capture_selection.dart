@@ -1,19 +1,18 @@
 import 'dart:math' as math;
-import 'dart:ui' as ui show Image;
+import 'dart:ui' as ui show Image, FragmentShader;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show LogicalKeyboardKey;
+import 'package:flutter/services.dart';
+import 'orb.dart';
+import 'orb_liquid.dart';
 
 import 'api_client.dart' show FeedbackCaptureRegion;
 
 /// 选区最小边长（逻辑像素）：拖动 / 缩放 / 重新框选都不得小于此值。
 const double kCaptureSelectionMinSize = 48;
 
-/// 初始选区宽度上限（dp）。
-const double kCaptureSelectionMaxWidth = 400;
-
-/// 初始选区高度上限（dp）。
-const double kCaptureSelectionMaxHeight = 260;
+/// 初始选区边长（逻辑像素）；与手动调整的最小边长分开。
+const double kCaptureSelectionInitialSize = 144;
 
 /// 动效时长（T2 规格：160–220ms）。
 const Duration kCaptureSelectionMotion = Duration(milliseconds: 180);
@@ -103,22 +102,17 @@ Rect clampCaptureSelection(
   return Rect.fromLTWH(left, top, width, height);
 }
 
-/// 初始选区：宽 `min(400dp, 屏宽×80%)`、高 `min(260dp, 屏高×40%)`，
-/// 中心为松手位置；靠边时整体移回可见区域（含安全区），最小 48×48。
+/// 初始选区为144×144，以可见球心（无球快照时为落点或视口中央）为中心。
+/// 靠边整体移回可用区域；视口或安全区不足144时按可用宽高收缩。
 Rect initialCaptureSelection({
   required Size viewport,
   required Offset center,
   EdgeInsets safeInsets = EdgeInsets.zero,
 }) {
-  final double width = math.max(
-    kCaptureSelectionMinSize,
-    math.min(kCaptureSelectionMaxWidth, viewport.width * 0.8),
-  );
-  final double height = math.max(
-    kCaptureSelectionMinSize,
-    math.min(kCaptureSelectionMaxHeight, viewport.height * 0.4),
-  );
-  final Rect raw = Rect.fromCenter(center: center, width: width, height: height);
+  final Rect raw = Rect.fromCenter(
+      center: center,
+      width: kCaptureSelectionInitialSize,
+      height: kCaptureSelectionInitialSize);
   return clampCaptureSelection(raw, viewport, safeInsets: safeInsets);
 }
 
@@ -205,441 +199,576 @@ FeedbackCaptureRegion normalizeCaptureRegion(Rect selection, Size viewport) {
   return FeedbackCaptureRegion.fromRect(selection, viewport);
 }
 
-/// 冻结画面（已遮挡位图 + 捕获元数据）上的局部选区覆盖层（T1）：
-/// 展示冻结位图、选区（拖动移动 / 八点缩放 / 背景重新框选）与
+/// 冻结画面（已遮挡位图 + 捕获元数据）上的局部选区覆盖层：
+/// 展示冻结位图、选区（拖动移动 / 四角缩放 / 背景重新框选）与
 /// 「使用此区域 / 截取整个窗口 / 取消」工具栏。
 ///
 /// 本覆盖层位于截图边界之外，任何选区边框、遮罩与按钮都**不入图**——
 /// 确认时只对冻结位图按选区裁剪。
 class CaptureSelectionOverlay extends StatefulWidget {
-  /// 构造覆盖层。[image] 为已完成位图级遮挡的冻结位图；
-  /// [viewport] 为原始捕获视口（逻辑像素）；[releasePoint] 为松手落点
-  /// （0..1，相对视口，null 表示无落点时居中）。
-  const CaptureSelectionOverlay({
-    super.key,
-    required this.image,
-    required this.viewport,
-    required this.releasePoint,
-    required this.onUseRegion,
-    required this.onCaptureWhole,
-    required this.onCancel,
-  });
-
-  /// 已遮挡的冻结位图。
+  const CaptureSelectionOverlay(
+      {super.key,
+      required this.image,
+      required this.viewport,
+      required this.releasePoint,
+      required this.onUseRegion,
+      required this.onCaptureWhole,
+      required this.onCancel,
+      this.busy = false,
+      this.error,
+      this.orbCenter,
+      this.orbShader,
+      this.scale = 1,
+      this.direction = const Offset(1, 0),
+      this.deform = 0,
+      this.wobble = 0,
+      this.safeInsets = EdgeInsets.zero,
+      this.orbRadius = 52});
   final ui.Image image;
-
-  /// 原始捕获视口（逻辑像素尺寸）。
   final Size viewport;
-
-  /// 松手落点（0..1 相对视口）。
   final Offset? releasePoint;
-
-  /// 使用当前选区（裁剪冻结位图）。
   final ValueChanged<Rect> onUseRegion;
-
-  /// 截取整个窗口（整张冻结位图，region 省略）。
   final VoidCallback onCaptureWhole;
-
-  /// 取消：丢弃冻结画面恢复 UI，不覆盖草稿、不报失败。
   final VoidCallback onCancel;
+  final bool busy;
+  final String? error;
+  final Offset? orbCenter;
+  final ui.FragmentShader? orbShader;
+  final double scale;
+  final Offset direction;
+  final double deform;
+  final double wobble;
+
+  /// 系统安全区与实际捕获边界相交后换算的本地边距，不是整个view的padding。
+  final EdgeInsets safeInsets;
+  final double orbRadius;
 
   @override
-  State<CaptureSelectionOverlay> createState() => CaptureSelectionOverlayState();
+  State<CaptureSelectionOverlay> createState() =>
+      CaptureSelectionOverlayState();
 }
 
-/// 覆盖层状态（public 仅供测试读取当前选区）。
-class CaptureSelectionOverlayState extends State<CaptureSelectionOverlay> {
-  /// 当前选区（逻辑像素，相对覆盖层坐标系）。
+class CaptureSelectionOverlayState extends State<CaptureSelectionOverlay>
+    with SingleTickerProviderStateMixin {
   late Rect _selection;
-
-  /// 重新框选中的实时矩形（null = 未在框选）。
   Rect? _framing;
-
-  /// 可用区域（视口扣安全区），布局时更新。
-  Size _layoutSize = Size.zero;
-
-  /// 首次布局后按安全区钳一次（initState 时尚无 MediaQuery 安全区）。
-  bool _safeAreaClamped = false;
-
-  /// 覆盖层内的焦点落点，对齐 Web 的 `.fb-region-frame`：挂载后把焦点从
-  /// 灵感球等外部节点移入覆盖层。Enter 确认 / Esc 取消由本层 Shortcuts
-  /// 处理（焦点必须落在其后代上，见上方注释）。
+  Offset? _frameStart;
   final FocusNode _frameFocus = FocusNode(debugLabel: 'feedback-capture-frame');
+  late final AnimationController _entrance = AnimationController(
+      vsync: this, duration: const Duration(milliseconds: 550));
+  bool _started = false;
+  Rect get selection => _selection;
+  EdgeInsets get _safeInsets => widget.safeInsets;
+  bool get _reduceMotion => MediaQuery.disableAnimationsOf(context);
+  bool get _coarse => switch (Theme.of(context).platform) {
+        TargetPlatform.android ||
+        TargetPlatform.iOS ||
+        TargetPlatform.fuchsia =>
+          true,
+        _ => false,
+      };
+  bool get _editable =>
+      !widget.busy && (_reduceMotion || _entrance.value >= 400 / 550);
 
   @override
   void initState() {
     super.initState();
-    _selection = clampCaptureSelection(
-      Rect.fromCenter(
-        center: Offset(
-          (widget.releasePoint?.dx ?? 0.5) * widget.viewport.width,
-          (widget.releasePoint?.dy ?? 0.5) * widget.viewport.height,
-        ),
-        width: math.min(kCaptureSelectionMaxWidth, widget.viewport.width * 0.8),
-        height:
-            math.min(kCaptureSelectionMaxHeight, widget.viewport.height * 0.4),
-      ),
-      widget.viewport,
-    );
-    // 挂载后请求：此前焦点可能在身后的灵感球上，键盘事件不得落到那里。
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      _frameFocus.requestFocus();
+      if (mounted) _frameFocus.requestFocus();
     });
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (!_started) {
+      _selection = initialCaptureSelection(
+          viewport: widget.viewport,
+          safeInsets: _safeInsets,
+          // orbCenter已是捕获boundary本地坐标；releasePoint仍保留真实指针落点。
+          center: widget.orbCenter ??
+              Offset((widget.releasePoint?.dx ?? .5) * widget.viewport.width,
+                  (widget.releasePoint?.dy ?? .5) * widget.viewport.height));
+    }
+    if (_reduceMotion) {
+      _entrance.value = 1;
+    } else if (!_started) {
+      _entrance.forward();
+    }
+    _started = true;
+  }
+
+  @override
   void dispose() {
+    _entrance.dispose();
     _frameFocus.dispose();
     super.dispose();
   }
 
-  /// 当前选区（测试可见）。
-  Rect get selection => _selection;
-
-  EdgeInsets get _safeInsets => MediaQuery.maybePaddingOf(context) ??
-      (MediaQuery.maybeOf(context)?.padding ?? EdgeInsets.zero);
-
-  /// 覆盖层坐标系尺寸：优先实际布局（等于原始捕获视口），
-  /// 尚未布局时退回冻结时记录的视口尺寸。
-  Size get _viewport =>
-      _layoutSize != Size.zero ? _layoutSize : widget.viewport;
-
-  bool get _reduceMotion => MediaQuery.disableAnimationsOf(context);
-
-  Duration get _motion => _reduceMotion ? Duration.zero : kCaptureSelectionMotion;
-
-  void _setSelection(Rect next) {
-    setState(() => _selection = next);
+  KeyEventResult _onKey(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    }
+    final LogicalKeyboardKey key = event.logicalKey;
+    if (key == LogicalKeyboardKey.escape) {
+      widget.onCancel();
+      return KeyEventResult.handled;
+    }
+    if (!_editable) return KeyEventResult.ignored;
+    if (key == LogicalKeyboardKey.enter ||
+        key == LogicalKeyboardKey.numpadEnter) {
+      widget.onUseRegion(_selection);
+      return KeyEventResult.handled;
+    }
+    final Offset? delta = <LogicalKeyboardKey, Offset>{
+      LogicalKeyboardKey.arrowLeft: const Offset(-6, 0),
+      LogicalKeyboardKey.arrowRight: const Offset(6, 0),
+      LogicalKeyboardKey.arrowUp: const Offset(0, -6),
+      LogicalKeyboardKey.arrowDown: const Offset(0, 6),
+    }[key];
+    if (delta == null) return KeyEventResult.ignored;
+    setState(() {
+      _selection = HardwareKeyboard.instance.isShiftPressed
+          ? resizeCaptureSelection(_selection, CaptureHandleAnchor.bottomRight,
+              delta, widget.viewport, safeInsets: _safeInsets)
+          : moveCaptureSelection(_selection, delta, widget.viewport,
+              safeInsets: _safeInsets);
+    });
+    return KeyEventResult.handled;
   }
 
-  void _cancel() => widget.onCancel();
+  Rect _controlsRect(double width, double height, double hit, Rect close) {
+    final Rect safe = captureSelectionArea(widget.viewport, _safeInsets);
+    final double minLeft = safe.left + math.min(16, safe.width / 2);
+    final double minTop = safe.top + math.min(16, safe.height / 2);
+    final double maxLeft = math.max(minLeft, safe.right - width - 16);
+    final double maxTop = math.max(minTop, safe.bottom - height - 16);
+    final double centered =
+        (_selection.center.dx - width / 2).clamp(minLeft, maxLeft);
+    final double gap = hit / 2 + 12;
+    final List<double> xs = <double>[
+      centered,
+      minLeft,
+      maxLeft,
+      _selection.left - gap - width,
+      _selection.right + gap
+    ];
+    final List<double> ys = <double>[
+      _selection.bottom + gap,
+      _selection.top - gap - height,
+      minTop,
+      maxTop
+    ];
+    for (final double y in ys) {
+      if (y < minTop || y > maxTop) continue;
+      for (final double x in xs) {
+        if (x < minLeft || x > maxLeft) continue;
+        final Rect rect = Rect.fromLTWH(x, y, width, height);
+        if (!rect.overlaps(_selection.inflate(hit / 2 + 4)) &&
+            !rect.overlaps(close)) {
+          return rect;
+        }
+      }
+    }
+    // On narrow embedded hosts the complete card may not fit above or below
+    // the frame. Use an actually empty rectangle and scroll the card there;
+    // never put controls over the selection or its corner hit targets.
+    final Rect bounds = Rect.fromLTRB(minLeft, minTop,
+        math.max(minLeft, safe.right - 16), math.max(minTop, safe.bottom - 16));
+    List<Rect> spaces = <Rect>[bounds];
+    for (final Rect obstacle in <Rect>[
+      _selection.inflate(hit / 2 + 4),
+      close
+    ]) {
+      final List<Rect> next = <Rect>[];
+      for (final Rect space in spaces) {
+        if (!space.overlaps(obstacle)) {
+          next.add(space);
+          continue;
+        }
+        final Rect cut = space.intersect(obstacle);
+        next.addAll(<Rect>[
+          Rect.fromLTRB(space.left, space.top, space.right, cut.top),
+          Rect.fromLTRB(space.left, cut.bottom, space.right, space.bottom),
+          Rect.fromLTRB(space.left, space.top, cut.left, space.bottom),
+          Rect.fromLTRB(cut.right, space.top, space.right, space.bottom),
+        ].where((r) => r.width > 0 && r.height > 0));
+      }
+      spaces = next;
+    }
+    spaces.sort((a, b) {
+      double score(Rect r) =>
+          math.min(width, r.width) *
+          math.min(height, r.height) *
+          (r.width >= math.min(120, width) && r.height >= 44 ? 10 : 1);
+      return score(b).compareTo(score(a));
+    });
+    if (spaces.isNotEmpty &&
+        spaces.first.width >= math.min(120, width) &&
+        spaces.first.height >= math.min(44, height)) {
+      final Rect space = spaces.first;
+      final double w = math.min(width, space.width),
+          h = math.min(height, space.height);
+      return Rect.fromLTWH(
+          centered.clamp(space.left, space.right - w), space.top, w, h);
+    }
+    // A frame spanning the viewport leaves no external room. Its interior is
+    // usable, but the close button and all four actual corner targets are not.
+    final List<Rect> targets = <Rect>[
+      close,
+      for (final Offset point in <Offset>[
+        _selection.topLeft,
+        _selection.topRight,
+        _selection.bottomLeft,
+        _selection.bottomRight
+      ])
+        Rect.fromCenter(center: point, width: hit, height: hit)
+    ];
+    final List<double> internalY = <double>[
+      (_selection.center.dy - height / 2).clamp(minTop, maxTop),
+      minTop,
+      maxTop,
+      for (final Rect target in targets) ...<double>[
+        target.bottom,
+        target.top - height
+      ]
+    ];
+    Rect? leastOverlap;
+    double overlap = double.infinity;
+    for (final double y in internalY) {
+      for (final double x in xs) {
+        final Rect candidate = Rect.fromLTWH(
+            x.clamp(minLeft, maxLeft), y.clamp(minTop, maxTop), width, height);
+        double area = 0;
+        for (final Rect target in targets) {
+          if (candidate.overlaps(target)) {
+            final Rect intersection = candidate.intersect(target);
+            area += intersection.width * intersection.height;
+          }
+        }
+        if (area == 0) return candidate;
+        if (area < overlap) {
+          overlap = area;
+          leastOverlap = candidate;
+        }
+      }
+    }
+    if (leastOverlap != null) return leastOverlap;
+    if (spaces.isEmpty) return Rect.fromLTWH(minLeft, minTop, width, height);
+    final Rect space = spaces.first;
+    final double w = math.min(width, space.width),
+        h = math.min(height, space.height);
+    return Rect.fromLTWH(
+        centered.clamp(space.left, space.right - w), space.top, w, h);
+  }
+
+  Widget _buildTools(bool stacked) {
+    final ColorScheme scheme = Theme.of(context).colorScheme;
+    final ButtonStyle primaryStyle = FilledButton.styleFrom(
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        minimumSize: const Size(0, 44),
+        fixedSize: const Size.fromHeight(44),
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        backgroundColor: const Color(0xFF0071E3),
+        foregroundColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)));
+    final Widget primary = FilledButton(
+        key: const Key('feedback-capture-use-region'),
+        onPressed: widget.busy ? null : () => widget.onUseRegion(_selection),
+        style: primaryStyle,
+        child: Text(widget.busy ? '正在准备…' : '使用此区域',
+            maxLines: 1, overflow: TextOverflow.ellipsis));
+    final Widget whole = TextButton(
+        key: const Key('feedback-capture-whole-window'),
+        onPressed: widget.busy ? null : widget.onCaptureWhole,
+        style: TextButton.styleFrom(
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            minimumSize: const Size(0, 44),
+            fixedSize: const Size.fromHeight(44),
+            foregroundColor: scheme.onSurfaceVariant,
+            shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10))),
+        child:
+            const Text('整个窗口', maxLines: 1, overflow: TextOverflow.ellipsis));
+    return Material(
+        key: const Key('feedback-capture-toolbar'),
+        color: scheme.surface,
+        elevation: 2,
+        shadowColor: Colors.black.withValues(alpha: .15),
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+            side: BorderSide(color: scheme.outlineVariant)),
+        child: Padding(
+            padding: const EdgeInsets.all(8),
+            child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
+                  if (stacked) ...<Widget>[
+                    whole,
+                    const SizedBox(height: 8),
+                    primary
+                  ] else
+                    Row(children: <Widget>[
+                      Expanded(child: whole),
+                      const SizedBox(width: 8),
+                      Expanded(child: primary)
+                    ]),
+                  if (widget.error != null)
+                    Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Text(widget.error!,
+                            key: const Key('feedback-capture-error'),
+                            style:
+                                TextStyle(color: scheme.error, fontSize: 12))),
+                ])));
+  }
 
   @override
-  Widget build(BuildContext context) {
-    final ThemeData theme = Theme.of(context);
-    return LayoutBuilder(
-      builder: (BuildContext context, BoxConstraints constraints) {
-        _layoutSize = Size(constraints.maxWidth, constraints.maxHeight);
-        final EdgeInsets insets = _safeInsets;
-        if (!_safeAreaClamped) {
-          _safeAreaClamped = true;
-          _selection = clampCaptureSelection(
-            _selection,
-            _viewport,
-            safeInsets: insets,
-          );
-        }
-        final Size viewport = _viewport;
-        final Rect? framing = _framing;
+  Widget build(BuildContext context) => AnimatedBuilder(
+      animation: _entrance,
+      builder: (BuildContext context, Widget? child) {
+        final double ms = _reduceMotion ? 550 : _entrance.value * 550;
+        final double shape = orbSmoothstep(0, 400, ms);
+        // The release begins at the captured visible shape. Its short rebound
+        // uses the first preview's wobble while that real orb fades out. A wake
+        // gesture has no dragged-orb energy to replay.
+        final double wobble = widget.wobble +
+            (widget.orbCenter != null && !_reduceMotion
+                ? orbReleaseWobble(ms / 1000)
+                : 0);
+        final Rect initial = Rect.fromCenter(
+            center: widget.orbCenter ?? _selection.center,
+            width: widget.orbRadius * 2,
+            height: widget.orbRadius * 2);
+        final Rect rect = _framing ?? Rect.lerp(initial, _selection, shape)!;
+        final double hit = _coarse ? 44 : 30;
+        final Rect safe = captureSelectionArea(widget.viewport, _safeInsets);
+        final double width = math.min(320, math.max(0, safe.width - 32));
+        final double textScale =
+            MediaQuery.textScalerOf(context).scale(12) / 12;
+        final bool stacked = width < 280 * math.max(1, textScale);
+        final double totalHeight = math.min(
+            math.max(0, safe.height - 32),
+            16 +
+                (stacked ? 96 : 44) +
+                (widget.error == null ? 0 : 44 * textScale));
+        final Rect close = Rect.fromLTWH(
+            math.max(0, widget.viewport.width - 52),
+            (8 + _safeInsets.top)
+                .clamp(0, math.max(0, widget.viewport.height - 44)),
+            44,
+            44);
+        final Rect tools = _controlsRect(width, totalHeight, hit, close);
+        final double toolbarOpacity = orbSmoothstep(350, 550, ms);
         return Semantics(
-          container: true,
-          label: '局部截图选区，可拖动调整，回车确认，Esc 取消',
-          // 不加外层 Focus(autofocus)：Shortcuts 自带 Focus 节点，事件沿
-          // 焦点链**向上**冒泡——焦点必须落在按钮等后代上，快捷键才生效。
-          child: Shortcuts(
-              shortcuts: <ShortcutActivator, Intent>{
-                const SingleActivator(LogicalKeyboardKey.escape):
-                    const _CancelSelectionIntent(),
-                // 对齐 Web regionFrame：回车确认；空格不映射，既不能落到
-                // 球上重拍整窗，也不直接激活按钮。
-                const SingleActivator(LogicalKeyboardKey.enter):
-                    const _ConfirmSelectionIntent(),
-                const SingleActivator(LogicalKeyboardKey.numpadEnter):
-                    const _ConfirmSelectionIntent(),
-              },
-              child: Actions(
-                actions: <Type, Action<Intent>>{
-                  _CancelSelectionIntent:
-                      CallbackAction<_CancelSelectionIntent>(
-                    onInvoke: (_) {
-                      _cancel();
-                      return null;
-                    },
-                  ),
-                  _ConfirmSelectionIntent:
-                      CallbackAction<_ConfirmSelectionIntent>(
-                    onInvoke: (_) {
-                      widget.onUseRegion(_selection);
-                      return null;
-                    },
-                  ),
-                },
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: <Widget>[
-                    // 焦点落点（等价 Web 的 .fb-region-frame）：无视觉、不参与
-                    // 命中，仅承载键盘焦点；initState 的 post-frame 请求焦点。
-                    Focus(
-                      focusNode: _frameFocus,
-                      includeSemantics: false,
-                      child: const SizedBox.expand(),
-                    ),
-                    // 冻结位图（已遮挡），铺满覆盖层。
-                    RawImage(image: widget.image, fit: BoxFit.fill),
-                    // 选区外压暗遮罩 + 选区边框与控制点（均为覆盖层绘制，不入图）。
-                    CustomPaint(
-                      painter: _SelectionOverlayPainter(
-                        selection: framing ?? _selection,
-                        framing: framing != null,
-                        reduceMotion: _reduceMotion,
+            container: true,
+            label: '局部截图选区，可拖动调整，回车确认，Esc 取消',
+            child: FocusScope(
+                child: Focus(
+                    focusNode: _frameFocus,
+                    onKeyEvent: _onKey,
+                    child: Stack(fit: StackFit.expand, children: <Widget>[
+                      RawImage(image: widget.image, fit: BoxFit.fill),
+                      GestureDetector(
+                        key: const Key('feedback-capture-reframe'),
+                        behavior: HitTestBehavior.opaque,
+                        onPanStart: !_editable
+                            ? null
+                            : (DragStartDetails d) => setState(() {
+                                  _frameStart = d.localPosition;
+                                  _framing = Rect.fromPoints(
+                                      d.localPosition, d.localPosition);
+                                }),
+                        onPanUpdate: !_editable
+                            ? null
+                            : (DragUpdateDetails d) => setState(() {
+                                  _framing = Rect.fromPoints(
+                                      _frameStart!, d.localPosition);
+                                }),
+                        onPanEnd: !_editable
+                            ? null
+                            : (_) => setState(() {
+                                  if (_framing != null) {
+                                    _selection = frameCaptureSelection(
+                                        _framing!.topLeft,
+                                        _framing!.bottomRight,
+                                        widget.viewport,
+                                        safeInsets: _safeInsets);
+                                  }
+                                  _framing = null;
+                                }),
+                        onPanCancel: () => setState(() => _framing = null),
+                        child: CustomPaint(
+                            painter: _SelectionOverlayPainter(
+                                selection: rect,
+                                radius: widget.orbRadius +
+                                    (12 - widget.orbRadius) * shape,
+                                dim: .26 * orbSmoothstep(0, 350, ms),
+                                opacity: orbSmoothstep(50, 300, ms))),
                       ),
-                    ),
-                    // 背景拖动 = 重新框选（opaque：完全遮蔽下方的灵感球 /
-                    // 面板 / 启动入口，选区流程期间不透传任何点击）。
-                    GestureDetector(
-                      key: const Key('feedback-capture-reframe'),
-                      behavior: HitTestBehavior.opaque,
-                      onPanStart: (DragStartDetails d) {
-                        setState(() => _framing = Rect.fromPoints(
-                            d.localPosition, d.localPosition));
-                      },
-                      onPanUpdate: (DragUpdateDetails d) {
-                        final Rect? live = _framing;
-                        if (live == null) return;
-                        setState(() {
-                          _framing =
-                              Rect.fromPoints(live.topLeft, d.localPosition);
-                        });
-                      },
-                      onPanEnd: (DragEndDetails d) {
-                        final Rect? live = _framing;
-                        if (live == null) return;
-                        setState(() => _framing = null);
-                        _setSelection(frameCaptureSelection(
-                          live.topLeft,
-                          live.bottomRight,
-                          viewport,
-                          safeInsets: insets,
-                        ));
-                      },
-                      child: const SizedBox.expand(),
-                    ),
-                    // 选区本体：内部拖动 = 整体移动。
-                    Positioned(
-                      left: (framing ?? _selection).left,
-                      top: (framing ?? _selection).top,
-                      width: (framing ?? _selection).width,
-                      height: (framing ?? _selection).height,
-                      child: framing != null
-                          ? const SizedBox.expand()
-                          : GestureDetector(
+                      if (ms < 260)
+                        Positioned(
+                            left: initial.center.dx - widget.orbRadius * 1.6,
+                            top: initial.center.dy - widget.orbRadius * 1.6,
+                            width: widget.orbRadius * 3.2,
+                            height: widget.orbRadius * 3.2,
+                            child: IgnorePointer(
+                                child: Opacity(
+                                    opacity: 1 - orbSmoothstep(0, 260, ms),
+                                    child: CustomPaint(
+                                        painter: widget.orbShader == null
+                                            ? OrbLiquidOutlinePainter(
+                                                radius: widget.orbRadius,
+                                                direction: widget.direction,
+                                                deform: widget.deform,
+                                                wobble: wobble)
+                                            : OrbLiquidLensPainter(
+                                                image: widget.image,
+                                                shader: widget.orbShader!,
+                                                offset: initial.center -
+                                                    Offset(
+                                                        widget.orbRadius * 1.6,
+                                                        widget.orbRadius * 1.6),
+                                                scale: widget.scale,
+                                                center: initial.center,
+                                                radius: widget.orbRadius,
+                                                direction: widget.direction,
+                                                deform: widget.deform,
+                                                wobble: wobble,
+                                                dark: Theme.of(context)
+                                                        .brightness ==
+                                                    Brightness.dark,
+                                                opacity: 1))))),
+                      Positioned.fromRect(
+                          rect: rect,
+                          child: GestureDetector(
                               key: const Key('feedback-capture-selection'),
                               behavior: HitTestBehavior.opaque,
-                              onPanUpdate: (DragUpdateDetails d) {
-                                _setSelection(moveCaptureSelection(
-                                  _selection,
-                                  d.delta,
-                                  viewport,
-                                  safeInsets: insets,
-                                ));
-                              },
-                              child: const SizedBox.expand(),
-                            ),
-                    ),
-                    // 八个缩放控制点（仅选区定型后显示）。
-                    if (framing == null)
-                      for (final CaptureHandleAnchor anchor
-                          in CaptureHandleAnchor.all)
-                        _buildHandle(anchor, viewport, insets),
-                    // 底部工具栏：确认 / 整窗 / 取消（键盘可达、焦点清晰）。
-                    Positioned(
-                      left: 0,
-                      right: 0,
-                      bottom: 0,
-                      child: SafeArea(
-                        top: false,
-                        child: AnimatedOpacity(
-                          duration: _motion,
-                          opacity: 1,
-                          child: Padding(
-                            padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-                            child: Material(
-                              key: const Key('feedback-capture-toolbar'),
-                              color: theme.colorScheme.surfaceContainerHigh,
-                              elevation: 4,
-                              borderRadius: BorderRadius.circular(16),
-                              child: Padding(
-                                padding: const EdgeInsets.all(12),
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  crossAxisAlignment:
-                                      CrossAxisAlignment.stretch,
-                                  children: <Widget>[
-                                    Text(
-                                      '调整选区后确认；也可以在画面上拖动重新框选',
-                                      key: const Key('feedback-capture-hint'),
-                                      textAlign: TextAlign.center,
-                                      style: theme.textTheme.bodySmall
-                                          ?.copyWith(
-                                              color: theme
-                                                  .colorScheme.onSurfaceVariant),
-                                    ),
-                                    const SizedBox(height: 8),
-                                    Row(
-                                      children: <Widget>[
-                                        Expanded(
-                                          child: FilledButton(
-                                            key: const Key(
-                                                'feedback-capture-use-region'),
-                                            autofocus: true,
-                                            onPressed: () => widget
-                                                .onUseRegion(_selection),
-                                            child: const Text('使用此区域'),
-                                          ),
-                                        ),
-                                        const SizedBox(width: 8),
-                                        Expanded(
-                                          child: OutlinedButton(
-                                            key: const Key(
-                                                'feedback-capture-whole-window'),
-                                            onPressed: widget.onCaptureWhole,
-                                            child: const Text('截取整个窗口'),
-                                          ),
-                                        ),
-                                        const SizedBox(width: 8),
-                                        SizedBox(
-                                          height: 48,
-                                          child: OutlinedButton(
-                                            key: const Key(
-                                                'feedback-capture-cancel'),
-                                            onPressed: _cancel,
-                                            child: const Text('取消'),
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          );
-      },
-    );
-  }
+                              onPanUpdate: !_editable
+                                  ? null
+                                  : (DragUpdateDetails d) => setState(() {
+                                        _selection = moveCaptureSelection(
+                                            _selection,
+                                            d.delta,
+                                            widget.viewport,
+                                            safeInsets: _safeInsets);
+                                      }),
+                              child: const SizedBox.expand())),
+                      if (_framing == null && _editable)
+                        for (final CaptureHandleAnchor anchor
+                            in const <CaptureHandleAnchor>[
+                          CaptureHandleAnchor.topLeft,
+                          CaptureHandleAnchor.topRight,
+                          CaptureHandleAnchor.bottomLeft,
+                          CaptureHandleAnchor.bottomRight
+                        ])
+                          _buildHandle(anchor, hit),
+                      Positioned.fromRect(
+                          rect: tools,
+                          child: IgnorePointer(
+                              ignoring: !_editable || toolbarOpacity == 0,
+                              child: Opacity(
+                                  opacity: toolbarOpacity,
+                                  child: SingleChildScrollView(
+                                      key: const Key('feedback-capture-tools'),
+                                      child: _buildTools(stacked ||
+                                          tools.width <
+                                              280 * math.max(1, textScale)))))),
+                      Positioned.fromRect(
+                          rect: close,
+                          child: Opacity(
+                              opacity: orbSmoothstep(120, 400, ms),
+                              child: SizedBox(
+                                  width: 44,
+                                  height: 44,
+                                  child: Material(
+                                      color:
+                                          Theme.of(context).colorScheme.surface,
+                                      shape: const CircleBorder(),
+                                      child: IconButton(
+                                          key: const Key(
+                                              'feedback-capture-cancel'),
+                                          tooltip: '取消截图选区',
+                                          onPressed: widget.onCancel,
+                                          icon: Icon(Icons.close,
+                                              color: Theme.of(context)
+                                                  .colorScheme
+                                                  .onSurface)))))),
+                    ]))));
+      });
 
-  Widget _buildHandle(
-    CaptureHandleAnchor anchor,
-    Size viewport,
-    EdgeInsets insets,
-  ) {
-    // 视觉 12dp、命中区 32dp（≥48dp 触控由相邻区域共享满足握手要求的
-    // 最小移动精度；主操作按钮均为 48dp）。
-    const double visual = 12;
-    const double hit = 32;
-    final Rect sel = _selection;
-    final double cx = anchor.dx < 0
-        ? sel.left
-        : anchor.dx > 0
-            ? sel.right
-            : sel.center.dx;
-    final double cy = anchor.dy < 0
-        ? sel.top
-        : anchor.dy > 0
-            ? sel.bottom
-            : sel.center.dy;
+  Widget _buildHandle(CaptureHandleAnchor anchor, double hit) {
+    final double x = anchor.dx < 0 ? _selection.left : _selection.right;
+    final double y = anchor.dy < 0 ? _selection.top : _selection.bottom;
     return Positioned(
-      left: cx - hit / 2,
-      top: cy - hit / 2,
-      width: hit,
-      height: hit,
-      child: GestureDetector(
-        key: Key(
-            'feedback-capture-handle-${anchor.dx + 1}-${anchor.dy + 1}'),
-        behavior: HitTestBehavior.opaque,
-        onPanUpdate: (DragUpdateDetails d) {
-          _setSelection(resizeCaptureSelection(
-            _selection,
-            anchor,
-            d.delta,
-            viewport,
-            safeInsets: insets,
-          ));
-        },
-        child: Center(
-          child: Container(
-            width: visual,
-            height: visual,
-            decoration: BoxDecoration(
-              color: Colors.white,
-              shape: anchor.dx == 0 || anchor.dy == 0
-                  ? BoxShape.rectangle
-                  : BoxShape.circle,
-              border: Border.all(color: Colors.black26, width: 0.6),
-              borderRadius: anchor.dx == 0 || anchor.dy == 0
-                  ? BorderRadius.circular(2)
-                  : null,
-            ),
-          ),
-        ),
-      ),
-    );
+        left: x - hit / 2,
+        top: y - hit / 2,
+        width: hit,
+        height: hit,
+        child: Semantics(
+            label:
+                '调整选区${anchor.dy < 0 ? '上' : '下'}${anchor.dx < 0 ? '左' : '右'}角',
+            child: GestureDetector(
+                key: Key(
+                    'feedback-capture-handle-${anchor.dx + 1}-${anchor.dy + 1}'),
+                behavior: HitTestBehavior.opaque,
+                onPanUpdate: (DragUpdateDetails d) => setState(() {
+                      _selection = resizeCaptureSelection(
+                          _selection, anchor, d.delta, widget.viewport,
+                          safeInsets: _safeInsets);
+                    }),
+                child: Center(
+                    child: Container(
+                        width: 10,
+                        height: 10,
+                        decoration: BoxDecoration(
+                            border: Border(
+                                top: anchor.dy < 0
+                                    ? const BorderSide(
+                                        color: Colors.white, width: 2)
+                                    : BorderSide.none,
+                                bottom: anchor.dy > 0
+                                    ? const BorderSide(
+                                        color: Colors.white, width: 2)
+                                    : BorderSide.none,
+                                left: anchor.dx < 0
+                                    ? const BorderSide(
+                                        color: Colors.white, width: 2)
+                                    : BorderSide.none,
+                                right: anchor.dx > 0
+                                    ? const BorderSide(
+                                        color: Colors.white, width: 2)
+                                    : BorderSide.none)))))));
   }
 }
 
-/// 取消选区意图（Esc）。
-class _CancelSelectionIntent extends Intent {
-  const _CancelSelectionIntent();
-}
-
-/// 确认选区意图（Enter）：与工具栏「使用此区域」同一动作。
-class _ConfirmSelectionIntent extends Intent {
-  const _ConfirmSelectionIntent();
-}
-
-/// 选区覆盖层绘制：选区外压暗遮罩 + 白色边框（覆盖层元素，不入图）。
 class _SelectionOverlayPainter extends CustomPainter {
-  _SelectionOverlayPainter({
-    required this.selection,
-    required this.framing,
-    required this.reduceMotion,
-  });
-
+  const _SelectionOverlayPainter(
+      {required this.selection,
+      required this.radius,
+      required this.dim,
+      required this.opacity});
   final Rect selection;
-  final bool framing;
-  final bool reduceMotion;
-
+  final double radius;
+  final double dim;
+  final double opacity;
   @override
   void paint(Canvas canvas, Size size) {
-    // 选区外整体压暗（含安全区），突出当前选区。
+    final RRect shape =
+        RRect.fromRectAndRadius(selection, Radius.circular(radius));
     canvas.drawPath(
-      Path.combine(
-        PathOperation.difference,
-        Path()..addRect(Offset.zero & size),
-        Path()..addRect(selection),
-      ),
-      Paint()..color = Colors.black.withValues(alpha: 0.45),
-    );
-    final bool animate = !reduceMotion;
-    canvas.drawRect(
-      selection,
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = animate ? 2.4 : 2
-        ..color = framing ? const Color(0xFF0071E3) : Colors.white,
-    );
-    // 三分辅助线（仅覆盖层显示，绝不入图）。
-    final Paint grid = Paint()
-      ..strokeWidth = 0.7
-      ..color = Colors.white.withValues(alpha: 0.35);
-    for (int i = 1; i <= 2; i++) {
-      final double dx = selection.left + selection.width * i / 3;
-      final double dy = selection.top + selection.height * i / 3;
-      canvas.drawLine(
-          Offset(dx, selection.top), Offset(dx, selection.bottom), grid);
-      canvas.drawLine(
-          Offset(selection.left, dy), Offset(selection.right, dy), grid);
-    }
+        Path.combine(PathOperation.difference,
+            Path()..addRect(Offset.zero & size), Path()..addRRect(shape)),
+        Paint()..color = const Color(0xFF635D92).withValues(alpha: dim));
+    canvas.drawRRect(
+        shape,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1
+          ..color = Colors.white.withValues(alpha: .44 * opacity));
   }
 
   @override
-  bool shouldRepaint(_SelectionOverlayPainter oldDelegate) => true;
+  bool shouldRepaint(_SelectionOverlayPainter old) => true;
 }

@@ -105,8 +105,7 @@ void main() {
 
   testWidgets('宽屏为侧边抽屉（440px / 最大高 min(720, 视口高−32)）+ 遮罩；随 side 停靠',
       (tester) async {
-    final controller =
-        await pumpHost(tester, surface: const Size(1200, 800));
+    final controller = await pumpHost(tester, surface: const Size(1200, 800));
     controller.open();
     await tester.pump();
     await tester.pump();
@@ -149,7 +148,8 @@ void main() {
     await tester.pump();
     panelRect = tester.getRect(find.byType(FeedbackPanel));
     expect(panelRect.width, 440);
-    expect(panelRect.height, moreOrLessEquals(kFeedbackPanelMaxHeight, epsilon: 1),
+    expect(
+        panelRect.height, moreOrLessEquals(kFeedbackPanelMaxHeight, epsilon: 1),
         reason: '最大高 720 封顶');
     expect(panelRect.top, moreOrLessEquals(90, epsilon: 1));
 
@@ -217,7 +217,8 @@ void main() {
     controller.open();
     await tester.pump();
     expect(
-        tester.widget<TextField>(find.byKey(const Key('feedback-input')))
+        tester
+            .widget<TextField>(find.byKey(const Key('feedback-input')))
             .controller!
             .text,
         '未写完的草稿');
@@ -260,8 +261,7 @@ void main() {
     await tester.pump(const Duration(seconds: 10));
   });
 
-  testWidgets('灵感球拖动超过 8dp 进入选区流程：冻结画面 → 调整选区 → 确认后交付截图',
-      (tester) async {
+  testWidgets('灵感球拖动超过 8dp 进入选区流程：冻结画面 → 调整选区 → 确认后交付截图', (tester) async {
     final controller = await pumpHost(
       tester,
       surface: const Size(800, 600),
@@ -298,8 +298,7 @@ void main() {
         await Future<void>.delayed(const Duration(milliseconds: 10));
       });
     }
-    expect(
-        find.byKey(const Key('feedback-capture-selection-overlay')),
+    expect(find.byKey(const Key('feedback-capture-selection-overlay')),
         findsOneWidget,
         reason: 'T1：拖动松手后必须进入选区流程，而不是直接写草稿');
     expect(controller.isOpen, isFalse, reason: '确认前不打开面板');
@@ -307,10 +306,14 @@ void main() {
     await tester.pump();
 
     // 确认「使用此区域」→ 打开面板并只交付选区截图。
+    await tester.pump(const Duration(milliseconds: 550));
     await tester.tap(find.byKey(const Key('feedback-capture-use-region')));
     for (int i = 0;
         i < 60 &&
-            find.byKey(const Key('feedback-screenshot-wrap')).evaluate().isEmpty;
+            find
+                .byKey(const Key('feedback-screenshot-wrap'))
+                .evaluate()
+                .isEmpty;
         i++) {
       await tester.pump(const Duration(milliseconds: 16));
       await tester.runAsync(() async {
@@ -325,6 +328,11 @@ void main() {
         findsNothing,
         reason: '确认后选区覆盖层收起');
 
+    // Wait for the real attachment handoff to unlock the existing form.
+    await tester.pump(); // layout and measure the real thumbnail
+    await tester.pump(); // start the handoff clock after measurement
+    await tester.pump(const Duration(milliseconds: 1500));
+    await tester.pump();
     // 点击移除截图按钮
     await tester.tap(find.byKey(const Key('feedback-remove-screenshot-btn')));
     await tester.pump();
@@ -353,8 +361,9 @@ void main() {
         FeedbackCaptureScope.maybeOf(maskContext);
     expect(scope, isNotNull);
     expect(scope!.records.length, 1);
-    expect(FeedbackCaptureScope.maybeOf(tester.element(
-        find.widgetWithText(FeedbackCaptureMask, '敏感内容'))),
+    expect(
+        FeedbackCaptureScope.maybeOf(
+            tester.element(find.widgetWithText(FeedbackCaptureMask, '敏感内容'))),
         same(scope));
 
     await tester.pumpWidget(const SizedBox.shrink());

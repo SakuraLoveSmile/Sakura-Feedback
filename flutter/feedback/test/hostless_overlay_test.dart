@@ -7,12 +7,12 @@
 // 2. 点击灵感球完成捕获后面板必须挂载并可交互；关闭后再次打开仍能挂载。
 // 3. 拖拽进入选区覆盖层同样能重建（覆盖层与面板同在这棵子树上），确认后
 //    正常交付截图。
-// 4. 灵感球光晕是常驻循环动画：测试环境（FLUTTER_TEST）不得启动该 Ticker，
-//    否则会挂起 `pumpAndSettle`（真实应用动画不受影响）。
+// 4. 停靠态不启动常驻 Ticker，pumpAndSettle 可完成。
 
 import 'package:feedback_widget/feedback_widget.dart';
 import 'package:feedback_widget/src/test_env.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'capture_test_utils.dart';
@@ -50,15 +50,12 @@ Future<FeedbackController> pumpHostlessHost(
 
 void main() {
   test('测试环境探测：flutter test 下 kFeedbackInFlutterTest 为 true', () {
-    expect(
-        kFeedbackInFlutterTest,
-        isTrue,
+    expect(kFeedbackInFlutterTest, isTrue,
         reason: 'flutter 工具链注入 FLUTTER_TEST=1；'
             '该值为 false 说明环境探测失效，光晕 Ticker 会挂起 pumpAndSettle');
   });
 
-  testWidgets('无 Overlay 祖先：灵感球可见时 pumpAndSettle 不被光晕常驻动画挂起',
-      (tester) async {
+  testWidgets('无 Overlay 祖先：灵感球可见时 pumpAndSettle 不被光晕常驻动画挂起', (tester) async {
     await pumpHostlessHost(tester); // 面板未打开 → 灵感球在树上
     // 旧实现光晕 repeat() 空转时，这里会直接超时失败。
     await tester.pumpAndSettle();
@@ -68,8 +65,7 @@ void main() {
     await tester.pump(const Duration(seconds: 2));
   });
 
-  testWidgets('无 Overlay 祖先：点击灵感球完成捕获后面板挂载可交互；关闭后重开仍挂载',
-      (tester) async {
+  testWidgets('无 Overlay 祖先：点击灵感球完成捕获后面板挂载可交互；关闭后重开仍挂载', (tester) async {
     final FeedbackController controller = await pumpHostlessHost(tester);
 
     // 点击 = viewport 模式先截图后开面板（整棵树必须随 setState 重建出来）。
@@ -115,13 +111,106 @@ void main() {
     await tester.pump(const Duration(seconds: 2));
   });
 
-  testWidgets('无 Overlay 祖先：拖拽进入选区覆盖层可重建，确认后交付截图并继续交互',
-      (tester) async {
+  testWidgets('无 MaterialApp 祖先：退格删除字符、选区与完整 emoji', (tester) async {
+    final FeedbackController controller = await pumpHostlessHost(tester);
+    controller.open();
+    final Finder input = find.byKey(const Key('feedback-input'));
+    await pumpUntil(tester, () => input.evaluate().isNotEmpty);
+    await tester.enterText(input, '测试AB');
+    await tester.sendKeyEvent(LogicalKeyboardKey.backspace);
+    await tester.pump();
+    final TextEditingController text =
+        tester.widget<TextField>(input).controller!;
+    expect(text.text, '测试A', reason: '真实 DEL 按键必须删除光标前一个字符');
+
+    text.value = const TextEditingValue(
+      text: '测试AB',
+      selection: TextSelection(baseOffset: 2, extentOffset: 4),
+    );
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.backspace);
+    await tester.pump();
+    expect(text.text, '测试', reason: '有选区时删除整个选区');
+
+    await tester.enterText(input, '测试👨‍👩‍👧‍👦');
+    await tester.sendKeyEvent(LogicalKeyboardKey.backspace);
+    await tester.pump();
+    expect(text.text, '测试', reason: '退格不能把组合 emoji 留成半个字符');
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pump();
+    expect(controller.isOpen, isFalse);
+    controller.open();
+    await pumpUntil(tester, () => input.evaluate().isNotEmpty);
+    expect(tester.widget<TextField>(input).controller!.text, '测试',
+        reason: '编辑后的草稿在关闭再打开后仍保留');
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump(const Duration(seconds: 2));
+  },
+      variant: const TargetPlatformVariant(<TargetPlatform>{
+        TargetPlatform.android,
+        TargetPlatform.macOS,
+        TargetPlatform.windows,
+        TargetPlatform.linux,
+      }));
+
+  testWidgets('无 MaterialApp 祖先：iOS 退格保留原生输入法编辑路径', (tester) async {
+    final FeedbackController controller = await pumpHostlessHost(tester);
+    controller.open();
+    final Finder input = find.byKey(const Key('feedback-input'));
+    await pumpUntil(tester, () => input.evaluate().isNotEmpty);
+    await tester.enterText(input, '测试AB');
+    final TextEditingController text =
+        tester.widget<TextField>(input).controller!;
+    // Flutter 在 iOS 将退格交回 IME，以免组合输入被框架和输入法重复删除。
+    expect(await tester.sendKeyEvent(LogicalKeyboardKey.backspace), isFalse);
+    expect(text.text, '测试AB');
+    tester.testTextInput.updateEditingValue(const TextEditingValue(
+      text: '测试A',
+      selection: TextSelection.collapsed(offset: 3),
+    ));
+    await tester.pump();
+    expect(text.text, '测试A');
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump(const Duration(seconds: 2));
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+  testWidgets('已有 MaterialApp 祖先：保留宿主自定义退格快捷键', (tester) async {
+    final FeedbackController controller = FeedbackController();
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(MaterialApp(
+      home: Shortcuts(
+        shortcuts: const <ShortcutActivator, Intent>{
+          SingleActivator(LogicalKeyboardKey.backspace): DoNothingIntent(),
+        },
+        child: FeedbackWidget(
+          config: FeedbackConfig('https://svc.test', 'com.example.test'),
+          controller: controller,
+          tokenStore: MemoryTokenStore('tok'),
+          serverPrefStore: MemoryServerPrefStore(),
+          httpClient: captureMockClient(),
+          child: const Scaffold(body: SizedBox()),
+        ),
+      ),
+    ));
+    controller.open();
+    final Finder input = find.byKey(const Key('feedback-input'));
+    await pumpUntil(tester, () => input.evaluate().isNotEmpty);
+    await tester.enterText(input, '保留宿主快捷键');
+    await tester.sendKeyEvent(LogicalKeyboardKey.backspace);
+    await tester.pump();
+    expect(tester.widget<TextField>(input).controller!.text, '保留宿主快捷键',
+        reason: '默认文本编辑键位已有祖先时，不得覆盖宿主显式定制');
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump(const Duration(seconds: 2));
+  });
+
+  testWidgets('无 Overlay 祖先：拖拽进入选区覆盖层可重建，确认后交付截图并继续交互', (tester) async {
     final FeedbackController controller = await pumpHostlessHost(tester);
 
     // 多段位移拖拽（>8dp）→ 松手进入选区流程。
-    final TestGesture gesture = await tester.startGesture(
-        tester.getCenter(find.byKey(const Key('feedback-orb'))));
+    final TestGesture gesture = await tester
+        .startGesture(tester.getCenter(find.byKey(const Key('feedback-orb'))));
     for (int i = 0; i < 3; i++) {
       await gesture.moveBy(const Offset(-40, -40));
       await tester.pump(const Duration(milliseconds: 16));
@@ -137,11 +226,12 @@ void main() {
             .byKey(const Key('feedback-capture-selection-overlay'))
             .evaluate()
             .isNotEmpty);
-    expect(
-        find.byKey(const Key('feedback-capture-selection-overlay')),
+    expect(find.byKey(const Key('feedback-capture-selection-overlay')),
         findsOneWidget);
     expect(controller.isOpen, isFalse, reason: '确认前面板未打开');
 
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 550));
     await tester.tap(find.byKey(const Key('feedback-capture-use-region')));
     await pumpUntil(tester, () {
       if (find.byType(FeedbackPanel).evaluate().isEmpty) return false;
@@ -151,14 +241,15 @@ void main() {
     });
     await tester.pump();
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 1500));
+    await tester.pump();
     expect(find.byKey(const Key('feedback-screenshot-wrap')), findsOneWidget,
         reason: '确认后覆盖层收起并交付选区截图');
     expect(find.byKey(const Key('feedback-capture-selection-overlay')),
         findsNothing);
 
     // 交付后子树仍可继续重建（交互可用）。
-    await tester.enterText(
-        find.byKey(const Key('feedback-input')), '选区交付后的草稿');
+    await tester.enterText(find.byKey(const Key('feedback-input')), '选区交付后的草稿');
     await tester.pump();
     expect(
         tester
