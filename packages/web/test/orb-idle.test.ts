@@ -3,8 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import '../src/index';
 import { OrbLens } from '../src/orb-lens';
 import { orbIdlePreferenceKey, parseOrbIdlePreference } from '../src/orb-idle';
+import { STYLES } from '../src/styles';
 import { APP_ID, cleanup, mount as mountBase, type Mounted } from './helpers';
-import { wakePreferenceKey } from '../src/wake-gestures';
+import { WAKE_GESTURES, wakePreferenceKey, type WakeGestureId } from '../src/wake-gestures';
 import { blobToPng, createState, encodePng, stubCreateElementCanvas } from './pixel-fixture';
 
 vi.mock('../src/capture',async original => ({...await original<typeof import('../src/capture')>(),captureViewport:vi.fn(async()=>{throw new Error('fixture: no safe texture');})}));
@@ -31,6 +32,19 @@ function requireVisibleFocusTarget(m:Mounted) {
 }
 // happy-dom's observer uses its Window's real task queue, separate from fake idle time.
 async function settle() { await nextTask(0); await vi.advanceTimersByTimeAsync(0); }
+
+// 唤醒手势模拟（与 wake-flow.test.ts 相同的 TouchEvent helper）。
+const idleHidden = (m:Mounted) => m.orb.classList.contains('is-idle-hidden');
+let host: HTMLDivElement;
+const enableGestures = (ids:readonly WakeGestureId[] = WAKE_GESTURES.map(g=>g.id)) =>
+  localStorage.setItem(wakePreferenceKey(APP_ID),JSON.stringify({version:1,enabled:ids}));
+const points = (y=200) => [new Touch({identifier:1,target:host,clientX:120,clientY:y}),new Touch({identifier:2,target:host,clientX:160,clientY:y})];
+function touch(type:string,active:Touch[],changed=active,target:EventTarget=host) {
+  const event=new TouchEvent(type,{bubbles:true,cancelable:true,composed:true,touches:active,changedTouches:changed}); target.dispatchEvent(event); return event;
+}
+function holdStart() { touch('touchstart',points()); }
+function release() { touch('touchend',[],points()); }
+function hold() { holdStart(); vi.advanceTimersByTime(700); release(); }
 
 beforeEach(()=>{
   vi.useFakeTimers(); vi.setSystemTime(0);
@@ -404,13 +418,18 @@ describe('R7 finite continuous glass morph',()=>{
 });
 
 /**
- * 0.8.2：第三种待机样式「隐藏」。
+ * 0.8.5：第三种待机样式「隐藏」只隐藏“待机（收起）状态”。
  * - parser 接受 hidden，旧/非法值仍回退 handle（旧组件读到 hidden 也按 handle 安全降级）；
- * - 设置里出现第三张单选卡，选中后不显示任何入口（复用 .fb-orb.is-unavailable）；
- * - 隐藏后仍可通过宿主入口 open() 打开面板，并在设置里改回 handle / edge 恢复显示；
+ * - 设置里出现第三张单选卡，脚注说明可用唤醒手势或宿主入口恢复；
+ * - 隐藏生效后：完整球初始仍显示，闲置5秒才收起并隐藏（.fb-orb.is-idle-hidden → display:none），
+ *   兄弟 canvas/outline 同步收起；已开启的唤醒手势可唤醒完整球，再闲置5秒重新隐藏；
+ * - 未开启手势时保持隐藏，但宿主 open() 仍可打开面板并改回 handle / edge；
  * - 偏好按 appId 保存，切走再切回、断开重连都保持。
  */
 describe('third idle style: hidden',()=>{
+  // 手势起点在宿主页面（不是组件自身 UI）；唤醒手势监听 document。
+  beforeEach(()=>{ host=document.createElement('div'); host.textContent='宿主页面'; document.body.append(host); });
+
   it('parser accepts hidden while invalid and legacy values still fall back to handle',()=>{
     expect(parseOrbIdlePreference('{"version":1,"style":"hidden"}')).toBe('hidden');
     expect(parseOrbIdlePreference('{"version":1,"style":"handle"}')).toBe('handle');
@@ -420,93 +439,231 @@ describe('third idle style: hidden',()=>{
     }
   });
 
-  it('settings expose three radio cards with the third one explaining how to restore the entry',()=>{
+  it('settings expose three radio cards and explain the new hidden semantics',()=>{
     const m=mount(); settings(m);
     const values=[...m.root.querySelectorAll<HTMLInputElement>('[data-orb-idle]')].map(input=>input.dataset.orbIdle);
     expect(values).toEqual(['handle','edge','hidden']);
     const titles=[...m.root.querySelectorAll<HTMLElement>('.fb-orb-idle-option')].map(option=>option.textContent);
     expect(titles).toEqual(['小把手','球体贴边','隐藏']);
     const footnote=m.root.querySelector<HTMLElement>('.fb-orb-idle-settings .fb-footnote')!;
-    expect(footnote.textContent).toContain('隐藏');
+    expect(footnote.textContent).toContain('闲置5秒后收起');
+    expect(footnote.textContent).toContain('待机不显示灵感球');
+    expect(footnote.textContent).toContain('唤醒手势');
     expect(footnote.textContent).toContain('宿主入口');
     expect(footnote.textContent).toContain('改回');
   });
 
-  it('choosing hidden persists the preference, hides every entry form, and open() still opens the panel to switch back',()=>{
-    const m=mount(); settings(m);
-    radio(m,'hidden').click();
-    expect(JSON.parse(localStorage.getItem(orbIdlePreferenceKey(APP_ID))!)).toEqual({version:1,style:'hidden'});
-    // 关闭面板，排除 openState 对入口可用性的影响，单独验证「隐藏」偏好本身
-    m.widget.close();
+  it('a stored hidden preference shows the full ball first, hides it after 5 seconds, and the wake gesture restores it',async()=>{
+    enableGestures();
+    localStorage.setItem(orbIdlePreferenceKey(APP_ID),'{"version":1,"style":"hidden"}');
+    const m=mount({'capture-mode':'viewport'});
+    const outline=m.root.querySelector<SVGSVGElement>('svg.fb-orb-lens')!;
+    const canvas=m.root.querySelector<HTMLCanvasElement>('canvas.fb-orb-lens')!;
     expect(m.orb.dataset.idleStyle).toBe('hidden');
-    // 复用既有不可用路径：is-unavailable 由样式表 display:none !important 整棵隐藏
-    expect(m.orb.classList.contains('is-unavailable')).toBe(true);
-    expect(getComputedStyle(m.orb).display).toBe('none');
-    expect(m.root.querySelector('.fb-launcher-badge')).toBeNull();
-    // 收起 / 待机计时不会再驱动这个入口
-    vi.advanceTimersByTime(5000);
-    expect(collapsed(m)).toBe(false);
-    expect(getComputedStyle(m.orb).display).toBe('none');
+    expect(collapsed(m)).toBe(false); expect(idleHidden(m)).toBe(false);
+    expect(getComputedStyle(m.orb).display).not.toBe('none');
 
-    // 隐藏后仍可由宿主入口打开反馈面板，并在设置里改回「小把手」恢复显示
+    vi.advanceTimersByTime(4999); expect(idleHidden(m)).toBe(false);
+    vi.advanceTimersByTime(1);
+    expect(collapsed(m)).toBe(true); expect(idleHidden(m)).toBe(true);
+    expect(getComputedStyle(m.orb).display).toBe('none');
+    // 待机隐藏时兄弟采样层必须一起收起，不能留下透明可绘制/可命中的层
+    expect(canvas.hidden).toBe(true); expect(outline.style.display).toBe('none');
+    expect(outline.classList.contains('is-fallback-visible')).toBe(false);
+    expect(m.orb.getAttribute('aria-label')).toBe('唤醒灵感球');
+
+    // 双指长按700ms并松手：隐藏待机不是「入口不可用」，手势必须能唤醒完整球
+    const provider=vi.fn(()=>new Promise<never>(()=>{})); m.widget.captureProvider=provider;
+    hold(); await settle();
+    expect(provider).not.toHaveBeenCalled();
+    expect(m.panel.classList.contains('is-open')).toBe(false);
+    expect(idleHidden(m)).toBe(false); expect(collapsed(m)).toBe(false);
+    expect(getComputedStyle(m.orb).display).not.toBe('none');
+    expect(outline.style.display).toBe('');
+    expect(m.orb.getAttribute('aria-label')).toBe('灵感球：拖动指出问题或点击反馈');
+    m.orb.focus(); expect(m.root.activeElement).toBe(m.orb);
+
+    // 唤醒后按正常的5秒闲置重新收起并隐藏
+    vi.advanceTimersByTime(4999); expect(idleHidden(m)).toBe(false);
+    vi.advanceTimersByTime(1);
+    expect(idleHidden(m)).toBe(true);
+    expect(getComputedStyle(m.orb).display).toBe('none');
+  });
+
+  it('a gesture-woken ball behaves like the normal full ball: held drag pauses idle and click starts capture',async()=>{
+    enableGestures();
+    localStorage.setItem(orbIdlePreferenceKey(APP_ID),'{"version":1,"style":"hidden"}');
+    const m=mount({'capture-mode':'viewport'});
+    const provider=vi.fn(()=>new Promise<never>(()=>{})); m.widget.captureProvider=provider;
+    vi.advanceTimersByTime(5000); expect(idleHidden(m)).toBe(true);
+
+    hold(); await settle();
+    expect(idleHidden(m)).toBe(false);
+    expect(m.orb.classList.contains('is-dragging')).toBe(false);
+    pointer(m,'pointerdown'); pointer(m,'pointermove',200,200);
+    expect(m.orb.classList.contains('is-dragging')).toBe(true);
+    // 拖拽期间不会误隐藏
+    vi.advanceTimersByTime(5000); expect(idleHidden(m)).toBe(false);
+    pointer(m,'pointercancel',200,200); await settle();
+    expect(m.orb.classList.contains('is-dragging')).toBe(false); expect(idleHidden(m)).toBe(false);
+    // 取消拖拽后重新计满5秒闲置才隐藏
+    vi.advanceTimersByTime(4999); expect(idleHidden(m)).toBe(false);
+    vi.advanceTimersByTime(1); expect(idleHidden(m)).toBe(true);
+
+    // 再次唤醒后完整球可点击：单击开始截图（不再被隐藏态挡住）
+    hold(); await settle();
+    expect(idleHidden(m)).toBe(false);
+    pointer(m,'pointerdown'); pointer(m,'pointerup'); await settle();
+    expect(provider).toHaveBeenCalledTimes(1);
+    expect(idleHidden(m)).toBe(false);
+  });
+
+  it('without wake gestures the hidden standby stays hidden, while the host entry can open and switch styles back',async()=>{
+    const m=mount({'capture-mode':'viewport'});
+    settings(m); radio(m,'hidden').click();
+    expect(JSON.parse(localStorage.getItem(orbIdlePreferenceKey(APP_ID))!)).toEqual({version:1,style:'hidden'});
+    m.widget.close(); await settle();
+    vi.advanceTimersByTime(5000);
+    expect(idleHidden(m)).toBe(true);
+    // 未启用任何手势：双指长按不应唤醒，待机保持隐藏
+    hold(); await settle();
+    expect(idleHidden(m)).toBe(true); expect(m.panel.classList.contains('is-open')).toBe(false);
+
+    // 隐藏待机时入口 display:none，但宿主入口 open() 仍可打开面板
     m.widget.open();
     expect(m.panel.classList.contains('is-open')).toBe(true);
+    expect(m.orb.classList.contains('is-unavailable')).toBe(true); // 面板打开仍是既有的入口不可用条件
+    expect(idleHidden(m)).toBe(false); // 面板打开期间不叠加待机隐藏
     m.root.querySelector<HTMLButtonElement>('.fb-settings-btn')!.click();
     expect(radio(m,'hidden').checked).toBe(true);
-    radio(m,'handle').click();
-    expect(m.orb.dataset.idleStyle).toBe('handle');
-    expect(JSON.parse(localStorage.getItem(orbIdlePreferenceKey(APP_ID))!)).toEqual({version:1,style:'handle'});
-    // 面板打开期间入口本就不可用（openState）；关闭后按新偏好恢复显示
-    m.widget.close();
+
+    // 改回「球体贴边」：关闭面板后先显示完整球，5秒闲置后是贴边待机而不是隐藏
+    radio(m,'edge').click();
+    expect(JSON.parse(localStorage.getItem(orbIdlePreferenceKey(APP_ID))!)).toEqual({version:1,style:'edge'});
+    m.widget.close(); await settle();
     expect(m.orb.classList.contains('is-unavailable')).toBe(false);
+    vi.advanceTimersByTime(4999); expect(collapsed(m)).toBe(false); expect(idleHidden(m)).toBe(false);
+    vi.advanceTimersByTime(1);
+    expect(collapsed(m)).toBe(true); expect(idleHidden(m)).toBe(false);
+    expect(m.orb.dataset.idleStyle).toBe('edge');
     expect(getComputedStyle(m.orb).display).not.toBe('none');
 
-    // 再隐藏一次后改回「球体贴边」同样立即恢复（两种旧样式都可作为恢复入口）
-    m.widget.open();
-    m.root.querySelector<HTMLButtonElement>('.fb-settings-btn')!.click();
-    radio(m,'hidden').click();
-    m.widget.close();
-    expect(m.orb.classList.contains('is-unavailable')).toBe(true);
-    m.widget.open();
-    m.root.querySelector<HTMLButtonElement>('.fb-settings-btn')!.click();
-    radio(m,'edge').click();
-    m.widget.close();
-    expect(m.orb.classList.contains('is-unavailable')).toBe(false);
+    // 再切回「隐藏」：同样在闲置后收起隐藏
+    m.widget.open(); m.root.querySelector<HTMLButtonElement>('.fb-settings-btn')!.click(); radio(m,'hidden').click();
+    m.widget.close(); await settle();
+    vi.advanceTimersByTime(5000); expect(idleHidden(m)).toBe(true);
+    expect(getComputedStyle(m.orb).display).toBe('none');
+
+    // 改回「小把手」同样恢复简短待机，而不是继续隐藏
+    m.widget.open(); m.root.querySelector<HTMLButtonElement>('.fb-settings-btn')!.click(); radio(m,'handle').click();
+    m.widget.close(); await settle();
+    vi.advanceTimersByTime(5000);
+    expect(collapsed(m)).toBe(true); expect(idleHidden(m)).toBe(false);
+    expect(m.orb.dataset.idleStyle).toBe('handle');
     expect(getComputedStyle(m.orb).display).not.toBe('none');
-    expect(JSON.parse(localStorage.getItem(orbIdlePreferenceKey(APP_ID))!)).toEqual({version:1,style:'edge'});
+    expect(JSON.parse(localStorage.getItem(orbIdlePreferenceKey(APP_ID))!)).toEqual({version:1,style:'handle'});
   });
 
-  it('hidden preference survives reconnect and is scoped per appId',()=>{
+  it('an open panel never adds the idle-hidden state and does not allow a stray gesture wake',async()=>{
+    enableGestures();
+    localStorage.setItem(orbIdlePreferenceKey(APP_ID),'{"version":1,"style":"hidden"}');
+    const m=mount({'capture-mode':'viewport'});
+    vi.advanceTimersByTime(5000); expect(idleHidden(m)).toBe(true);
+    m.widget.open(); await settle();
+    expect(m.panel.classList.contains('is-open')).toBe(true);
+    // 面板打开时手势不会唤醒，也不会叠加待机隐藏
+    hold(); await settle();
+    expect(m.panel.classList.contains('is-open')).toBe(true);
+    expect(idleHidden(m)).toBe(false); expect(m.orb.classList.contains('is-collapsed')).toBe(false);
+    vi.advanceTimersByTime(9000); expect(idleHidden(m)).toBe(false);
+    // 关闭面板后恢复正常的5秒闲置 → 待机隐藏
+    m.widget.close(); await settle();
+    expect(m.orb.classList.contains('is-unavailable')).toBe(false);
+    vi.advanceTimersByTime(5000); expect(idleHidden(m)).toBe(true);
+  });
+
+  it('hidden preference survives reconnect and is scoped per appId',async()=>{
     const m=mount(); settings(m); radio(m,'hidden').click();
-    m.widget.close();
-    expect(m.orb.classList.contains('is-unavailable')).toBe(true);
+    expect(JSON.parse(localStorage.getItem(orbIdlePreferenceKey(APP_ID))!)).toEqual({version:1,style:'hidden'});
+    m.widget.close(); await settle();
+    expect(m.orb.dataset.idleStyle).toBe('hidden');
+    vi.advanceTimersByTime(5000); expect(idleHidden(m)).toBe(true);
 
-    m.widget.remove(); document.body.append(m.widget);
+    m.widget.remove(); document.body.append(m.widget); await settle();
     expect(radio(m,'hidden').checked).toBe(true);
-    expect(m.orb.classList.contains('is-unavailable')).toBe(true);
+    expect(m.orb.dataset.idleStyle).toBe('hidden');
+    // 重连后入口可用（不再复用 is-unavailable），先显示完整球，再按闲置重新隐藏
+    expect(m.orb.classList.contains('is-unavailable')).toBe(false);
+    expect(idleHidden(m)).toBe(false);
+    vi.advanceTimersByTime(5000); expect(idleHidden(m)).toBe(true);
 
-    // 另一个 appId 没有该偏好 → 回退 handle 并恢复可见
+    // 另一个 appId 没有该偏好 → 回退 handle 并保持可见
     m.widget.appId='other app';
     expect(radio(m,'handle').checked).toBe(true);
+    expect(m.orb.dataset.idleStyle).toBe('handle');
     expect(m.orb.classList.contains('is-unavailable')).toBe(false);
+    expect(idleHidden(m)).toBe(false);
+    vi.advanceTimersByTime(5000);
+    expect(collapsed(m)).toBe(true); expect(idleHidden(m)).toBe(false);
     expect(getComputedStyle(m.orb).display).not.toBe('none');
 
-    // 切回原 appId 恢复 hidden
+    // 切回原 appId 恢复 hidden 的待机循环
     m.widget.appId=APP_ID;
     expect(radio(m,'hidden').checked).toBe(true);
-    expect(m.orb.classList.contains('is-unavailable')).toBe(true);
+    expect(m.orb.dataset.idleStyle).toBe('hidden');
+    expect(idleHidden(m)).toBe(false);
+    vi.advanceTimersByTime(5000); expect(idleHidden(m)).toBe(true);
     expect(getComputedStyle(m.orb).display).toBe('none');
   });
 
-  it('a stored hidden preference is applied on startup without opening the panel',()=>{
+  it('a stored hidden preference starts with the full ball visible and hides only after the idle interval',async()=>{
     localStorage.setItem(orbIdlePreferenceKey(APP_ID),'{"version":1,"style":"hidden"}');
     const m=mount();
     expect(m.orb.dataset.idleStyle).toBe('hidden');
-    expect(m.orb.classList.contains('is-unavailable')).toBe(true);
+    expect(m.orb.classList.contains('is-unavailable')).toBe(false);
+    expect(idleHidden(m)).toBe(false);
+    expect(getComputedStyle(m.orb).display).not.toBe('none');
+    vi.advanceTimersByTime(5000);
+    expect(idleHidden(m)).toBe(true);
     expect(getComputedStyle(m.orb).display).toBe('none');
-    // 面板仍可被宿主 API 打开（隐藏只针对入口，不锁面板）
+    // 面板仍可被宿主 API 打开（隐藏只针对待机入口，不锁面板），打开期间不叠加待机隐藏
     m.widget.open();
     expect(m.panel.classList.contains('is-open')).toBe(true);
+    expect(idleHidden(m)).toBe(false);
+    expect(m.orb.classList.contains('is-unavailable')).toBe(true);
+    // 宿主隐藏等既有不可用条件仍然生效，待机隐藏不会绕过它们
+    m.widget.hidden = true; await settle();
+    expect(m.orb.classList.contains('is-unavailable')).toBe(true);
+    expect(idleHidden(m)).toBe(false);
+  });
+});
+
+/**
+ * 「隐藏」只是第三张卡的语义变化，不改变既有设置卡片布局：
+ * 440px 面板内容宽 = 440 − 2×16 = 408px，三卡最小行长 = 3×110 + 2×8 = 346px → 仍为单行；
+ * 每张卡保持 44px 最小高度与 flex:1 1 110px，窄屏才换行。
+ */
+describe('idle standby settings card layout',()=>{
+  it('keeps three 110px-basis, 44px-high cards on one row inside the 440px panel',()=>{
+    const m=mount(); settings(m);
+    const options=m.root.querySelector<HTMLElement>('.fb-orb-idle-options')!;
+    const cards=[...options.querySelectorAll<HTMLElement>('.fb-orb-idle-option')];
+    expect(cards).toHaveLength(3);
+    const optionsStyle=getComputedStyle(options);
+    expect(optionsStyle.display).toBe('flex');
+    expect(optionsStyle.flexWrap).toBe('wrap');
+    expect(optionsStyle.gap).toBe('8px');
+    for(const card of cards) {
+      const style=getComputedStyle(card);
+      expect(style.display).toBe('flex');
+      expect(style.minHeight).toBe('44px');
+      expect(style.flexGrow).toBe('1');
+      expect(style.flexBasis).toBe('110px');
+      expect(style.boxSizing).toBe('border-box');
+    }
+    expect(3*110+2*8).toBeLessThanOrEqual(440-16*2);
+    expect(STYLES).toMatch(/\.fb-orb-idle-options \{ display:flex; flex-wrap:wrap; gap:8px; \}/);
+    expect(STYLES).toMatch(/\.fb-orb-idle-option \{[^}]*flex:1 1 110px;[^}]*min-height:44px/);
   });
 });
 

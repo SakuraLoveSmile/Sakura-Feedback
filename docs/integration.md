@@ -181,23 +181,23 @@ Shadow DOM 查询节点或覆盖内部样式）；`test/` 下的测试辅助文�
 
 ### 2.1 Web：通过构建出的 npm tarball 安装（打包器宿主推荐）
 
-包名 `@feedback/web`，当前版本 `0.8.4`，因此 tarball 文件名为 **`feedback-web-0.8.4.tgz`**（版本变了文件名跟着变）。
+包名 `@feedback/web`，当前版本 `0.8.5`，因此 tarball 文件名为 **`feedback-web-0.8.5.tgz`**（版本变了文件名跟着变）。
 
 优先安装正式 Release 的固定产物（保留锁文件）；不要把工作区源码或 `main` 当成稳定版本：
 
 ```bash
-pnpm add https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/download/v0.8.4/feedback-web-0.8.4.tgz
+pnpm add https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/download/v0.8.5/feedback-web-0.8.5.tgz
 ```
 
-完整 Web dist、SHA256 与服务端镜像清单均在 [v0.8.4 Release](https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/tag/v0.8.4)。
-需要自行构建时，先检出 `v0.8.4`，再执行：
+完整 Web dist、SHA256 与服务端镜像清单均在 [v0.8.5 Release](https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/tag/v0.8.5)。
+需要自行构建时，先检出 `v0.8.5`，再执行：
 
 ```bash
 # ① 在仓库根构建组件包
 pnpm install
 pnpm --filter @feedback/web build
 
-# ② 打成 tarball（真实产物：/tmp/fbpack/feedback-web-0.8.4.tgz）
+# ② 打成 tarball（真实产物：/tmp/fbpack/feedback-web-0.8.5.tgz）
 mkdir -p /tmp/fbpack
 pnpm --filter @feedback/web pack --pack-destination /tmp/fbpack
 ```
@@ -206,8 +206,8 @@ tarball 内含 `dist/` 全部产物（含 ESM 懒加载分块）、`package.json
 
 ```bash
 # ③ 在你的宿主项目里安装这个 tgz
-pnpm add /tmp/fbpack/feedback-web-0.8.4.tgz
-# 等价写法：npm install /tmp/fbpack/feedback-web-0.8.4.tgz
+pnpm add /tmp/fbpack/feedback-web-0.8.5.tgz
+# 等价写法：npm install /tmp/fbpack/feedback-web-0.8.5.tgz
 ```
 
 ```ts
@@ -268,7 +268,7 @@ dependencies:
   feedback_widget:
     git:
       url: https://github.com/SakuraLoveSmile/Sakura-Feedback.git
-      ref: v0.8.4                    # 或该标签对应的完整 commit SHA
+      ref: v0.8.5                    # 或该标签对应的完整 commit SHA
       path: flutter/feedback        # 包在仓库的子目录里
 ```
 
@@ -835,12 +835,12 @@ FeedbackWidget(
 ```
 
 - 提供某个取值时，该设置**不再写组件自己的存储**：宿主负责保存（数据库 / preferences 均可），
-  收到回调后把新值回传，组件按新值立即生效——`hidden` 立即隐藏入口，改回其他样式立即恢复。
+  收到回调后把新值回传，组件按新值立即生效——`hidden` 只隐藏待机（收起）状态，完整球在初始显示与被唤醒后照常可见，改回其他样式立即恢复对应待机入口。
 - 内置反馈面板的对应设置区会显示同一份当前值并调用宿主回调；**只提供取值、不提供回调**时该
   设置区隐藏（由宿主 UI 负责改写）。两个设置可以各自独立托管。
 - 类型从包入口导出：`FeedbackOrbIdleStyle { handle, edge, hidden }`、
   `FeedbackWakeGesture { twoFingerHold, threeFingerSwipeUp, twoFingerDoubleTap }`。
-- 都不传时行为与 0.8.3 完全一致（组件自行持久化）。
+- 都不传时由组件自行持久化这两项设置（默认行为）；「隐藏」的待机语义以 0.8.5 为准（只隐藏待机态，已开启的手势仍可唤醒）。
 
 ### 4.3 方法
 
@@ -1006,7 +1006,7 @@ Flutter 端：宿主传入新 `apiBase` / `appId` 重建 `FeedbackWidget` 时走
 - 识别成功后提示松开手指，全部手指抬起后只唤醒灵感球，回到配置的停靠位置；再拖动球才进入截图选区，确认后更新真实附件并打开反馈面板。手势本身不截图，也不改变草稿。
 - 手势仅限当前宿主内容；反馈面板、选区及球体拖动时暂停识别。Web 排除输入框、链接、按钮等交互起点；单指滚动和正常双指缩放不会被保留为唤醒手势。启用三指上滑时，及时到齐且尚未滚动的三指序列保留给该手势。
 - 选择即时生效、按本机宿主的 `appId` 保存，切换 Feedback 服务器不重置手势。存储失败时提示「仅本次生效」。根组件初始化即恢复偏好，不要求先打开反馈面板。
-- 「设置 → 灵感球」可选择闲置后显示“小把手”“球体贴边”或“隐藏”三种待机样式。默认先显示完整球，闲置5秒后收起；点收起入口只展开，手势也可唤醒。选择“隐藏”后不显示任何灵感球入口（无待机球、贴边球或小把手；只影响灵感球入口，Tab 模式的悬浮按钮不受影响），但反馈面板仍可通过宿主入口（Web `openFeedback()` / `widget.open()`，Flutter `controller.open()`）打开，并在「设置 → 灵感球」改回“小把手”或“球体贴边”立即恢复显示；隐藏偏好同样按本机appId独立保存，旧版组件读到该偏好会按“小把手”处理。待机与收起入口使用柔雾玻璃，小把手为完整竖向胶囊；拖动时切换为清晰液态玻璃。拖动、焦点、截图或面板期间暂停收起。偏好按本机appId独立保存，具体视觉参数与验收以[液态灵感球双端落地计划](tasks/液态灵感球双端落地_032e28ef.plan.md)的R9为准。
+- 「设置 → 灵感球」可选择闲置后显示“小把手”“球体贴边”或“隐藏”三种待机样式。默认先显示完整球，闲置5秒后收起；点收起入口只展开，手势也可唤醒。选择“隐藏”后只隐藏待机（收起）状态——不显示待机球、贴边球或小把手（只影响灵感球入口，Tab 模式的悬浮按钮不受影响），完整球在初始显示与被唤醒后照常可见、可点击/拖动，再闲置5秒才重新隐藏；已开启的唤醒手势仍可唤醒它，未开启手势时可通过宿主入口（Web `openFeedback()` / `widget.open()`，Flutter `controller.open()`）打开反馈面板，并在「设置 → 灵感球」改回“小把手”或“球体贴边”立即恢复对应待机入口；隐藏偏好同样按本机appId独立保存，旧版组件读到该偏好会按“小把手”处理。待机与收起入口使用柔雾玻璃，小把手为完整竖向胶囊；拖动时切换为清晰液态玻璃。拖动、焦点、截图或面板期间暂停收起。偏好按本机appId独立保存，具体视觉参数与验收以[液态灵感球双端落地计划](tasks/液态灵感球双端落地_032e28ef.plan.md)的R9为准。
 - **宿主托管（v0.8.4）**：宿主可用 `FeedbackWidget.orbIdleStyle` / `wakeGestures` 接管这两项设置，
   在自己的设置页提供同样的选项（见 4.2.1）；内置设置区会同步显示并回调宿主。不传时由组件自行保存。
 - 不监听其他应用，不使用传感器或系统级截图。系统先截获的多指操作可能无法到达组件。

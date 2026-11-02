@@ -120,11 +120,17 @@ void main() {
     debugDisableOrbLensCapture = false;
   });
 
-  testWidgets('宿主给出的 hidden 立即隐藏入口，面板仍可打开并改回', (tester) async {
+  testWidgets('宿主给出的 hidden 只隐藏待机态：完整球先显示，闲置后隐藏，面板仍可打开并改回',
+      (tester) async {
     host.style = FeedbackOrbIdleStyle.hidden;
     await host.mount(tester);
 
-    expect(_orb, findsNothing);
+    // v0.8.5：待机隐藏不等于入口开关。完整球初始仍显示并开始 5 秒计时，
+    // 闲置后才进入待机隐藏（不渲染任何收起入口）。
+    expect(_orb, findsOneWidget, reason: '完整球初始仍显示');
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pump(const Duration(milliseconds: 420));
+    expect(_orb, findsNothing, reason: '待机隐藏时不渲染灵感球');
     expect(_collapsed, findsNothing);
     expect(host.controller.isOpen, isFalse);
 
@@ -143,7 +149,7 @@ void main() {
     expect(host.style, FeedbackOrbIdleStyle.handle);
 
     await host.closePanel(tester);
-    expect(_orb, findsOneWidget, reason: '宿主把新值回传后入口恢复');
+    expect(_orb, findsOneWidget, reason: '宿主把新值回传后完整球恢复');
     expect(
       await host.preferences.read(orbIdleStorageKey(host.appId)),
       isNull,
@@ -170,7 +176,8 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('宿主属性从 handle 改为 hidden 再改回，入口随值显隐', (tester) async {
+  testWidgets('宿主属性从 handle 改为 hidden 再改回：完整球保留，闲置后隐藏，改回后恢复',
+      (tester) async {
     host.style = FeedbackOrbIdleStyle.handle;
     await host.mount(tester);
     expect(_orb, findsOneWidget);
@@ -178,13 +185,76 @@ void main() {
     host.style = FeedbackOrbIdleStyle.hidden;
     host.rebuild();
     await tester.pump();
-    expect(_orb, findsNothing);
+    expect(_orb, findsOneWidget, reason: '切到 hidden 先恢复完整球并重新计时');
+    expect(_collapsed, findsNothing);
+
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pump(const Duration(milliseconds: 420));
+    expect(_orb, findsNothing, reason: '宿主给出的 hidden 闲置后隐藏待机态');
     expect(_collapsed, findsNothing);
 
     host.style = FeedbackOrbIdleStyle.handle;
     host.rebuild();
     await tester.pump();
+    expect(_orb, findsOneWidget, reason: '宿主改回 handle 后完整球立即恢复');
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('宿主托管的 hidden 不妨碍已开启的唤醒手势，改回 handle 后恢复',
+      (tester) async {
+    host.captureMode = FeedbackCaptureMode.viewport;
+    host.style = FeedbackOrbIdleStyle.hidden;
+    host.gestures = <FeedbackWakeGesture>{FeedbackWakeGesture.twoFingerHold};
+    await host.mount(tester);
+    final Rect dock = tester.getRect(_orb);
     expect(_orb, findsOneWidget);
+
+    // 闲置 5 秒进入待机隐藏：不渲染任何收起入口，但唤醒能力仍在线。
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pump(const Duration(milliseconds: 420));
+    expect(_orb, findsNothing);
+    expect(_collapsed, findsNothing);
+    expect(host.controller.isOpen, isFalse);
+
+    Future<void> holdAndLift() async {
+      final TestGesture first =
+          await tester.startGesture(const Offset(160, 300));
+      final TestGesture second =
+          await tester.startGesture(const Offset(220, 300));
+      await tester.pump(const Duration(milliseconds: 700));
+      expect(find.byKey(const Key('feedback-wake-release-hint')),
+          findsOneWidget);
+      await first.up();
+      await second.up();
+    }
+
+    await holdAndLift();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 420));
+    expect(_orb, findsOneWidget,
+        reason: '宿主托管的 hidden 不取消已开启的唤醒手势');
+    expect(tester.getRect(_orb), dock, reason: '唤醒后完整球回到原停车位');
+    expect(host.controller.isOpen, isFalse);
+    expect(
+      await host.preferences.read(wakeGestureStorageKey(host.appId)),
+      isNull,
+      reason: '宿主托管时组件不得写自己的唤醒手势偏好',
+    );
+
+    // 再次闲置后重新待机隐藏。
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pump(const Duration(milliseconds: 420));
+    expect(_orb, findsNothing);
+
+    // 宿主改回 handle：完整球立即恢复，并按 handle 重新计时收起。
+    host.style = FeedbackOrbIdleStyle.handle;
+    host.rebuild();
+    await tester.pump();
+    expect(_orb, findsOneWidget, reason: '宿主改回 handle 后完整球恢复');
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pump(const Duration(milliseconds: 420));
+    expect(find.byKey(const Key('feedback-orb-idle-handle')), findsOneWidget,
+        reason: '恢复后重新开始闲置计时');
     expect(tester.takeException(), isNull);
   });
 

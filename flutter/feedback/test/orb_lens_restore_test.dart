@@ -330,6 +330,34 @@ void main() {
   });
 
   testWidgets(
+      'hidden idle releases the lens snapshot; the returning full orb captures a fresh one',
+      (tester) async {
+    await host.preferences.write(orbIdleStorageKey(host.appId),
+        encodeOrbIdleStyle(FeedbackOrbIdleStyle.hidden));
+    await host.mount(tester);
+    final OrbLiquidLensPainter original = await _waitLens(tester);
+    expect(debugOrbLensCaptureAttempts, 1);
+    // 待机隐藏后入口不在屏幕上，透镜快照随之释放（_lensVisible 为 false）。
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pump(const Duration(milliseconds: 420));
+    expect(liquidOrb, findsNothing);
+    expect(_shader, findsNothing);
+    // 完整球恢复（面板打开后关闭，与唤醒同一条「重新可见」路径）时按既有
+    // 规则重新捕获，而不是复用隐藏前的安全纹理。
+    host.controller.open();
+    await tester.pump();
+    await tester.pump();
+    host.controller.close();
+    await tester.pump();
+    await tester.pump();
+    expect(liquidOrb, findsOneWidget);
+    final OrbLiquidLensPainter restored = await _waitLens(tester);
+    expect(restored.image, isNot(same(original.image)));
+    expect(debugOrbLensCaptureAttempts, 2);
+    await _expectQuiet(tester, 2);
+  });
+
+  testWidgets(
       'background while edge is visible releases it and resume restores once',
       (tester) async {
     await host.preferences.write(orbIdleStorageKey(host.appId),

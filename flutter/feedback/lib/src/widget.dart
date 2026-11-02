@@ -284,16 +284,21 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   bool get _wakeGesturesSessionOnly =>
       widget.wakeGestures == null && _wakePreferences.sessionOnly;
 
-  /// 入口是否可见：宿主允许显示入口，且灵感球待机样式不是「隐藏」。
+  /// 入口是否可见：只看宿主配置。
   ///
-  /// 「隐藏」是 v0.8.2 新增的待机样式，只作用于 `launcherMode == orb` 的灵感球：
-  /// 完整球与收起后的小把手 / 贴边球都不渲染，但面板本身仍常驻（打开过之后），
-  /// 宿主可通过 `controller.open()` 打开并在设置里改回其他样式。
-  /// `launcherMode == tab` 的悬浮按钮不受该偏好影响（与 Web 端语义一致）。
-  bool get _launcherVisible =>
-      widget.config.showLauncher &&
-      !(widget.config.launcherMode == FeedbackLauncherMode.orb &&
-          _orbIdleStyle == FeedbackOrbIdleStyle.hidden);
+  /// 待机样式「隐藏」（v0.8.2 新增、v0.8.5 澄清语义）不是入口开关：入口可见性
+  /// （唤醒手势可用性、透镜快照、面板关闭后的焦点回归等）必须与完整球状态一致，
+  /// 否则选择「隐藏」会把唤醒能力一并禁用。待机隐藏只影响 build 时是否渲染
+  /// launcher slot，见 [_orbIdleHidden]。
+  bool get _launcherVisible => widget.config.showLauncher;
+
+  /// 待机（收起）状态下不渲染入口：仅灵感球模式 + 待机样式「隐藏」+ 已收起 /
+  /// 正在收起。完整球（初始、刚唤醒、面板关闭后）仍按 [_launcherVisible] 正常
+  /// 渲染；`launcherMode == tab` 的悬浮按钮与灵感球无关，不受影响。
+  bool get _orbIdleHidden =>
+      widget.config.launcherMode == FeedbackLauncherMode.orb &&
+      _orbIdleStyle == FeedbackOrbIdleStyle.hidden &&
+      _orbMorphVisible;
 
   bool get _orbAvailable =>
       _appResumed &&
@@ -362,11 +367,14 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   void _wakeOrb() {
     if (!_orbAvailable) return;
     _cancelOrbIdle();
+    // 从待机隐藏唤醒时屏幕上看不到收起把手，展开动画没有可衔接的起点：
+    // 直接把形变归零，完整球立即出现（与 reduced motion 的即时唤醒一致）。
+    final bool fromIdleHidden = _orbIdleHidden;
     setState(() {
       _orbCollapsed = false;
       _orbWasAvailable = true;
     });
-    if (_orbGlowReduced) {
+    if (_orbGlowReduced || fromIdleHidden) {
       _snapOrbMorph(0);
     } else {
       _orbMorph.reverse();
@@ -375,19 +383,21 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
 
   void _idlePreferencesChanged() => _applyOrbIdleStyleChange();
 
-  /// 生效的待机样式变化（组件偏好或宿主托管值）：隐藏时立即收回入口与相关
-  /// 会话状态；改回其他样式时由 build 重新渲染完整球并重新开始 5 秒计时。
+  /// 生效的待机样式变化（组件偏好或宿主托管值）：无论切到「隐藏」还是改回
+  /// 其他样式，都从完整球重新开始 5 秒计时（切到「隐藏」也不例外：先恢复
+  /// 完整球，闲置后才进入待机隐藏）。唤醒能力由 [_wakeAvailable] 与手势识别
+  /// 器的 `enabled` 决定，不随该偏好取消；这里只清理拖动 / 回弹 / 焦点残留，
+  /// 避免样式切换时留下悬空状态。
   void _applyOrbIdleStyleChange() {
     if (!mounted || _disposed) return;
-    if (_orbIdleStyle == FeedbackOrbIdleStyle.hidden) {
-      // 「隐藏」入口立即消失：抢占进行中的拖动 / 回弹 / 悬停，释放透镜快照
-      // 与唤醒识别，避免卸载后的残留状态。
-      _releaseLensSnapshot(allowPrefetch: true);
-      _wakeRecognizer?.cancel();
+    // 只中止当前一轮识别（未完成的手势需要重新开始），不禁用识别器：否则
+    // 待机隐藏后已开启的唤醒手势会失效。
+    _wakeRecognizer?.cancel();
+    setState(() {
       _orbFocusVisible = false;
+      // 内含 _resetOrbIdle：从完整球重新开始 5 秒计时。
       _resetOrbReleaseState();
-    }
-    setState(_resetOrbIdle);
+    });
   }
 
   FeedbackWakeGestureRecognizer? _wakeRecognizer;
@@ -395,6 +405,9 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   bool _appResumed = true;
   int? _capturePendingSeq;
 
+  /// 唤醒手势是否可用。待机样式「隐藏」只让入口在收起时不渲染，不影响这里：
+  /// 否则隐藏待机后手势失效，用户再也无法呼出完整球（未开启手势时仍可由宿主
+  /// `controller.open()` 打开面板改回）。
   bool get _wakeAvailable =>
       !_disposed &&
       mounted &&
@@ -770,6 +783,8 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
 
   /// 每次球从 hidden 恢复可见时捕获一次，hidden 时释放快照。
   ///
+  /// 待机隐藏（收起且样式为「隐藏」）视同不可见：入口不在屏幕上，透镜采样
+  /// 没有意义，快照随之释放；唤醒后按既有规则重新捕获。
   /// 同一可见期不周期捕获；拖动刷新受一秒间隔与单在途约束。
   bool get _lensVisible =>
       _appResumed &&
@@ -778,6 +793,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
       !_temporarilyHideForCapture &&
       _handoff == null &&
       _launcherVisible &&
+      !_orbIdleHidden &&
       widget.config.launcherMode == FeedbackLauncherMode.orb;
 
   void _invalidateLensTheme() {
@@ -1032,9 +1048,9 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     if ((oldWidget.config.showLauncher && !_launcherVisible) ||
         (oldWidget.config.launcherMode == FeedbackLauncherMode.orb &&
             widget.config.launcherMode != FeedbackLauncherMode.orb)) {
-      // 入口变为 hidden（关闭入口、待机样式改为「隐藏」或离开 orb 模式）：
-      // 抢占进行中的回弹，恢复可见后从静态起点开始。本次 didUpdateWidget
-      // 后必然重建（样式变化另外由 _idlePreferencesChanged 处理）。
+      // 入口变为 hidden（关闭入口或离开 orb 模式）：抢占进行中的回弹，恢复
+      // 可见后从静态起点开始。本次 didUpdateWidget 后必然重建（待机样式变化
+      // 另外由 _applyOrbIdleStyleChange 处理）。
       _resetOrbReleaseState();
     }
   }
@@ -2055,10 +2071,10 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   Widget build(BuildContext context) {
     final FeedbackConfig config = widget.config;
     final bool open = _controller.isOpen;
-    // hidden（面板打开、入口关闭或待机样式为「隐藏」）时清除焦点环锁存：
-    // 入口不渲染时保留 true 会让下次显示在没有焦点的情况下画出环；指针关闭
-    // 路径也依赖这里抑制环（T7i），不是纯防御。build 内不能 setState。
-    if (open || !_launcherVisible) _orbFocusVisible = false;
+    // hidden（面板打开、入口关闭或待机隐藏）时清除焦点环锁存：
+    // launcher slot 不渲染时保留 true 会让下次显示在没有焦点的情况下画出环；
+    // 指针关闭路径也依赖这里抑制环（T7i），不是纯防御。build 内不能 setState。
+    if (open || !_launcherVisible || _orbIdleHidden) _orbFocusVisible = false;
     _syncOrbFlow();
     _syncOrbIdle();
     _syncOrbLensCapture(open: open, config: config);
@@ -2238,8 +2254,12 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
                     }),
                   ),
                 ),
+                // 待机隐藏（灵感球已收起且样式为「隐藏」）不渲染 launcher slot：
+                // 完整球初始、唤醒后与面板关闭后仍按 `_launcherVisible` 渲染；
+                // tab 模式的 FAB 与灵感球待机样式无关。
                 if (!open &&
                     _launcherVisible &&
+                    !_orbIdleHidden &&
                     !_temporarilyHideForCapture &&
                     _selectionCapture == null)
                   Positioned(

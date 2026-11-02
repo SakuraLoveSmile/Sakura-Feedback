@@ -2555,6 +2555,8 @@ export const STYLES = /* css */ `
 :host([side="left"]) .fb-orb { left:max(20px,env(safe-area-inset-left,0px)); right:auto; border:0; border-radius:50%; }
 .fb-orb, .fb-orb.fb-orb-properties-unavailable { transition:transform .18s ease; }
 .fb-orb.is-unavailable { display:none !important; }
+/* 0.8.5「隐藏」只隐藏待机（收起）状态：完整球与唤醒后的球仍可见；兄弟 canvas/outline 由 drawLiquid() 同步收起。 */
+.fb-orb.is-idle-hidden { display:none !important; }
 /* R7 geometry/material are drawn together from the safe texture, never CSS backdrop. */
 .fb-orb-idle-mark, .fb-orb-idle-handle { display:none; pointer-events:none; }
 .fb-orb-hit { position:absolute; top:0; right:0; bottom:0; left:0; display:block; border-radius:0; background:transparent; pointer-events:auto; }

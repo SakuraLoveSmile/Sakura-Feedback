@@ -2,9 +2,10 @@
 import { liquidBoundary, type LiquidShape } from './orb-liquid';
 
 /**
- * 本机灵感球待机样式：`handle` 小把手 / `edge` 球体贴边 / `hidden` 隐藏入口。
- * `hidden` 是 0.8.2 新增的第三种选项：选中后灵感球整体不显示（无任何入口形态），
- * 但反馈面板仍可由宿主 `openFeedback()` / `widget.open()` 打开并改回其它样式。
+ * 本机灵感球待机样式：`handle` 小把手 / `edge` 球体贴边 / `hidden` 隐藏待机态。
+ * `hidden` 从 0.8.5 起只隐藏“待机（收起）状态”：完整球初始/被唤醒后照常可见、可点击拖动，
+ * 再闲置 5 秒才收起并隐藏；已开启的唤醒手势仍可唤醒它。反馈面板仍可由宿主
+ * `openFeedback()` / `widget.open()` 打开并改回其它样式。
  * 旧版组件读到 `hidden` 会按非法值回退 `handle`（安全降级，不会白屏）。
  */
 export type OrbIdleStyle = 'handle' | 'edge' | 'hidden';

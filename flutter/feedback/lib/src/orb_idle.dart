@@ -5,9 +5,12 @@ import 'server_pref.dart';
 
 /// Internal preference; independent from server URLs and wake gesture choices.
 ///
-/// `hidden` 是 v0.8.2 新增的第三种待机样式：既不在完整球状态显示入口，也不在
-/// 闲置 5 秒后显示小把手 / 贴边球；宿主仍可通过 `controller.open()` 打开面板
-/// （在设置里可改回）。旧版本只认识 `handle` / `edge`，未知值一律回退默认。
+/// `hidden` 是 v0.8.2 新增、v0.8.5 澄清语义的第三种待机样式：只隐藏「待机
+/// （收起）状态」——收起后不渲染任何入口；完整球（初始 / 唤醒后 / 面板关闭
+/// 后）仍正常显示。已开启的唤醒手势仍可唤醒它，唤醒后闲置 5 秒再次进入待机
+/// 隐藏。未开启手势时宿主始终可用 `controller.open()` 打开面板并改回其他
+/// 样式（宿主托管时由宿主设置页改写）。旧版本只认识 `handle` / `edge`，未知
+/// 值一律回退默认。
 enum FeedbackOrbIdleStyle { handle, edge, hidden }
 
 String orbIdleStorageKey(String appId) =>

@@ -3110,7 +3110,7 @@ class FeedbackPanelState extends State<FeedbackPanel>
           if (widget.onOrbIdleStyleChanged != null) ...<Widget>[
             Text('灵感球', style: theme.textTheme.titleSmall),
             const SizedBox(height: 4),
-            Text('闲置 5 秒后收起；选择「隐藏」后不显示入口，可从宿主入口打开反馈面板改回。',
+            Text('闲置 5 秒后收起；选择「隐藏」后待机时不显示灵感球，可用已开启的唤醒手势唤醒，或从宿主入口打开面板改回。',
                 style: theme.textTheme.bodySmall),
             const SizedBox(height: 8),
             for (final FeedbackOrbIdleStyle style

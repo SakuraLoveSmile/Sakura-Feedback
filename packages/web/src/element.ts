@@ -3024,9 +3024,8 @@ export class FeedbackWidget extends HTMLElement {
   }
 
   private canUseOrbLauncher(): boolean {
-    // 0.8.2：第三种待机样式「隐藏」——不显示任何灵感球入口（复用 .fb-orb.is-unavailable 的
-    // display:none），但面板仍可由 open()/openFeedback() 打开并改回其它样式。
-    if (this.orbIdleStyle === 'hidden') return false;
+    // 0.8.5：「隐藏」只隐藏待机（收起）态，入口本身仍可用——唤醒手势依赖这里返回 true。
+    // 待机显隐由 is-idle-hidden 单独处理，不再复用 is-unavailable 的「入口不可用」语义。
     if (!this.isConnected || !this.showLauncher || this.launcherMode !== 'orb' || !this.orbSurfaceActive || document.visibilityState === 'hidden' || this.closest('[hidden], [inert], [aria-disabled="true"]') || this.openState || this.regionSession || this.isCapturing || this.captureInFlight) return false;
     for (const node of this.orbHostElements()) {
       const style = window.getComputedStyle(node);
@@ -3083,12 +3082,27 @@ export class FeedbackWidget extends HTMLElement {
     this.orb.setAttribute('aria-label',base+(this.unreadCount>0?`，${this.unreadCount}条未读`:''));
   }
 
+  /**
+   * 0.8.5：第三种待机样式「隐藏」只隐藏“待机（收起）状态”。
+   * 唤醒后完整球照常可见、可点击/拖动，再次闲置 5 秒才会收起并隐藏。
+   */
+  private orbIdleHidden(): boolean {
+    return this.orbCollapsed && this.orbIdleStyle === 'hidden';
+  }
+
+  /** `.fb-orb` 的 display:none 只能隐藏球本体；canvas/outline 是兄弟节点，由 drawLiquid() 一并收起。 */
+  private syncOrbIdleHidden(): void {
+    this.orb.classList.toggle('is-idle-hidden',this.orbIdleHidden());
+  }
+
   private setOrbCollapsed(collapsed: boolean, animate=true): void {
     const changed=this.orbCollapsed!==collapsed;
     const from=this.currentOrbIdleVisual();
     this.orbCollapsed=collapsed;
     this.orb.classList.toggle('is-collapsed',collapsed);
     this.orb.dataset.idleStyle=this.orbIdleStyle;
+    // 同一次收起里的 changed===false 早退也必须同步，避免样式切到 hidden 后 class 残留/缺失。
+    this.syncOrbIdleHidden();
     this.syncOrbAriaLabel();
     if (!changed && animate) return;
     const target=this.orbIdleTarget(collapsed);
@@ -3385,6 +3399,9 @@ export class FeedbackWidget extends HTMLElement {
 
   private drawLiquid(): void {
     if (!this.canUseOrbLauncher()) { this.orbCanvas.hidden = true; this.hideOrbOutline(); return; }
+    // 0.8.5 待机隐藏：球本体由 is-idle-hidden 收起，独立 canvas/outline 兄弟层也必须清空，
+    // 否则会留下不可见的采样/描边层（也可能被误当成命中面）。
+    if (this.orbIdleHidden()) { this.orbCanvas.hidden = true; this.hideOrbOutline(); return; }
     if (this.isCapturing || this.regionSession || this.openState) { this.orbCanvas.hidden = true; this.hideOrbOutline(); return; }
     if (this.isDragging) this.orb.style.transform = `translate3d(${this.liquid.x}px, ${this.liquid.y}px, 0)`;
     const dock = this.isDragging ? this.orbDock : (() => { const r=this.orb.getBoundingClientRect(); return { x:r.left+r.width/2,y:r.top+r.height/2 }; })();
@@ -4132,6 +4149,8 @@ export class FeedbackWidget extends HTMLElement {
    * 地址变化且有草稿 / 未确认提交时先展开内联确认块。
    */
   private canWakeOrb(): boolean {
+    // 0.8.5：待机隐藏不等于入口不可用——canUseOrbLauncher() 仍为 true，手势可继续唤醒完整球。
+    // 仍需 capture-mode=viewport（surfaceSignature 一致）且用户已启用至少一个手势。
     return this.canUseOrbLauncher() && this.surfaceSignature === this.displaySignature() && this.captureMode === 'viewport' && this.orbPointerId === null && !this.isDragging && this.phase !== 'submitting' && !this.polling;
   }
 
@@ -4145,7 +4164,7 @@ export class FeedbackWidget extends HTMLElement {
     catch { this.orbIdleStyle = 'handle'; this.orbIdleSessionOnly = true; }
     this.orb.dataset.idleStyle = this.orbIdleStyle;
     this.syncOrbIdleSettings();
-    // 立即按新偏好同步入口可用性：启动恢复 / appId 切换后「隐藏」必须马上生效，
+    // 立即按新偏好同步待机外观：启动恢复 / appId 切换后「隐藏」的待机显隐必须马上对齐，
     // 改回 handle / edge 也要马上恢复显示（重复调用是幂等的）。
     this.syncOrbIdle(true);
   }
@@ -4154,7 +4173,7 @@ export class FeedbackWidget extends HTMLElement {
     const group = el('fieldset','fb-orb-idle-settings');
     group.append(el('legend','fb-settings-title','灵感球'));
     const cards = el('div','fb-orb-idle-options');
-    // 0.8.2：第三种待机样式「隐藏」——选中后不显示任何入口，仍可由宿主入口打开面板改回。
+    // 0.8.2：第三种待机样式「隐藏」——0.8.5 起只隐藏待机（收起）状态，唤醒后完整球照常可用。
     for (const [style,title] of [['handle','小把手'],['edge','球体贴边'],['hidden','隐藏']] as const) {
       const label = el('label','fb-orb-idle-option');
       const input = el('input'); input.type='radio'; input.name='orb-idle-style'; input.value=style;
@@ -4172,7 +4191,7 @@ export class FeedbackWidget extends HTMLElement {
     }
     this.orbIdlePreferenceHint = el('p','fb-orb-idle-pref-hint','仅本次生效');
     this.orbIdlePreferenceHint.setAttribute('role','status');
-    group.append(cards,el('p','fb-footnote','闲置5秒后收起；选择「隐藏」后不显示入口，可从宿主入口打开反馈面板改回'),this.orbIdlePreferenceHint);
+    group.append(cards,el('p','fb-footnote','闲置5秒后收起；选择「隐藏」后待机不显示灵感球，可用已开启的唤醒手势唤醒，或从宿主入口打开反馈面板改回'),this.orbIdlePreferenceHint);
     return group;
   }
 
