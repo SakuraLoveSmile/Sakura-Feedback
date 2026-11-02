@@ -1,13 +1,13 @@
 # FB-HOST-ORB-001：宿主托管的灵感球设置并发布 0.8.4
 
 - 项目 / 任务编号：personal-feedback / FB-HOST-ORB-001
-- 状态：实现中
+- 状态：待体验
 - 创建日期（Asia/Taipei）：2026-11-02
 - 权威记录：本文件
 - 主仓库 / 当前工作目录：`/Users/sakurasep/Documents/Code/Project/Personal Project/Feedback`
 - 基线 / 分支 / 合入目标：`v0.8.3`（提交 `a1f1949`）/ `feat/20261102-fb-orb-settings`（沿用 0.8.x 发布分支模式，不自行改写 `main`）
 - 工作树：`/Users/sakurasep/Documents/Code/Project/Project Worktree/personal-feedback/20261102-feat-fb-orb-settings`
-- 当前 HEAD / 未提交差异：工作树未提交（组件 0.8.4 候选）
+- 当前 HEAD / 未提交差异：发布提交 `b1a92cb`（标签 `v0.8.4`）已推送；本 closeout 只更新本记录
 
 ## 目标与范围
 
@@ -37,7 +37,7 @@ Music 客户端要把设置页的「显示反馈悬浮球」开关改成具体�
 | 步骤 | 用户效果 / 实现范围 | 验收情形与预期 | 当前结果及证据 | 状态 |
 | --- | --- | --- | --- | --- |
 | T1 | 宿主可托管待机样式与唤醒手势 | 未传参时行为与 0.8.3 一致（组件自存）；传值时按宿主值渲染、不写组件偏好、面板内改选回调宿主；`hidden` 立即隐藏入口、回传后恢复；只给值不给回调时设置区隐藏 | 组件 analyze 无问题；654 项测试通过（基线 648，新增 6 项）；示例 38 项与 analyze 通过 | 已完成 |
-| T2 | 发布 0.8.4 | 标签触发手动发布流水线；Release 非预发布；SOURCE.txt/`release-manifest.json` 提交与标签一致；Flutter 标签可供宿主固定 | 待发布 | 未开始 |
+| T2 | 发布 0.8.4 | 标签触发手动发布流水线；Release 非预发布；SOURCE.txt/`release-manifest.json` 提交与标签一致；Flutter 标签可供宿主固定 | [Release v0.8.4](https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/tag/v0.8.4) 已发布（非草稿、非预发布，2026-11-02T15:27:26Z，7 资产）；`SOURCE.txt` commit=`b1a92cb`、tag=`v0.8.4`、channel=stable；`release-manifest.json` 版本/提交/schema 14 一致 | 已完成 |
 | T3 | 文档与兼容说明 | 接入指南写明宿主托管用法、未传参兼容；CHANGELOG 记录 0.8.4 | 已更新 `docs/integration.md` §4.2.1/§5.3.2 与 `CHANGELOG.md` | 已完成 |
 
 ## 执行与验证记录
@@ -47,21 +47,22 @@ Music 客户端要把设置页的「显示反馈悬浮球」开关改成具体�
 | 2026-11-02 | 工作树未提交（0.8.4） | macOS arm64，Flutter 3.41.3 / Dart 3.11.1 | `flutter pub get`、`flutter analyze`（`flutter/feedback`） | 依赖解析成功；`No issues found!` |
 | 2026-11-02 | 同上 | 同上 | `flutter test`（`flutter/feedback`） | 654 项全部通过（含新增 `test/host_orb_settings_test.dart` 6 项） |
 | 2026-11-02 | 同上 | 同上 | `flutter pub get`、`flutter analyze`、`flutter test`（`examples/flutter`） | 示例 analyze 无问题；38 项通过 |
-| — | — | — | 三档 `flutter_secure_storage` 矩阵、Node 全量检查 | 未本地运行；由发布流水线的 CI 门禁执行 |
-| — | — | — | 真实 Music 宿主接入 | 未运行；宿主任务另行验证 |
+| 2026-11-02 | `b1a92cb`（v0.8.4） | GitHub Actions（ubuntu / macOS） | 推送签名标签 `v0.8.4`，手动触发发布流水线 [41470747057](https://github.com/SakuraLoveSmile/Sakura-Feedback/actions/runs/41470747057) | checks（含 Node 全量、组件/示例、三档安全存储矩阵）全部通过；plan/artifacts/publish/manifest/release 全部成功 |
+| 2026-11-02 | v0.8.4 发布产物 | GitHub Release 资产核对 | 下载 `SOURCE.txt`、`release-manifest.json` 核对 | SOURCE commit=`b1a92cb`、tag=`v0.8.4`、channel=stable；manifest version 0.8.4、dbSchemaVersion 14、镜像 digest 与 Release 一致；7 份资产齐全 |
+| — | — | — | 真实 Music 宿主接入 | 未在本任务运行；Music 任务 `feedback-20261102e` 已固定 `b1a92cb` 并完成本地验证 |
 
 ## 提交与集成
 
 | 提交 | 行为变化与原因 | 验证 | 合并 / 发布情况 |
 | --- | --- | --- | --- |
-| 待定 | 组件新增宿主托管灵感球设置；文档/CHANGELOG/版本入口 0.8.4 | 本机 analyze + 654 项组件测试 + 38 项示例测试 | 待推送/发布 |
+| b1a92cb | 组件新增宿主托管灵感球设置；文档/CHANGELOG/版本入口 0.8.4 | 本机 analyze + 654 项组件测试 + 38 项示例测试；发布流水线全量 CI 通过；Release 产物独立核对 | 标签 `v0.8.4`；[Release v0.8.4](https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/tag/v0.8.4) 已发布（非预发布） |
 
 ## 交付与恢复
 
 - 体验入口和操作步骤：宿主传参后，在宿主设置页修改待机样式 / 唤醒手势即时生效；不传参时在
   反馈面板「设置 → 灵感球 / 唤醒方式」修改。
-- 尚未完成 / 尚未验证：发布流水线全量 CI（Node、三档安全存储矩阵）；Music 宿主的真实设置页体验。
+- 尚未完成 / 尚未验证：Music 宿主的真实设置页与手势体验（在 Music 任务 `feedback-20261102e` 跟进）。
 - 用户确认（明确确认后才改为已验收）：待体验。
 - 下一步：发布 `v0.8.4` 并核验 Release；Music 任务升级依赖并实现设置 UI。
 - 回退方式：不发布或回退宿主依赖到 `v0.8.3` 即可；0.8.4 无服务端/schema 变更，已发布对象不回改。
-- 本任务 worktree 收尾：发布并核验后检查清理。
+- 本任务 worktree 收尾：已在发布与产物核验后检查清理（提交/标签/Release 均已固定，无独有成果）。
