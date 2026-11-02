@@ -532,7 +532,13 @@ def main() -> int:
                 (1920, 1080, "wide"),
             ):
                 page.set_viewport_size({"width": w, "height": hgt})
-                page.locator(".nav-item:visible", has_text="反馈").first.click()
+                # <768 的横向导航收进「管理菜单」按钮（既有移动端设计）；
+                # 测试走与用户一致的入口，不假设这条窄屏导航仍可见。
+                if w < 768:
+                    page.locator(".mobile-menu-toggle").click()
+                    page.locator(".mobile-nav .nav-item", has_text="反馈").first.click()
+                else:
+                    page.locator(".nav-item:visible", has_text="反馈").first.click()
                 page.wait_for_timeout(600)
                 overflow = page.evaluate(
                     "() => document.scrollingElement.scrollWidth > document.scrollingElement.clientWidth + 1"
