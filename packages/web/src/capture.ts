@@ -17,6 +17,8 @@
  *   编码超过 5MiB 最多缩小重编码三次，仍超限则本次截图失败。
  */
 
+import { snapshotLinkedStyles } from './capture-styles';
+
 export const MAX_CAPTURE_EDGE = 2048;
 export const MAX_CAPTURE_PIXELS = 4_000_000;
 export const MAX_PNG_BYTES = 5 * 1024 * 1024;
@@ -611,22 +613,44 @@ export async function captureViewport(opts: BuiltinCaptureOptions): Promise<Buil
 
   let maskRectsLogical: CaptureRect[] = [];
   const renderHtml2Canvas = opts.html2canvas ?? (await defaultHtml2Canvas());
-
-  const canvas = await renderHtml2Canvas(document.documentElement, {
-    x: viewport.scrollX,
-    y: viewport.scrollY,
-    width: viewport.width,
-    height: viewport.height,
-    scale,
-    useCORS: true,
-    allowTaint: false,
-    logging: false,
-    ignoreElements: (element: Element) => opts.ignore?.(element) ?? false,
-    onclone: (clonedDoc: Document) => {
-      // 记录 + 隐藏必须在修改克隆前完成；定位失败直接抛出使整次捕获失败
-      maskRectsLogical = recordAndApplyCloneMask(clonedDoc, viewport, opts.expectedSensitiveCount);
-    },
-  });
+  checkAbort(opts.signal);
+  const restoreStyles = snapshotLinkedStyles(document, opts.ignore);
+  let cloneFrame: Element | null = null;
+  let canvas: HTMLCanvasElement;
+  try {
+    canvas = await renderHtml2Canvas(document.documentElement, {
+      x: viewport.scrollX,
+      y: viewport.scrollY,
+      width: viewport.width,
+      height: viewport.height,
+      scale,
+      useCORS: true,
+      allowTaint: false,
+      logging: false,
+      signal: opts.signal,
+      ignoreElements: (element: Element) => opts.ignore?.(element) ?? false,
+      onclone: async (clonedDoc: Document) => {
+        cloneFrame = clonedDoc.defaultView?.frameElement ?? null;
+        // An already-cancelled renderer may still finish its clone callback.
+        // Let it settle; the outer abort check discards its canvas before PNG
+        // encoding, and the capture queue keeps the next renderer serialized.
+        if (opts.signal?.aborted) return;
+        try {
+          await restoreStyles(clonedDoc, opts.signal);
+        } catch {
+          checkAbort(opts.signal);
+          throw new CaptureError('verify-failed', '截图克隆无法保留宿主页面样式');
+        }
+        checkAbort(opts.signal);
+        // 记录 + 隐藏必须在修改克隆前完成；定位失败直接抛出使整次捕获失败
+        maskRectsLogical = recordAndApplyCloneMask(clonedDoc, viewport, opts.expectedSensitiveCount);
+      },
+    });
+  } finally {
+    // html2canvas's onclone runs before its own cleanup try/finally. An error
+    // here must remove only this capture's iframe, including on abort.
+    (cloneFrame as Element | null)?.remove();
+  }
   checkAbort(opts.signal);
 
   if (!canvas || !Number.isFinite(canvas.width) || !Number.isFinite(canvas.height) || canvas.width <= 0 || canvas.height <= 0) {

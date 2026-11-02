@@ -4,7 +4,7 @@
 > —— React / Vue / 原生 HTML / SSR / Flutter 的完整接入步骤、属性与方法清单、
 > 截图与遮挡的已知限制，都集中在这一篇。
 
-当前接入版本 **0.7.1**：[正式产物与校验文件](https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/tag/v0.7.1)。Web 固定安装 Release 的 `feedback-web-0.7.1.tgz`；Flutter 固定 Git 标签 `v0.7.1` 与 `flutter/feedback` 子目录，详细步骤见接入指南。
+当前接入版本 **0.8.3**：[正式产物与校验文件](https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/tag/v0.8.3)。Web 固定安装 Release 的 `feedback-web-0.8.3.tgz`；Flutter 固定 Git 标签 `v0.8.3` 与 `flutter/feedback` 子目录，详细步骤见接入指南。
 
 个人使用的反馈收集组件 + 归档服务。流程：**呼出面板 →（可选）截取当前应用视口并自动遮挡敏感区 → 输入文字 → 服务保存原话与截图（首次提交自动发现软件）→ AI 整理内容 →（后台停止）→ 管理员在管理页确认来源并配置规则 →「启用自动同步到 Kaneo 并处理积压」（或逐条「保存并同步到 Kaneo」）→ 写入 Kaneo**。
 
