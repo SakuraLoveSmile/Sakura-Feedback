@@ -683,6 +683,23 @@ App 对象：
 - 确认删除后清除有效远端链接，归档轮次 `archive_round` 递增。
 - 重新归档：必须在旧任务确认已删除后方可进行。新轮次归档打包初始反馈、双方全部对话记录及全部附件（长内容分段同步），生成新任务链接。
 
+### Kaneo 完成状态回读（0.8.0）
+
+问题状态仍由管理员显式操作决定；本能力只**读取** Kaneo 任务，绝不写 Kaneo。
+
+- **完成判定**：任务当前列等于其所属项目中 `isFinal = true` 的列（Kaneo v2 `GET /api/column/:projectId` 返回的 `isFinal`；缺字段时**不推断**为完成）。任务读取需返回 `status`（当前列 slug）与 `projectId`。
+- **自动扫描**：服务端每 `FEEDBACK_KANEO_SYNC_INTERVAL_MS`（默认 10 分钟，`0` 关闭）扫描「已归档 + `kaneo_task_id` 非空 + `issueStatus = open` + 非回收站」的反馈，每批最多 50 条。命中完成列时：
+  - `issueStatus` 置为 `resolved`，`dialogueVersion` 递增；
+  - 写入一条 `senderType = "system"` 的消息，文本与 `resolutionNote` 均为「任务看板中的对应任务已完成，问题已标记为已解决。」；
+  - 计入用户未读摘要（用户端「我的反馈」徽标与对话时间线可见）。
+  - 已是 `resolved` 不重复写入；`waiting_user` / `waiting_admin` 的人工对话记录**不被自动关闭**；任务未完成、项目无完成列、`task_state_missing`、Kaneo 不可达均不改本地状态。
+- **管理端单条**：`POST /api/admin/feedback/:id/sync-kaneo`（管理员显式触发，可对非 `open` 记录同步；已 `resolved` 不重复写入）。
+  - 200 `{ ok: true, result: { kind, message, ... } }`；`kind` 为 `resolved | already_resolved | no_task | task_missing | task_state_missing | no_final_column | not_final | skipped_status`。
+  - Kaneo 不可达返回 `502 kaneo_unavailable`；回收站记录 `403 readonly_trashed`。
+- **管理端批量**：`POST /api/admin/feedback/sync-kaneo`，可选 `{ "limit"?: number }`（默认 50，上限 200）；
+  返回 `{ ok: true, checked, resolved, skipped, failed, results: [{ id, kind, message }] }`。批量只处理自动候选集合（已归档 + `open` + 有任务），不会关闭进行中的人工对话。
+- **审计与通知边界**：系统同步写入 `feedback_audit.action = "kaneo_status_sync"`（actor 显示为「系统（Kaneo 同步）」，与人工「标记已解决」区分）；不发邮件/系统推送，用户端通过既有未读徽标感知。
+
 ### API 接口清单
 - **用户端接口（需 Bearer 令牌）**：
   - `GET /api/feedback/mine?appId=&page=1&limit=20&issueStatus=`：用户历史列表，按 `lastActivityAt` 倒序。
@@ -706,6 +723,8 @@ App 对象：
   - `POST /api/admin/feedback/:id/issue-status`：修改问题状态 `{ "issueStatus": "open"|"waiting_user"|"waiting_admin"|"resolved", "resolutionNote"?: string, "expectedDialogueVersion"?: number }`。
     - v12：`issueStatus === "resolved"` 时 `resolutionNote` **必填**；处理说明在用户端对话中以系统/管理员消息形式可见。
   - `POST /api/admin/feedback/:id/read`：管理员标记已读。
+  - `POST /api/admin/feedback/:id/sync-kaneo`：读取该反馈关联 Kaneo 任务的当前列；任务进入 `isFinal` 完成列时置为已解决并写入用户可见系统说明（详见「Kaneo 完成状态回读」）。
+  - `POST /api/admin/feedback/sync-kaneo`：批量回读自动候选（已归档 + `open` + 有任务），返回 `checked/resolved/skipped/failed` 汇总。
   - `POST /api/admin/feedback/:id/cancellation/retry`：重试/核对 Kaneo 撤销任务（v12 起仅用于存量 `uncertain`/`failed` 人工核对）。
 - **能力探测**：
   - `GET /api/features` → `{ "dialogue": true, "images": 5 }`。

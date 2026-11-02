@@ -2659,6 +2659,15 @@ class FeedbackPanelState extends State<FeedbackPanel>
   /// 保存按钮：校验 → 同址仅持久化 / 异址确认后完整切换。
   Future<void> _saveServerSetting() async {
     if (_settingsBusy) return;
+    // 未填写地址 = 不更改：沿用当前实际使用的服务器（上次生效的地址），
+    // 不报错、不要求用户重新输入；清除覆盖仍走「恢复默认」。
+    if (_serverInput.text.trim().isEmpty) {
+      setState(() {
+        _serverError = null;
+        _serverHint = '未填写服务器地址，保持当前服务器不变';
+      });
+      return;
+    }
     final ServerBaseNormalization norm = normalizeServerBase(
       _serverInput.text,
       pageIsHttps: kIsWeb && Uri.base.scheme == 'https',

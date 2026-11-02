@@ -6311,6 +6311,14 @@ export class FeedbackWidget extends HTMLElement {
    * 不同且有草稿 / 未确认提交时先展开确认块 → 确认后切换。
    */
   private saveServerSettings(): void {
+    // 未填写地址 = 不更改：沿用当前实际使用的服务器（上次生效的地址），
+    // 不报错、不要求用户重新输入；清除覆盖仍走「恢复默认」。
+    if (this.settingsInput.value.trim() === '' && this.effectiveApiBase !== null) {
+      this.settingsErrorEl.hidden = true;
+      this.settingsErrorEl.textContent = '';
+      this.setSettingsHint('未填写服务器地址，保持当前服务器不变。');
+      return;
+    }
     const res = normalizeServerBase(this.settingsInput.value, { pageIsHttps: this.pageIsHttps() });
     if (!res.ok) {
       this.settingsErrorEl.textContent = res.reason;

@@ -186,6 +186,12 @@ export function createKaneoHttpClient(
         id: String(r.id ?? ""),
         slug: String(r.slug ?? ""),
         name: String(r.name ?? ""),
+        // Kaneo v2 以 isFinal 暴露完成列；缺字段时保持 undefined（不推断）。
+        ...(typeof r.isFinal === "boolean"
+          ? { isFinal: r.isFinal }
+          : typeof r.is_final === "boolean"
+            ? { isFinal: r.is_final }
+            : {}),
       }))
       .filter((c) => c.slug !== "");
   }
@@ -586,7 +592,27 @@ export function createKaneoHttpClient(
       if (!res.ok) {
         throw new KaneoUncertainError(`读取 Kaneo 任务返回异常状态 (${res.status})`);
       }
-      return { taskId, taskUrl: "" };
+      // 完成状态回读需要任务当前列（Kaneo 的 status）与所属项目；旧版响应缺字段时
+      // 保持 undefined，由调用方决定是否视为“无法判断”。
+      let body: Record<string, unknown> | null = null;
+      try {
+        body = (await res.json()) as Record<string, unknown>;
+      } catch {
+        body = null;
+      }
+      const status = typeof body?.status === "string" && body.status !== "" ? body.status : undefined;
+      const projectId =
+        typeof body?.projectId === "string" && body.projectId !== ""
+          ? body.projectId
+          : typeof body?.project_id === "string" && body.project_id !== ""
+            ? body.project_id
+            : undefined;
+      return {
+        taskId,
+        taskUrl: "",
+        ...(status ? { status } : {}),
+        ...(projectId ? { projectId } : {}),
+      };
     },
 
     async deleteTask(taskId: string) {

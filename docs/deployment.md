@@ -14,6 +14,7 @@
 | `FEEDBACK_ADMIN_DIST` | 否 | 管理页构建目录；镜像内已指向 `/app/admin` |
 | `FEEDBACK_UPDATE_MANIFEST_URL` | 否 | 「检查更新」的版本清单地址，默认稳定渠道 Release 的 `release-manifest.json`；`off` 显式关闭检查功能 |
 | `FEEDBACK_UPDATE_CHECK_INTERVAL_MS` | 否 | 自动检查间隔，默认 86400000（24 小时，只检查不安装）；`0` = 只允许手动检查 |
+| `FEEDBACK_KANEO_SYNC_INTERVAL_MS` | 否 | Kaneo 完成状态回读的自动扫描间隔，默认 600000（10 分钟）；`0` = 关闭自动扫描，管理端「同步完成状态」仍可手动触发 |
 | `FEEDBACK_SESSION_TTL_MS` 等 | 否 | 会话有效期微调（cookie 14 天 / 客户端令牌 90 天 / 握手令牌 15 分钟） |
 
 上面是**服务端**读取的变量。生产部署还有一组供 compose 变量替换使用的部署变量（`FEEDBACK_IMAGE`、`FEEDBACK_PUBLIC_URL`、

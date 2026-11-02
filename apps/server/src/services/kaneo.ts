@@ -4,6 +4,11 @@ export interface KaneoColumn {
   id: string;
   slug: string;
   name: string;
+  /**
+   * Kaneo v2：该列是否为「完成」列（`is_final`）。
+   * 旧版本 Kaneo 或响应缺字段时为 undefined——完成状态回读只认显式 true。
+   */
+  isFinal?: boolean;
 }
 
 /** 工作区级标签（Kaneo GET /label/workspace/{workspaceId}）。taskId 为 null 表示工作区级标签。 */
@@ -27,6 +32,10 @@ export interface KaneoMember {
 export interface KaneoTaskRef {
   taskId: string;
   taskUrl: string;
+  /** 读取任务时返回：当前列 slug（Kaneo 的 `status` 字段）。 */
+  status?: string;
+  /** 读取任务时返回：所属项目 ID（完成状态回读用）。 */
+  projectId?: string;
 }
 
 /** 目标列不存在/失效。属于确定性失败，调用保证未发出创建请求。 */

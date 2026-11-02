@@ -3445,6 +3445,28 @@ function nextFeedbackActivityAt(previous: string, now: string): string {
   return new Date(previousMs + 1).toISOString();
 }
 
+/**
+ * Kaneo 完成状态回读候选（后台自动同步用）：
+ * 已归档、有关联任务、问题仍为 `open`（尚未有人工对话/结论）、且不在回收站。
+ * 按最近活动时间升序取前 N 条，避免每次扫描都集中在同一批。
+ */
+export function listKaneoSyncCandidates(db: Db, limit = 50): string[] {
+  const capped = Math.min(Math.max(1, Math.trunc(limit)), 200);
+  const rows = db
+    .prepare(
+      `SELECT id FROM feedbacks
+       WHERE status = 'archived'
+         AND kaneo_task_id IS NOT NULL
+         AND TRIM(kaneo_task_id) <> ''
+         AND issue_status = 'open'
+         AND mgmt_state != 'trash'
+       ORDER BY last_activity_at ASC, created_at ASC
+       LIMIT ?`,
+    )
+    .all(capped) as { id: string }[];
+  return rows.map((r) => r.id);
+}
+
 export function listUserFeedbacks(
   db: Db,
   userId: string,
@@ -3718,6 +3740,11 @@ export function updateIssueStatusInTx(
   expectedDialogueVersion?: number,
   /** v12：处理说明（resolved 时必填，1..2000 字符；其余状态可选携带），对用户可见。 */
   resolutionNote?: string | null,
+  /**
+   * 审计覆盖（v13+）：系统自动同步等非管理员显式操作使用独立 action 并附加来源信息；
+   * 缺省保持历史行为（issue_status_change）。
+   */
+  audit?: { action?: string; detail?: Record<string, unknown> },
 ):
   | { ok: true; dialogueVersion: number; issueStatus: IssueStatus; seq?: number }
   | { ok: false; error: "not_found" | "version_conflict" | "invalid_state" } {
@@ -3778,12 +3805,13 @@ export function updateIssueStatusInTx(
     insertFeedbackAuditInTx(db, {
       feedbackId,
       actor,
-      action: "issue_status_change",
+      action: audit?.action ?? "issue_status_change",
       detail: {
         from: row.issue_status,
         to: newStatus,
         dialogueVersion: nextVer,
         ...(note !== null ? { resolutionNote: note, seq: noteSeq } : {}),
+        ...(audit?.detail ?? {}),
       },
     });
 

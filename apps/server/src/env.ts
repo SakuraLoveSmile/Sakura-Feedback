@@ -48,9 +48,17 @@ export interface ServerConfig {
   assistQueueMax?: number;
   /** 投递循环空闲休眠毫秒，默认 2000。 */
   assistFlushMs?: number;
+  /**
+   * Kaneo 完成状态回读：自动扫描间隔（毫秒）。
+   * 缺省 10 分钟；显式 0 关闭自动扫描（管理端手动同步仍可用）。
+   */
+  kaneoSyncIntervalMs?: number;
 }
 
 const DAY = 24 * 60 * 60 * 1000;
+
+/** Kaneo 完成状态回读默认自动扫描间隔。 */
+export const DEFAULT_KANEO_SYNC_INTERVAL_MS = 10 * 60 * 1000;
 
 function deriveMasterKey(raw: string): Buffer {
   // base64 编码的 32 字节密钥优先；否则按口令 scrypt 派生
@@ -91,6 +99,15 @@ function parseUpdateManifestUrl(env: NodeJS.ProcessEnv): string | null {
   return raw;
 }
 
+/** Kaneo 自动同步间隔：非负整数；0 = 关闭；非法值回退默认（配置笔误不得停掉功能）。 */
+function parseKaneoSyncInterval(raw: string | undefined): number {
+  const value = (raw ?? "").trim();
+  if (value === "") return DEFAULT_KANEO_SYNC_INTERVAL_MS;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) return DEFAULT_KANEO_SYNC_INTERVAL_MS;
+  return parsed;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const dataDir = env.FEEDBACK_DATA_DIR ?? path.resolve("data");
   const masterRaw = env.FEEDBACK_MASTER_KEY;
@@ -118,5 +135,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     assistMgmtKey: optionalText(env.FEEDBACK_ASSIST_MGMT_KEY),
     assistQueueMax: parsePositiveInt(env.FEEDBACK_ASSIST_QUEUE_MAX, 1000),
     assistFlushMs: parsePositiveInt(env.FEEDBACK_ASSIST_FLUSH_MS, 2000),
+    kaneoSyncIntervalMs: parseKaneoSyncInterval(env.FEEDBACK_KANEO_SYNC_INTERVAL_MS),
   };
 }

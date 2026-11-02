@@ -597,6 +597,63 @@ export interface FeedbackDialogueResponse {
   cancellation?: KaneoCancellationTask | null;
 }
 
+// ---------- Kaneo 任务完成状态回读（单条 / 批量，管理员 cookie 鉴权） ----------
+
+/** 单条同步结果类型：任务进入 isFinal 列时标记已解决并写入系统处理说明。 */
+export type KaneoStatusSyncKind =
+  | "resolved"
+  | "already_resolved"
+  | "no_task"
+  | "task_missing"
+  | "no_final_column"
+  | "not_final";
+
+/** 单条同步结果（message 可直接展示；其余字段供排查与补充说明）。 */
+export interface KaneoStatusSyncResult {
+  kind: KaneoStatusSyncKind;
+  message: string;
+  issueStatus?: string;
+  dialogueVersion?: number;
+  resolutionNote?: string;
+  taskId?: string;
+  columnSlug?: string;
+  columnName?: string;
+  currentStatus?: string;
+  finalColumnSlug?: string;
+  finalColumnName?: string;
+}
+
+export interface KaneoStatusSyncResponse {
+  ok: true;
+  result: KaneoStatusSyncResult;
+}
+
+/** 批量同步的逐条结果（kind 与单条同一套取值，按 string 透传）。 */
+export interface KaneoStatusSyncBatchItem {
+  id: string;
+  kind: string;
+  message: string;
+}
+
+export interface KaneoStatusSyncBatchResponse {
+  ok: true;
+  checked: number;
+  resolved: number;
+  skipped: number;
+  failed: number;
+  results: KaneoStatusSyncBatchItem[];
+}
+
+/** 单条同步：读取 Kaneo 任务当前列；已完成则置为 resolved 并通知提交者。 */
+export function syncFeedbackKaneoStatus(id: string): Promise<KaneoStatusSyncResponse> {
+  return api.post<KaneoStatusSyncResponse>(`/api/admin/feedback/${id}/sync-kaneo`);
+}
+
+/** 批量同步：不传 limit，由服务端按默认窗口（50 条，上限 200）回读关联任务。 */
+export function syncFeedbacksKaneoStatus(): Promise<KaneoStatusSyncBatchResponse> {
+  return api.post<KaneoStatusSyncBatchResponse>("/api/admin/feedback/sync-kaneo");
+}
+
 /** 审计动作文案（详情页展示）。 */
 export const AUDIT_LABELS: Record<string, string> = {
   classify_save: "保存分类",
@@ -621,4 +678,5 @@ export const AUDIT_LABELS: Record<string, string> = {
   kaneo_task_cancelled: "旧 Kaneo 任务已删除",
   kaneo_cancellation_cancelled: "v12 升级停止派发 Kaneo 撤销任务",
   kaneo_cancellation_manual_retry: "手动重试 Kaneo 撤销",
+  kaneo_status_sync: "同步看板完成状态",
 };
