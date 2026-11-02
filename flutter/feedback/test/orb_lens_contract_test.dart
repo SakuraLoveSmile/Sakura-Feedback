@@ -301,7 +301,7 @@ void main() {
           .painter! as OrbLiquidLensPainter;
       expect(idle.mist, .74);
       expect(idle.idleMix, 1);
-      final _Frame fogged = await _capture(tester, withOrb);
+      final _Frame idleFrame = await _capture(tester, withOrb);
       final TestGesture drag =
           await tester.startGesture(tester.getCenter(_orb));
       await drag.moveBy(const Offset(32, 0));
@@ -343,12 +343,18 @@ void main() {
           'meanIn=${meanIn.toStringAsFixed(2)} '
           'meanInPlain=${meanInPlain.toStringAsFixed(2)}');
 
-      final double fogRetention = _retention(fogged).$1;
-      expect(fogRetention, lessThan(specRetention * .75),
-          reason:
-              'real idle output intentionally blurs, while drag remains clear');
+      final double idleRetention = _retention(idleFrame).$1;
+      if (brightness == Brightness.light) {
+        expect(idleRetention, lessThan(specRetention * .75),
+            reason: 'light idle retains its existing soft material');
+      } else {
+        expect(idleRetention, greaterThanOrEqualTo(_minRetention),
+            reason: 'R11 clear dark idle must preserve readable core detail');
+        expect(idleRetention, lessThan(specRetention),
+            reason: 'R11 idle retains subtle softness relative to clear drag');
+      }
       debugPrint(
-          'R7_FOG ${brightness.name} retention=$fogRetention clear=$specRetention');
+          'R11_IDLE ${brightness.name} retention=$idleRetention clear=$specRetention');
       expect(fixtureRatio, closeTo(1.0, 0.05), reason: '条纹夹具自身不均匀');
       if (brightness == Brightness.light) {
         expect(meanIn, greaterThanOrEqualTo(meanInPlain),
