@@ -7,113 +7,57 @@ const double _valueTolerance = 1e-9;
 
 /// 验证灵感球透镜径向放大表、源点半径与滚动角的数值层。
 void main() {
-  group('灵感球透镜常量', () {
-    test('中心与边缘倍率及滚动因子与契约一致', () {
-      expect(kFeedbackOrbLensCenterScale, 1.70);
-      expect(kFeedbackOrbLensEdgeScale, 0.866);
-      expect(kFeedbackOrbRollFactor, 1.0);
-    });
-
-    test('采样点与放大倍数一一对应且半径升序', () {
-      expect(kFeedbackOrbLensSampleR, hasLength(7));
-      expect(kFeedbackOrbLensSampleM, hasLength(kFeedbackOrbLensSampleR.length));
-      expect(kFeedbackOrbLensSampleR.first, 0.0);
-      expect(kFeedbackOrbLensSampleR.last, 1.0);
-      for (int i = 1; i < kFeedbackOrbLensSampleR.length; i++) {
-        expect(
-          kFeedbackOrbLensSampleR[i] > kFeedbackOrbLensSampleR[i - 1],
-          isTrue,
-        );
-      }
-    });
+  // R3 restores the complete first preview, superseding R1's reverse annulus.
+  test('首版中心 1.62，外缘源半径约 1.157，采样表仅用于诊断', () {
+    expect(kFeedbackOrbLensCenterScale, 1.62);
+    expect(kFeedbackOrbLensEdgeScale, closeTo(1 / (1 / 1.62 + .54), 1e-12));
+    expect(kFeedbackOrbLensDispersionEdge, .52);
+    expect(kFeedbackOrbLensRimStrength, .64);
+    expect(kFeedbackOrbRollFactor, 1);
+    expect(kFeedbackOrbLensSampleR, hasLength(7));
+    for (int i = 0; i < kFeedbackOrbLensSampleR.length; i++) {
+      expect(orbLensMagnification(kFeedbackOrbLensSampleR[i]),
+          closeTo(kFeedbackOrbLensSampleM[i], _valueTolerance));
+    }
   });
 
-  group('灵感球透镜放大倍数', () {
-    test('表内七个采样点与表一致', () {
-      for (int i = 0; i < kFeedbackOrbLensSampleR.length; i++) {
-        expect(
-          orbLensMagnification(kFeedbackOrbLensSampleR[i]),
-          closeTo(kFeedbackOrbLensSampleM[i], _valueTolerance),
-        );
-      }
-    });
-
-    test('关键半径取到中心、中点与边缘倍率', () {
-      expect(orbLensMagnification(0.0), closeTo(1.700, _valueTolerance));
-      expect(orbLensMagnification(0.5), closeTo(1.671, _valueTolerance));
-      expect(orbLensMagnification(1.0), closeTo(0.866, _valueTolerance));
-    });
-
-    test('相邻采样点中点落在两端倍率之间', () {
-      for (int i = 1; i < kFeedbackOrbLensSampleR.length; i++) {
-        final double mid =
-            (kFeedbackOrbLensSampleR[i] + kFeedbackOrbLensSampleR[i - 1]) / 2;
-        final double lower = kFeedbackOrbLensSampleM[i - 1];
-        final double upper = kFeedbackOrbLensSampleM[i];
-        final double value = orbLensMagnification(mid);
-        expect(value, lessThanOrEqualTo(lower + _valueTolerance));
-        expect(value, greaterThanOrEqualTo(upper - _valueTolerance));
-      }
-    });
-
-    test('放大倍数沿半径单调不增', () {
-      double previous = orbLensMagnification(0.0);
-      for (int step = 1; step <= 200; step++) {
-        final double value = orbLensMagnification(step / 200);
-        expect(value, lessThanOrEqualTo(previous + _valueTolerance));
-        previous = value;
-      }
-    });
-
-    test('越界半径钳制到边界值且不抛异常', () {
-      expect(orbLensMagnification(-2.5), orbLensMagnification(0.0));
-      expect(orbLensMagnification(-1e-12), orbLensMagnification(0.0));
-      expect(orbLensMagnification(1.5), orbLensMagnification(1.0));
-      expect(orbLensMagnification(1e6), orbLensMagnification(1.0));
-      expect(
-        orbLensMagnification(-2.5),
-        closeTo(kFeedbackOrbLensCenterScale, _valueTolerance),
-      );
-      expect(
-        orbLensMagnification(1.5),
-        closeTo(kFeedbackOrbLensEdgeScale, _valueTolerance),
-      );
-    });
+  test('首版使用原始半径乘七次弯曲，中心极限为 1.62', () {
+    for (int i = 0; i <= 64; i++) {
+      final double r = i / 100;
+      expect(orbLensSourceOffset(r),
+          closeTo(r * (1 / 1.62 + .54 * math.pow(r, 7)), _valueTolerance));
+    }
+    expect(orbLensMagnification(.001), closeTo(1.62, 1e-12));
   });
 
-  group('灵感球透镜源点半径', () {
-    test('球心源点为零、球缘源点约为边缘倍率倒数', () {
-      expect(orbLensSourceOffset(0.0), 0.0);
-      // 契约写作 1.156 ± 1e-3；按 r / M(r) 与 M(1) = 0.866 得 1.1547，相差 1.27e-3。
-      final double edge = orbLensSourceOffset(1.0);
-      expect(edge, closeTo(1 / kFeedbackOrbLensEdgeScale, _valueTolerance));
-      expect(edge, closeTo(1.1547, 1e-4));
-    });
+  test('首版源半径连续递增，.75/.86/1 的实际源位置匹配冻结值', () {
+    expect(orbLensSourceOffset(0), 0);
+    expect(orbLensSourceOffset(.75), closeTo(.517024, .000001));
+    expect(orbLensSourceOffset(.86), closeTo(.692442, .000001));
+    expect(orbLensSourceOffset(1), closeTo(1 / 1.62 + .54, _valueTolerance));
+    double previous = 0;
+    for (int i = 1; i <= 1000; i++) {
+      final double current = orbLensSourceOffset(i / 1000);
+      expect(current, greaterThan(previous));
+      previous = current;
+    }
+  });
 
-    test('源点半径等于半径除以对应放大倍数', () {
-      for (final double r in <double>[0.1, 0.25, 0.4, 0.7, 0.85, 0.95, 1.0]) {
-        expect(
-          orbLensSourceOffset(r),
-          closeTo(r / orbLensMagnification(r), _valueTolerance),
-        );
-      }
-    });
-
-    test('源点半径在零到一上严格递增', () {
-      double previous = orbLensSourceOffset(1 / 400);
-      for (int step = 2; step <= 400; step++) {
-        final double value = orbLensSourceOffset(step / 400);
-        expect(value, greaterThan(previous));
-        previous = value;
-      }
-    });
-
-    test('越界半径钳制到边界值', () {
-      expect(orbLensSourceOffset(-1.0), orbLensSourceOffset(0.0));
-      expect(orbLensSourceOffset(0.0), 0.0);
-      expect(orbLensSourceOffset(2.0), orbLensSourceOffset(1.0));
-      expect(orbLensSourceOffset(1e6), orbLensSourceOffset(1.0));
-    });
+  test('弯曲因子钳制但原始偏移继续递增，中心没有除零', () {
+    expect(orbLensSourceOffset(-1), 0);
+    expect(orbLensSourceOffset(2), closeTo(2 * (1 / 1.62 + .54), 1e-12));
+    expect(orbLensMagnification(0).isFinite, isTrue);
+    for (final double boundary in <double>[.64, .86, 1]) {
+      expect(
+          (orbLensSourceOffset(boundary - 1e-8) -
+                  orbLensSourceOffset(boundary + 1e-8))
+              .abs(),
+          lessThan(1e-6));
+    }
+    for (final double r in <double>[.1, .5, .75, .86, .93, 1]) {
+      expect(
+          orbLensMagnification(r), closeTo(r / orbLensSourceOffset(r), 1e-12));
+    }
   });
 
   group('灵感球滚动角', () {

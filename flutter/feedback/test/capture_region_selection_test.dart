@@ -2,16 +2,19 @@
 //
 // 覆盖：
 // 1. 初始选区计算（中央 / 四角 / 靠边 / 安全区 / 最小 48×48）；
-// 2. 选区移动、八点缩放、重新框选的边界钳制；
+// 2. 选区移动、四角缩放、重新框选的边界钳制；
 // 3. `capture.region` 归一化（0..1、相对原始捕获视口、x+width≤1）与
 //    提交 metadata 透传、整窗省略、旧提交（无 region）兼容；
 // 4. 5 张上限先提示整理附件、取消（含 Esc）、回车确认、失败可重试且绝不
 //    静默回退整屏截图、会话/身份失效作废进行中流程、已有草稿不丢失。
 
 import 'dart:convert';
+import 'dart:ui' as ui;
 
 import 'package:feedback_widget/feedback_widget.dart';
 import 'package:feedback_widget/src/capture_selection.dart';
+import 'package:feedback_widget/src/test_env.dart';
+import 'package:feedback_widget/src/wake_gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -30,8 +33,8 @@ Future<TestGesture> dragOrbAndRelease(
   Offset step = const Offset(-40, -40),
   int times = 3,
 }) async {
-  final TestGesture gesture = await tester.startGesture(
-      tester.getCenter(find.byKey(const Key('feedback-orb'))));
+  final TestGesture gesture = await tester
+      .startGesture(tester.getCenter(find.byKey(const Key('feedback-orb'))));
   for (int i = 0; i < times; i++) {
     await gesture.moveBy(step);
     await tester.pump(const Duration(milliseconds: 16));
@@ -50,7 +53,7 @@ Future<void> pumpUntilOverlay(WidgetTester tester) async {
           .evaluate()
           .isNotEmpty);
   await tester.pump();
-  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 550));
 }
 
 /// 带 orb + viewport 捕获的宿主（默认 mock 服务）。
@@ -91,6 +94,8 @@ Future<FeedbackPanelState> _waitScreenshot(WidgetTester tester) async {
   });
   await tester.pump();
   await tester.pump();
+  await tester.pump(const Duration(milliseconds: 1500));
+  await tester.pump();
   return tester.state<FeedbackPanelState>(find.byType(FeedbackPanel));
 }
 
@@ -100,30 +105,212 @@ Map<String, Object?> _multipartMetadata(http.Request req) {
   final String boundary =
       RegExp(r'boundary=([^;]+)').firstMatch(contentType)!.group(1)!;
   final List<String> parts = latin1.decode(req.bodyBytes).split('--$boundary');
-  final String metaPart = parts
-      .firstWhere((String p) => p.contains('name="metadata"'));
+  final String metaPart =
+      parts.firstWhere((String p) => p.contains('name="metadata"'));
   final String raw =
       metaPart.substring(metaPart.indexOf('\r\n\r\n') + 4).trim();
   return jsonDecode(utf8.decode(latin1.encode(raw))) as Map<String, Object?>;
 }
 
 void main() {
+  for (final entry in <({
+    String name,
+    EdgeInsets host,
+    bool safeArea,
+    EdgeInsets viewPadding,
+    Rect boundary,
+    Rect area
+  })>[
+    (
+      name: 'full view',
+      host: EdgeInsets.zero,
+      safeArea: false,
+      viewPadding: const EdgeInsets.only(top: 24, bottom: 34),
+      boundary: const Rect.fromLTWH(0, 0, 800, 600),
+      area: const Rect.fromLTWH(0, 24, 800, 542)
+    ),
+    (
+      name: 'embedded already safe',
+      host: const EdgeInsets.fromLTRB(80, 60, 120, 40),
+      safeArea: false,
+      viewPadding: const EdgeInsets.only(top: 24, bottom: 34),
+      boundary: const Rect.fromLTWH(80, 60, 600, 500),
+      area: const Rect.fromLTWH(0, 0, 600, 500)
+    ),
+    (
+      name: 'partial overlap',
+      host: const EdgeInsets.fromLTRB(80, 10, 120, 10),
+      safeArea: false,
+      viewPadding: const EdgeInsets.only(top: 24, bottom: 34),
+      boundary: const Rect.fromLTWH(80, 10, 600, 580),
+      area: const Rect.fromLTWH(0, 14, 600, 542)
+    ),
+    (
+      name: 'SafeArea already consumed',
+      host: EdgeInsets.zero,
+      safeArea: true,
+      viewPadding: const EdgeInsets.only(top: 24, bottom: 34),
+      boundary: const Rect.fromLTWH(0, 24, 800, 542),
+      area: const Rect.fromLTWH(0, 0, 800, 542)
+    ),
+    (
+      name: 'four partially overlapping edges',
+      host: const EdgeInsets.all(10),
+      safeArea: false,
+      viewPadding: const EdgeInsets.fromLTRB(18, 24, 30, 34),
+      boundary: const Rect.fromLTWH(10, 10, 780, 580),
+      area: const Rect.fromLTWH(8, 14, 752, 542)
+    ),
+  ]) {
+    for (final bool dragged in <bool>[false, true]) {
+      testWidgets(
+          'local safe rect: ${entry.name} / ${dragged ? 'orbCenter' : 'wake then drag'}',
+          (tester) async {
+        final double dpr = entry.name == 'partial overlap' ? 2 : 1;
+        tester.view.devicePixelRatio = dpr;
+        tester.view.physicalSize = Size(800 * dpr, 600 * dpr);
+        final FakeViewPadding padding = FakeViewPadding(
+            left: entry.viewPadding.left * dpr,
+            top: entry.viewPadding.top * dpr,
+            right: entry.viewPadding.right * dpr,
+            bottom: entry.viewPadding.bottom * dpr);
+        tester.view.padding = padding;
+        tester.view.viewPadding = padding;
+        debugDisableOrbLensCapture = true;
+        addTearDown(() {
+          tester.view.resetPadding();
+          tester.view.resetViewPadding();
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+          debugDisableOrbLensCapture = false;
+        });
+        final FeedbackController controller = FeedbackController();
+        addTearDown(controller.dispose);
+        final MemoryServerPrefStore preferences = MemoryServerPrefStore();
+        await preferences.write(
+            wakeGestureStorageKey('com.example.safe-local'),
+            encodeWakeGestures(
+                <FeedbackWakeGesture>{FeedbackWakeGesture.twoFingerHold}));
+        Widget host = FeedbackWidget(
+            config: FeedbackConfig('https://svc.test', 'com.example.safe-local',
+                launcherMode: FeedbackLauncherMode.orb,
+                captureMode: FeedbackCaptureMode.viewport),
+            controller: controller,
+            tokenStore: MemoryTokenStore('tok'),
+            serverPrefStore: preferences,
+            httpClient: captureMockClient(),
+            child:
+                const SizedBox.expand(child: ColoredBox(color: Colors.blue)));
+        if (entry.safeArea) host = SafeArea(child: host);
+        await tester.pumpWidget(
+            MaterialApp(home: Padding(padding: entry.host, child: host)));
+        await tester.pump();
+        expect(tester.getRect(find.byKey(const Key('feedback-host-slot'))),
+            entry.boundary);
+        final Offset releaseLocal = Offset(220, entry.boundary.height - 8);
+        final Offset releaseGlobal = entry.boundary.topLeft + releaseLocal;
+        Offset? visibleLocal;
+        if (!dragged) {
+          final TestGesture first =
+              await tester.startGesture(releaseGlobal - const Offset(20, 0));
+          final TestGesture second =
+              await tester.startGesture(releaseGlobal + const Offset(20, 0));
+          await tester.pump(const Duration(milliseconds: 700));
+          await first.up();
+          await second.up();
+          await tester.pump();
+          expect(find.byType(CaptureSelectionOverlay), findsNothing,
+              reason:
+                  'R5 wake never captures; the subsequent drag is explicit');
+        }
+        final TestGesture finger = await tester.startGesture(
+            tester.getCenter(find.byKey(const Key('feedback-orb'))));
+        await finger.moveTo(releaseGlobal);
+        for (int i = 0; i < 20; i++) {
+          await tester.pump(const Duration(milliseconds: 16));
+        }
+        visibleLocal =
+            tester.getCenter(find.byKey(const Key('feedback-orb-lens'))) -
+                entry.boundary.topLeft;
+        await finger.up();
+        await tester.pump();
+        await pumpUntilOverlay(tester);
+        final CaptureSelectionOverlay overlay =
+            tester.widget(find.byType(CaptureSelectionOverlay));
+        final CaptureSelectionOverlayState state =
+            tester.state(find.byType(CaptureSelectionOverlay));
+        expect(overlay.viewport, entry.boundary.size);
+        expect(
+            overlay.releasePoint,
+            Offset(releaseLocal.dx / entry.boundary.width,
+                releaseLocal.dy / entry.boundary.height));
+        expect(overlay.orbCenter,
+            offsetMoreOrLessEquals(visibleLocal, epsilon: 1e-9));
+        final Offset center = visibleLocal;
+        expect(
+            state.selection,
+            rectMoreOrLessEquals(
+                Rect.fromLTWH(
+                    (center.dx - 72)
+                        .clamp(entry.area.left, entry.area.right - 144),
+                    (center.dy - 72)
+                        .clamp(entry.area.top, entry.area.bottom - 144),
+                    144,
+                    144),
+                epsilon: 1e-9));
+        expect(
+            tester.getRect(find.byKey(const Key('feedback-capture-selection'))),
+            rectMoreOrLessEquals(state.selection.shift(entry.boundary.topLeft),
+                epsilon: 1e-9));
+
+        // Exercise actual move and resize callbacks, using the same local area.
+        final TestGesture move = await tester
+            .startGesture(entry.boundary.topLeft + state.selection.center);
+        await move.moveBy(const Offset(-40, -40));
+        await move.moveBy(const Offset(-1000, -1000));
+        await move.up();
+        await tester.pump();
+        expect(state.selection.topLeft, entry.area.topLeft);
+        final TestGesture grow = await tester.startGesture(tester
+            .getCenter(find.byKey(const Key('feedback-capture-handle-2-2'))));
+        await grow.moveBy(const Offset(40, 40));
+        await grow.moveBy(const Offset(1000, 1000));
+        await grow.up();
+        await tester.pump();
+        expect(state.selection, entry.area);
+        final TestGesture shrink = await tester.startGesture(tester
+            .getCenter(find.byKey(const Key('feedback-capture-handle-0-0'))));
+        await shrink.moveBy(const Offset(40, 40));
+        await shrink.moveBy(const Offset(1000, 1000));
+        await shrink.up();
+        await tester.pump();
+        expect(state.selection.size, const Size(48, 48));
+        expect(state.selection.bottomRight, entry.area.bottomRight);
+        await tester.tap(find.byKey(const Key('feedback-capture-cancel')));
+        await tester.pump();
+        expect(controller.isOpen, isFalse);
+        expect(find.byType(CaptureSelectionOverlay), findsNothing);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(seconds: 1));
+      });
+    }
+  }
+
   group('T1-1：初始选区与钳制（纯函数）', () {
-    test('中央：min(400, 屏宽×80%) × min(260, 屏高×40%)，中心为松手点', () {
+    test('中央：144×144，中心为指定球心或落点', () {
       final Rect r = initialCaptureSelection(
         viewport: const Size(800, 600),
         center: const Offset(400, 300),
       );
-      expect(r, const Rect.fromLTWH(200, 180, 400, 240));
+      expect(r, const Rect.fromLTWH(328, 228, 144, 144));
     });
 
-    test('超大视口取上限 400×260', () {
+    test('超大视口仍为144×144', () {
       final Rect r = initialCaptureSelection(
         viewport: const Size(2000, 1600),
         center: const Offset(1000, 800),
       );
-      expect(r.width, 400);
-      expect(r.height, 260);
+      expect(r.size, const Size(144, 144));
     });
 
     test('四角与靠边：整体移回可见区域（不越界）', () {
@@ -132,16 +319,23 @@ void main() {
           initialCaptureSelection(viewport: v, center: Offset.zero);
       expect(topLeft.left, 0);
       expect(topLeft.top, 0);
+      expect(topLeft.size, const Size(144, 144));
+
+      expect(initialCaptureSelection(viewport: v, center: const Offset(800, 0)),
+          const Rect.fromLTWH(656, 0, 144, 144));
+      expect(initialCaptureSelection(viewport: v, center: const Offset(0, 600)),
+          const Rect.fromLTWH(0, 456, 144, 144));
 
       final Rect bottomRight =
           initialCaptureSelection(viewport: v, center: const Offset(800, 600));
       expect(bottomRight.right, 800);
       expect(bottomRight.bottom, 600);
+      expect(bottomRight.size, const Size(144, 144));
 
       final Rect leftEdge =
           initialCaptureSelection(viewport: v, center: const Offset(10, 300));
       expect(leftEdge.left, 0);
-      expect(leftEdge.right, 400);
+      expect(leftEdge.right, 144);
 
       final Rect rightEdge =
           initialCaptureSelection(viewport: v, center: const Offset(790, 300));
@@ -165,7 +359,33 @@ void main() {
         expect(r.top, greaterThanOrEqualTo(area.top - 1e-9));
         expect(r.right, lessThanOrEqualTo(area.right + 1e-9));
         expect(r.bottom, lessThanOrEqualTo(area.bottom + 1e-9));
+        expect(r.size, const Size(144, 144));
       }
+    });
+
+    test('小视口或安全区不足144时按可用宽高收缩，允许不足48', () {
+      for (final Offset center in <Offset>[
+        Offset.zero,
+        const Offset(50, 40),
+        const Offset(100, 80)
+      ]) {
+        expect(
+            initialCaptureSelection(
+                viewport: const Size(100, 80), center: center),
+            const Rect.fromLTWH(0, 0, 100, 80));
+        expect(
+            initialCaptureSelection(
+                viewport: const Size(100, 80),
+                center: center,
+                safeInsets: const EdgeInsets.fromLTRB(30, 20, 40, 25)),
+            const Rect.fromLTWH(30, 20, 30, 35));
+      }
+      expect(
+          initialCaptureSelection(
+              viewport: const Size(200, 160),
+              center: const Offset(200, 160),
+              safeInsets: const EdgeInsets.fromLTRB(30, 10, 40, 20)),
+          const Rect.fromLTWH(30, 10, 130, 130));
     });
 
     test('最小 48×48：缩放、框选、平移都不低于最小值且移回可用区', () {
@@ -195,6 +415,123 @@ void main() {
       expect(moved.size, const Size(100, 100));
     });
   });
+
+  for (final ({String label, Offset? orb, Offset? release, Offset center}) entry
+      in <({String label, Offset? orb, Offset? release, Offset center})>[
+    (
+      label: '球心优先于不同的手指落点',
+      orb: const Offset(320, 240),
+      release: const Offset(.75, .7),
+      center: const Offset(320, 240)
+    ),
+    (
+      label: '无球快照使用归一化落点',
+      orb: null,
+      release: const Offset(.75, .7),
+      center: const Offset(600, 420)
+    ),
+    (
+      label: '无球快照和落点使用视口中央',
+      orb: null,
+      release: null,
+      center: const Offset(400, 300)
+    )
+  ]) {
+    testWidgets('400ms从104px向外展开至144px：${entry.label}', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(800, 600));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final ui.PictureRecorder recorder = ui.PictureRecorder();
+      Canvas(recorder).drawColor(Colors.blue, BlendMode.src);
+      final ui.Picture picture = recorder.endRecording();
+      final ui.Image image = picture.toImageSync(800, 600);
+      picture.dispose();
+      addTearDown(image.dispose);
+      await tester.pumpWidget(MaterialApp(
+          home: CaptureSelectionOverlay(
+              image: image,
+              viewport: const Size(800, 600),
+              orbCenter: entry.orb,
+              releasePoint: entry.release,
+              onUseRegion: (_) {},
+              onCaptureWhole: () {},
+              onCancel: () {})));
+      final CaptureSelectionOverlayState state =
+          tester.state(find.byType(CaptureSelectionOverlay));
+      expect(state.selection,
+          Rect.fromCenter(center: entry.center, width: 144, height: 144));
+      final Finder frame = find.byKey(const Key('feedback-capture-selection'));
+      expect(tester.getRect(frame),
+          Rect.fromCenter(center: entry.center, width: 104, height: 104));
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(tester.getRect(frame),
+          Rect.fromCenter(center: entry.center, width: 124, height: 124));
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(tester.getRect(frame), state.selection,
+          reason: '保持原400ms展开时长，不再向48px收缩或跳向手指');
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
+  for (final ({
+    String label,
+    Size viewport,
+    EdgeInsets insets,
+    Rect expected
+  }) entry
+      in <({String label, Size viewport, EdgeInsets insets, Rect expected})>[
+    (
+      label: '安全区小于144',
+      viewport: const Size(200, 160),
+      insets: const EdgeInsets.fromLTRB(30, 10, 40, 20),
+      expected: const Rect.fromLTWH(30, 10, 130, 130)
+    ),
+    (
+      label: '小视口不足144',
+      viewport: const Size(130, 130),
+      insets: EdgeInsets.zero,
+      expected: const Rect.fromLTWH(0, 0, 130, 130)
+    )
+  ]) {
+    testWidgets('实际覆盖层：${entry.label}，缩到可用区域且键盘不能移出', (tester) async {
+      await tester.binding.setSurfaceSize(entry.viewport);
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final ui.PictureRecorder recorder = ui.PictureRecorder();
+      Canvas(recorder).drawColor(Colors.blue, BlendMode.src);
+      final ui.Picture picture = recorder.endRecording();
+      final ui.Image image = picture.toImageSync(200, 160);
+      picture.dispose();
+      addTearDown(image.dispose);
+      await tester.pumpWidget(MaterialApp(
+          home: MediaQuery(
+              data: MediaQueryData(size: entry.viewport, padding: entry.insets),
+              child: CaptureSelectionOverlay(
+                  image: image,
+                  viewport: entry.viewport,
+                  safeInsets: entry.insets,
+                  releasePoint: const Offset(1, 1),
+                  onUseRegion: (_) {},
+                  onCaptureWhole: () {},
+                  onCancel: () {}))));
+      final CaptureSelectionOverlayState state =
+          tester.state(find.byType(CaptureSelectionOverlay));
+      expect(state.selection, entry.expected);
+      await tester.pump(const Duration(milliseconds: 550));
+      expect(
+          tester.getRect(find.byKey(const Key('feedback-capture-selection'))),
+          entry.expected);
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+      await tester.pump();
+      expect(state.selection, entry.expected);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.pump();
+      expect(state.selection.topLeft, entry.expected.topLeft);
+      expect(state.selection.width, entry.expected.width - 6);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
 
   group('T1-5：capture.region 归一化与序列化', () {
     test('相对原始捕获视口 0..1，x+width≤1、y+height≤1', () {
@@ -230,17 +567,14 @@ void main() {
         pixelWidth: 800,
         pixelHeight: 480,
         capturedAt: 't',
-        region: FeedbackCaptureRegion(
-            x: 0.1, y: 0.2, width: 0.3, height: 0.4),
+        region: FeedbackCaptureRegion(x: 0.1, y: 0.2, width: 0.3, height: 0.4),
       );
-      expect(
-          withRegion.toJson()['region'],
-          <String, Object?>{
-            'x': 0.1,
-            'y': 0.2,
-            'width': 0.3,
-            'height': 0.4,
-          });
+      expect(withRegion.toJson()['region'], <String, Object?>{
+        'x': 0.1,
+        'y': 0.2,
+        'width': 0.3,
+        'height': 0.4,
+      });
 
       // 旧提交（不带 region）：字段省略、其余语义不变——兼容。
       const FeedbackCaptureInfo legacy = FeedbackCaptureInfo(
@@ -258,40 +592,40 @@ void main() {
     });
   });
 
-  testWidgets('灵感球视觉：静止 56dp、拖动中 84dp、松手回停靠位', (tester) async {
+  testWidgets('灵感球视觉：静止 56dp、拖动中 104dp、松手回停靠位', (tester) async {
     final controller = FeedbackController();
     addTearDown(controller.dispose);
     await pumpOrbHost(tester, controller);
 
     final Finder orb = find.byKey(const Key('feedback-orb'));
     final Rect docked = tester.getRect(orb);
-    expect(tester.getSize(orb), const Size(56, 56), reason: 'spec 3.1：静止直径 56dp');
+    expect(tester.getSize(orb), const Size(56, 56),
+        reason: 'spec 3.1：静止直径 56dp');
 
-    final TestGesture gesture = await tester.startGesture(tester.getCenter(orb));
+    final TestGesture gesture =
+        await tester.startGesture(tester.getCenter(orb));
     await gesture.moveBy(const Offset(-40, -40)); // 跨过 pan slop（被接受）
     await gesture.moveBy(const Offset(-10, -10)); // 有效更新 → 拖动态（>8dp）
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300)); // 动效 220ms 完成
-    expect(tester.getSize(orb), const Size(84, 84), reason: 'spec 3.1：拖动直径 84dp');
+    expect(tester.getSize(orb), const Size(104, 104),
+        reason: 'spec 3.1：拖动直径 104dp');
 
     await gesture.up();
     await tester.pump();
-    // spec 3.1/5：松手回弹改为 460ms，500ms 后断言精确归位。
-    await tester.pump(const Duration(milliseconds: 500));
-    expect(tester.getSize(orb), const Size(56, 56), reason: 'spec 7.1：松手复位 56dp');
-    expect(tester.getRect(orb), docked,
-        reason: '截图定位绝不更改停靠位置（位移归零）');
-    // 拖动松手 → 进入选区流程（而不是直接写草稿）。
-    expect(
-        find.byKey(const Key('feedback-capture-selection-overlay')),
-        findsOneWidget);
+    await pumpUntilOverlay(tester);
+    expect(orb, findsNothing, reason: '捕获和选区期间球隐藏');
+    await tester.tap(find.byKey(const Key('feedback-capture-cancel')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(tester.getSize(orb), const Size(56, 56));
+    expect(tester.getRect(orb), docked, reason: '取消不改变停靠位置');
 
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump(const Duration(seconds: 2));
   });
 
-  testWidgets('系统减少动态效果：拖动取消缩放（恒 56dp），选区流程不受影响',
-      (tester) async {
+  testWidgets('系统减少动态效果：直接进入104dp拖动态，选区流程不受影响', (tester) async {
     final controller = FeedbackController();
     addTearDown(controller.dispose);
     await tester.binding.setSurfaceSize(const Size(800, 600));
@@ -322,13 +656,14 @@ void main() {
     expect(tester.getSize(orb), const Size(56, 56),
         reason: 'spec 8.2：减少动态效果的基础直径为 56dp');
 
-    final TestGesture gesture = await tester.startGesture(tester.getCenter(orb));
+    final TestGesture gesture =
+        await tester.startGesture(tester.getCenter(orb));
     await gesture.moveBy(const Offset(-40, -40));
     await gesture.moveBy(const Offset(-10, -10));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
-    expect(tester.getSize(orb), const Size(56, 56),
-        reason: 'spec 8.2：拖动也保持 56dp（不展开 84dp）');
+    expect(tester.getSize(orb), const Size(104, 104),
+        reason: '减少动态效果直接进入活动态，不禁用截图');
 
     await gesture.up();
     await tester.pump();
@@ -341,8 +676,7 @@ void main() {
     await tester.pump(const Duration(seconds: 2));
   });
 
-  testWidgets('拖到中央：初始选区居中于松手点（800×600 → 400×240，靠边整体移回）',
-      (tester) async {
+  testWidgets('指针拖向中央：144×144初始选区围绕可见球心并整体钳回边界', (tester) async {
     final controller = FeedbackController();
     addTearDown(controller.dispose);
     await pumpOrbHost(tester, controller);
@@ -357,12 +691,19 @@ void main() {
     final CaptureSelectionOverlayState overlay =
         tester.state<CaptureSelectionOverlayState>(
             find.byType(CaptureSelectionOverlay));
-    // (632,302)±(200,120) → (432,182)-(832,422)，向左钳回32px。
-    expect(overlay.selection, const Rect.fromLTWH(400, 182, 400, 240));
-    expect(
-        tester.getRect(find.byKey(const Key('feedback-capture-selection'))),
-        const Rect.fromLTWH(400, 182, 400, 240),
-        reason: '右侧钳回到800，top=302-120=182；实际渲染与计算一致');
+    final CaptureSelectionOverlay widget =
+        tester.widget(find.byType(CaptureSelectionOverlay));
+    expect(widget.orbCenter, isNotNull);
+    expect(widget.releasePoint, const Offset(632 / 800, 302 / 600));
+    final Rect expected = Rect.fromCenter(
+        center: Offset(widget.orbCenter!.dx.clamp(72, 728),
+            widget.orbCenter!.dy.clamp(72, 528)),
+        width: 144,
+        height: 144);
+    expect(overlay.selection, expected);
+    expect(tester.getRect(find.byKey(const Key('feedback-capture-selection'))),
+        expected,
+        reason: '实际渲染与以可见球心展开的144px初始选区一致');
 
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump(const Duration(seconds: 2));
@@ -374,8 +715,8 @@ void main() {
     await pumpOrbHost(tester, controller);
 
     // 球停靠在右下，向右下小步移动（贴边松手）。
-    final TestGesture gesture = await tester.startGesture(
-        tester.getCenter(find.byKey(const Key('feedback-orb'))));
+    final TestGesture gesture = await tester
+        .startGesture(tester.getCenter(find.byKey(const Key('feedback-orb'))));
     for (int i = 0; i < 6; i++) {
       await gesture.moveBy(const Offset(20, 20));
       await tester.pump(const Duration(milliseconds: 16));
@@ -388,8 +729,7 @@ void main() {
         tester.state<CaptureSelectionOverlayState>(
             find.byType(CaptureSelectionOverlay));
     final Rect sel = overlay.selection;
-    expect(sel.width, 400);
-    expect(sel.height, 240);
+    expect(sel.size, const Size(144, 144));
     expect(sel.left, greaterThanOrEqualTo(0));
     expect(sel.top, greaterThanOrEqualTo(0));
     expect(sel.right, 800, reason: '靠右 → 整体移回贴住右边界');
@@ -399,8 +739,7 @@ void main() {
     await tester.pump(const Duration(seconds: 2));
   });
 
-  testWidgets('选区交互：拖动移动、控制点缩放、背景重新框选，均不越界不小于最小值',
-      (tester) async {
+  testWidgets('选区交互：拖动移动、控制点缩放、背景重新框选，均不越界不小于最小值', (tester) async {
     final controller = FeedbackController();
     addTearDown(controller.dispose);
     await pumpOrbHost(tester, controller);
@@ -411,7 +750,14 @@ void main() {
     final CaptureSelectionOverlayState overlay =
         tester.state<CaptureSelectionOverlayState>(
             find.byType(CaptureSelectionOverlay));
+    final TestGesture enlarge = await tester.startGesture(
+        tester.getCenter(find.byKey(const Key('feedback-capture-handle-2-2'))));
+    await enlarge.moveBy(const Offset(55, 55));
+    await enlarge.moveBy(const Offset(55, 55));
+    await enlarge.up();
+    await tester.pump();
     final Rect initial = overlay.selection;
+    expect(initial.width, greaterThan(48));
 
     // ① 移动：在选区内拖动（多次位移事件）。
     final TestGesture move = await tester.startGesture(initial.center);
@@ -427,8 +773,8 @@ void main() {
     expect(moved.topLeft, isNot(initial.topLeft), reason: '移动改变了位置');
 
     // ② 缩放：拖右下控制点（锚点 (1,1) → key dx+1,dy+1 = 2-2）。
-    final TestGesture resize = await tester.startGesture(tester
-        .getCenter(find.byKey(const Key('feedback-capture-handle-2-2'))));
+    final TestGesture resize = await tester.startGesture(
+        tester.getCenter(find.byKey(const Key('feedback-capture-handle-2-2'))));
     for (int i = 0; i < 3; i++) {
       await resize.moveBy(const Offset(-40, -40));
       await tester.pump(const Duration(milliseconds: 16));
@@ -462,8 +808,7 @@ void main() {
     await tester.pump(const Duration(seconds: 2));
   });
 
-  testWidgets('确认「使用此区域」：只提交选区内容，region 归一化，落点不变；灵感球不入图',
-      (tester) async {
+  testWidgets('确认「使用此区域」：只提交选区内容，region 归一化，落点不变；灵感球不入图', (tester) async {
     final controller = FeedbackController();
     addTearDown(controller.dispose);
     await pumpOrbHost(tester, controller);
@@ -475,8 +820,16 @@ void main() {
         tester.state<CaptureSelectionOverlayState>(
             find.byType(CaptureSelectionOverlay));
     final Rect sel = overlay.selection;
-    expect(sel, const Rect.fromLTWH(400, 182, 400, 240),
-        reason: '松手点(632,302)，400×240选区右侧钳回；top=302-120');
+    final CaptureSelectionOverlay widget =
+        tester.widget(find.byType(CaptureSelectionOverlay));
+    expect(
+        sel,
+        Rect.fromCenter(
+            center: Offset(widget.orbCenter!.dx.clamp(72, 728),
+                widget.orbCenter!.dy.clamp(72, 528)),
+            width: 144,
+            height: 144),
+        reason: '初始选区以最后可见球心展开，元数据仍保留真实落点');
 
     await tester.tap(find.byKey(const Key('feedback-capture-use-region')));
     final FeedbackPanelState panel = await _waitScreenshot(tester);
@@ -485,30 +838,32 @@ void main() {
     // viewport 语义不变（原始捕获视口），pixel 为选区裁剪后的最终输出。
     expect(info.viewportWidth, 800);
     expect(info.viewportHeight, 600);
-    expect(info.pixelWidth, 800, reason: '400 逻辑宽 × scale 2');
-    expect(info.pixelHeight, 480, reason: '240 逻辑高 × scale 2');
+    // 原有floor/ceil外扩保持：惯性球心带小数时输出可能多1px。
+    final int pixelWidth = (sel.right * 2).ceil() - (sel.left * 2).floor();
+    final int pixelHeight = (sel.bottom * 2).ceil() - (sel.top * 2).floor();
+    expect(info.pixelWidth, pixelWidth, reason: '144逻辑宽 × scale 2，像素边界向外取整');
+    expect(info.pixelHeight, pixelHeight, reason: '144逻辑高 × scale 2，像素边界向外取整');
     // 落点仍相对原始捕获视口 0..1。
     expect(info.releasePoint, const Offset(0.79, 302 / 600),
         reason: '(632/800,302/600)，仍相对原始捕获视口');
     // region 归一化。
     final FeedbackCaptureRegion region = info.region!;
-    expect(region.x, closeTo(400 / 800, 1e-9));
-    expect(region.y, closeTo(182 / 600, 1e-9),
-        reason: '新选区top=182，归一化分母仍为原始视口高600');
-    expect(region.width, closeTo(0.5, 1e-9));
-    expect(region.height, closeTo(0.4, 1e-9));
+    expect(region.x, closeTo(sel.left / 800, 1e-9));
+    expect(region.y, closeTo(sel.top / 600, 1e-9), reason: '球心选区位置按原始视口归一化');
+    expect(region.width, closeTo(144 / 800, 1e-9));
+    expect(region.height, closeTo(144 / 600, 1e-9));
     expect(region.x + region.width, lessThanOrEqualTo(1.0));
     expect(region.y + region.height, lessThanOrEqualTo(1.0));
 
-    // 输出位图 = 选区内容（800×480）；工具栏/选区边框/灵感球均不入图。
+    // 输出位图仅为选区内容；工具栏/选区边框/灵感球均不入图。
     final DecodedPng img = await decodePng(panel.screenshotBytes!, tester);
-    expect(img.width, 800);
-    expect(img.height, 480);
-    expectPixel(img.pixelAt(10, 10), const <int>[33, 150, 243, 255],
-        '选区内应为宿主背景');
-    // 球心(752,422)，选区左上(400,182)：保留球心上方10dp取样，输出倍率2。
-    expectPixel(img.pixelAt((752 - 400) * 2, (422 - 182 - 10) * 2),
-        const <int>[33, 150, 243, 255], '灵感球不在冻结位图内');
+    expect(img.width, pixelWidth);
+    expect(img.height, pixelHeight);
+    expectPixel(
+        img.pixelAt(10, 10), const <int>[33, 150, 243, 255], '选区内应为宿主背景');
+    // 选区输出倍率2，冻结图中的宿主蓝底保持不变。
+    expectPixel(
+        img.pixelAt(144, 144), const <int>[33, 150, 243, 255], '灵感球不在冻结位图内');
 
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump(const Duration(seconds: 2));
@@ -534,8 +889,7 @@ void main() {
     final DecodedPng img = await decodePng(panel.screenshotBytes!, tester);
     expect(img.width, 1600);
     expect(img.height, 1200);
-    expectPixel(img.pixelAt(10, 10), const <int>[33, 150, 243, 255],
-        '整窗内容正常');
+    expectPixel(img.pixelAt(10, 10), const <int>[33, 150, 243, 255], '整窗内容正常');
 
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump(const Duration(seconds: 2));
@@ -574,7 +928,7 @@ void main() {
     await tester.pump(const Duration(seconds: 2));
   });
 
-  testWidgets('键盘：回车确认（焦点在「使用此区域」）', (tester) async {
+  testWidgets('键盘：选区框获得焦点并可回车确认', (tester) async {
     final controller = FeedbackController();
     addTearDown(controller.dispose);
     await pumpOrbHost(tester, controller);
@@ -582,9 +936,9 @@ void main() {
     await dragOrbAndRelease(tester);
     await pumpUntilOverlay(tester);
 
-    final FilledButton confirm = tester
-        .widget<FilledButton>(find.byKey(const Key('feedback-capture-use-region')));
-    expect(confirm.autofocus, isTrue, reason: '确认按钮自动聚焦（焦点清晰）');
+    expect(FocusManager.instance.primaryFocus?.debugLabel,
+        'feedback-capture-frame',
+        reason: '方向键与回车由选区框处理');
 
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     final FeedbackPanelState panel = await _waitScreenshot(tester);
@@ -685,8 +1039,7 @@ void main() {
     await tester.pump(const Duration(seconds: 2));
   });
 
-  testWidgets('捕获失败：提示可重试、绝不静默回退整屏截图；修复后重试成功且草稿不丢',
-      (tester) async {
+  testWidgets('捕获失败：提示可重试、绝不静默回退整屏截图；修复后重试成功且草稿不丢', (tester) async {
     final controller = FeedbackController();
     addTearDown(controller.dispose);
     await tester.binding.setSurfaceSize(const Size(800, 600));
@@ -735,13 +1088,11 @@ void main() {
     for (int i = 0; i < 20; i++) {
       await tester.pump(const Duration(milliseconds: 16));
     }
-    expect(
-        find.byKey(const Key('feedback-capture-selection-overlay')),
+    expect(find.byKey(const Key('feedback-capture-selection-overlay')),
         findsNothing);
     final FeedbackPanelState panel =
         tester.state<FeedbackPanelState>(find.byType(FeedbackPanel));
-    expect(panel.hasScreenshot, isFalse,
-        reason: '失败绝不静默回退成整屏截图');
+    expect(panel.hasScreenshot, isFalse, reason: '失败绝不静默回退成整屏截图');
     expect(find.textContaining('截图失败'), findsOneWidget);
     controller.close();
     await tester.pump();
@@ -777,8 +1128,7 @@ void main() {
     await tester.pump(const Duration(seconds: 2));
   });
 
-  testWidgets('会话 / 身份失效：进行中的选区流程作废（冻结位图立即销毁）',
-      (tester) async {
+  testWidgets('会话 / 身份失效：进行中的选区流程作废（冻结位图立即销毁）', (tester) async {
     final controller = FeedbackController();
     addTearDown(controller.dispose);
     await pumpOrbHost(tester, controller);
@@ -814,8 +1164,7 @@ void main() {
     await tester.pump(const Duration(seconds: 2));
   });
 
-  testWidgets('提交透传：metadata.capture 携带 region（0..1、相对原始捕获视口）',
-      (tester) async {
+  testWidgets('提交透传：metadata.capture 携带 region（0..1、相对原始捕获视口）', (tester) async {
     final controller = FeedbackController();
     addTearDown(controller.dispose);
     final PanelServer server = PanelServer();
@@ -826,11 +1175,14 @@ void main() {
 
     await dragOrbAndRelease(tester);
     await pumpUntilOverlay(tester);
+    final Rect selection = tester
+        .state<CaptureSelectionOverlayState>(
+            find.byType(CaptureSelectionOverlay))
+        .selection;
     await tester.tap(find.byKey(const Key('feedback-capture-use-region')));
     await _waitScreenshot(tester);
 
-    await tester.enterText(
-        find.byKey(const Key('feedback-input')), '带局部截图的反馈');
+    await tester.enterText(find.byKey(const Key('feedback-input')), '带局部截图的反馈');
     await tester.pump();
     await tester.tap(find.byKey(const Key('feedback-submit')));
     await pumpUntil(tester, () => server.count('POST /api/feedback') == 1);
@@ -849,8 +1201,14 @@ void main() {
         lessThanOrEqualTo(1.0));
     expect(capture['viewportWidth'], 800);
     expect(capture['viewportHeight'], 600);
-    expect(capture['pixelWidth'], 800);
-    expect(capture['pixelHeight'], 480);
+    expect(capture['pixelWidth'],
+        (selection.right * 2).ceil() - (selection.left * 2).floor());
+    expect(capture['pixelHeight'],
+        (selection.bottom * 2).ceil() - (selection.top * 2).floor());
+    expect(region['x'], closeTo(selection.left / 800, 1e-9));
+    expect(region['y'], closeTo(selection.top / 600, 1e-9));
+    expect(region['width'], closeTo(144 / 800, 1e-9));
+    expect(region['height'], closeTo(144 / 600, 1e-9));
     final Map<String, Object?> release =
         capture['releasePoint'] as Map<String, Object?>;
     expect(release['x'], 0.79, reason: '新松手点632 / 原始视口宽800');

@@ -8,8 +8,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'capture_test_utils.dart';
 
 /// 草稿守卫与截图保留回归：
-/// 1. 三个呼出入口（普通点击 / 拖动释放 / controller.captureAndOpen）在面板
-///    已有草稿文本或截图时必须**统一**跳过捕获，只打开面板并原样恢复草稿；
+/// 1. 普通点击 / controller.captureAndOpen 保留草稿；拖动为明确重截，
+///    在成功确认之前不更改草稿，取消也不覆盖旧截图；
 /// 2. 重拍失败 / 取消 / 中途关闭都不得清掉草稿文本与旧截图。
 void main() {
   Future<void> pumpGuardHost(
@@ -54,10 +54,10 @@ void main() {
     fail('等待重拍流程结束超时（面板未恢复可见）');
   }
 
-  String draftText(WidgetTester tester) =>
-      tester.widget<TextField>(find.byKey(const Key('feedback-input')))
-          .controller!
-          .text;
+  String draftText(WidgetTester tester) => tester
+      .widget<TextField>(find.byKey(const Key('feedback-input')))
+      .controller!
+      .text;
 
   testWidgets('普通点击入口：已有草稿时不重新截图，草稿与截图原样保留', (tester) async {
     final controller = FeedbackController();
@@ -114,7 +114,7 @@ void main() {
     expect(find.byKey(const Key('feedback-screenshot-wrap')), findsOneWidget);
   });
 
-  testWidgets('拖动释放入口：已有草稿时不截图，落点元数据不被改写', (tester) async {
+  testWidgets('拖动明确重截：确认前不覆盖旧草稿，取消保留落点元数据', (tester) async {
     final controller = FeedbackController();
     addTearDown(controller.dispose);
     await pumpGuardHost(tester, controller,
@@ -131,8 +131,8 @@ void main() {
 
     // 拖动灵感球超过 8dp 后释放（多次位移事件）：releasePoint 入口也必须
     // 先检查草稿——进入选区流程前就被守卫拦下，直接打开面板恢复草稿。
-    final TestGesture gesture =
-        await tester.startGesture(tester.getCenter(find.byKey(const Key('feedback-orb'))));
+    final TestGesture gesture = await tester
+        .startGesture(tester.getCenter(find.byKey(const Key('feedback-orb'))));
     for (int i = 0; i < 3; i++) {
       await gesture.moveBy(const Offset(-40, -40));
       await tester.pump(const Duration(milliseconds: 16));
@@ -140,11 +140,20 @@ void main() {
     await gesture.up();
     await tester.pump();
     await tester.pump();
-    expect(controller.isOpen, isTrue);
-    expect(
-        find.byKey(const Key('feedback-capture-selection-overlay')),
-        findsNothing,
-        reason: '已有草稿：拖动释放不得进入选区流程');
+    await pumpUntil(
+        tester,
+        () => find
+            .byKey(const Key('feedback-capture-selection-overlay'))
+            .evaluate()
+            .isNotEmpty);
+    await tester.pump(const Duration(milliseconds: 550));
+    expect(controller.isOpen, isFalse);
+    expect(panel.captureInfo!.capturedAt, oldCapturedAt);
+    await tester.tap(find.byKey(const Key('feedback-capture-cancel')));
+    await tester.pump();
+    controller.open();
+    await tester.pump();
+    await tester.pump();
     await allowCaptureToFinish(tester);
 
     panel = tester.state<FeedbackPanelState>(find.byType(FeedbackPanel));
@@ -163,7 +172,8 @@ void main() {
     FeedbackPanelState panel = await captureAndWait(tester, controller);
     final String oldCapturedAt = panel.captureInfo!.capturedAt!;
 
-    await tester.enterText(find.byKey(const Key('feedback-input')), 'CAS 入口的草稿');
+    await tester.enterText(
+        find.byKey(const Key('feedback-input')), 'CAS 入口的草稿');
     await tester.pump();
     await tester.tap(find.byKey(const Key('feedback-close')));
     await tester.pump();
@@ -222,8 +232,7 @@ void main() {
     await pumpUntilPanelRestored(tester);
 
     panel = tester.state<FeedbackPanelState>(find.byType(FeedbackPanel));
-    expect(panel.captureInfo!.capturedAt, oldCapturedAt,
-        reason: '取消重拍不得替换截图');
+    expect(panel.captureInfo!.capturedAt, oldCapturedAt, reason: '取消重拍不得替换截图');
     expect(listEquals<int>(panel.screenshotBytes, oldBytes), isTrue);
     expect(draftText(tester), '取消重拍也要保留');
     expect(find.byKey(const Key('feedback-screenshot-wrap')), findsOneWidget);
@@ -253,8 +262,7 @@ void main() {
         reason: '重拍中途关闭后重新打开：面板必须恢复可见（覆盖层隐藏状态需复位）');
 
     panel = tester.state<FeedbackPanelState>(find.byType(FeedbackPanel));
-    expect(panel.captureInfo!.capturedAt, oldCapturedAt,
-        reason: '关闭重拍不得替换截图');
+    expect(panel.captureInfo!.capturedAt, oldCapturedAt, reason: '关闭重拍不得替换截图');
     expect(listEquals<int>(panel.screenshotBytes, oldBytes), isTrue);
     expect(draftText(tester), '关闭重拍也要保留');
     expect(find.byKey(const Key('feedback-screenshot-wrap')), findsOneWidget);
@@ -286,8 +294,7 @@ void main() {
     await tester.tap(find.byKey(const Key('feedback-retake-btn')));
     await pumpUntilPanelRestored(tester);
 
-    expect(panel.captureInfo!.capturedAt, oldCapturedAt,
-        reason: '重拍失败不得替换旧截图');
+    expect(panel.captureInfo!.capturedAt, oldCapturedAt, reason: '重拍失败不得替换旧截图');
     expect(listEquals<int>(panel.screenshotBytes, oldBytes), isTrue);
     expect(draftText(tester), '重拍失败也要保留');
     expect(find.byKey(const Key('feedback-screenshot-wrap')), findsOneWidget);

@@ -9,7 +9,6 @@
 // F. 热替换到已打开的新控制器时复位回弹状态，关闭后从静态起点恢复。
 import 'package:feedback_widget/feedback_widget.dart';
 import 'package:feedback_widget/src/capture_selection.dart';
-import 'package:feedback_widget/src/orb.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -17,6 +16,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 
 import 'capture_test_utils.dart';
+import 'orb_liquid_test_utils.dart';
 
 final Finder _orb = find.byKey(const Key('feedback-orb'));
 final Finder _body = find.byKey(const Key('feedback-orb-body'));
@@ -24,19 +24,7 @@ final Finder _ring = find.byKey(const Key('feedback-orb-focus-ring'));
 final Finder _overlay =
     find.byKey(const Key('feedback-capture-selection-overlay'));
 
-OrbPainter _painter(WidgetTester tester) => tester
-    .widgetList<CustomPaint>(
-        find.descendant(of: _body, matching: find.byType(CustomPaint)))
-    .map((CustomPaint paint) => paint.painter)
-    .whereType<OrbPainter>()
-    .single;
-
-TweenAnimationBuilder<Offset> _translation(WidgetTester tester) => tester
-    .widgetList<TweenAnimationBuilder<Offset>>(find.descendant(
-        of: _orb,
-        matching: find.byWidgetPredicate(
-            (Widget widget) => widget is TweenAnimationBuilder<Offset>)))
-    .single;
+LiquidPaintState _painter(WidgetTester tester) => liquidPaintState(tester);
 
 class _RecordingController extends FeedbackController {
   int openRequests = 0;
@@ -104,21 +92,20 @@ void main() {
 
   /// 拖动入口 >8dp 并松手，等待冻结捕获挂上覆盖层。
   Future<void> dragIntoOverlay(WidgetTester tester) async {
-    final TestGesture gesture = await tester.startGesture(tester.getCenter(_orb));
+    final TestGesture gesture =
+        await tester.startGesture(tester.getCenter(_orb));
     await gesture.moveBy(const Offset(-40, -40));
     await tester.pump(const Duration(milliseconds: 16));
     await gesture.moveBy(const Offset(-40, -40));
     await tester.pump(const Duration(milliseconds: 16));
     await gesture.up();
     await tester.pump();
-    await pumpUntil(
-        tester, () => _overlay.evaluate().isNotEmpty);
+    await pumpUntil(tester, () => _overlay.evaluate().isNotEmpty);
     await tester.pump();
     await tester.pump();
   }
 
-  testWidgets('T7f-A 覆盖层期间 Space 不落到球上：不重拍、不开面板',
-      (WidgetTester tester) async {
+  testWidgets('T7f-A 覆盖层期间 Space 不落到球上：不重拍、不开面板', (WidgetTester tester) async {
     final FeedbackController controller = FeedbackController();
     addTearDown(controller.dispose);
     await pumpHost(tester, controller,
@@ -143,13 +130,14 @@ void main() {
         tester.widget<CaptureSelectionOverlay>(_overlay);
     expect(identical(overlayAfter.image, overlayBefore.image), isTrue,
         reason: '不得重新捕获（同一冻结位图实例）');
-    expect(identical(tester.state<CaptureSelectionOverlayState>(_overlay), stateBefore),
+    expect(
+        identical(
+            tester.state<CaptureSelectionOverlayState>(_overlay), stateBefore),
         isTrue,
         reason: '不得重建覆盖层');
     expect(controller.isOpen, isFalse, reason: '不得打开面板');
     expect(find.byType(FeedbackPanel), findsNothing);
-    expect(Focus.of(tester.element(_orb)).canRequestFocus, isFalse,
-        reason: '覆盖层期间入口退出焦点链（等效 ExcludeFocus）');
+    expect(_orb, findsNothing, reason: '选区期间球隐藏并退出焦点链');
     debugPrint('T7f A: focus=feedback-capture-frame, overlay=true, '
         'sameImage=true, isOpen=${controller.isOpen}');
 
@@ -157,8 +145,7 @@ void main() {
     await tester.pump(const Duration(seconds: 2));
   });
 
-  testWidgets('T7f-B 覆盖层期间 Esc 取消，且守卫不拦截之后的正常点击',
-      (WidgetTester tester) async {
+  testWidgets('T7f-B 覆盖层期间 Esc 取消，且守卫不拦截之后的正常点击', (WidgetTester tester) async {
     final FeedbackController controller = FeedbackController();
     addTearDown(controller.dispose);
     await pumpHost(tester, controller,
@@ -185,8 +172,7 @@ void main() {
     await tester.pump(const Duration(seconds: 2));
   });
 
-  testWidgets('T7f-C 键盘开面板、Esc 关闭：焦点回球且环可见',
-      (WidgetTester tester) async {
+  testWidgets('T7f-C 键盘开面板、Esc 关闭：焦点回球且环可见', (WidgetTester tester) async {
     final _RecordingController controller = _RecordingController();
     addTearDown(controller.dispose);
     await pumpHost(tester, controller);
@@ -219,9 +205,8 @@ void main() {
     addTearDown(controller.dispose);
     await pumpHost(tester, controller);
 
-    final TestGesture mouse =
-        await tester.startGesture(tester.getCenter(_orb),
-            kind: PointerDeviceKind.mouse);
+    final TestGesture mouse = await tester.startGesture(tester.getCenter(_orb),
+        kind: PointerDeviceKind.mouse);
     await tester.pump();
     await mouse.up();
     await tester.pump();
@@ -252,8 +237,8 @@ void main() {
 
     // Web 默认把 Enter / numpadEnter 映射为 ButtonActivateIntent，
     // 本地映射是跨平台可用的前提，行为断言在本机 VM 上无法区分。
-    final FocusableActionDetector detector = tester.widget<FocusableActionDetector>(
-        find.ancestor(
+    final FocusableActionDetector detector =
+        tester.widget<FocusableActionDetector>(find.ancestor(
             of: _orb, matching: find.byType(FocusableActionDetector)));
     expect(
       detector.shortcuts!.keys
@@ -280,26 +265,30 @@ void main() {
     await tester.pump(const Duration(seconds: 2));
   });
 
-  testWidgets('T7f-F 热替换到已打开控制器：关闭后回到静态起点',
-      (WidgetTester tester) async {
+  testWidgets('T7f-F 热替换到已打开控制器：关闭后回到静态起点', (WidgetTester tester) async {
     final FeedbackController first = FeedbackController();
     final FeedbackController opened = FeedbackController()..open();
     addTearDown(first.dispose);
     addTearDown(opened.dispose);
     await pumpHost(tester, first);
 
-    final TestGesture gesture = await tester.startGesture(tester.getCenter(_orb));
+    final TestGesture gesture =
+        await tester.startGesture(tester.getCenter(_orb));
     await gesture.moveBy(const Offset(-40, -40));
     await tester.pump();
     await gesture.moveBy(const Offset(-80, 0));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 230));
-    expect(tester.getSize(_body), const Size(84, 84));
+    expect(tester.getSize(_body), const Size(104, 104));
     await gesture.cancel();
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
-    expect(_translation(tester).duration, kFeedbackOrbReleaseDuration,
-        reason: '回弹进行中');
+    expect(_painter(tester).deform, 0, reason: '取消直接清空动力学');
+    // The original 220ms size transition still returns 104px to the 56px dock.
+    await tester.pump(const Duration(milliseconds: 120));
+    // Retire the finite size interpolation on its first frame after 220ms.
+    await tester.pump(const Duration(milliseconds: 16));
+    expect(tester.binding.transientCallbackCount, 0);
 
     // 换入已打开的新控制器：didUpdateWidget 侧必须抢占回弹。
     await tester.pumpWidget(host(opened));
@@ -313,13 +302,9 @@ void main() {
     await tester.pump(const Duration(milliseconds: 260));
 
     expect(tester.getSize(_body), const Size(56, 56));
-    expect(_painter(tester).stateScale, closeTo(1.0, 1e-6));
-    expect(_painter(tester).breathWeight, 1.0);
-    expect(_translation(tester).duration, Duration.zero);
-    debugPrint('T7f F: restored size=${tester.getSize(_body)}, '
-        'stateScale=${_painter(tester).stateScale}, '
-        'breathWeight=${_painter(tester).breathWeight}, '
-        'translation=${_translation(tester).duration.inMilliseconds}ms');
+    expect(_painter(tester).scale, closeTo(1.0, 1e-6));
+    expect(_painter(tester).wobble, 0.0);
+    expect(tester.binding.transientCallbackCount, 0);
 
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump(const Duration(seconds: 2));
@@ -334,8 +319,7 @@ void main() {
     await mouse.moveTo(tester.getCenter(_orb));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 260));
-    expect(_painter(tester).stateScale, closeTo(1.04, 1e-6),
-        reason: '鼠标悬停为 1.04');
+    expect(_painter(tester).scale, closeTo(1.04, 1e-6), reason: '鼠标悬停为 1.04');
     await mouse.down(tester.getCenter(_orb));
     await tester.pump();
     await mouse.up();
@@ -363,17 +347,16 @@ void main() {
     expect(Focus.of(tester.element(_orb)).hasPrimaryFocus, isTrue,
         reason: '指针模态也回球（对齐 Web orb.focus()）');
     expect(_ring, findsNothing, reason: '指针模态不得点亮 focus-visible 环');
-    expect(_painter(tester).stateScale, closeTo(1.0, 1e-6));
+    expect(_painter(tester).scale, closeTo(1.0, 1e-6));
     debugPrint('T7i A: focus=orb, ring=false, '
-        'stateScale=${_painter(tester).stateScale}');
+        'stateScale=${_painter(tester).scale}');
 
     await mouse.removePointer();
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump(const Duration(seconds: 2));
   });
 
-  testWidgets('T7i-B 指针关闭的抑制只生效一次：Tab 来回聚焦重新点亮',
-      (WidgetTester tester) async {
+  testWidgets('T7i-B 指针关闭的抑制只生效一次：Tab 来回聚焦重新点亮', (WidgetTester tester) async {
     final FeedbackController controller = FeedbackController();
     addTearDown(controller.dispose);
     await pumpHost(

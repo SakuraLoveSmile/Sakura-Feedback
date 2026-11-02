@@ -8,7 +8,6 @@
 // 因此「鼠标按下环保留」在本机 VM 里不能证明锁存；锁存必须用 touch 按下
 // （mode 翻为 touch，Focus 会派发 onShowFocusHighlight(false)）来验证。
 import 'package:feedback_widget/feedback_widget.dart';
-import 'package:feedback_widget/src/orb.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -16,17 +15,12 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 
 import 'capture_test_utils.dart';
+import 'orb_liquid_test_utils.dart';
 
 final Finder _orb = find.byKey(const Key('feedback-orb'));
-final Finder _body = find.byKey(const Key('feedback-orb-body'));
 final Finder _ring = find.byKey(const Key('feedback-orb-focus-ring'));
 
-OrbPainter _painter(WidgetTester tester) => tester
-    .widgetList<CustomPaint>(
-        find.descendant(of: _body, matching: find.byType(CustomPaint)))
-    .map((CustomPaint paint) => paint.painter)
-    .whereType<OrbPainter>()
-    .single;
+LiquidPaintState _painter(WidgetTester tester) => liquidPaintState(tester);
 
 // open() 只计数，不真的展开面板：入口保持可见，便于持续观察环。
 class _VisualController extends FeedbackController {
@@ -108,28 +102,24 @@ void main() {
     // 真实键盘模态：Tab 先翻模式，再移动焦点。
     await tester.sendKeyEvent(LogicalKeyboardKey.tab);
     await tester.pump();
-    expect(FocusManager.instance.highlightMode,
-        FocusHighlightMode.traditional,
+    expect(FocusManager.instance.highlightMode, FocusHighlightMode.traditional,
         reason: '键盘事件必须把 automatic 模式翻到 traditional');
     expect(_ring, findsOneWidget, reason: 'traditional 聚焦必须点亮环');
     expect(tester.getSize(_orb), const Size(56, 56));
 
     // 鼠标按下：Flutter 只把 touch/stylus 视为 touch 模态，mouse 不翻模式，
     // 环保留属于预期（点击不请求焦点、不清锁存）。
-    final TestGesture mouse = await tester.startGesture(
-        tester.getCenter(_orb),
+    final TestGesture mouse = await tester.startGesture(tester.getCenter(_orb),
         kind: PointerDeviceKind.mouse);
     await tester.pump();
-    expect(FocusManager.instance.highlightMode,
-        FocusHighlightMode.traditional,
+    expect(FocusManager.instance.highlightMode, FocusHighlightMode.traditional,
         reason: 'mouse down 不改变 highlightMode（见文件头口径）');
     expect(_ring, findsOneWidget, reason: '鼠标按下不得移除焦点环');
     await mouse.up();
     await tester.pump();
     expect(controller.openRequests, 1, reason: '点击分流照常');
     expect(_ring, findsOneWidget, reason: '鼠标点击后环仍锁存');
-    expect(tester.getSize(_orb), const Size(56, 56),
-        reason: '环不进入布局');
+    expect(tester.getSize(_orb), const Size(56, 56), reason: '环不进入布局');
     await mouse.removePointer();
     await tester.pump();
 
@@ -139,10 +129,9 @@ void main() {
     await tester.pump();
     expect(FocusManager.instance.highlightMode, FocusHighlightMode.touch,
         reason: 'touch 按下必须翻回 touch 模式');
-    expect(_ring, findsOneWidget,
-        reason: 'mode 翻为 touch 的当帧，锁存不得被清除（spec 5）');
+    expect(_ring, findsOneWidget, reason: 'mode 翻为 touch 的当帧，锁存不得被清除（spec 5）');
     await tester.pump(const Duration(milliseconds: 140));
-    expect(_painter(tester).stateScale, closeTo(0.94, 1e-6));
+    expect(_painter(tester).scale, closeTo(0.94, 1e-6));
     expect(_ring, findsOneWidget,
         reason: 'pressed 且 mode=touch 时焦点环仍须锁存（spec 5）');
     await touch.cancel();

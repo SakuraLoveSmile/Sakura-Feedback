@@ -4,6 +4,7 @@ import 'dart:ui' as ui;
 
 import 'package:feedback_widget/feedback_widget.dart';
 import 'package:feedback_widget/src/test_env.dart';
+import 'package:feedback_widget/src/orb.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -16,7 +17,7 @@ import 'capture_test_utils.dart';
 /// T-L7a 用仓库外临时用例量过三项，但删掉后 C 路线没有任何覆盖，而 C 才是
 /// 生产默认。本文件把三项固化：
 /// 1. spec 12.3.1 对比度保持率 ≥ 0.85（light / dark），**必须先等 C 接管**；
-/// 2. 命中区 A == C：56 与 84 两档，盒内多点 / 盒外 0.7px / 焦点环带一致；
+/// 2. 命中区 A == C：56 与 104 两档，盒内多点 / 盒外 0.7px / 焦点环带一致；
 /// 3. Semantics 不被透镜层污染：A 与 C 的节点数、标签完全一致。
 ///
 /// 确定性约束：
@@ -32,7 +33,6 @@ const double _logicalHeight = 600;
 const double _pixelRatio = 2;
 const double _orbCenterX = 400;
 const double _orbCenterY = 300;
-const double _radiusDev = 28 * _pixelRatio;
 // 条纹周期 8 逻辑像素，相位以球心为原点，球内外同相位。
 const double _stripePeriod = 8;
 const double _minRetention = 0.85;
@@ -97,8 +97,8 @@ Future<GlobalKey> _pumpHost(
   Brightness brightness = Brightness.light,
 }) async {
   final GlobalKey root = GlobalKey();
-  await tester.binding.setSurfaceSize(
-      const Size(_logicalWidth, _logicalHeight));
+  await tester.binding
+      .setSurfaceSize(const Size(_logicalWidth, _logicalHeight));
   addTearDown(() => tester.binding.setSurfaceSize(null));
   // 卸载上一棵树：同类型 FeedbackWidget 会被原地 update，旧状态会残留。
   await tester.pumpWidget(const SizedBox.shrink());
@@ -165,10 +165,13 @@ Future<_Frame> _capture(WidgetTester tester, GlobalKey root) async {
 
 /// spec 12.3.1：球心水平带 `|dy| < 0.45R`，比较 `r < 0.55R` 与
 /// `1.6R–3.2R` 的亮度标准差；返回(保持率, 球内均值, 球外均值, 球内 std)。
-(double, double, double, double) _retention(_Frame frame) {
-  final double cx = _orbCenterX * _pixelRatio;
-  final double cy = _orbCenterY * _pixelRatio;
-  final double bandHalf = 0.45 * _radiusDev;
+(double, double, double, double) _retention(_Frame frame,
+    {Offset center = const Offset(_orbCenterX, _orbCenterY),
+    double radius = 28}) {
+  final double cx = center.dx * _pixelRatio;
+  final double cy = center.dy * _pixelRatio;
+  final double radiusDev = radius * _pixelRatio;
+  final double bandHalf = 0.45 * radiusDev;
   List<double> sample(double inner, double outer) {
     final List<double> out = <double>[];
     for (int y = math.max(0, (cy - bandHalf).ceil());
@@ -196,18 +199,19 @@ Future<_Frame> _capture(WidgetTester tester, GlobalKey root) async {
     return math.sqrt(sum / values.length);
   }
 
-  final List<double> inside = sample(0, 0.55 * _radiusDev);
-  final List<double> outside = sample(1.6 * _radiusDev, 3.2 * _radiusDev);
+  final List<double> inside = sample(0, 0.55 * radiusDev);
+  final List<double> outside = sample(1.6 * radiusDev, 3.2 * radiusDev);
   expect(inside.length, greaterThan(500), reason: '球内采样过少');
   expect(outside.length, greaterThan(5000), reason: '球外采样过少');
   return (std(inside) / std(outside), mean(inside), mean(outside), std(inside));
 }
 
 /// 命中路径的稳定指纹：只取 target 的运行时类型，避免受绑定细节影响。
-String _hitFingerprint(WidgetTester tester, Offset point) =>
-    tester.hitTestOnBinding(point).path
-        .map((HitTestEntry entry) => entry.target.runtimeType.toString())
-        .join('>');
+String _hitFingerprint(WidgetTester tester, Offset point) => tester
+    .hitTestOnBinding(point)
+    .path
+    .map((HitTestEntry entry) => entry.target.runtimeType.toString())
+    .join('>');
 
 /// 该点是否命中了球体自己的手势盒（`feedback-orb` 的 RenderObject）。
 bool _hitsOrb(WidgetTester tester, Offset point) {
@@ -268,7 +272,8 @@ void main() {
    * 先断言 shader 透镜层存在且 A 的 BackdropFilter 已撤掉，再采样。
    */
   for (final Brightness brightness in Brightness.values) {
-    testWidgets('T-L7c spec 12.3.1 C 路线 ${brightness.name}：核心对比度保持率 ≥ 0.85',
+    testWidgets(
+        'T-L7c spec 12.3.1 C 路线 ${brightness.name}：真实清晰拖动态核心对比度保持率 ≥ 0.85',
         (WidgetTester tester) async {
       final (Color base, Color stripe) = brightness == Brightness.light
           ? (const Color(0xFFC9C9C9), const Color(0xFF303030))
@@ -291,10 +296,30 @@ void main() {
       expect(_shaderLens, findsOneWidget, reason: 'C 路线应已接管');
       expect(find.byType(BackdropFilter), findsNothing,
           reason: 'C 就绪后不得再叠 A 的 BackdropFilter');
+      final OrbLiquidLensPainter idle = tester
+          .widget<CustomPaint>(_shaderLens)
+          .painter! as OrbLiquidLensPainter;
+      expect(idle.mist, .74);
+      expect(idle.idleMix, 1);
+      final _Frame fogged = await _capture(tester, withOrb);
+      final TestGesture drag =
+          await tester.startGesture(tester.getCenter(_orb));
+      await drag.moveBy(const Offset(32, 0));
+      await tester.pump();
+      await drag.moveTo(const Offset(_orbCenterX, _orbCenterY));
+      for (int i = 0; i < 100; i++) {
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      final OrbLiquidLensPainter clear = tester
+          .widget<CustomPaint>(_shaderLens)
+          .painter! as OrbLiquidLensPainter;
+      expect(clear.mist, 0);
+      expect(clear.idleMix, 0);
+      expect(tester.getSize(_body), const Size(104, 104));
+      final Offset sampleCenter = clear.center;
+      final double sampleRadius = clear.radius;
       final _Frame lensed = await _capture(tester, withOrb);
-      expect(tester.getCenter(_body),
-          const Offset(_orbCenterX, _orbCenterY),
-          reason: '球心偏离会让带区采样失去意义');
+      await drag.cancel();
 
       final GlobalKey plain = await _pumpHost(
         tester,
@@ -308,9 +333,9 @@ void main() {
       final _Frame background = await _capture(tester, plain);
 
       final (double specRetention, double meanIn, double _, double stdIn) =
-          _retention(lensed);
+          _retention(lensed, center: sampleCenter, radius: sampleRadius);
       final (double fixtureRatio, double meanInPlain, double _, double _) =
-          _retention(background);
+          _retention(background, center: sampleCenter, radius: sampleRadius);
       debugPrint('T_L7C_CONTRAST ${brightness.name} '
           'specRetention=${specRetention.toStringAsFixed(4)} '
           'fixtureRatio=${fixtureRatio.toStringAsFixed(4)} '
@@ -318,6 +343,12 @@ void main() {
           'meanIn=${meanIn.toStringAsFixed(2)} '
           'meanInPlain=${meanInPlain.toStringAsFixed(2)}');
 
+      final double fogRetention = _retention(fogged).$1;
+      expect(fogRetention, lessThan(specRetention * .75),
+          reason:
+              'real idle output intentionally blurs, while drag remains clear');
+      debugPrint(
+          'R7_FOG ${brightness.name} retention=$fogRetention clear=$specRetention');
       expect(fixtureRatio, closeTo(1.0, 0.05), reason: '条纹夹具自身不均匀');
       if (brightness == Brightness.light) {
         expect(meanIn, greaterThanOrEqualTo(meanInPlain),
@@ -329,13 +360,13 @@ void main() {
   }
 
   /*
-   * 2) 命中区 A == C（56 / 84）。
+   * 2) 命中区 A == C（56 / 104）。
    *
    * 命中盒是 GestureDetector（`feedback-orb`），拖动时它停在停靠位、不随视觉
    * 平移；这里比较两条路线在同一批点上的命中路径指纹，并断言盒尺寸。
    */
   for (final bool dragging in <bool>[false, true]) {
-    final double expectedBox = dragging ? 84 : 56;
+    final double expectedBox = dragging ? 104 : 56;
     testWidgets('T-L7c 命中区 ${expectedBox.toInt()}：A 与 C 完全一致',
         (WidgetTester tester) async {
       Future<(Rect, Map<String, String>, Map<String, bool>)> sample(
@@ -357,7 +388,8 @@ void main() {
           await _waitForC(tester);
           expect(_shaderLens, findsOneWidget);
         } else {
-          expect(find.byType(BackdropFilter), findsOneWidget);
+          expect(find.byType(BackdropFilter), findsNothing,
+              reason: '安全降级不读取实时背景');
         }
 
         TestGesture? gesture;
@@ -370,8 +402,8 @@ void main() {
           await gesture.moveBy(const Offset(-40, -40));
           await tester.pump();
           await tester.pump(const Duration(milliseconds: 300));
-          expect(tester.getSize(_orb).width, closeTo(84, 0.01),
-              reason: 'dragging 时应为 84');
+          expect(tester.getSize(_orb).width, closeTo(104, 0.01),
+              reason: 'dragging 时应为 104');
         } else {
           expect(tester.getSize(_orb).width, closeTo(56, 0.01),
               reason: 'idle 时应为 56');
@@ -423,8 +455,7 @@ void main() {
       for (final String key in aHits.keys) {
         expect(cHits[key], aHits[key],
             reason: '命中路径在 $key 处 A/C 不一致（命中区被透镜层改变）');
-        expect(cOrbHits[key], aOrbHits[key],
-            reason: '是否命中球体在 $key 处 A/C 不一致');
+        expect(cOrbHits[key], aOrbHits[key], reason: '是否命中球体在 $key 处 A/C 不一致');
       }
       for (final String key in <String>[
         'center',
@@ -450,8 +481,7 @@ void main() {
    * 透镜层（A 的 BackdropFilter / C 的 shader CustomPaint）都包在
    * IgnorePointer 里；这里在真实树下比较 A/C 的节点数与标签序列。
    */
-  testWidgets('T-L7c Semantics：A 与 C 的节点数与标签完全一致',
-      (WidgetTester tester) async {
+  testWidgets('T-L7c Semantics：A 与 C 的节点数与标签完全一致', (WidgetTester tester) async {
     Future<(List<String>, int)> sample({required bool routeC}) async {
       debugDisableOrbLensCapture = !routeC;
       final FeedbackController inlineController = FeedbackController();

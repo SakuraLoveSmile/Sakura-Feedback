@@ -75,10 +75,6 @@ function drag(orb: HTMLButtonElement, dx: number, dy: number, pointerId = 1): vo
   dispatchPointer(orb, 'pointermove', dx, dy, pointerId);
 }
 
-function inlineNumber(orb: HTMLButtonElement, property: string): number {
-  return Number.parseFloat(orb.style.getPropertyValue(property));
-}
-
 function inlineTranslation(orb: HTMLButtonElement): [number, number] {
   const match = /^translate3d\(([-\d.e]+)px, ([-\d.e]+)px, 0\)$/.exec(orb.style.transform);
   if (!match) throw new Error(`无法解析灵感球平移：${orb.style.transform}`);
@@ -95,9 +91,11 @@ function expectDragInlineCleared(orb: HTMLButtonElement): void {
 
 function installManualAnimationFrames(): {
   frames: Map<number, FrameRequestCallback>;
-  runAll: () => void;
+  runAll: (milliseconds?: number) => void;
 } {
   let nextId = 1;
+  let now = 0;
+  vi.spyOn(performance, 'now').mockImplementation(() => now);
   const frames = new Map<number, FrameRequestCallback>();
   vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
     const id = nextId++;
@@ -109,10 +107,11 @@ function installManualAnimationFrames(): {
   });
   return {
     frames,
-    runAll: () => {
+    runAll: (milliseconds = 16) => {
+      now += milliseconds;
       const current = [...frames.values()];
       frames.clear();
-      for (const callback of current) callback(performance.now());
+      for (const callback of current) callback(now);
     },
   };
 }
@@ -141,222 +140,102 @@ afterEach(() => {
   vi.resetModules();
 });
 
-describe('灵感球拖动阈值与向量', () => {
-  it('严格 r > 8：8px 不进入拖动且不写 inline，8.01px 才进入', async () => {
+// The accepted liquid design replaces the old zero-lag/ellipse/460ms return assertions.
+// Gesture cancellation now clears all dynamics; only a successful capture morphs into a selection.
+describe('液态球拖动与会话', () => {
+  it('严格 >8px 阈值，视觉中心随后以惯性追随，未写旧椭圆参数', async () => {
     installRegisteredProperties();
+    const raf = installManualAnimationFrames();
     const { orb } = await mountFresh();
-
-    dispatchPointer(orb, 'pointerdown', 10, 10);
-    dispatchPointer(orb, 'pointermove', 18, 10);
+    dispatchPointer(orb,'pointerdown',10,10);
+    dispatchPointer(orb,'pointermove',18,10);
     expect(orb.classList.contains('is-dragging')).toBe(false);
     expect(orb.classList.contains('is-pressed')).toBe(true);
     expectDragInlineCleared(orb);
-
-    dispatchPointer(orb, 'pointermove', 18.01, 10);
+    dispatchPointer(orb,'pointermove',90,10);
     expect(orb.classList.contains('is-dragging')).toBe(true);
-    expect(orb.classList.contains('is-pressed')).toBe(false);
-    const [inlineX, inlineY] = inlineTranslation(orb);
-    expect(inlineX).toBeCloseTo(8.01, 12);
-    expect(inlineY).toBeCloseTo(0, 12);
-    expect(inlineNumber(orb, '--fb-orb-drag-angle')).toBeCloseTo(0, 12);
-  });
-
-  it.each([
-    { vector: [80, 0] as const, angle: 0, stretch: 1.04, glow: [-4, 0] as const },
-    { vector: [0, 80] as const, angle: Math.PI / 2, stretch: 1.04, glow: [0, -4] as const },
-    {
-      vector: [60, 80] as const,
-      angle: Math.atan2(80, 60),
-      stretch: 1.04,
-      glow: [-2.4, -3.2] as const,
-    },
-    { vector: [160, 0] as const, angle: 0, stretch: 1.04, glow: [-4, 0] as const },
-  ])(
-    '固定向量 ($vector.0,$vector.1) 独立实例写入方向、饱和拉伸与反向 glow',
-    async ({ vector, angle, stretch, glow }) => {
-      installRegisteredProperties();
-      const { orb, widget } = await mountFresh();
-      const [dx, dy] = vector;
-      const [glowX, glowY] = glow;
-
-      drag(orb, dx, dy);
-
-      expect(orb.classList.contains('is-dragging')).toBe(true);
-      expect(orb.style.transform).toBe(`translate3d(${dx}px, ${dy}px, 0)`);
-      expect(inlineNumber(orb, '--fb-orb-drag-angle')).toBeCloseTo(angle, 12);
-      expect(inlineNumber(orb, '--fb-orb-stretch-along')).toBeCloseTo(stretch, 12);
-      expect(inlineNumber(orb, '--fb-orb-glow-x')).toBeCloseTo(glowX, 12);
-      expect(inlineNumber(orb, '--fb-orb-glow-y')).toBeCloseTo(glowY, 12);
-
-      widget.remove();
-    },
-  );
-});
-
-describe('灵感球 release 时序', () => {
-  it('pointercancel 不捕获：rAF 开始复位，460ms 后移除 release class', async () => {
-    vi.useFakeTimers();
-    installRegisteredProperties();
-    const raf = installManualAnimationFrames();
-    const { widget, orb } = await mountFresh();
-    const captureProvider = vi.fn(async () => ({
-      blob: new Blob(['unused'], { type: 'image/png' }),
-      width: 1,
-      height: 1,
-    }));
-    widget.captureProvider = captureProvider;
-
-    drag(orb, 80, 0);
-    dispatchPointer(orb, 'pointercancel', 80, 0);
-
-    expect(captureProvider).not.toHaveBeenCalled();
-    expect(orb.classList.contains('is-releasing')).toBe(true);
-    expect(orb.classList.contains('is-dragging')).toBe(true);
-    expect(orb.style.transform).toBe('translate3d(80px, 0px, 0)');
+    raf.runAll();
+    const [x,y] = inlineTranslation(orb);
+    expect(x).toBeGreaterThan(0); expect(x).toBeLessThan(80); expect(y).toBe(0);
+    expect(orb.style.getPropertyValue('--fb-orb-stretch-along')).toBe('');
     expect(raf.frames.size).toBe(1);
-
-    raf.runAll();
-    expect(orb.classList.contains('is-dragging')).toBe(false);
-    expect(orb.classList.contains('is-releasing')).toBe(true);
-    expectDragInlineCleared(orb);
-
-    vi.advanceTimersByTime(459);
-    expect(orb.classList.contains('is-releasing')).toBe(true);
-    vi.advanceTimersByTime(1);
-    expect(orb.classList.contains('is-releasing')).toBe(false);
   });
 
-  it('release 后 50ms 重新 pointerdown 会废弃旧回调，不清新 pressed', async () => {
-    vi.useFakeTimers();
-    installRegisteredProperties();
-    const raf = installManualAnimationFrames();
+  it('只接收主指针/主按钮，第二指针不能覆盖已在途手势', async () => {
     const { orb } = await mountFresh();
-
-    drag(orb, 80, 0);
-    dispatchPointer(orb, 'pointercancel', 80, 0);
-    raf.runAll();
-    vi.advanceTimersByTime(50);
-
-    dispatchPointer(orb, 'pointerdown', 20, 20, 2);
-    expect(orb.classList.contains('is-pressed')).toBe(true);
-    expect(orb.classList.contains('is-releasing')).toBe(false);
-
-    vi.advanceTimersByTime(500);
-    expect(orb.classList.contains('is-pressed')).toBe(true);
-    expect(orb.classList.contains('is-releasing')).toBe(false);
+    orb.dispatchEvent(new PointerEvent('pointerdown',{button:0,pointerId:9,isPrimary:false}));
+    dispatchPointer(orb,'pointermove',80,0,9);
+    expect(orb.classList.contains('is-dragging')).toBe(false);
+    orb.dispatchEvent(new PointerEvent('pointerdown',{button:2,pointerId:9,isPrimary:true}));
+    expect(orb.classList.contains('is-pressed')).toBe(false);
+    dispatchPointer(orb,'pointerdown',0,0,1);
+    dispatchPointer(orb,'pointerdown',0,0,2);
+    dispatchPointer(orb,'pointermove',80,0,2);
+    expect(orb.classList.contains('is-dragging')).toBe(false);
+    dispatchPointer(orb,'pointermove',80,0,1);
+    expect(orb.classList.contains('is-dragging')).toBe(true);
   });
 
-  it('8px 点击路径只保留 140ms unpress，不进入 release', async () => {
-    vi.useFakeTimers();
-    installRegisteredProperties();
+  it('pointerup 立即调用正式provider，落点来自实际指针而非滞后球心', async () => {
     const raf = installManualAnimationFrames();
-    const { orb } = await mountFresh();
-
-    dispatchPointer(orb, 'pointerdown', 0, 0);
-    dispatchPointer(orb, 'pointermove', 8, 0);
-    dispatchPointer(orb, 'pointerup', 8, 0);
-
-    expect(orb.classList.contains('is-dragging')).toBe(false);
-    expect(orb.classList.contains('is-releasing')).toBe(false);
-    expect(orb.classList.contains('is-unpressing')).toBe(true);
+    vi.spyOn(window,'innerWidth','get').mockReturnValue(1000);
+    vi.spyOn(window,'innerHeight','get').mockReturnValue(800);
+    const { widget,orb } = await mountFresh();
+    const provider = vi.fn((_ctx: {releasePoint?:{x:number;y:number}}) => new Promise<never>(()=>{}));
+    widget.captureProvider = provider;
+    drag(orb,80,0); raf.runAll();
+    expect(inlineTranslation(orb)[0]).toBeLessThan(80);
+    dispatchPointer(orb,'pointerup',123.456,654.321);
+    expect(provider).toHaveBeenCalledTimes(1);
+    expect(provider.mock.calls[0]![0].releasePoint).toEqual({x:.1235,y:.8179});
+    expect(orb.style.visibility).toBe('hidden');
     expect(raf.frames.size).toBe(0);
     expectDragInlineCleared(orb);
+  });
 
-    vi.advanceTimersByTime(139);
+  it.each(['pointercancel','lostpointercapture','cancelCapture','disconnect','identity'] as const)('%s 清理积分与RAF，旧回调不能影响下一手势', async action => {
+    const raf = installManualAnimationFrames();
+    const { widget,orb } = await mountFresh();
+    const provider = vi.fn(() => new Promise<never>(()=>{})); widget.captureProvider = provider;
+    drag(orb,80,0); raf.runAll();
+    const stale = [...raf.frames.values()];
+    if (action === 'cancelCapture') widget.cancelCapture();
+    else if (action === 'disconnect') widget.remove();
+    else if (action === 'identity') widget.setAttribute('app-id','another');
+    else orb.dispatchEvent(new PointerEvent(action,{pointerId:1,isPrimary:true}));
+    expect(raf.frames.size).toBe(0);
+    expect(orb.classList.contains('is-dragging')).toBe(false);
+    expectDragInlineCleared(orb);
+    expect(provider).not.toHaveBeenCalled();
+    if (action !== 'disconnect') {
+      dispatchPointer(orb,'pointerdown',20,20,2);
+      for (const callback of stale) callback(performance.now()+16);
+      expect(orb.classList.contains('is-pressed')).toBe(true);
+      expectDragInlineCleared(orb);
+    }
+  });
+
+  it('8px点击保留140ms unpress；不安排液态RAF', async () => {
+    vi.useFakeTimers();
+    const raf = installManualAnimationFrames();
+    const { orb } = await mountFresh();
+    drag(orb,8,0); dispatchPointer(orb,'pointerup',8,0);
     expect(orb.classList.contains('is-unpressing')).toBe(true);
-    vi.advanceTimersByTime(1);
+    expect(raf.frames.size).toBe(0);
+    vi.advanceTimersByTime(140);
     expect(orb.classList.contains('is-unpressing')).toBe(false);
   });
 
-  it('pointerup 同步调用 captureProvider，落点精确四位且隐藏捕获优先清 release', async () => {
-    vi.useFakeTimers();
-    installRegisteredProperties();
-    const raf = installManualAnimationFrames();
-    vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(1000);
-    vi.spyOn(window, 'innerHeight', 'get').mockReturnValue(800);
-    const { widget, orb } = await mountFresh();
-    const captureProvider = vi.fn(
-      (_context: { releasePoint?: { x: number; y: number } }) => new Promise<never>(() => {}),
-    );
-    widget.captureProvider = captureProvider;
-
-    drag(orb, 80, 0);
-    const dispatched = dispatchPointer(orb, 'pointerup', 123.456, 654.321);
-
-    expect(dispatched).toBe(true);
-    expect(captureProvider).toHaveBeenCalledTimes(1);
-    expect(captureProvider.mock.calls[0]?.[0]?.releasePoint).toEqual({ x: 0.1235, y: 0.8179 });
-    expect(orb.style.visibility).toBe('hidden');
-    expect(orb.classList.contains('is-releasing')).toBe(false);
-    expect(raf.frames.size).toBe(0);
-    expectDragInlineCleared(orb);
-  });
-});
-
-describe('灵感球清理与结构', () => {
-  it('cancelCapture 清除待执行 rAF、release timer、class 与 inline', async () => {
-    vi.useFakeTimers();
-    installRegisteredProperties();
-    const raf = installManualAnimationFrames();
-    const { widget, orb } = await mountFresh();
-
-    drag(orb, 80, 0);
-    dispatchPointer(orb, 'pointercancel', 80, 0);
-    expect(raf.frames.size).toBe(1);
-    widget.cancelCapture();
-    expect(raf.frames.size).toBe(0);
-    expect(orb.classList.contains('is-releasing')).toBe(false);
-    expectDragInlineCleared(orb);
-
-    drag(orb, 0, 80, 2);
-    dispatchPointer(orb, 'pointercancel', 0, 80, 2);
-    raf.runAll();
-    expect(vi.getTimerCount()).toBeGreaterThanOrEqual(1);
-    widget.cancelCapture();
-    expect(vi.getTimerCount()).toBe(0);
-    expect(orb.classList.contains('is-releasing')).toBe(false);
-    expectDragInlineCleared(orb);
-  });
-
-  it('disconnectedCallback 清除待执行 rAF 或 timer、class 与 inline', async () => {
-    vi.useFakeTimers();
-    installRegisteredProperties();
-    const raf = installManualAnimationFrames();
-    const first = await mountFresh();
-
-    drag(first.orb, 80, 0);
-    dispatchPointer(first.orb, 'pointercancel', 80, 0);
-    expect(raf.frames.size).toBe(1);
-    first.widget.remove();
-    expect(raf.frames.size).toBe(0);
-    expect(first.orb.classList.contains('is-releasing')).toBe(false);
-    expectDragInlineCleared(first.orb);
-
-    const second = await mountFresh();
-    drag(second.orb, 80, 0, 2);
-    dispatchPointer(second.orb, 'pointercancel', 80, 0, 2);
-    raf.runAll();
-    expect(vi.getTimerCount()).toBeGreaterThanOrEqual(1);
-    second.widget.remove();
-    expect(vi.getTimerCount()).toBe(0);
-    expect(second.orb.classList.contains('is-releasing')).toBe(false);
-    expectDragInlineCleared(second.orb);
-  });
-
-  it('四层视觉装饰均 aria-hidden，badge 是独立直系子节点', async () => {
-    installRegisteredProperties();
-    const { orb } = await mountFresh();
-    const layerSelectors = ['.fb-orb-bloom', '.fb-orb-glow', '.fb-orb-sweep', '.fb-orb-core'];
-
-    for (const selector of layerSelectors) {
-      const layer = orb.querySelector<HTMLElement>(selector);
-      expect(layer?.getAttribute('aria-hidden')).toBe('true');
-      expect(layer?.parentElement).toBe(orb);
+  it('渲染Canvas不抢焦点/指针，原badge与焦点环保留独立节点', async () => {
+    const { orb,root } = await mountFresh();
+    const canvas = root.querySelector('.fb-orb-lens');
+    expect(canvas?.getAttribute('aria-hidden')).toBe('true');
+    expect(canvas?.hasAttribute('tabindex')).toBe(false);
+    for (const selector of ['.fb-orb-bloom','.fb-orb-glow','.fb-orb-sweep','.fb-orb-core','.fb-orb-focus-ring']) {
+      expect(orb.querySelector(selector)?.getAttribute('aria-hidden')).toBe('true');
+      expect(orb.querySelector(selector)?.parentElement).toBe(orb);
     }
-    const badge = orb.querySelector<HTMLElement>('.fb-launcher-badge');
-    expect(badge?.parentElement).toBe(orb);
-    expect(badge?.getAttribute('aria-hidden')).toBeNull();
-    expect(orb.lastElementChild).toBe(badge);
+    expect(orb.lastElementChild).toBe(orb.querySelector('.fb-launcher-badge'));
   });
 });
 
@@ -419,13 +298,16 @@ describe('模块级 @property 注册与降级', () => {
     expect(orb.classList.contains('fb-orb-properties-unavailable')).toBe(false);
   });
 
-  it('CSS.registerProperty 不可用时挂 fallback；拖动仍 1:1，释放立即清理', async () => {
+  it('CSS.registerProperty 不可用时仍保留液态惯性与取消能力', async () => {
     vi.stubGlobal('CSS', {});
+    const raf = installManualAnimationFrames();
     const { orb } = await mountFresh();
 
     expect(orb.classList.contains('fb-orb-properties-unavailable')).toBe(true);
     drag(orb, 80, 0);
-    expect(orb.style.transform).toBe('translate3d(80px, 0px, 0)');
+    raf.runAll();
+    expect(inlineTranslation(orb)[0]).toBeGreaterThan(0);
+    expect(inlineTranslation(orb)[0]).toBeLessThan(80);
     dispatchPointer(orb, 'pointercancel', 80, 0);
     expect(orb.classList.contains('is-releasing')).toBe(false);
     expectDragInlineCleared(orb);

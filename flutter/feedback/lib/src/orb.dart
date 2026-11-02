@@ -1,18 +1,21 @@
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 import 'dart:ui' show Brightness, Color, ImageFilter, Offset, TileMode;
 
 import 'package:flutter/animation.dart' show Cubic, Curves;
 import 'package:flutter/painting.dart';
 import 'package:flutter/rendering.dart' show CustomPainter;
 
+import 'orb_liquid.dart';
+
 /// 灵感球静止时的基础直径，单位为逻辑像素。
 const double kFeedbackOrbIdleDiameter = 56.0;
 
 /// 灵感球拖动时的基础直径，单位为逻辑像素。
-const double kFeedbackOrbDraggingDiameter = 84.0;
+const double kFeedbackOrbDraggingDiameter = 104.0;
 
 /// 拖动直径相对于静止直径的比例。
-const double kFeedbackOrbDragScale = 1.5;
+const double kFeedbackOrbDragScale = 104 / 56;
 
 /// 沿拖动方向的最大额外拉伸比例。
 const double kFeedbackOrbDragStretchMax = 0.04;
@@ -170,6 +173,7 @@ class OrbPainter extends CustomPainter {
     required this.glowOffset,
     required this.brightness,
     this.dispersionOpacity = 1.0,
+    this.haloOnly = false,
   });
 
   final double flow;
@@ -181,6 +185,7 @@ class OrbPainter extends CustomPainter {
   final Offset glowOffset;
   final Brightness brightness;
   final double dispersionOpacity;
+  final bool haloOnly;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -306,6 +311,13 @@ class OrbPainter extends CustomPainter {
     canvas.restore();
     canvas.restore();
 
+    // The sampled glass owns the interior and optical rim. The dock may keep
+    // its brand halo without whitening the source or adding the old sweep.
+    if (haloOnly) {
+      canvas.restore();
+      return;
+    }
+
     final Rect coreRect = Rect.fromCircle(center: Offset.zero, radius: radius);
     final double rotation = 2 * math.pi * flow;
     canvas.saveLayer(coreRect, Paint());
@@ -383,7 +395,8 @@ class OrbPainter extends CustomPainter {
       oldDelegate.pull != pull ||
       oldDelegate.glowOffset != glowOffset ||
       oldDelegate.brightness != brightness ||
-      oldDelegate.dispersionOpacity != dispersionOpacity;
+      oldDelegate.dispersionOpacity != dispersionOpacity ||
+      oldDelegate.haloOnly != haloOnly;
 }
 
 /// 面板关闭、灵感球模式、入口可见且未减少动态效果时运行流动动画。
@@ -397,92 +410,55 @@ bool orbShouldRunFlow({
 }) =>
     !open && orbMode && showLauncher && !reducedMotion && !occluded;
 
-/// 透镜中心处的径向放大倍数。
-const double kFeedbackOrbLensCenterScale = 1.70;
-
-/// 透镜球缘处的径向放大倍数。
-const double kFeedbackOrbLensEdgeScale = 0.866;
-
-/// 滚动角随累计行进距离增长的因子。
-const double kFeedbackOrbRollFactor = 1.0;
-
-/// C 路线透镜球缘处的 B−R 总位移，单位是透镜半径。
-///
-/// 初始值 0.072 由官方 Dispersion / Refraction = 0.61 / 1.31 与球缘源点位移
-/// 0.412R 的比例推导；2026-10-29 按用户观感收敛为 0.05。**不是实测值**。
-const double kFeedbackOrbLensDispersionEdge = 0.05;
-
-/// 透镜径向放大表的采样点，取值为归一化半径 r/R，升序排列。
+/// R3 first-preview glass. Sampling remains a masked, local snapshot.
+const double kFeedbackOrbLensCenterScale = 1.62;
+const double kFeedbackOrbLensEdgeScale =
+    1 / (1 / kFeedbackOrbLensCenterScale + .54);
+const double kFeedbackOrbRollFactor = 1;
+const double kFeedbackOrbLensDispersionEdge = .52;
+const double kFeedbackOrbLensRimStrength = .64;
 const List<double> kFeedbackOrbLensSampleR = <double>[
-  0.00,
-  0.25,
-  0.50,
-  0.70,
-  0.85,
-  0.95,
-  1.00,
+  0,
+  .25,
+  .5,
+  .64,
+  .75,
+  .86,
+  1
 ];
+final List<double> kFeedbackOrbLensSampleM =
+    kFeedbackOrbLensSampleR.map(orbLensMagnification).toList(growable: false);
 
-/// 与 [kFeedbackOrbLensSampleR] 一一对应的放大倍数采样点。
-const List<double> kFeedbackOrbLensSampleM = <double>[
-  1.700,
-  1.698,
-  1.671,
-  1.577,
-  1.401,
-  1.173,
-  0.866,
-];
-
-/// 按归一化半径返回透镜放大倍数；越界先钳制到零到一，再在表内分段线性插值。
 double orbLensMagnification(double r) {
-  final double t = r.clamp(0.0, 1.0);
-  for (int i = 1; i < kFeedbackOrbLensSampleR.length; i++) {
-    final double upper = kFeedbackOrbLensSampleR[i];
-    if (t <= upper) {
-      final double lower = kFeedbackOrbLensSampleR[i - 1];
-      final double fraction = (t - lower) / (upper - lower);
-      return kFeedbackOrbLensSampleM[i - 1] +
-          (kFeedbackOrbLensSampleM[i] - kFeedbackOrbLensSampleM[i - 1]) *
-              fraction;
-    }
-  }
-  return kFeedbackOrbLensSampleM.last;
+  final double t = r.clamp(0, 1);
+  return t == 0 ? kFeedbackOrbLensCenterScale : t / orbLensSourceOffset(t);
 }
 
-/// 返回球内半径 r 对应的源点半径 r / M(r)，即透镜取样位置的相对半径。
-double orbLensSourceOffset(double r) {
-  final double t = r.clamp(0.0, 1.0);
-  if (t == 0.0) {
-    return 0.0;
-  }
-  return t / orbLensMagnification(t);
-}
+double orbLensSourceOffset(double r) => orbLiquidSourceRadius(r);
 
-/// 按累计行进距离与半径返回滚动角，钳制到零到二派；半径非正时返回零。
-double orbRollAngle(double travelled, double radius) {
-  if (!(radius > 0.0)) {
-    return 0.0;
-  }
-  final double angle = travelled / radius * kFeedbackOrbRollFactor;
-  return angle.clamp(0.0, 2 * math.pi);
-}
+double orbRollAngle(double travelled, double radius) => radius <= 0
+    ? 0
+    : (travelled / radius * kFeedbackOrbRollFactor).clamp(0, 2 * math.pi);
 
-/// 按 `shaders/orb_lens.frag` 的 uniform 声明顺序，把十一个 float 槽位排成列表。
-///
-/// 顺序固定为 uImageSize.x、uImageSize.y、uOffset.x、uOffset.y、uScale、
-/// uCenter.x、uCenter.y、uRadiusPx、uStretch、uAngle、uDispersion；
-/// 必须与着色器的 uniform 声明顺序一致，改动其中一处就要同步另一处。
-/// sampler2D uBg 不占 float 槽位，由调用方单独设置。
+/// R7 appends five material/shape slots; the original 18 slots stay fixed.
 List<double> orbLensUniformValues({
   required Size imageSize,
   required Offset imageOffset,
   required double pixelRatio,
   required Offset center,
   required double radiusPx,
-  required double stretch,
-  required double angle,
-  required double dispersion,
+  Offset direction = const Offset(1, 0),
+  double deform = 0,
+  double wobble = 0,
+  double magnification = kFeedbackOrbLensCenterScale,
+  double rimStrength = kFeedbackOrbLensRimStrength,
+  double opacity = 1,
+  Size localSize = Size.zero,
+  bool dark = false,
+  Size? halfSize,
+  double handleMix = 0,
+  double mist = 0,
+  double idleMix = 0,
 }) =>
     <double>[
       imageSize.width,
@@ -490,10 +466,187 @@ List<double> orbLensUniformValues({
       imageOffset.dx,
       imageOffset.dy,
       pixelRatio,
-      imageOffset.dx + center.dx * pixelRatio,
-      imageOffset.dy + center.dy * pixelRatio,
-      radiusPx * pixelRatio,
-      stretch,
-      angle,
-      dispersion,
+      center.dx,
+      center.dy,
+      radiusPx,
+      direction.dx,
+      direction.dy,
+      deform,
+      wobble,
+      magnification,
+      rimStrength,
+      opacity,
+      localSize.width,
+      localSize.height,
+      dark ? 1 : 0,
+      halfSize?.width ?? radiusPx,
+      halfSize?.height ?? radiusPx,
+      handleMix,
+      mist,
+      idleMix,
     ];
+
+/// Draws the unclipped liquid contour in a box with at least 1.6R padding.
+class OrbLiquidLensPainter extends CustomPainter {
+  const OrbLiquidLensPainter(
+      {required this.image,
+      required this.shader,
+      required this.offset,
+      required this.scale,
+      required this.center,
+      required this.radius,
+      this.direction = const Offset(1, 0),
+      this.deform = 0,
+      this.wobble = 0,
+      this.opacity = 1,
+      this.dark = false,
+      this.halfSize,
+      this.handleMix = 0,
+      this.mist = 0,
+      this.idleMix = 0});
+  final ui.Image image;
+  final ui.FragmentShader shader;
+  final Offset offset;
+  final double scale;
+  final Offset center;
+  final double radius;
+  final Offset direction;
+  final double deform;
+  final double wobble;
+  final double opacity;
+  final bool dark;
+  final Size? halfSize;
+  final double handleMix;
+  final double mist;
+  final double idleMix;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final List<double> uniforms = orbLensUniformValues(
+        imageSize: Size(image.width.toDouble(), image.height.toDouble()),
+        imageOffset: offset,
+        pixelRatio: scale,
+        center: center,
+        radiusPx: radius,
+        direction: direction,
+        deform: deform,
+        wobble: wobble,
+        opacity: opacity,
+        localSize: size,
+        dark: dark,
+        halfSize: halfSize,
+        handleMix: handleMix,
+        mist: mist,
+        idleMix: idleMix);
+    for (int i = 0; i < uniforms.length; i++) {
+      shader.setFloat(i, uniforms[i]);
+    }
+    shader.setImageSampler(0, image);
+    canvas.drawRect(Offset.zero & size, Paint()..shader = shader);
+  }
+
+  @override
+  bool shouldRepaint(OrbLiquidLensPainter old) => true;
+}
+
+/// No-sampling fallback: never reads live pixels or bypasses capture masks.
+class OrbLiquidOutlinePainter extends CustomPainter {
+  const OrbLiquidOutlinePainter(
+      {required this.radius,
+      this.direction = const Offset(1, 0),
+      this.deform = 0,
+      this.wobble = 0,
+      this.color = const Color(0xDDFFFFFF),
+      this.halfSize,
+      this.handleMix = 0,
+      this.idleMix = 0,
+      this.dark = false,
+      this.highContrast = false});
+  final double radius;
+  final Offset direction;
+  final double deform;
+  final double wobble;
+  final Color color;
+  final Size? halfSize;
+  final double handleMix;
+  final double idleMix;
+  final bool dark;
+  final bool highContrast;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final Offset center = size.center(Offset.zero);
+    final Path path = Path();
+    for (int i = 0; i <= 192; i++) {
+      final double a = i * 2 * math.pi / 192;
+      double r = radius * orbLiquidContour(a, direction, deform, wobble);
+      if (handleMix > 0) {
+        final Size half = halfSize ?? Size(radius, radius);
+        final double stem = math.max(0, half.height - half.width);
+        double low = 0, high = math.max(r, half.height) * 1.1;
+        for (int step = 0; step < 16; step++) {
+          final double distance = (low + high) / 2;
+          final Offset d = Offset(math.cos(a), math.sin(a)) * distance;
+          final double capsule =
+              Offset(d.dx, d.dy - d.dy.clamp(-stem, stem)).distance /
+                  half.width;
+          final double mixed =
+              distance / r * (1 - handleMix) + capsule * handleMix;
+          if (mixed > 1) {
+            high = distance;
+          } else {
+            low = distance;
+          }
+        }
+        r = (low + high) / 2;
+      }
+      final Offset p = center + Offset(math.cos(a), math.sin(a)) * r;
+      if (i == 0) {
+        path.moveTo(p.dx, p.dy);
+      } else {
+        path.lineTo(p.dx, p.dy);
+      }
+    }
+    path.close();
+    // An unavailable texture keeps a transparent, softly glowing idle shape.
+    // High contrast and clear dragging retain their visible contour.
+    if (idleMix > 0 && !highContrast) {
+      if (!dark) {
+        // A narrow handle's two blurred sides otherwise overlap at its center.
+        // Keep the light idle cue outside the unfilled glass silhouette.
+        canvas.save();
+        canvas.clipPath(Path.combine(PathOperation.difference,
+            Path()..addRect(Offset.zero & size), path));
+      }
+      canvas.drawPath(
+          path,
+          Paint()
+            ..color = dark
+                ? color.withValues(alpha: color.a * .16 * idleMix)
+                : Color.fromRGBO(89, 110, 143, .10 * idleMix)
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 4
+            ..maskFilter = const ui.MaskFilter.blur(ui.BlurStyle.normal, 5));
+      canvas.drawPath(
+          path,
+          Paint()
+            ..color = dark
+                ? Color.fromRGBO(235, 237, 246, .45 * idleMix)
+                : Color.fromRGBO(89, 110, 143, .32 * idleMix)
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 4
+            ..maskFilter = const ui.MaskFilter.blur(ui.BlurStyle.normal, 3));
+      if (!dark) canvas.restore();
+      return;
+    }
+    canvas.drawPath(
+        path,
+        Paint()
+          ..color = color
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.2);
+  }
+
+  @override
+  bool shouldRepaint(OrbLiquidOutlinePainter old) => true;
+}

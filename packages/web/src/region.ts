@@ -39,10 +39,10 @@ export interface RegionViewport {
 /** 选区最小边长（逻辑像素）。 */
 export const MIN_REGION_SIZE = 48;
 /** 初始选区宽 / 高上限（逻辑像素）。 */
-export const REGION_DEFAULT_WIDTH = 400;
-export const REGION_DEFAULT_HEIGHT = 260;
+export const REGION_DEFAULT_WIDTH = 144;
+export const REGION_DEFAULT_HEIGHT = 144;
 /** 键盘调整选区的步长（逻辑像素）。 */
-export const REGION_KEY_STEP = 8;
+export const REGION_KEY_STEP = 6;
 
 /** 八个缩放控制点方位。 */
 export type RegionHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
@@ -85,20 +85,19 @@ export function clampRegion(sel: RegionRect, viewport: RegionViewport): RegionRe
 }
 
 /**
- * 松手位置处的初始选区：
- * 宽 `min(400, 视口宽×80%)`、高 `min(260, 视口高×40%)`，中心为松手点（0..1），
- * 靠边时整体移回可见区域内，并强制最小 48×48。
+ * 以给定归一化中心（可见球心或入口落点）初始化144×144选区。
+ * 靠边时整体移回可见区域内；可用视口不足144时取实际尺寸。
  */
 export function initialRegionSelection(
-  release: { x: number; y: number },
+  center: { x: number; y: number },
   viewport: RegionViewport,
 ): RegionRect {
   const vw = Math.max(1, viewport.width);
   const vh = Math.max(1, viewport.height);
-  const width = Math.min(REGION_DEFAULT_WIDTH, vw * 0.8);
-  const height = Math.min(REGION_DEFAULT_HEIGHT, vh * 0.4);
-  const cx = clamp01(release.x) * vw;
-  const cy = clamp01(release.y) * vh;
+  const width = Math.min(REGION_DEFAULT_WIDTH, vw);
+  const height = Math.min(REGION_DEFAULT_HEIGHT, vh);
+  const cx = clamp01(center.x) * vw;
+  const cy = clamp01(center.y) * vh;
   return clampRegion({ x: cx - width / 2, y: cy - height / 2, width, height }, viewport);
 }
 

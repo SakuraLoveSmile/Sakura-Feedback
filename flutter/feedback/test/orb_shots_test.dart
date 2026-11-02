@@ -14,12 +14,14 @@ const double _flow = 0.25;
 const double _breath = 0.5;
 const double _ringSampleRadius = 0.97;
 const double _ringSampleAngle = 330;
+// This matrix covers the retained standalone OrbPainter material. The live
+// liquid widget and its 104px geometry have separate rendered pixel/flow tests.
+const double _legacyDragDiameter = 84;
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  test('writes the orb screenshot matrix required by docs/orb-spec.md 10.2',
-      () async {
+  test('writes the retained OrbPainter material fixture matrix', () async {
     final Directory directory = _shotsDirectory();
     await directory.create(recursive: true);
     final List<_Shot> shots = _shots();
@@ -125,8 +127,8 @@ void main() {
 
 List<_Shot> _shots() {
   final double p = kFeedbackOrbReleaseCurve.transform(0.5);
-  final double releaseDiameter = kFeedbackOrbDraggingDiameter +
-      (kFeedbackOrbIdleDiameter - kFeedbackOrbDraggingDiameter) * p;
+  final double releaseDiameter = _legacyDragDiameter +
+      (kFeedbackOrbIdleDiameter - _legacyDragDiameter) * p;
   // 回弹过冲时组件用 safePull 把 pull 钳到 0..1，尺寸仍按曲线过冲。
   final double rawReleasePull = 1 - p;
   final double releasePull = rawReleasePull.clamp(0.0, 1.0).toDouble();
@@ -170,7 +172,7 @@ List<_Shot> _shots() {
           file: '${brightness.name}-dragging.png',
           state: 'dragging',
           brightness: brightness,
-          diameter: kFeedbackOrbDraggingDiameter,
+          diameter: _legacyDragDiameter,
           stateScale: 1.0,
           breathWeight: 0,
           dragAngle: 0,
@@ -273,7 +275,8 @@ Future<void> _verifyPng(Uint8List bytes, _Shot shot) async {
     int maximumDelta = 0;
     for (int y = 0; y < height; y += 2) {
       for (int x = 0; x < width; x += 2) {
-        final int delta = (_pixel(pixels, width, x, y).l - backgroundL).abs().round();
+        final int delta =
+            (_pixel(pixels, width, x, y).l - backgroundL).abs().round();
         maximumDelta = math.max(maximumDelta, delta);
       }
     }
@@ -281,21 +284,26 @@ Future<void> _verifyPng(Uint8List bytes, _Shot shot) async {
         reason: '${shot.file} draws no visible orb');
 
     final double breathFactor = 1.0 + 0.02 * _breath * shot.breathWeight;
-    final double visualRadius =
-        shot.diameter * shot.stateScale * breathFactor;
+    final double visualRadius = shot.diameter * shot.stateScale * breathFactor;
     final ui.Offset ringPoint = ui.Offset(
-      width / 2 + _ringSampleRadius * visualRadius * math.cos(_ringSampleAngle * math.pi / 180),
-      height / 2 + _ringSampleRadius * visualRadius * math.sin(_ringSampleAngle * math.pi / 180),
+      width / 2 +
+          _ringSampleRadius *
+              visualRadius *
+              math.cos(_ringSampleAngle * math.pi / 180),
+      height / 2 +
+          _ringSampleRadius *
+              visualRadius *
+              math.sin(_ringSampleAngle * math.pi / 180),
     );
-    final _Pixel ring = _meanPixel(
-        pixels, width, height, ringPoint.dx, ringPoint.dy);
+    final _Pixel ring =
+        _meanPixel(pixels, width, height, ringPoint.dx, ringPoint.dy);
     expect((ring.l - backgroundL).abs(), greaterThan(20),
-        reason: '${shot.file} white ring at 0.97R/330deg blends into background');
+        reason:
+            '${shot.file} white ring at 0.97R/330deg blends into background');
 
     // docs/orb-spec.md 12.3: the core is clear glass, so the center matches
     // the uniform backdrop instead of carrying its own fill.
-    final _Pixel center =
-        _pixel(pixels, width, width ~/ 2, height ~/ 2);
+    final _Pixel center = _pixel(pixels, width, width ~/ 2, height ~/ 2);
     expect((center.l - backgroundL).abs(), lessThanOrEqualTo(3),
         reason: '${shot.file} center is not clear glass');
   } finally {
@@ -316,8 +324,7 @@ _Pixel _pixel(Uint8List bytes, int width, int x, int y) {
 int _alpha(Uint8List bytes, int width, int x, int y) =>
     bytes[(y * width + x) * 4 + 3];
 
-_Pixel _meanPixel(
-    Uint8List bytes, int width, int height, double x, double y) {
+_Pixel _meanPixel(Uint8List bytes, int width, int height, double x, double y) {
   double red = 0;
   double green = 0;
   double blue = 0;
@@ -335,18 +342,9 @@ _Pixel _meanPixel(
 }
 
 Directory _shotsDirectory() {
-  Directory directory = Directory.current.absolute;
-  while (true) {
-    if (Directory('${directory.path}/e2e/shots').existsSync()) {
-      return Directory('${directory.path}/e2e/shots/orb-hyperos4/flutter');
-    }
-    final Directory parent = directory.parent;
-    if (parent.path == directory.path) {
-      throw StateError('Repository root with e2e/shots not found from '
-          '${Directory.current.path}');
-    }
-    directory = parent;
-  }
+  // Unit-test material fixtures are disposable build output, separate from
+  // browser/device acceptance screenshots owned by the host verification.
+  return Directory('${Directory.current.path}/build/orb-material-fixtures');
 }
 
 double _round(double value) => double.parse(value.toStringAsFixed(6)) + 0.0;

@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui
     show
-        FilterQuality,
         FragmentProgram,
         FragmentShader,
         Image,
@@ -14,7 +13,8 @@ import 'dart:ui' as ui
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart' show GestureBinding, kPrimaryButton;
 import 'package:flutter/material.dart';
-import 'package:flutter/scheduler.dart' show SchedulerBinding, SchedulerPhase;
+import 'package:flutter/scheduler.dart'
+    show SchedulerBinding, SchedulerPhase, Ticker;
 import 'package:flutter/rendering.dart'
     show Matrix4, MatrixUtils, RenderEditable, RenderRepaintBoundary;
 import 'package:flutter/services.dart'
@@ -32,10 +32,13 @@ import 'capture_selection.dart';
 import 'config.dart';
 import 'controller.dart';
 import 'orb.dart';
+import 'orb_liquid.dart';
 import 'panel.dart';
 import 'server_pref.dart';
 import 'test_env.dart';
 import 'token_store.dart';
+import 'wake_gestures.dart';
+import 'orb_idle.dart';
 
 /// 宽屏断点：>= 此宽度时面板以侧边抽屉展开，否则全屏页面式。
 const double kFeedbackWideBreakpoint = 768;
@@ -127,7 +130,18 @@ class _FrozenCapture {
   final bool containsUndrawable;
 
   /// 释放冻结位图（幂等由调用方保证：只调用一次）。
-  void dispose() => image.dispose();
+  bool _released = false;
+  void dispose() {
+    if (_released) return;
+    _released = true;
+    image.dispose();
+  }
+
+  _FrozenCapture clone() => _FrozenCapture(image.clone(),
+      scale: scale,
+      viewport: viewport,
+      baseInfo: baseInfo,
+      containsUndrawable: containsUndrawable);
 }
 
 /// 截图边界坐标系（逻辑像素）下的遮挡区域。
@@ -202,9 +216,160 @@ class FeedbackWidget extends StatefulWidget {
 }
 
 class _FeedbackWidgetState extends State<FeedbackWidget>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin, WidgetsBindingObserver {
   FeedbackController? _internalController;
   bool _everOpened = false;
+  late FeedbackServerPrefStore _wakePrefStore;
+  late final FeedbackWakePreferences _wakePreferences;
+  late final FeedbackOrbIdlePreferences _idlePreferences;
+  Timer? _orbIdleTimer;
+  int _orbIdleGeneration = 0;
+  bool _orbCollapsed = false;
+  bool _orbWasAvailable = false;
+  Offset _orbIdleDockCenter = Offset.zero;
+  bool _snappingOrbMorph = false;
+  late final AnimationController _orbMorph = AnimationController(
+      vsync: this, duration: const Duration(milliseconds: 420))
+    ..addListener(() {
+      if (mounted && !_disposed && !_snappingOrbMorph) setState(() {});
+    });
+
+  bool get _orbMorphVisible => _orbCollapsed || _orbMorph.value > 0;
+  double get _orbMorphProgress =>
+      1 - math.pow(1 - _orbMorph.value, 3).toDouble();
+  void _snapOrbMorph(double value) {
+    _snappingOrbMorph = true;
+    _orbMorph.stop();
+    _orbMorph.value = value;
+    _snappingOrbMorph = false;
+  }
+
+  bool get _orbAvailable =>
+      _appResumed &&
+      widget.config.showLauncher &&
+      widget.config.launcherMode == FeedbackLauncherMode.orb &&
+      !_controller.isOpen &&
+      _selectionCapture == null &&
+      !_temporarilyHideForCapture &&
+      _capturePendingSeq == null &&
+      _handoff == null;
+  bool get _orbCanIdle =>
+      _orbAvailable &&
+      !_isDragging &&
+      // Flutter retires an interpolation ticker one frame after its exact end.
+      // Start the next idle interval at the visible full-orb endpoint instead.
+      _orbMorph.value == 0 &&
+      !_orbPressed &&
+      _orbPointer == null &&
+      !_orbHovered &&
+      !(_orbFocusNode.hasFocus && _orbLastInputKeyboard);
+
+  void _cancelOrbIdle() {
+    _orbIdleTimer?.cancel();
+    _orbIdleTimer = null;
+    ++_orbIdleGeneration;
+  }
+
+  void _resetOrbIdle() {
+    _cancelOrbIdle();
+    _orbCollapsed = false;
+    _snapOrbMorph(0);
+    _orbWasAvailable = false;
+  }
+
+  void _syncOrbIdle() {
+    final bool available = _orbAvailable;
+    if (!available || !_orbWasAvailable) {
+      _cancelOrbIdle();
+      _orbCollapsed = false;
+      _snapOrbMorph(0);
+    }
+    _orbWasAvailable = available;
+    if (!_orbCanIdle) {
+      _cancelOrbIdle();
+      return;
+    }
+    if (_orbCollapsed || _orbIdleTimer != null) return;
+    final int generation = _orbIdleGeneration;
+    _orbIdleTimer = Timer(const Duration(seconds: 5), () {
+      _orbIdleTimer = null;
+      if (!mounted ||
+          _disposed ||
+          generation != _orbIdleGeneration ||
+          !_orbCanIdle) {
+        return;
+      }
+      setState(() => _orbCollapsed = true);
+      if (_orbGlowReduced) {
+        _snapOrbMorph(1);
+      } else {
+        _orbMorph.forward();
+      }
+    });
+  }
+
+  void _wakeOrb() {
+    if (!_orbAvailable) return;
+    _cancelOrbIdle();
+    setState(() {
+      _orbCollapsed = false;
+      _orbWasAvailable = true;
+    });
+    if (_orbGlowReduced) {
+      _snapOrbMorph(0);
+    } else {
+      _orbMorph.reverse();
+    }
+  }
+
+  void _idlePreferencesChanged() {
+    if (!mounted || _disposed) return;
+    setState(_resetOrbIdle);
+  }
+
+  FeedbackWakeGestureRecognizer? _wakeRecognizer;
+  bool _wakeReleaseHint = false;
+  bool _appResumed = true;
+  int? _capturePendingSeq;
+
+  bool get _wakeAvailable =>
+      !_disposed &&
+      mounted &&
+      _appResumed &&
+      widget.config.showLauncher &&
+      widget.config.launcherMode == FeedbackLauncherMode.orb &&
+      widget.config.captureMode == FeedbackCaptureMode.viewport &&
+      !_controller.isOpen &&
+      _selectionCapture == null &&
+      !_temporarilyHideForCapture &&
+      _capturePendingSeq == null &&
+      _handoff == null &&
+      !_isDragging &&
+      _orbPointer == null;
+
+  void _setWakeReleaseHint(bool value) {
+    if (_wakeReleaseHint == value || _disposed || !mounted) return;
+    _wakeReleaseHint = value;
+    if (SchedulerBinding.instance.schedulerPhase ==
+        SchedulerPhase.persistentCallbacks) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && !_disposed) setState(() {});
+      });
+    } else {
+      setState(() {});
+    }
+  }
+
+  void _wakePreferencesChanged() {
+    if (!mounted || _disposed) return;
+    _wakeRecognizer?.enabled = _wakePreferences.enabled;
+    setState(() {});
+  }
+
+  void _onWake(Offset releaseGlobal) {
+    if (!_wakeAvailable) return;
+    _wakeOrb();
+  }
 
   /// 上一次观察到的面板开关状态：只有 open→closed 的真实翻转才把焦点还给
   /// 入口；关闭期间的普通通知（未读数、地址）不得抢宿主焦点。
@@ -245,30 +410,150 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   /// 球盒锚点：C 路线把捕获图像像素映射回球盒时，需要球盒的全局左上角。
   final GlobalKey _orbLensAnchorKey = GlobalKey();
 
-  // ---- T-L3b C 路线单次捕获（本地内存，不上传、不写盘）----
-
-  /// 最近的宿主快照。捕获完成只刷新透镜层，不重建球体 / 面板。
   final ValueNotifier<_OrbLensSnapshot?> _lensSnapshot =
       ValueNotifier<_OrbLensSnapshot?>(null);
-  ui.FragmentShader? _lensShaderCache;
+  ui.FragmentProgram? _lensProgramCache;
+  ui.FragmentShader? _selectionShader;
   bool _lensProgramUnavailable = false;
-  bool _lensCaptureInFlight = false;
-
-  /// 捕获间隔闸门用单调时钟，系统校时回拨不会把它锁死。
+  int? _lensCaptureGeneration;
+  int? _lensPendingCaptureGeneration;
+  bool get _lensCaptureInFlight => _lensCaptureGeneration != null;
   final Stopwatch _lensGate = Stopwatch();
-  int _lensRetries = 0;
+  int _lensGeneration = 0;
+  bool _lensPrefetchDone = false;
   bool _lensFirstCaptureScheduled = false;
+  Timer? _lensThemeRefresh;
+  Brightness? _lensAncestorBrightness;
+  Brightness _lensPlatformBrightness =
+      WidgetsBinding.instance.platformDispatcher.platformBrightness;
+  Size? _sessionViewport;
+  double? _sessionDpr;
+  Size? _lastViewport;
+  double? _lastDpr;
+  bool _viewportInvalidationScheduled = false;
+  bool _selectionBusy = false;
+  String? _selectionError;
+  Offset? _selectionOrbCenter;
+  Offset _selectionDirection = const Offset(1, 0);
+  double _selectionDeform = 0;
+  double _selectionWobble = 0;
+  double _selectionRadius = 52;
+  double _orbRenderedRadius = 28;
+  final OrbLiquid _liquid = OrbLiquid();
+  late final Ticker _liquidTicker = createTicker(_tickLiquid);
+  Duration _liquidPrevious = Duration.zero;
+  Offset? _orbDockGlobal;
+  Offset? _orbPointerStart;
+  _CaptureHandoff? _handoff;
+  late final AnimationController _handoffAnimation = AnimationController(
+      vsync: this, duration: const Duration(milliseconds: 1500))
+    ..addListener(_tickHandoff);
+
+  double get _dpr =>
+      MediaQuery.maybeDevicePixelRatioOf(context) ??
+      View.of(context).devicePixelRatio;
+
+  bool _captureSessionValid(int seq) {
+    if (_disposed || !mounted || seq != _captureSeq) return false;
+    final RenderRepaintBoundary? boundary = _repaintBoundaryKey.currentContext
+        ?.findRenderObject() as RenderRepaintBoundary?;
+    return boundary != null &&
+        boundary.attached &&
+        (_sessionViewport == null ||
+            (boundary.size == _sessionViewport &&
+                (_lastViewport == null ||
+                    _lastViewport == _sessionViewport))) &&
+        (_sessionDpr == null || _dpr == _sessionDpr);
+  }
+
+  void _tickLiquid(Duration elapsed) {
+    final double dt = (elapsed - _liquidPrevious).inMicroseconds / 1000000;
+    _liquidPrevious = elapsed;
+    _liquid.advance(dt, moving: _isDragging, reducedMotion: _orbGlowReduced);
+    if (mounted && !_disposed) setState(() {});
+    if (!_isDragging && _liquid.settled) _liquidTicker.stop();
+  }
+
+  void _kickLiquid() {
+    if (_orbGlowReduced) {
+      _snapOrbMorph(_orbCollapsed ? 1 : 0);
+      _liquid.advance(0, moving: _isDragging, reducedMotion: true);
+    } else if (!_liquidTicker.isActive) {
+      _liquidPrevious = Duration.zero;
+      _liquidTicker.start();
+    }
+  }
+
+  void _resetLiquid() {
+    _liquidTicker.stop();
+    _liquid.reset();
+    _orbPointerStart = null;
+    _orbDockGlobal = null;
+  }
+
+  void _tickHandoff() {
+    final _CaptureHandoff? flow = _handoff;
+    if (flow == null || !_captureSessionValid(flow.seq)) return;
+    final double ms = _handoffAnimation.value * 1500;
+    _panelKey.currentState?.setCaptureHandoffProgress(
+        flow.target == null ? 1 : orbSmoothstep(1220, 1350, ms));
+    if (ms >= 1350) _panelKey.currentState?.endCaptureHandoff();
+    if (ms >= 1500) {
+      _finishHandoff(focus: true);
+    } else if (mounted) {
+      setState(() {});
+    }
+  }
+
+  void _finishHandoff({bool focus = false}) {
+    final _CaptureHandoff? flow = _handoff;
+    _handoff = null;
+    _handoffAnimation.stop();
+    _panelKey.currentState?.endCaptureHandoff();
+    if (flow != null) {
+      _disposeAfterFrame(flow.image);
+      _disposeAfterFrame(flow.background);
+      if (focus && _captureSessionValid(flow.seq) && _controller.isOpen) {
+        _panelKey.currentState?.requestDraftInputFocus(
+            isCurrent: () =>
+                _captureSessionValid(flow.seq) &&
+                _controller.isOpen &&
+                _handoff == null);
+      }
+    }
+    if (flow != null && mounted && !_disposed) setState(() {});
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _appResumed = state == AppLifecycleState.resumed;
+    _resetOrbIdle();
+    if (_appResumed) {
+      if (mounted) setState(() {});
+      return;
+    }
+    _wakeRecognizer?.cancel();
+    _invalidateCaptureSession();
+    _releaseLensSnapshot();
+    _resetOrbReleaseState();
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void didChangePlatformBrightness() {
+    final Brightness brightness =
+        WidgetsBinding.instance.platformDispatcher.platformBrightness;
+    if (brightness == _lensPlatformBrightness) return;
+    _lensPlatformBrightness = brightness;
+    _invalidateLensTheme();
+    if (mounted && !_disposed) setState(() {});
+  }
 
   // 灵感球拖拽状态
-  Offset _dragOffset = Offset.zero;
-  Offset _lastGlobalPosition = Offset.zero;
   bool _isDragging = false;
   bool _orbHovered = false;
   bool _orbPressed = false;
   bool _orbPressTransition = false;
-  bool _orbReleasing = false;
-  double _orbReleaseAngle = 0.0;
-  bool _orbPointerCancelled = false;
 
   /// 当前被灵感球接受的指针 id；非空表示已有活跃指针，第二指一律忽略。
   /// 与 Web 的 `orbPointerId` 守卫同一口径（spec 5.2）。
@@ -284,7 +569,6 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
 
   double get _orbTargetStateScale {
     if (_isDragging) return 1.0;
-    if (_orbReleasing) return 1.0;
     if (_orbPressed) return kFeedbackOrbPressedScale;
     if (_orbHovered) return kFeedbackOrbHoverScale;
     return 1.0;
@@ -293,8 +577,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   void _setOrbPressed(bool pressed) {
     if (_orbPressed == pressed) return;
     setState(() {
-      // 保留刚退出 pressed 的 140ms 窗口，对齐 Web 的 is-unpressing。
-      _orbPressTransition = !_isDragging && (_orbPressed || pressed);
+      _orbPressTransition = true;
       _orbPressed = pressed;
     });
   }
@@ -313,13 +596,15 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   /// `onPointerCancel`——入口在按下期间被隐藏也不例外，Flutter 按指针保留按下时
   /// 的命中路径，抬起仍会派发到已 detach 的 `Listener`。
   void _cleanUpOrbPan(VoidCallback mutate) {
+    if (_disposed || !mounted) return;
     if (SchedulerBinding.instance.schedulerPhase == SchedulerPhase.idle) {
       setState(mutate);
       return;
     }
     mutate();
+    final int seq = _captureSeq;
     WidgetsBinding.instance.addPostFrameCallback((Duration _) {
-      if (mounted) setState(() {});
+      if (mounted && !_disposed && seq == _captureSeq) setState(() {});
     });
   }
 
@@ -328,21 +613,17 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   /// 悬停无需手工恢复：恢复帧的 MouseTracker 会按指针实际位置重新补发
   /// onEnter。调用方负责触发重建。
   void _resetOrbReleaseState() {
-    _orbReleasing = false;
-    _orbReleaseAngle = 0.0;
-    _dragOffset = Offset.zero;
+    _resetOrbIdle();
+    _resetLiquid();
+    _orbPressTransition = false;
+
     _isDragging = false;
     _orbPressed = false;
-    _orbPressTransition = false;
-    _orbPointerCancelled = false;
+
     _orbHovered = false;
   }
 
-  /// 灵感球光晕流动动画（系统「减少动态效果」时不创建、不运行；
-  /// Flutter 测试环境默认不创建——见 [kFeedbackInFlutterTest]）。
-  AnimationController? _orbGlow;
   bool _orbGlowReduced = false;
-  bool _orbFlowRunning = false;
 
   FeedbackController get _controller =>
       widget.controller ?? (_internalController ??= FeedbackController());
@@ -350,7 +631,20 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _panelWasOpen = _controller.isOpen;
+    _everOpened = _controller.isOpen;
+    _appResumed = WidgetsBinding.instance.lifecycleState == null ||
+        WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
+    _wakePrefStore = widget.serverPrefStore ?? createDefaultServerPrefStore();
+    _wakePreferences = FeedbackWakePreferences(
+        appId: widget.config.appId, store: _wakePrefStore)
+      ..addListener(_wakePreferencesChanged);
+    unawaited(_wakePreferences.load());
+    _idlePreferences = FeedbackOrbIdlePreferences(
+        appId: widget.config.appId, store: _wakePrefStore)
+      ..addListener(_idlePreferencesChanged);
+    unawaited(_idlePreferences.load());
     HardwareKeyboard.instance.addHandler(_handleGlobalKeyEvent);
     GestureBinding.instance.pointerRouter.addGlobalRoute(_globalPointerRoute);
     _bindController(_controller);
@@ -382,198 +676,212 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    final bool reduce = MediaQuery.disableAnimationsOf(context);
-    _orbGlowReduced = reduce;
-    if (reduce) _orbReleasing = false;
-    if (_orbGlow == null &&
-        !reduce &&
-        (!kFeedbackInFlutterTest || debugForceOrbAnimation)) {
-      _orbGlow = AnimationController(
-        vsync: this,
-        duration: kFeedbackOrbSweepDuration,
-      );
+    final Brightness? brightness = Theme.maybeBrightnessOf(context);
+    if (_lensAncestorBrightness != null &&
+        brightness != _lensAncestorBrightness) {
+      _invalidateLensTheme();
     }
-    _syncOrbFlow();
-  }
-
-  void _syncOrbFlow() {
-    final AnimationController? glow = _orbGlow;
-    if (glow == null) return;
-    bool shouldRunFlow() => orbShouldRunFlow(
-          open: _controller.isOpen,
-          orbMode: widget.config.launcherMode == FeedbackLauncherMode.orb,
-          showLauncher: widget.config.showLauncher,
-          reducedMotion: _orbGlowReduced,
-          occluded: _selectionCapture != null,
-        );
-    final bool shouldRun = shouldRunFlow();
-    final bool changed = _orbFlowRunning != shouldRun;
-    _orbFlowRunning = shouldRun;
-    if (!shouldRun) {
-      glow.stop();
-      if (glow.value != 0 || changed) {
+    _lensAncestorBrightness = brightness;
+    _orbGlowReduced = MediaQuery.disableAnimationsOf(context);
+    if (_orbGlowReduced) {
+      _snapOrbMorph(_orbCollapsed ? 1 : 0);
+      _liquid.advance(0, moving: _isDragging, reducedMotion: true);
+      _liquidTicker.stop();
+      if (_handoff != null) {
+        final int seq = _handoff!.seq;
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted || _orbGlow != glow || shouldRunFlow()) return;
-          glow.value = 0;
+          if (_captureSessionValid(seq)) _finishHandoff(focus: true);
         });
       }
-    } else if (!glow.isAnimating && changed) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted || _orbGlow != glow || !shouldRunFlow()) return;
-        glow.value = 0;
-        glow.repeat();
-      });
     }
   }
 
-  /// C 路线触发闸门：只在「球首次可见」调度一次捕获，hidden 时释放快照。
+  // Neutral glass has no idle ticker or legacy brand/sweep/breathing layer.
+  void _syncOrbFlow() {}
+
+  /// 每次球从 hidden 恢复可见时捕获一次，hidden 时释放快照。
   ///
-  /// 绝不周期捕获；重复触发的唯一入口是拖动开始，且受 [_captureLensSnapshot]
-  /// 的一秒间隔与单在途约束。
+  /// 同一可见期不周期捕获；拖动刷新受一秒间隔与单在途约束。
+  bool get _lensVisible =>
+      _appResumed &&
+      !_controller.isOpen &&
+      _selectionCapture == null &&
+      !_temporarilyHideForCapture &&
+      _handoff == null &&
+      widget.config.showLauncher &&
+      widget.config.launcherMode == FeedbackLauncherMode.orb;
+
+  void _invalidateLensTheme() {
+    // Decoration only: never invalidate the frozen selection, draft, release
+    // geometry, or the in-progress morph. Old in-flight captures lose their
+    // generation before another frame can publish them.
+    _releaseLensSnapshot(allowPrefetch: true);
+    _lensThemeRefresh?.cancel();
+    // MaterialApp animates its host colors for this default duration. A bounded
+    // trailing refresh also coalesces its halfway brightness change. The normal
+    // masked capture still waits for paint; no transitional/old sampler is used.
+    _lensThemeRefresh = Timer(kThemeAnimationDuration, () {
+      _lensThemeRefresh = null;
+      if (mounted && !_disposed && _lensVisible) setState(() {});
+    });
+  }
+
   void _syncOrbLensCapture(
       {required bool open, required FeedbackConfig config}) {
-    final bool visible = !open &&
-        config.showLauncher &&
-        config.launcherMode == FeedbackLauncherMode.orb;
-    if (!visible) {
-      // 释放会写 notifier 并让透镜子树重建，不能在 build 里同步做。
-      if (_lensSnapshot.value != null || _lensFirstCaptureScheduled) {
+    if (!_lensVisible) {
+      _lensPrefetchDone = false;
+      _lensPendingCaptureGeneration = null;
+      if (_lensSnapshot.value != null || _lensCaptureInFlight) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted || _disposed) return;
-          _releaseLensSnapshot();
+          if (mounted && !_disposed && !_lensVisible) {
+            _releaseLensSnapshot(allowPrefetch: true);
+          }
         });
       }
       return;
     }
-    if (debugDisableOrbLensCapture) return;
-    if (_lensSnapshot.value != null ||
-        _lensCaptureInFlight ||
+    if (debugDisableOrbLensCapture ||
+        _lensThemeRefresh != null ||
+        _lensPrefetchDone ||
         _lensFirstCaptureScheduled) {
       return;
     }
     _lensFirstCaptureScheduled = true;
+    final int generation = _lensGeneration;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || _disposed) return;
+      if (!mounted || _disposed || generation != _lensGeneration) return;
+      _lensFirstCaptureScheduled = false;
+      if (!_lensVisible) return;
+      _lensPrefetchDone = true;
       unawaited(_captureLensSnapshot());
     });
   }
 
-  void _releaseLensSnapshot() {
+  void _releaseLensSnapshot({bool allowPrefetch = false}) {
+    ++_lensGeneration;
+    _lensPendingCaptureGeneration = null;
     _lensFirstCaptureScheduled = false;
-    _lensRetries = 0;
-    final _OrbLensSnapshot? snapshot = _lensSnapshot.value;
-    if (snapshot == null) return;
+    _lensPrefetchDone = !allowPrefetch;
+    _clearLensImage();
+  }
+
+  void _clearLensImage() {
+    final _OrbLensSnapshot? previous = _lensSnapshot.value;
     _lensSnapshot.value = null;
-    // 位图可能正被上一帧的绘制引用：等这一帧画完再释放。
-    _disposeAfterFrame(snapshot.image);
+    if (previous != null) _disposeLensAfterFrame(previous);
+  }
+
+  void _disposeLensAfterFrame(_OrbLensSnapshot snapshot) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      snapshot.shader.dispose();
+      snapshot.image.dispose();
+    });
+    WidgetsBinding.instance.scheduleFrame();
+  }
+
+  void _releaseSelectionShader() {
+    final ui.FragmentShader? shader = _selectionShader;
+    _selectionShader = null;
+    if (shader == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) => shader.dispose());
+    WidgetsBinding.instance.scheduleFrame();
   }
 
   void _disposeAfterFrame(ui.Image image) {
     WidgetsBinding.instance.addPostFrameCallback((_) => image.dispose());
+    WidgetsBinding.instance.scheduleFrame();
   }
 
-  /// 捕获宿主的当前位置作为 C 路线采样源。
-  ///
-  /// 硬约束：同一时刻最多一个在途；新触发间隔 ≥1000ms；失败立即退回 A，
-  /// 并在两帧后重试，最多两次。重试属于同一次触发，不受间隔闸门拦截。
-  Future<void> _captureLensSnapshot({bool retry = false}) async {
-    if (debugDisableOrbLensCapture) return;
-    if (_disposed || !mounted) return;
-    if (_lensCaptureInFlight) return;
-    if (_selectionCapture != null ||
-        _controller.isOpen ||
-        !widget.config.showLauncher) {
-      // 这次调度被覆盖层/面板拦下：放开标记，否则覆盖层结束后永远停在 A。
-      _lensFirstCaptureScheduled = false;
+  Future<void> _captureLensSnapshot() async {
+    if (debugDisableOrbLensCapture ||
+        _lensThemeRefresh != null ||
+        _disposed ||
+        !mounted ||
+        !_lensVisible) {
       return;
     }
-    if (!retry) {
-      if (_lensGate.isRunning &&
-          _lensGate.elapsed < debugOrbLensGateDuration) {
-        return;
-      }
-      _lensGate
-        ..reset()
-        ..start();
+    // An invalid/missing texture may be refreshed immediately; a usable one
+    // refreshes only on a drag trigger at least 1000ms after the last capture.
+    if (_lensSnapshot.value != null &&
+        _lensGate.isRunning &&
+        _lensGate.elapsed < debugOrbLensGateDuration) {
+      return;
     }
-    _lensCaptureInFlight = true;
+    if (_lensCaptureInFlight) {
+      // A return/identity change may request a new generation before the old
+      // engine future finishes. Coalesce that request once; another trigger in
+      // the current generation must not queue a retry of the same attempt.
+      if (_lensCaptureGeneration != _lensGeneration) {
+        _lensPendingCaptureGeneration = _lensGeneration;
+      }
+      return;
+    }
+    final int generation = ++_lensGeneration;
+    final RenderRepaintBoundary? boundary = _repaintBoundaryKey.currentContext
+        ?.findRenderObject() as RenderRepaintBoundary?;
+    if (boundary == null || !boundary.attached || boundary.size.isEmpty) return;
+    final Size size = boundary.size;
+    final double dpr = _dpr;
+    bool current() =>
+        mounted &&
+        !_disposed &&
+        generation == _lensGeneration &&
+        _lensVisible &&
+        boundary.attached &&
+        boundary.size == size &&
+        _dpr == dpr;
+    _lensCaptureGeneration = generation;
+    _lensGate
+      ..reset()
+      ..start();
+    ui.FragmentShader? shader;
     try {
-      // 先确认着色器可用：它不可用是终态，不该为每次触发做一次整窗捕获。
-      final ui.FragmentShader? shader = await _lensShaderOrNull();
-      if (_disposed || !mounted) return;
-      if (shader == null) return;
-      final RenderRepaintBoundary? boundary = _repaintBoundaryKey.currentContext
-          ?.findRenderObject() as RenderRepaintBoundary?;
-      if (boundary == null || !boundary.attached || boundary.size.isEmpty) {
-        _scheduleLensRetry();
+      shader = await _lensShaderOrNull();
+      if (!current()) return;
+      if (shader == null) {
+        _releaseLensSnapshot();
         return;
       }
-      final double ratio = math.min(
-        MediaQuery.maybeDevicePixelRatioOf(context) ??
-            View.of(context).devicePixelRatio,
-        kFeedbackCaptureMaxDevicePixelRatio,
-      );
-      // 几何在 toImage 之前同步取，避免「位图时刻」与「几何时刻」错开。
-      final Rect source = boundary.localToGlobal(Offset.zero) & boundary.size;
-      final RenderBox? anchor =
-          _orbLensAnchorKey.currentContext?.findRenderObject() as RenderBox?;
-      final Offset? anchorGlobal = (anchor != null && anchor.attached)
-          ? anchor.localToGlobal(Offset.zero)
-          : null;
       debugOrbLensCaptureAttempts++;
-      if (debugFailOrbLensCapture) {
-        throw StateError('debugFailOrbLensCapture');
+      if (debugFailOrbLensCapture) throw StateError('debugFailOrbLensCapture');
+      final _FrozenCapture? frozen = await _captureFrozen(isCurrent: current);
+      if (frozen == null) {
+        if (current()) _releaseLensSnapshot();
+        return;
       }
-      final ui.Image image = await boundary.toImage(pixelRatio: ratio);
-      if (_disposed ||
-          !mounted ||
-          _controller.isOpen ||
-          !widget.config.showLauncher) {
-        image.dispose();
+      if (!current() || frozen.containsUndrawable) {
+        frozen.dispose();
+        if (current()) _releaseLensSnapshot();
         return;
       }
       final _OrbLensSnapshot? previous = _lensSnapshot.value;
       _lensSnapshot.value = _OrbLensSnapshot(
-        image: image,
-        sourceRect: source,
-        pixelRatio: ratio,
-        anchorGlobal: anchorGlobal ?? source.topLeft,
-        shader: shader,
-      );
-      if (previous != null) _disposeAfterFrame(previous.image);
-      _lensRetries = 0;
+          image: frozen.image, pixelRatio: frozen.scale, shader: shader);
+      shader = null; // the snapshot now owns its sampler and image handle
+      if (previous != null) _disposeLensAfterFrame(previous);
     } catch (error) {
-      // 立即退回 A；图像未就绪时上层本来就在画 A。这里留一条不含像素的
-      // 线索，线上才能区分「着色器缺失」和「捕获失败」。
-      debugPrint('反馈组件：透镜捕获失败（${error.runtimeType}: $error）');
-      _scheduleLensRetry();
-    } finally {
-      _lensCaptureInFlight = false;
-    }
-  }
-
-  void _scheduleLensRetry() {
-    if (_disposed || !mounted || _lensRetries >= 2) return;
-    _lensRetries++;
-    int remaining = 2;
-    void onFrame(Duration _) {
-      if (!mounted || _disposed) return;
-      remaining--;
-      if (remaining > 0) {
-        WidgetsBinding.instance.scheduleFrame();
-        WidgetsBinding.instance.addPostFrameCallback(onFrame);
-        return;
+      if (current()) {
+        debugPrint('反馈组件：透镜快照不可用（${error.runtimeType}）');
+        _releaseLensSnapshot();
       }
-      unawaited(_captureLensSnapshot(retry: true));
+    } finally {
+      shader?.dispose();
+      _lensCaptureGeneration = null;
+      final int? pending = _lensPendingCaptureGeneration;
+      _lensPendingCaptureGeneration = null;
+      if (pending != null &&
+          pending == _lensGeneration &&
+          mounted &&
+          !_disposed &&
+          _lensVisible) {
+        unawaited(_captureLensSnapshot());
+      }
     }
-
-    WidgetsBinding.instance.scheduleFrame();
-    WidgetsBinding.instance.addPostFrameCallback(onFrame);
   }
 
   Future<ui.FragmentShader?> _lensShaderOrNull() async {
     if (debugFailOrbLensShader) return null;
-    if (_lensShaderCache != null) return _lensShaderCache;
+    if (_lensProgramCache != null) return _lensProgramCache!.fragmentShader();
     if (_lensProgramUnavailable) return null;
     // 包被宿主引用时资源键带包前缀；先试前缀，组件包自己的测试/示例回退根键。
     for (final String key in const <String>[
@@ -585,7 +893,8 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
             await ui.FragmentProgram.fromAsset(key);
         // 加载期间组件可能已被移除：此时不要再创建/缓存 shader。
         if (_disposed) return null;
-        return _lensShaderCache = program.fragmentShader();
+        _lensProgramCache = program;
+        return program.fragmentShader();
       } catch (_) {
         continue;
       }
@@ -598,21 +907,50 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   @override
   void didUpdateWidget(FeedbackWidget oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.config.theme != widget.config.theme) {
+      _invalidateLensTheme();
+    }
+    if (oldWidget.serverPrefStore != widget.serverPrefStore ||
+        oldWidget.config.appId != widget.config.appId) {
+      _wakeRecognizer?.cancel();
+      if (oldWidget.serverPrefStore != widget.serverPrefStore) {
+        _wakePrefStore =
+            widget.serverPrefStore ?? createDefaultServerPrefStore();
+      }
+      _wakePreferences.rebind(
+          appId: widget.config.appId, store: _wakePrefStore);
+      _idlePreferences.rebind(
+          appId: widget.config.appId, store: _wakePrefStore);
+    }
+    if (oldWidget.config.captureMode != widget.config.captureMode) {
+      _invalidateCaptureSession();
+    }
     if (oldWidget.config.appId != widget.config.appId ||
         oldWidget.config.apiBase != widget.config.apiBase) {
       // 宿主身份变化时，面板的偏好读取可能仍在等待；先使截图会话失效，
       // 防止旧身份的编码结果迟到后交付给新身份。
       _invalidateCaptureSession();
+      _releaseLensSnapshot(allowPrefetch: true);
+      _resetOrbReleaseState();
       if (mounted && _temporarilyHideForCapture) {
         setState(() => _temporarilyHideForCapture = false);
       }
     }
+    if (oldWidget.config.pageLabel != widget.config.pageLabel ||
+        oldWidget.child.key != widget.child.key ||
+        oldWidget.child.runtimeType != widget.child.runtimeType) {
+      _invalidateCaptureSession();
+      _releaseLensSnapshot(allowPrefetch: true);
+      _resetOrbReleaseState();
+    }
     if (oldWidget.controller != widget.controller) {
+      _releaseLensSnapshot(allowPrefetch: true);
       // 控制器替换：旧会话立即失效，旧请求不得再影响新控制器的 UI。
       _invalidateCaptureSession();
       _unbindController(oldWidget.controller ?? _internalController!);
       _bindController(_controller);
       _panelWasOpen = _controller.isOpen;
+      if (_controller.isOpen) _everOpened = true;
       // 换入的控制器可能已打开：入口随即 hidden，抢占进行中的回弹。
       if (_controller.isOpen) _resetOrbReleaseState();
     }
@@ -625,7 +963,12 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     }
   }
 
+  int _lastControllerUnread = 0;
+  String? _lastControllerBase;
+
   void _bindController(FeedbackController controller) {
+    _lastControllerUnread = controller.unreadCount;
+    _lastControllerBase = controller.effectiveApiBase;
     controller.addListener(_onControllerChanged);
     controller.onCaptureAndOpen = _captureAndOpen;
     controller.onCancelCapture = _cancelCapture;
@@ -640,14 +983,31 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   void _onControllerChanged() {
     if (!mounted) return;
     final bool wasOpen = _panelWasOpen;
+    if (_controller.isOpen) _wakeRecognizer?.cancel();
+    final bool metadataChanged =
+        _lastControllerUnread != _controller.unreadCount ||
+            _lastControllerBase != _controller.effectiveApiBase;
+    _lastControllerUnread = _controller.unreadCount;
+    _lastControllerBase = _controller.effectiveApiBase;
+    final bool closedAction =
+        !_controller.isOpen && (!metadataChanged || wasOpen);
     _panelWasOpen = _controller.isOpen;
     if (_controller.isOpen) {
       _everOpened = true;
       // 呼出时把焦点请求到输入区。
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _panelKey.currentState?.requestInputFocus();
-      });
-    } else {
+      final int seq = _captureSeq;
+      if (!wasOpen) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!_captureSessionValid(seq) ||
+              !_controller.isOpen ||
+              _handoff != null) {
+            return;
+          }
+          _panelKey.currentState?.requestInputFocus();
+        });
+      }
+    } else if (closedAction) {
+      _releaseLensSnapshot(allowPrefetch: true);
       // 面板关闭（含宿主直接调用 controller.close()）：进行中的捕获会话
       // 一并失效，捕获完成后不再挂载 / 恢复面板 UI。
       _invalidateCaptureSession();
@@ -655,8 +1015,9 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
         // 面板关闭后把焦点还给入口（仅 orb 模式且入口可见）。环是否点亮
         // 取决于最近输入模态：指针模态的回归只移动焦点（spec 5：鼠标
         // 聚焦不显示环），键盘模态照常点亮。
+        final int seq = _captureSeq;
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted || _controller.isOpen) return;
+          if (!_captureSessionValid(seq) || _controller.isOpen) return;
           if (!widget.config.showLauncher ||
               widget.config.launcherMode != FeedbackLauncherMode.orb) {
             return;
@@ -671,7 +1032,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
       if (_controller.isOpen) _resetOrbReleaseState();
       // 关闭时同时复位"截图期间隐藏覆盖层"状态：重拍中途关闭面板后再次
       // 呼出，面板必须恢复可见（否则会一直停留在隐藏状态）。
-      if (!_controller.isOpen) _temporarilyHideForCapture = false;
+      if (closedAction) _temporarilyHideForCapture = false;
     });
   }
 
@@ -679,6 +1040,11 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   /// （宿主布局回到常规状态后再等待 paint / 捕获）。
   void _startCaptureSession() {
     _invalidateCaptureSession();
+    final RenderRepaintBoundary? boundary = _repaintBoundaryKey.currentContext
+        ?.findRenderObject() as RenderRepaintBoundary?;
+    _capturePendingSeq = _captureSeq;
+    _sessionViewport = boundary?.size;
+    _sessionDpr = _dpr;
     if (mounted && _temporarilyHideForCapture) {
       setState(() => _temporarilyHideForCapture = false);
     }
@@ -687,11 +1053,19 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   /// 使当前进行中的捕获会话全部失效（取消 / 关闭 / 身份切换）。
   /// 同时作废 T1 局部选区流程：丢弃冻结画面并恢复 UI。
   void _invalidateCaptureSession() {
+    _wakeRecognizer?.cancel();
+    _capturePendingSeq = null;
     _captureSeq++;
+    _sessionViewport = null;
+    _sessionDpr = null;
+    _selectionBusy = false;
+    _selectionError = null;
+    _releaseSelectionShader();
+    _finishHandoff();
     final _FrozenCapture? selection = _selectionCapture;
     if (selection != null) {
       _selectionCapture = null;
-      selection.dispose();
+      _disposeAfterFrame(selection.image);
       if (mounted && !_disposed) setState(() {});
     }
   }
@@ -700,9 +1074,10 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     // 用户取消：静默使旧会话失效（不报错），旧请求不得恢复新请求 UI
     // ——此时已无新请求，可安全统一恢复覆盖层与拖拽状态。
     _invalidateCaptureSession();
+    _releaseLensSnapshot(allowPrefetch: true);
+    _resetOrbReleaseState();
     if (mounted) {
       setState(() {
-        _dragOffset = Offset.zero;
         _isDragging = false;
         _temporarilyHideForCapture = false;
       });
@@ -710,22 +1085,73 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   }
 
   @override
+  void deactivate() {
+    // A GlobalKey reparent can detach without disposing State. It still ends
+    // this viewport's capture session; no old await may revive the overlay.
+    _wakeRecognizer?.cancel();
+    _capturePendingSeq = null;
+    ++_captureSeq;
+    ++_lensGeneration;
+    _lensPendingCaptureGeneration = null;
+    _resetOrbReleaseState();
+    _handoffAnimation.stop();
+    final _CaptureHandoff? flow = _handoff;
+    _handoff = null;
+    if (flow != null) {
+      _disposeAfterFrame(flow.image);
+      _disposeAfterFrame(flow.background);
+    }
+    final _FrozenCapture? frozen = _selectionCapture;
+    _selectionCapture = null;
+    if (frozen != null) _disposeAfterFrame(frozen.image);
+    _releaseSelectionShader();
+    _selectionBusy = false;
+    _selectionError = null;
+    _temporarilyHideForCapture = false;
+    _sessionViewport = null;
+    _sessionDpr = null;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _disposed) return;
+      _releaseLensSnapshot(allowPrefetch: true);
+      _panelKey.currentState?.endCaptureHandoff();
+      setState(() {});
+    });
+    super.deactivate();
+  }
+
+  @override
   void dispose() {
     _disposed = true;
+    _lensThemeRefresh?.cancel();
+    _cancelOrbIdle();
+    _idlePreferences.dispose();
+    _wakeRecognizer?.cancel();
+    _wakePreferences.dispose();
+    _orbPointer = null;
+    WidgetsBinding.instance.removeObserver(this);
+    _lensGeneration++;
+    _lensPendingCaptureGeneration = null;
+    _orbMorph.dispose();
+    _liquidTicker.dispose();
+    _handoffAnimation.dispose();
+    final _CaptureHandoff? flow = _handoff;
+    _handoff = null;
+    flow?.image.dispose();
+    flow?.background.dispose();
     _captureSeq++;
     final _FrozenCapture? selection = _selectionCapture;
     _selectionCapture = null;
     selection?.dispose();
+    _lensSnapshot.value?.shader.dispose();
     _lensSnapshot.value?.image.dispose();
     _lensSnapshot.dispose();
-    _lensShaderCache?.dispose();
-    _lensShaderCache = null;
+    _selectionShader?.dispose();
+    _selectionShader = null;
+    _lensProgramCache = null;
     GestureBinding.instance.pointerRouter
         .removeGlobalRoute(_globalPointerRoute);
     HardwareKeyboard.instance.removeHandler(_handleGlobalKeyEvent);
     _orbFocusNode.dispose();
-    _orbGlow?.dispose();
-    _orbGlow = null;
     _unbindController(_controller);
     _internalController?.dispose();
     super.dispose();
@@ -744,6 +1170,8 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
       // T7：服务身份切换——进行中的截图会话作废，隐藏覆盖层复位，
       // 旧会话的迟到交付不得写入新身份面板。
       _invalidateCaptureSession();
+      _releaseLensSnapshot(allowPrefetch: true);
+      _resetOrbReleaseState();
       if (_temporarilyHideForCapture) {
         setState(() => _temporarilyHideForCapture = false);
       }
@@ -955,13 +1383,16 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   /// 交付时进行）。会话失效、几何失败、边界缺失一律返回 null（调用方
   /// 保留旧草稿旧图，绝不静默回退成整屏截图）。
   Future<_FrozenCapture?> _captureFrozen({
-    required int seq,
+    int? seq,
+    bool Function()? isCurrent,
     Offset? releasePoint,
   }) async {
+    final bool Function() current =
+        isCurrent ?? () => _captureSessionValid(seq!);
     // 等待一帧完成：确保 paint 状态与随后同步记录的几何一致。
     await WidgetsBinding.instance.endOfFrame;
     // 会话校验：等待 paint 期间会话被取消 / 关闭 / 新会话取代则中止。
-    if (!mounted || seq != _captureSeq) return null;
+    if (!mounted || !current()) return null;
 
     final RenderRepaintBoundary? boundary = _repaintBoundaryKey.currentContext
         ?.findRenderObject() as RenderRepaintBoundary?;
@@ -1008,9 +1439,9 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
       final bool containsUndrawable = _containsUndrawableContent();
 
       // 异步步骤后校验会话：取消即中止，临时资源在 finally 释放。
-      if (!mounted || seq != _captureSeq) return null;
+      if (!current()) return null;
       source = await boundary.toImage(pixelRatio: scale);
-      if (!mounted || seq != _captureSeq) return null;
+      if (!current()) return null;
       // 遮挡几何映射到实际输出像素：向外取整、外扩边缘、裁定到图片范围。
       final List<Rect> pixelRects = regions
           .map((r) =>
@@ -1029,7 +1460,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
         }
         picture = recorder.endRecording();
         composited = await picture.toImage(source.width, source.height);
-        if (!mounted || seq != _captureSeq) return null;
+        if (!current()) return null;
         result = composited;
       }
       final _FrozenCapture frozen = _FrozenCapture(
@@ -1153,11 +1584,11 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
         await _captureFrozen(seq: seq, releasePoint: releasePoint);
     if (frozen == null) return null;
     try {
-      if (!mounted || seq != _captureSeq) return null;
+      if (!_captureSessionValid(seq)) return null;
       final (Uint8List, int, int)? encoded =
           await _encodeCapturePng(frozen.image);
       // 编码是异步步骤：完成后再次校验会话，过期结果直接丢弃。
-      if (encoded == null || !mounted || seq != _captureSeq) return null;
+      if (encoded == null || !_captureSessionValid(seq)) return null;
       final FeedbackCaptureInfo base = frozen.baseInfo;
       final FeedbackCaptureInfo info = FeedbackCaptureInfo(
         viewportWidth: base.viewportWidth,
@@ -1214,12 +1645,13 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
       releasePoint: releasePoint,
     );
     // 捕获完成后校验会话：被取消 / 关闭 / 新会话取代则不再挂载面板。
-    if (!mounted || seq != _captureSeq) return;
+    if (!_captureSessionValid(seq)) return;
+    _capturePendingSeq = null;
     _open();
     // 面板可能尚未挂载（首次呼出）：等挂载后在 post-frame 交付，
     // 交付前再次校验捕获序号，防止 post-frame 回调写入过期结果。
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || seq != _captureSeq) return;
+      if (!_captureSessionValid(seq)) return;
       final FeedbackPanelState? panel = _panelKey.currentState;
       if (panel == null) return;
       if (result != null) {
@@ -1245,10 +1677,10 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     final Size reference = (boundary != null && boundary.attached)
         ? boundary.size
         : MediaQuery.sizeOf(context);
-    final double rx =
-        reference.width > 0 ? (releaseGlobal.dx / reference.width) : 0.5;
-    final double ry =
-        reference.height > 0 ? (releaseGlobal.dy / reference.height) : 0.5;
+    final Offset local =
+        boundary?.globalToLocal(releaseGlobal) ?? releaseGlobal;
+    final double rx = reference.width > 0 ? local.dx / reference.width : .5;
+    final double ry = reference.height > 0 ? local.dy / reference.height : .5;
     final Offset releasePoint = Offset(rx.clamp(0.0, 1.0), ry.clamp(0.0, 1.0));
 
     // 1) 图片上限：已达上限且无可替换截图（capture 槽位）→ 提示整理附件。
@@ -1259,101 +1691,151 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
       _open();
       return;
     }
-    // 2) 草稿守卫：已有草稿 / 图片 / 日志 → 只打开面板原样恢复，不重新捕获。
-    if (_panelHasDraftContent()) {
-      _open();
-      return;
-    }
+    // Dragging is an explicit retake. Existing draft and attachment remain
+    // untouched until a successful confirmation replaces the capture slot.
     // 3) 冻结捕获（与整窗截图同一遮挡管线）。
     _startCaptureSession();
     final int seq = _captureSeq;
+    setState(() => _temporarilyHideForCapture = true);
     final _FrozenCapture? frozen =
         await _captureFrozen(seq: seq, releasePoint: releasePoint);
-    if (!mounted || seq != _captureSeq) {
+    if (!_captureSessionValid(seq)) {
       frozen?.dispose();
       return;
     }
+    _temporarilyHideForCapture = false;
+    _capturePendingSeq = null;
     if (frozen == null) {
       // 失败：保留旧草稿旧图并提示可重试；不产出任何截图、不回退整屏。
       _open();
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted || seq != _captureSeq) return;
+        if (!_captureSessionValid(seq)) return;
         _panelKey.currentState?.showComposeNotice('截图失败，已保留原草稿与图片；可再次拖动灵感球重试');
       });
       return;
     }
+    _releaseLensSnapshot();
+    _selectionShader = _lensProgramCache?.fragmentShader();
     setState(() => _selectionCapture = frozen);
   }
 
   /// 选区流程确认：[selection] 为 null 表示「截取整个窗口」（region 省略），
   /// 非 null 表示把冻结位图裁到选区（`capture.region` 归一化透传）。
   Future<void> _deliverSelection({Rect? selection}) async {
-    final _FrozenCapture? frozen = _selectionCapture;
-    if (frozen == null) return;
+    if (_selectionBusy || _selectionCapture == null) return;
     final int seq = _captureSeq;
-    setState(() => _selectionCapture = null); // 覆盖层立即收起，位图另行释放
+    if (!_captureSessionValid(seq)) {
+      _cancelSelection();
+      return;
+    }
+    // The operation owns an independent handle: cancellation may release the
+    // overlay while crop/encode is still awaiting the engine.
+    final _FrozenCapture frozen = _selectionCapture!.clone();
+    setState(() {
+      _selectionBusy = true;
+      _selectionError = null;
+    });
     ui.Image? cropped;
-    Uint8List? bytes;
-    int? outWidth;
-    int? outHeight;
+    ui.Image? flight;
     try {
-      ui.Image? source;
-      if (selection == null) {
-        source = frozen.image;
-      } else {
-        source = cropped = await _cropFrozen(frozen, selection);
-      }
-      if (source != null) {
-        final (Uint8List, int, int)? encoded = await _encodeCapturePng(source);
-        bytes = encoded?.$1;
-        outWidth = encoded?.$2;
-        outHeight = encoded?.$3;
+      final ui.Image? source = selection == null
+          ? frozen.image
+          : cropped = await _cropFrozen(frozen, selection);
+      if (!_captureSessionValid(seq)) return;
+      final (Uint8List, int, int)? encoded =
+          source == null ? null : await _encodeCapturePng(source);
+      if (!_captureSessionValid(seq)) return;
+      if (encoded == null) throw StateError('capture encoding failed');
+      flight = source!.clone();
+      final FeedbackCaptureInfo base = frozen.baseInfo;
+      final FeedbackCaptureInfo info = FeedbackCaptureInfo(
+          viewportWidth: base.viewportWidth,
+          viewportHeight: base.viewportHeight,
+          pixelWidth: encoded.$2,
+          pixelHeight: encoded.$3,
+          capturedAt: base.capturedAt,
+          releasePoint: base.releasePoint,
+          region: selection == null
+              ? null
+              : normalizeCaptureRegion(selection, frozen.viewport));
+      final _CaptureHandoff flow = _CaptureHandoff(
+          seq: seq,
+          image: flight,
+          background: frozen.image.clone(),
+          source: selection ?? Offset.zero & frozen.viewport);
+      flight = null; // ownership transfers to the handoff until its final frame
+      _handoff = flow;
+      final _FrozenCapture? overlay = _selectionCapture;
+      _selectionCapture = null;
+      _releaseSelectionShader();
+      if (overlay != null) _disposeAfterFrame(overlay.image);
+      _selectionBusy = false;
+      _handoffAnimation.value = 0;
+      _everOpened = true;
+      _open();
+      setState(() {});
+      // Mount the actual panel and commit exactly once, then measure its
+      // untransformed final attachment layout in a second layout pass.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!_captureSessionValid(seq) ||
+            !identical(_handoff, flow) ||
+            !_controller.isOpen) {
+          return;
+        }
+        final FeedbackPanelState? panel = _panelKey.currentState;
+        if (panel == null) {
+          _finishHandoff();
+          return;
+        }
+        panel.beginCaptureHandoff();
+        panel.setScreenshot(encoded.$1, info,
+            captureSeq: seq, containsUndrawable: frozen.containsUndrawable);
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!_captureSessionValid(seq) ||
+              !identical(_handoff, flow) ||
+              !_controller.isOpen) {
+            return;
+          }
+          final Rect? global = panel.captureThumbnailRect;
+          final RenderBox? host = context.findRenderObject() as RenderBox?;
+          if (global != null && host != null && host.attached) {
+            // Panel entrance uses FractionalTranslation (paint only). Its
+            // layout is already final; subtract that known paint translation.
+            final Offset translated = host.globalToLocal(global.topLeft);
+            final double offsetY = _handoffPanelTranslation;
+            final Rect local = (translated - Offset(0, offsetY)) & global.size;
+            if ((Offset.zero & host.size).overlaps(local)) flow.target = local;
+          }
+          if (_orbGlowReduced) {
+            _finishHandoff(focus: true);
+            return;
+          }
+          if (flow.target == null) panel.setCaptureHandoffProgress(1);
+          _handoffAnimation.forward(from: 0);
+        });
+      });
+    } catch (_) {
+      if (_captureSessionValid(seq)) {
+        setState(() {
+          _selectionBusy = false;
+          _selectionError = '截图准备失败，已保留选区与原草稿，请重试';
+        });
       }
     } finally {
+      flight?.dispose();
       cropped?.dispose();
       frozen.dispose();
     }
-    // 会话 / 身份在裁剪期间失效：迟到结果直接丢弃（流程作废）。
-    if (!mounted || seq != _captureSeq) return;
-    final FeedbackCaptureInfo base = frozen.baseInfo;
-    if (bytes == null) {
-      // 编码失败：打开面板提示可重试，不写入任何截图。
-      _open();
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted || seq != _captureSeq) return;
-        _panelKey.currentState?.showComposeNotice('截图失败，已保留原草稿与图片；可再次拖动灵感球重试');
-      });
-      return;
-    }
-    final FeedbackCaptureInfo info = FeedbackCaptureInfo(
-      viewportWidth: base.viewportWidth,
-      viewportHeight: base.viewportHeight,
-      pixelWidth: outWidth,
-      pixelHeight: outHeight,
-      capturedAt: base.capturedAt,
-      releasePoint: base.releasePoint,
-      // 整窗捕获省略 region；局部选区按原始捕获视口 0..1 归一化。
-      region: selection == null
-          ? null
-          : normalizeCaptureRegion(selection, frozen.viewport),
-    );
-    _open();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || seq != _captureSeq) return;
-      final FeedbackPanelState? panel = _panelKey.currentState;
-      if (panel == null) return;
-      panel.setScreenshot(bytes!, info,
-          captureSeq: seq, containsUndrawable: frozen.containsUndrawable);
-      panel.requestInputFocus();
-    });
   }
+
+  double _handoffPanelTranslation = 0;
 
   /// 取消选区流程：丢弃冻结画面并恢复 UI；不覆盖原草稿、不报失败。
   void _cancelSelection() {
     _invalidateCaptureSession();
+    _releaseLensSnapshot(allowPrefetch: true);
     if (mounted && !_disposed) {
       setState(() {
-        _dragOffset = Offset.zero;
         _isDragging = false;
       });
     }
@@ -1375,13 +1857,13 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     });
     final int seq = _captureSeq;
     final _CaptureResult? result = await _capture(seq: seq);
-    if (mounted && seq == _captureSeq && result != null) {
+    if (_captureSessionValid(seq) && result != null) {
       _panelKey.currentState?.setScreenshot(result.bytes, result.info,
           captureSeq: seq, containsUndrawable: result.containsUndrawable);
     }
     // 旧请求的 finally 不得恢复新请求的 UI：仅在会话仍有效时恢复；
     // 会话被取消时由 _cancelCapture 统一恢复，被新会话取代时由新会话管理。
-    if (mounted && seq == _captureSeq) {
+    if (_captureSessionValid(seq)) {
       setState(() {
         _temporarilyHideForCapture = false;
       });
@@ -1400,6 +1882,99 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     }
   }
 
+  void _observeViewport(Size viewport) {
+    final double dpr = _dpr;
+    final bool changed = (_lastViewport != null && _lastViewport != viewport) ||
+        (_lastDpr != null && _lastDpr != dpr);
+    _lastViewport = viewport;
+    _lastDpr = dpr;
+    if (!changed || _viewportInvalidationScheduled) return;
+    _wakeRecognizer?.cancel();
+    ++_lensGeneration; // invalidate awaiting captures before the next layout callback
+    _viewportInvalidationScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _viewportInvalidationScheduled = false;
+      if (!mounted || _disposed) return;
+      final bool hadFlow = _selectionCapture != null || _handoff != null;
+      _invalidateCaptureSession();
+      _releaseLensSnapshot(allowPrefetch: true);
+      _resetOrbReleaseState();
+      _sessionViewport = null;
+      _sessionDpr = null;
+      _temporarilyHideForCapture = false;
+      if (hadFlow) {
+        _open();
+        final int seq = _captureSeq;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (_captureSessionValid(seq) && _controller.isOpen) {
+            _panelKey.currentState?.showComposeNotice('窗口尺寸或显示比例已变化，请重新截图');
+          }
+        });
+      }
+      setState(() {});
+    });
+  }
+
+  bool _onHostScroll(ScrollNotification notification) {
+    _wakeRecognizer?.cancel();
+    ++_lensGeneration;
+    _lensPendingCaptureGeneration = null;
+    _lensFirstCaptureScheduled = false;
+    _lensPrefetchDone = true;
+    final _OrbLensSnapshot? previous = _lensSnapshot.value;
+    // Scroll only invalidates decoration; a frozen selection keeps its
+    // original pixels, geometry and capture metadata.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && !_disposed && identical(previous, _lensSnapshot.value)) {
+        _clearLensImage();
+      }
+    });
+    WidgetsBinding.instance.scheduleFrame();
+    return false;
+  }
+
+  Widget _buildHandoffBackground(_CaptureHandoff flow) {
+    final double ms = _handoffAnimation.value * 1500;
+    return IgnorePointer(
+        child: Stack(fit: StackFit.expand, children: <Widget>[
+      ImageFiltered(
+          imageFilter: ui.ImageFilter.blur(
+              sigmaX: 3 * orbSmoothstep(0, 350, ms),
+              sigmaY: 3 * orbSmoothstep(0, 350, ms)),
+          child: RawImage(image: flow.background, fit: BoxFit.fill)),
+      const ColoredBox(color: Color(0x42635D92)),
+    ]));
+  }
+
+  Widget _buildHandoffFlight(_CaptureHandoff flow) {
+    final Rect? target = flow.target;
+    if (target == null) return const SizedBox.shrink();
+    final double ms = _handoffAnimation.value * 1500;
+    final double p = orbSmoothstep(180, 1330, ms);
+    final double wave = math.sin(math.pi * p);
+    final Rect rect =
+        Rect.lerp(flow.source, target, p)!.shift(Offset(0, -12 * wave));
+    return Positioned.fromRect(
+        rect: rect,
+        child: IgnorePointer(
+            child: Opacity(
+                opacity: 1 - orbSmoothstep(1220, 1350, ms),
+                child: DecoratedBox(
+                    decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(12 - 2 * p),
+                        boxShadow: <BoxShadow>[
+                          BoxShadow(
+                              color: const Color(0xFF1E193C)
+                                  .withValues(alpha: .2 * (1 - p)),
+                              offset: Offset(0, 16 * wave),
+                              blurRadius: 30 * wave)
+                        ]),
+                    child: ClipRRect(
+                        borderRadius: BorderRadius.circular(12 - 2 * p),
+                        child: RawImage(
+                            image: flow.image, fit: BoxFit.contain))))));
+  }
+
   @override
   Widget build(BuildContext context) {
     final FeedbackConfig config = widget.config;
@@ -1409,6 +1984,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     //（T7i），不是纯防御。build 内不能 setState。
     if (open || !config.showLauncher) _orbFocusVisible = false;
     _syncOrbFlow();
+    _syncOrbIdle();
     _syncOrbLensCapture(open: open, config: config);
     return LayoutBuilder(
       builder: (BuildContext context, BoxConstraints constraints) {
@@ -1418,6 +1994,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
         final double height = constraints.maxHeight.isFinite
             ? constraints.maxHeight
             : MediaQuery.of(context).size.height;
+        _observeViewport(Size(width, height));
         final bool wide = width >= kFeedbackWideBreakpoint;
         // 冻结视觉规格（与 Web 端 `min(440px, 100vw−32px)` /
         // `min(720px, 100dvh−32px)` 一致）：
@@ -1434,15 +2011,43 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
               )
             : height;
         final double panelTop = wide ? (height - panelHeight) / 2 : 0.0;
+        final _CaptureHandoff? flow = _handoff;
+        final double ms = flow == null || _orbGlowReduced
+            ? 1500
+            : _handoffAnimation.value * 1500;
+        final double panelShift =
+            flow == null ? 0 : 1.04 * (1 - orbSmoothstep(120, 1050, ms));
+        final bool handoffLocked = flow != null && ms < 1350;
         final bool isLeft = config.side == FeedbackSide.left;
 
         final double bottom =
             config.position?.dy ?? _parseBottom(config.launcherBottom, height);
+        final RenderObject? dockBoundary =
+            _repaintBoundaryKey.currentContext?.findRenderObject();
+        final EdgeInsets dockInsets =
+            dockBoundary is RenderBox && dockBoundary.hasSize
+                ? _captureSelectionSafeInsets()
+                : MediaQuery.paddingOf(context);
+        final double dockTop = (height - bottom - 56).clamp(dockInsets.top,
+            math.max(dockInsets.top, height - dockInsets.bottom - 56));
+        final double orbBottom = height - dockTop - 56;
         // T9：面板底部抬升键盘实际重叠量（未避让部分），避免输入框与
         // 操作按钮被软键盘覆盖；宿主已避让时为 0，不产生双重留白。
         final double keyboardOverlap = _keyboardOverlap(context);
+        _handoffPanelTranslation = (panelHeight - keyboardOverlap) * panelShift;
         final double? left = isLeft ? (config.position?.dx ?? 20.0) : null;
         final double? right = isLeft ? null : (config.position?.dx ?? 20.0);
+        _orbIdleDockCenter =
+            Offset(isLeft ? left! + 28 : width - right! - 28, dockTop + 28);
+        final _OrbMorphGeometry? orbMorph = _orbMorphVisible
+            ? _OrbMorphGeometry(
+                left: isLeft,
+                handle: _idlePreferences.style == FeedbackOrbIdleStyle.handle,
+                progress: _orbMorphProgress,
+                dockCenter: _orbIdleDockCenter,
+                safeInsets: dockInsets,
+                viewportWidth: width)
+            : null;
 
         // 提供本实例私有的遮挡作用域：子树内的 FeedbackCaptureMask
         // 注册到最近的作用域（嵌套组件实例各归其主）。
@@ -1461,11 +2066,40 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
                   key: const Key('feedback-host-slot'),
                   child: RepaintBoundary(
                     key: _repaintBoundaryKey,
-                    child: widget.child,
+                    child: Listener(
+                      onPointerUp: (PointerUpEvent event) =>
+                          _wakeRecognizer?.preparePointerUp(event),
+                      child: RawGestureDetector(
+                        behavior: HitTestBehavior.translucent,
+                        excludeFromSemantics: true,
+                        gestures: <Type, GestureRecognizerFactory>{
+                          FeedbackWakeGestureRecognizer:
+                              GestureRecognizerFactoryWithHandlers<
+                                  FeedbackWakeGestureRecognizer>(
+                            () => _wakeRecognizer =
+                                FeedbackWakeGestureRecognizer(debugOwner: this),
+                            (FeedbackWakeGestureRecognizer recognizer) {
+                              recognizer
+                                ..isAvailable = (() => _wakeAvailable)
+                                ..onReleaseHint = _setWakeReleaseHint
+                                ..onWake = _onWake
+                                ..enabled = _wakePreferences.enabled;
+                            },
+                          ),
+                        },
+                        child: NotificationListener<ScrollNotification>(
+                            onNotification: _onHostScroll, child: widget.child),
+                      ),
+                    ),
                   ),
                 ),
+                Positioned.fill(
+                    key: const Key('feedback-handoff-background-slot'),
+                    child: flow == null
+                        ? const SizedBox.shrink()
+                        : _buildHandoffBackground(flow)),
                 // 宽屏抽屉展开时压一层可点击遮罩；窄屏为全屏页面不需要。
-                if (open && wide && !_temporarilyHideForCapture)
+                if (open && wide && !_temporarilyHideForCapture && flow == null)
                   Positioned.fill(
                     key: const Key('feedback-scrim-slot'),
                     child: GestureDetector(
@@ -1497,22 +2131,43 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
                               maintainState: true,
                               // 传真实开关状态（用户是否打开面板）：截图期间暂时
                               // 隐藏不算关闭，不得据此取消登录接续或清除状态。
-                              child: _buildPanel(config, visible: open),
+                              child: IgnorePointer(
+                                  ignoring: handoffLocked,
+                                  child: ExcludeFocus(
+                                      excluding: handoffLocked,
+                                      child: Opacity(
+                                          opacity: flow == null
+                                              ? 1
+                                              : orbSmoothstep(60, 300, ms),
+                                          child: FractionalTranslation(
+                                              translation:
+                                                  Offset(0, panelShift),
+                                              child: _buildPanel(config,
+                                                  visible: open))))),
                             );
                     }),
                   ),
                 ),
-                if (!open && config.showLauncher)
+                if (!open &&
+                    config.showLauncher &&
+                    !_temporarilyHideForCapture &&
+                    _selectionCapture == null)
                   Positioned(
                     key: const Key('feedback-launcher-slot'),
-                    bottom: bottom,
-                    left: left,
-                    right: right,
+                    bottom: config.launcherMode == FeedbackLauncherMode.orb
+                        ? orbBottom
+                        : bottom,
+                    left: isLeft && orbMorph != null ? orbMorph.hit.left : left,
+                    right: !isLeft && orbMorph != null
+                        ? width - orbMorph.hit.right
+                        : right,
                     child: Builder(
-                      builder: (BuildContext context) =>
-                          config.launcherMode == FeedbackLauncherMode.orb
-                              ? _buildOrb(context, config)
-                              : _buildFab(context, config),
+                      builder: (BuildContext context) => config.launcherMode ==
+                              FeedbackLauncherMode.orb
+                          ? (orbMorph != null
+                              ? _buildCollapsedOrb(context, config, orbMorph)
+                              : _buildOrb(context, config))
+                          : _buildFab(context, config),
                     ),
                   ),
                 // T1：拖动灵感球后的局部选区覆盖层——置于最上层，
@@ -1524,7 +2179,17 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
                       key: const Key('feedback-capture-selection-overlay'),
                       image: _selectionCapture!.image,
                       viewport: _selectionCapture!.viewport,
+                      safeInsets: _captureSelectionSafeInsets(),
                       releasePoint: _selectionCapture!.baseInfo.releasePoint,
+                      busy: _selectionBusy,
+                      error: _selectionError,
+                      orbCenter: _selectionOrbCenter,
+                      orbShader: _selectionShader,
+                      scale: _selectionCapture!.scale,
+                      direction: _selectionDirection,
+                      deform: _selectionDeform,
+                      wobble: _selectionWobble,
+                      orbRadius: _selectionRadius,
                       onUseRegion: (Rect region) {
                         unawaited(_deliverSelection(selection: region));
                       },
@@ -1534,12 +2199,66 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
                       onCancel: _cancelSelection,
                     ),
                   ),
+                if (_wakeReleaseHint)
+                  const Positioned(
+                    key: Key('feedback-wake-release-hint'),
+                    left: 16,
+                    right: 16,
+                    top: 24,
+                    child: IgnorePointer(
+                      child: Center(
+                        child: Material(
+                          borderRadius: BorderRadius.all(Radius.circular(12)),
+                          color: Color(0xEE292633),
+                          child: Padding(
+                            padding: EdgeInsets.symmetric(
+                                horizontal: 16, vertical: 12),
+                            child: Text('松开手指唤醒灵感球',
+                                style: TextStyle(color: Colors.white)),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                if (flow != null)
+                  KeyedSubtree(
+                      key: const Key('feedback-handoff-flight-slot'),
+                      child: _buildHandoffFlight(flow)),
               ],
             ),
           ),
         );
       },
     );
+  }
+
+  /// 先与真实view安全区相交，再换算为捕获boundary本地边距。
+  /// 宿主SafeArea或局部布局已避让的空间不会再次扣除。
+  EdgeInsets _captureSelectionSafeInsets() {
+    final RenderBox boundary =
+        _repaintBoundaryKey.currentContext!.findRenderObject()! as RenderBox;
+    final view = View.of(context);
+    final Rect viewSafe = captureSelectionArea(
+        view.physicalSize / view.devicePixelRatio,
+        EdgeInsets.fromViewPadding(view.padding, view.devicePixelRatio));
+    final Matrix4 toGlobal = boundary.getTransformTo(null);
+    final Rect globalBoundary =
+        MatrixUtils.transformRect(toGlobal, Offset.zero & boundary.size);
+    final Rect intersection = globalBoundary.intersect(viewSafe);
+    // 完全在view外的边界把空交集压到最近边缘，不能反向变成可用区域。
+    final Rect clipped = Rect.fromLTRB(
+        intersection.left.clamp(globalBoundary.left, globalBoundary.right),
+        intersection.top.clamp(globalBoundary.top, globalBoundary.bottom),
+        intersection.right.clamp(globalBoundary.left, globalBoundary.right),
+        intersection.bottom.clamp(globalBoundary.top, globalBoundary.bottom));
+    final Rect localSafe =
+        MatrixUtils.transformRect(Matrix4.inverted(toGlobal), clipped);
+    return EdgeInsets.fromLTRB(
+        localSafe.left.clamp(0, boundary.size.width),
+        localSafe.top.clamp(0, boundary.size.height),
+        (boundary.size.width - localSafe.right).clamp(0, boundary.size.width),
+        (boundary.size.height - localSafe.bottom)
+            .clamp(0, boundary.size.height));
   }
 
   /// T9：面板与键盘区域的实际重叠量——只扣除尚未被宿主布局避让的部分。
@@ -1576,132 +2295,159 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     );
   }
 
+  Widget _buildCollapsedOrb(
+      BuildContext context, FeedbackConfig config, _OrbMorphGeometry geometry) {
+    final bool left = config.side == FeedbackSide.left;
+    final bool handle = _idlePreferences.style == FeedbackOrbIdleStyle.handle;
+    final double t = geometry.progress;
+    final double halfWidth = geometry.halfWidth;
+    Widget art = IgnorePointer(
+        child: ClipRect(
+            clipper: const _OrbDockClipper(),
+            child: Stack(clipBehavior: Clip.none, children: <Widget>[
+              Positioned(
+                  left: left ? geometry.paintInset : null,
+                  right: left ? null : geometry.paintInset,
+                  top: 0,
+                  width: halfWidth * 2,
+                  height: 56,
+                  child: SizedBox(
+                      key: Key(
+                          'feedback-orb-idle-${handle ? 'handle' : 'edge'}'),
+                      child: Stack(clipBehavior: Clip.none, children: <Widget>[
+                        Positioned(
+                            left: halfWidth - 44.8,
+                            top: -16.8,
+                            width: 89.6,
+                            height: 89.6,
+                            child: _buildOrbLensLayer(28,
+                                fixedCenter: geometry.center,
+                                halfSize: Size(halfWidth, 28),
+                                handleMix: handle ? t : 0,
+                                mist: .74,
+                                idleMix: 1)),
+                        if (_orbFocusVisible && _orbFocusNode.hasPrimaryFocus)
+                          Positioned(
+                              left: -4,
+                              top: -4,
+                              right: -4,
+                              bottom: -4,
+                              child: DecoratedBox(
+                                  key: const Key('feedback-orb-focus-ring'),
+                                  decoration: BoxDecoration(
+                                      borderRadius:
+                                          BorderRadius.circular(halfWidth + 4),
+                                      border: Border.all(
+                                          width: kFeedbackOrbFocusWidth,
+                                          color: Theme.of(context)
+                                              .colorScheme
+                                              .primary)))),
+                      ]))),
+            ])));
+    return FocusableActionDetector(
+        focusNode: _orbFocusNode,
+        onFocusChange: (bool focused) {
+          if (focused && _orbLastInputKeyboard) {
+            _orbFocusVisible = true;
+            _wakeOrb();
+          } else if (!focused && _orbFocusVisible) {
+            setState(() => _orbFocusVisible = false);
+          }
+        },
+        shortcuts: const <ShortcutActivator, Intent>{
+          SingleActivator(LogicalKeyboardKey.enter): ActivateIntent(),
+          SingleActivator(LogicalKeyboardKey.space): ActivateIntent(),
+        },
+        actions: <Type, Action<Intent>>{
+          ActivateIntent: CallbackAction<ActivateIntent>(onInvoke: (_) {
+            _wakeOrb();
+            return null;
+          })
+        },
+        child: Semantics(
+            button: true,
+            label: '唤醒灵感球',
+            value: _controller.unreadCount > 0
+                ? '${_controller.unreadCount} 条未读反馈'
+                : null,
+            child: GestureDetector(
+                key: const Key('feedback-orb-collapsed'),
+                behavior: HitTestBehavior.opaque,
+                onTap: _wakeOrb,
+                child: SizedBox(
+                    width: geometry.hit.width,
+                    height: 56,
+                    child: Stack(clipBehavior: Clip.none, children: <Widget>[
+                      Positioned(
+                          left: left ? -geometry.hitInset : null,
+                          right: left ? null : -geometry.hitInset,
+                          top: 0,
+                          width: geometry.clipWidth,
+                          height: 56,
+                          child: art),
+                    ])))));
+  }
+
   Widget _buildOrb(BuildContext context, FeedbackConfig config) {
     final int unread = _controller.unreadCount;
     final bool reduceMotion =
         _orbGlowReduced || MediaQuery.disableAnimationsOf(context);
-    final double diameter = (_isDragging && !reduceMotion)
-        ? kFeedbackOrbDraggingDiameter
-        : kFeedbackOrbIdleDiameter;
-    final Duration motion = reduceMotion
-        ? Duration.zero
-        : (_orbReleasing
-            ? kFeedbackOrbReleaseDuration
-            : kFeedbackOrbSizeDuration);
-    final double target = reduceMotion ? 1.0 : _orbTargetStateScale;
-    final double pull =
-        (_isDragging && !reduceMotion) ? orbPull(_dragOffset) : 0.0;
-    final double angle = reduceMotion
-        ? 0.0
-        : (_isDragging
-            ? orbDragAngle(_dragOffset)
-            : (_orbReleasing ? _orbReleaseAngle : 0.0));
-    final bool pressTransition = _orbPressed || _orbPressTransition;
-    // 状态过渡时长 / 曲线：stateScale 与呼吸权重共用，对齐 Web 把两个
-    // registered number 写进同一条 transition 的做法。
-    final Duration stateDuration = reduceMotion
-        ? Duration.zero
-        : (_orbReleasing
-            ? kFeedbackOrbReleaseDuration
-            : (pressTransition
-                ? kFeedbackOrbPressDuration
-                : kFeedbackOrbSizeDuration));
-    final Curve stateCurve = _orbReleasing
-        ? kFeedbackOrbReleaseCurve
-        : (pressTransition ? kFeedbackOrbPressCurve : kFeedbackOrbStateCurve);
-    // 呼吸权重目标（spec 7）：hover / pressed / dragging 压到 0，其余为 1。
-    // `releasing` 刻意不压 0——Web 的 `.is-releasing` 不设该变量、回落到基值 1，
-    // 所以回弹是把权重在 460ms 内从 0 拉回 1，而不是结束瞬间阶跃接上呼吸。
-    // 同理回弹期间 hover 不参与（Web 的 hover 规则带 :not(.is-releasing)）。
-    final double breathWeightTarget = _orbReleasing
-        ? 1.0
-        : ((_isDragging || _orbPressed || _orbHovered) ? 0.0 : 1.0);
-    final Brightness brightness = Theme.of(context).brightness;
-    OrbPainter orbPainter(
-            double flow, double stateScale, double pull, double breathWeight) =>
-        OrbPainter(
-          flow: flow,
-          breath: orbBreath(flow),
-          breathWeight: breathWeight,
-          stateScale: stateScale,
-          dragAngle: angle,
-          pull: pull,
-          glowOffset: orbGlowOffset(pull, angle),
-          brightness: brightness,
-        );
-    final AnimationController? glow = _orbGlow;
-    // 选区覆盖层期间不挂透镜层：覆盖层是冻结位图，透镜只会放大它自己。
-    final bool showLens = _selectionCapture == null;
-
+    final double diameter =
+        _isDragging ? kFeedbackOrbDraggingDiameter : kFeedbackOrbIdleDiameter;
+    final double target = reduceMotion ? 1 : _orbTargetStateScale;
     Widget orbBox = AnimatedContainer(
       key: const Key('feedback-orb-body'),
-      duration: motion,
-      curve: _orbReleasing ? kFeedbackOrbReleaseCurve : kFeedbackOrbStateCurve,
+      duration: reduceMotion ? Duration.zero : kFeedbackOrbSizeDuration,
+      curve: kFeedbackOrbStateCurve,
       width: diameter,
       height: diameter,
       child: TweenAnimationBuilder<double>(
-        tween: Tween<double>(begin: 1.0, end: breathWeightTarget),
-        duration: stateDuration,
-        curve: stateCurve,
-        builder: (BuildContext context, double breathWeight, Widget? child) =>
-            TweenAnimationBuilder<double>(
-          tween: Tween<double>(begin: 1.0, end: target),
-          duration: stateDuration,
-          curve: stateCurve,
-          onEnd: () {
-            _orbPressTransition = false;
-          },
+          tween: Tween<double>(begin: 1, end: target),
+          duration: reduceMotion
+              ? Duration.zero
+              : (_orbPressTransition
+                  ? kFeedbackOrbPressDuration
+                  : kFeedbackOrbSizeDuration),
+          curve: _orbPressTransition
+              ? kFeedbackOrbPressCurve
+              : kFeedbackOrbStateCurve,
+          onEnd: () => _orbPressTransition = false,
           builder: (BuildContext context, double stateScale, Widget? child) =>
-              TweenAnimationBuilder<double>(
-            tween: Tween<double>(begin: 0.0, end: pull),
-            duration:
-                _orbReleasing ? kFeedbackOrbReleaseDuration : Duration.zero,
-            curve: kFeedbackOrbReleaseCurve,
-            builder: (BuildContext context, double value, Widget? child) {
-              // 回弹过冲会产生负 pull，必须钳制以免 stretch<1、glow 反向。
-              final double safePull =
-                  (_orbReleasing ? value : pull).clamp(0.0, 1.0).toDouble();
-              Widget compose(double flow) {
-                final double breathFactor =
-                    1.0 + 0.02 * orbBreath(flow) * breathWeight;
-                return Stack(
-                  key: _orbLensAnchorKey,
-                  clipBehavior: Clip.none,
-                  fit: StackFit.expand,
-                  children: <Widget>[
-                    if (showLens)
-                      KeyedSubtree(
-                        key: const Key('feedback-orb-lens'),
-                        child: _buildOrbLensLayer(
-                          stateScale,
-                          angle,
-                          safePull,
-                          breathFactor,
-                        ),
-                      ),
-                    CustomPaint(
-                      painter: orbPainter(
-                        flow,
-                        stateScale,
-                        safePull,
-                        breathWeight,
-                      ),
-                    ),
-                  ],
-                );
-              }
-
-              if (glow == null) return compose(0.0);
-              return AnimatedBuilder(
-                animation: glow,
-                builder: (BuildContext context, Widget? child) => compose(
-                  reduceMotion ? 0.0 : glow.value,
-                ),
-              );
-            },
-          ),
-        ),
-      ),
+              LayoutBuilder(
+                  builder: (BuildContext context, BoxConstraints box) {
+                final double side = box.maxWidth;
+                final double radius =
+                    side / 2 * stateScale * (_liquid.radius / 52);
+                _orbRenderedRadius = radius;
+                // Expansion preserves the original dock center. The pointer's hit
+                // offset is retained while only the rendered center has inertia.
+                final Offset expansion = Offset(
+                    (config.side == FeedbackSide.left ? -1 : 1) *
+                        (side - 56) /
+                        2,
+                    (side - 56) / 2);
+                return Transform.translate(
+                    offset: _liquid.position + expansion,
+                    child: Stack(
+                        key: _orbLensAnchorKey,
+                        clipBehavior: Clip.none,
+                        fit: StackFit.expand,
+                        children: <Widget>[
+                          Positioned(
+                              left: side / 2 - radius * 1.6,
+                              top: side / 2 - radius * 1.6,
+                              width: radius * 3.2,
+                              height: radius * 3.2,
+                              child: KeyedSubtree(
+                                  key: const Key('feedback-orb-lens'),
+                                  child: _buildOrbLensLayer(radius,
+                                      fixedCenter: _isDragging
+                                          ? null
+                                          : _orbIdleDockCenter,
+                                      mist: _isDragging ? 0 : .74,
+                                      idleMix: _isDragging ? 0 : 1))),
+                        ]));
+              })),
     );
 
     if (unread > 0) {
@@ -1722,18 +2468,28 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
             top: ringInset,
             right: ringInset,
             bottom: ringInset,
-            child: IgnorePointer(
-              child: DecoratedBox(
-                key: const Key('feedback-orb-focus-ring'),
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  border: Border.all(
-                    width: kFeedbackOrbFocusWidth,
-                    color: Theme.of(context).colorScheme.primary,
-                  ),
-                ),
-              ),
-            ),
+            child: IgnorePointer(child: LayoutBuilder(
+              builder: (BuildContext context, BoxConstraints ringBox) {
+                final double side = ringBox.maxWidth + 2 * ringInset;
+                final Offset expansion = Offset(
+                    (config.side == FeedbackSide.left ? -1 : 1) *
+                        (side - 56) /
+                        2,
+                    (side - 56) / 2);
+                return Transform.translate(
+                    offset: _liquid.position + expansion,
+                    child: DecoratedBox(
+                      key: const Key('feedback-orb-focus-ring'),
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          width: kFeedbackOrbFocusWidth,
+                          color: Theme.of(context).colorScheme.primary,
+                        ),
+                      ),
+                    ));
+              },
+            )),
           ),
       ],
     );
@@ -1789,179 +2545,157 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
           label: '灵感球',
           child: Listener(
             onPointerDown: (PointerDownEvent event) {
-              // 与 Web 同一口径（element.ts 的 `ev.button !== 0` 与
-              // `orbPointerId` 守卫）：只认主键，且同一时刻只认一根指针。
-              // 不过滤时右键按下会亮起 pressed 态；更要紧的是第二指按下会把
-              // _dragOffset 清零，让正在拖动的球瞬间跳回原位。
-              if (event.buttons != kPrimaryButton) {
+              if (event.buttons != kPrimaryButton ||
+                  _orbPointer != null ||
+                  _temporarilyHideForCapture ||
+                  _selectionCapture != null) {
                 return;
               }
-              if (_orbPointer != null) {
-                return;
-              }
+              _wakeRecognizer?.cancel();
               _orbPointer = event.pointer;
-              setState(() {
-                _orbReleasing = false;
-                _orbPointerCancelled = false;
-                _dragOffset = Offset.zero;
-              });
+              _orbPointerStart = event.position;
+
+              final RenderBox? box = _orbLensAnchorKey.currentContext
+                  ?.findRenderObject() as RenderBox?;
+              _orbDockGlobal = box != null && box.attached
+                  ? box.localToGlobal(box.size.center(Offset.zero))
+                  : event.position;
+              _liquid.reset();
+
               _setOrbPressed(true);
             },
-            onPointerUp: (PointerUpEvent event) {
-              if (_orbPointer != event.pointer) {
+            onPointerMove: (PointerMoveEvent event) {
+              if (event.pointer != _orbPointer || _orbPointerStart == null) {
                 return;
               }
+
+              final Offset offset = event.position - _orbPointerStart!;
+              if (!_isDragging &&
+                  offset.distance <= kFeedbackOrbDragThreshold) {
+                return;
+              }
+              if (!_isDragging) unawaited(_captureLensSnapshot());
+              setState(() {
+                _isDragging = true;
+                _orbPressTransition = false;
+                _orbPressed = false;
+
+                _liquid.target = offset;
+                _kickLiquid();
+              });
+            },
+            onPointerUp: (PointerUpEvent event) {
+              if (event.pointer != _orbPointer) return;
               _orbPointer = null;
-              _setOrbPressed(false);
+              if (_orbPointerStart == null || !_lensVisible) return;
+              final bool dragged = _isDragging;
+              final RenderRepaintBoundary? boundary =
+                  _repaintBoundaryKey.currentContext?.findRenderObject()
+                      as RenderRepaintBoundary?;
+              final Offset visualGlobal =
+                  (_orbDockGlobal ?? event.position) + _liquid.position;
+              _selectionOrbCenter = boundary?.globalToLocal(visualGlobal);
+              _selectionDirection = _liquid.direction;
+              _selectionDeform = _liquid.shaderDeform;
+              _selectionWobble = _liquid.wobble;
+              _selectionRadius = _orbRenderedRadius;
+              setState(() {
+                _isDragging = false;
+                _orbPressTransition = !dragged;
+                _orbPressed = false;
+                _resetLiquid();
+              });
+              if (dragged) {
+                unawaited(_captureForSelection(releaseGlobal: event.position));
+              } else {
+                _handleLauncherTap();
+              }
             },
             onPointerCancel: (PointerCancelEvent event) {
-              if (_orbPointer != event.pointer) {
-                return;
-              }
+              if (event.pointer != _orbPointer) return;
               _orbPointer = null;
-              // 已接受的 Flutter pan 在 PointerCancel 时也调用 onPanEnd。
-              _orbPointerCancelled = true;
-              _setOrbPressed(false);
+              _cleanUpOrbPan(_resetOrbReleaseState);
             },
             child: GestureDetector(
-              key: const Key('feedback-orb'),
-              behavior: HitTestBehavior.opaque,
-              onPanStart: (DragStartDetails details) {
-                _lastGlobalPosition = details.globalPosition;
-                setState(() {
-                  _orbReleasing = false;
-                  _dragOffset = Offset.zero;
-                  _isDragging = false;
-                });
-                // 拖动开始：刷新一次 C 路线快照（受一秒间隔与单在途约束）。
-                unawaited(_captureLensSnapshot());
-              },
-              onPanUpdate: (DragUpdateDetails details) {
-                _lastGlobalPosition = details.globalPosition;
-                setState(() {
-                  _dragOffset += details.delta;
-                  if (_dragOffset.distance > 8.0) {
-                    _isDragging = true;
-                    _orbPressed = false;
-                    _orbPressTransition = false;
-                  }
-                });
-              },
-              onPanEnd: (DragEndDetails details) {
-                final bool dragged = _isDragging;
-                final Offset releaseGlobal = _lastGlobalPosition;
-                final double releaseAngle = orbDragAngle(_dragOffset);
-                setState(() {
-                  _orbReleaseAngle = releaseAngle;
-                  _orbReleasing = dragged && !reduceMotion;
-                  _dragOffset = Offset.zero;
-                  _isDragging = false;
-                  _orbPressed = false;
-                  _orbPressTransition = false;
-                });
-                if (_orbPointerCancelled) return;
-                if (dragged) {
-                  // T1：拖动松手不再直接写草稿——进入局部选区流程
-                  // （先冻结已遮挡画面，确认后才交付截图）。
-                  _captureForSelection(releaseGlobal: releaseGlobal);
-                } else {
-                  _handleLauncherTap();
-                }
-              },
-              onPanCancel: () {
-                final bool dragged = _isDragging;
-                final double releaseAngle = orbDragAngle(_dragOffset);
-                _cleanUpOrbPan(() {
-                  _orbReleaseAngle = releaseAngle;
-                  _orbReleasing = dragged && !reduceMotion;
-                  _orbPressTransition =
-                      !dragged && (_orbPressed || _orbPressTransition);
-                  _dragOffset = Offset.zero;
-                  _isDragging = false;
-                  _orbPressed = false;
-                });
-              },
-              onTap: () {
-                if (!_isDragging) {
-                  _handleLauncherTap();
-                }
-              },
-              child: TweenAnimationBuilder<Offset>(
-                // 目标不变时 duration=0 不会重启；减少动态效果需当帧终止旧动画。
-                key: ValueKey<bool>(reduceMotion),
-                tween: Tween<Offset>(begin: Offset.zero, end: _dragOffset),
-                duration:
-                    _orbReleasing ? kFeedbackOrbReleaseDuration : Duration.zero,
-                curve: kFeedbackOrbReleaseCurve,
-                onEnd: () {
-                  if (!_orbReleasing) return;
-                  setState(() {
-                    _orbReleasing = false;
-                    _orbReleaseAngle = 0.0;
-                  });
-                },
-                builder: (BuildContext context, Offset offset, Widget? child) =>
-                    Transform.translate(
-                  offset: _orbReleasing ? offset : _dragOffset,
-                  child: child,
-                ),
-                child: orbWithFocusRing,
-              ),
-            ),
+                key: const Key('feedback-orb'),
+                behavior: HitTestBehavior.opaque,
+                child: orbWithFocusRing),
           ),
         ),
       ),
     );
   }
 
-  /// 透镜层：C 就绪时用捕获图 + 着色器，否则（首帧、失败、被禁用）退回 A。
-  Widget _buildOrbLensLayer(
-    double stateScale,
-    double dragAngle,
-    double pull,
-    double breathFactor,
-  ) {
-    return ValueListenableBuilder<_OrbLensSnapshot?>(
-      valueListenable: _lensSnapshot,
-      builder:
-          (BuildContext context, _OrbLensSnapshot? snapshot, Widget? child) {
-        if (snapshot == null) {
-          return _OrbLensLayer(
-            stateScale: stateScale,
-            dragAngle: dragAngle,
-            pull: pull,
-            breathFactor: breathFactor,
-          );
-        }
-        final Offset anchor =
-            _orbLensAnchorGlobalOrNull() ?? snapshot.anchorGlobal;
-        return _OrbLensShaderLayer(
-          key: const Key('feedback-orb-lens-shader'),
-          shader: snapshot.shader,
-          image: snapshot.image,
-          imageOffset:
-              (anchor - snapshot.sourceRect.topLeft) * snapshot.pixelRatio,
-          pixelRatio: snapshot.pixelRatio,
-          stateScale: stateScale,
-          dragAngle: dragAngle,
-          pull: pull,
-          breathFactor: breathFactor,
-        );
-      },
-    );
-  }
-
-  /// 球盒当前的全局左上角（含拖动位移）。取上一帧的绘制变换，误差上限一帧。
-  Offset? _orbLensAnchorGlobalOrNull() {
-    final RenderObject? renderObject =
-        _orbLensAnchorKey.currentContext?.findRenderObject();
-    if (renderObject is RenderBox &&
-        renderObject.attached &&
-        renderObject.hasSize) {
-      return renderObject.localToGlobal(Offset.zero);
-    }
-    return null;
-  }
+  Widget _buildOrbLensLayer(double radius,
+          {Offset? fixedCenter,
+          Size? halfSize,
+          double handleMix = 0,
+          double mist = 0,
+          double idleMix = 0}) =>
+      ValueListenableBuilder<_OrbLensSnapshot?>(
+          valueListenable: _lensSnapshot,
+          builder: (BuildContext context, _OrbLensSnapshot? snapshot,
+              Widget? child) {
+            if (snapshot == null || MediaQuery.highContrastOf(context)) {
+              return IgnorePointer(
+                  child: CustomPaint(
+                      painter: OrbLiquidOutlinePainter(
+                          radius: radius,
+                          halfSize: halfSize,
+                          handleMix: handleMix,
+                          idleMix: idleMix,
+                          dark: Theme.of(context).brightness == Brightness.dark,
+                          highContrast: MediaQuery.highContrastOf(context),
+                          direction: _liquid.direction,
+                          deform: _liquid.shaderDeform,
+                          wobble: _liquid.wobble,
+                          color: MediaQuery.highContrastOf(context)
+                              ? Theme.of(context).colorScheme.onSurface
+                              : Theme.of(context)
+                                  .colorScheme
+                                  .onSurface
+                                  .withValues(alpha: .4))));
+            }
+            final RenderRepaintBoundary? boundary =
+                _repaintBoundaryKey.currentContext?.findRenderObject()
+                    as RenderRepaintBoundary?;
+            final RenderBox? anchor = fixedCenter == null
+                ? _orbLensAnchorKey.currentContext?.findRenderObject()
+                    as RenderBox?
+                : null;
+            if (boundary == null ||
+                !boundary.attached ||
+                (fixedCenter == null &&
+                    (anchor == null || !anchor.attached || !anchor.hasSize))) {
+              return const SizedBox.expand();
+            }
+            // Convert both the moving center and drawing-box offset through the
+            // capture boundary: embedding at a nonzero global origin is supported.
+            final Offset center = fixedCenter ??
+                boundary.globalToLocal(_orbDockGlobal == null
+                    ? anchor!.localToGlobal(anchor.size.center(Offset.zero))
+                    : _orbDockGlobal! + _liquid.position);
+            return RepaintBoundary(
+                child: IgnorePointer(
+                    child: CustomPaint(
+                        key: const Key('feedback-orb-lens-shader'),
+                        painter: OrbLiquidLensPainter(
+                            image: snapshot.image,
+                            shader: snapshot.shader,
+                            offset: center - Offset(radius * 1.6, radius * 1.6),
+                            scale: snapshot.pixelRatio,
+                            center: center,
+                            radius: radius,
+                            halfSize: halfSize,
+                            handleMix: handleMix,
+                            mist: mist,
+                            idleMix: idleMix,
+                            direction: _liquid.direction,
+                            deform: _liquid.shaderDeform,
+                            wobble: _liquid.wobble,
+                            dark: Theme.of(context).brightness ==
+                                Brightness.dark))));
+          });
 
   Widget _buildPanel(FeedbackConfig config, {required bool visible}) {
     return Shortcuts(
@@ -1991,6 +2725,12 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
           tokenStore: widget.tokenStore,
           tokenStoreFactory: widget.tokenStoreFactory,
           serverPrefStore: widget.serverPrefStore,
+          orbIdleStyle: _idlePreferences.style,
+          orbIdleSessionOnly: _idlePreferences.sessionOnly,
+          onOrbIdleStyleChanged: _idlePreferences.select,
+          wakeGestures: _wakePreferences.enabled,
+          wakeGesturesSessionOnly: _wakePreferences.sessionOnly,
+          onWakeGesturesChanged: _wakePreferences.select,
           // T6/T7：向控制器上报实际使用地址；地址变化时使外层截图会话
           // 失效（旧会话的迟到交付不得写入新身份的草稿）。
           onEffectiveApiBaseChange: _onEffectiveApiBaseChange,
@@ -2001,6 +2741,76 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
       ),
     );
   }
+}
+
+/// One progress drives the safe glass center, shape and its moving hit target.
+/// A sphere can still be fully visible before reaching the side clip; keep
+/// that painted contour inside the target while it shrinks from 56 to 44.
+class _OrbMorphGeometry {
+  factory _OrbMorphGeometry({
+    required bool left,
+    required bool handle,
+    required double progress,
+    required Offset dockCenter,
+    required EdgeInsets safeInsets,
+    required double viewportWidth,
+  }) {
+    final double safeLeft = safeInsets.left;
+    final double safeRight = viewportWidth - safeInsets.right;
+    final double edge = left ? safeLeft : safeRight;
+    final double dockGap =
+        left ? dockCenter.dx - 28 - edge : edge - dockCenter.dx - 28;
+    final double halfWidth = 28 + ((handle ? 6 : 28) - 28) * progress;
+    final double inset = dockGap + ((handle ? 3 : -28) - dockGap) * progress;
+    final Offset center = Offset(
+        left ? edge + inset + halfWidth : edge - inset - halfWidth,
+        dockCenter.dy);
+    // Horizontal r=1 of R7's sphere/capsule mix (at delta.y=0). This changes
+    // hit layout only; sampling, shader math and the safe-side clip stay fixed.
+    final double extent =
+        handle ? 1 / ((1 - progress) / 28 + progress / halfWidth) : 28;
+    final double visibleLeft = math.max(safeLeft, center.dx - extent);
+    final double visibleRight = math.min(safeRight, center.dx + extent);
+    final double width = math.max(
+        56 + (44 - 56) * progress, (visibleRight - visibleLeft).clamp(0, 56));
+    final double nominalInset = dockGap * (1 - progress);
+    final double nominalLeft =
+        left ? edge + nominalInset : edge - nominalInset - width;
+    final double hitLeft = nominalLeft.clamp(visibleRight - width, visibleLeft);
+    final Rect hit = Rect.fromLTWH(hitLeft, dockCenter.dy - 28, width, 56);
+    return _OrbMorphGeometry._(
+        progress,
+        center,
+        halfWidth,
+        inset,
+        hit,
+        left ? hit.left - edge : edge - hit.right,
+        math.min(
+            viewportWidth - safeInsets.horizontal, math.max(56, dockGap + 56)));
+  }
+
+  const _OrbMorphGeometry._(this.progress, this.center, this.halfWidth,
+      this.paintInset, this.hit, this.hitInset, this.clipWidth);
+  final double progress;
+  final Offset center;
+  final double halfWidth;
+  final double paintInset;
+  final Rect hit;
+  final double hitInset;
+  final double clipWidth;
+}
+
+/// Dock clipping is horizontal: round caps, soft shadow and keyboard outline
+/// retain their vertical paint allowance without crossing the safe side edge.
+class _OrbDockClipper extends CustomClipper<Rect> {
+  const _OrbDockClipper();
+
+  @override
+  Rect getClip(Size size) =>
+      Rect.fromLTRB(0, -16.8, size.width, size.height + 16.8);
+
+  @override
+  bool shouldReclip(_OrbDockClipper oldClipper) => false;
 }
 
 /// 宿主无 `Overlay` 祖先时（组件按集成文档/示例包在 `MaterialApp` 外侧）
@@ -2060,7 +2870,7 @@ class _FallbackOverlayState extends State<_FallbackOverlay> {
 
 /// v12 挂载环境兜底（组件包在 MaterialApp 外侧时生效）：
 /// 面板 UI 需要 `Directionality` / `MediaQuery` / `Localizations` /
-/// `Theme` / `Overlay` 祖先——宿主 MaterialApp 是组件的 child，
+/// `Theme` / `Overlay` / 文本编辑快捷键祖先——宿主 MaterialApp 是组件的 child，
 /// 祖先查找只向上走，所以缺失时组件自备最小环境。
 ///
 /// 在 MaterialApp 内挂载（旧 builder 方式）时所有祖先齐备，本组件
@@ -2074,6 +2884,13 @@ class _FeedbackEnvironment extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     Widget result = child;
+    // Android 输入法也可能以 DEL 按键发送退格；没有 WidgetsApp 的默认
+    // 文本编辑快捷键时，文字能输入却无法通过这类按键删除。沿用 Flutter
+    // 的原生编辑行为；已有祖先时不覆盖宿主在其内部设置的快捷键。
+    if (context.findAncestorWidgetOfExactType<DefaultTextEditingShortcuts>() ==
+        null) {
+      result = DefaultTextEditingShortcuts(child: result);
+    }
     // Overlay 祖先：面板对话框与放大预览的兜底承载（无 Navigator 时）。
     // ⚠ `Overlay.initialEntries` 只在 Overlay **首次挂载**时插入，之后
     // OverlayState 忽略新列表；若把子树闭包进 initialEntries，父级
@@ -2135,281 +2952,24 @@ class _FeedbackEnvironment extends StatelessWidget {
   }
 }
 
-/// A 路线透镜的几何：与 `OrbPainter.paint` 的变换链逐项同构，
-/// 把球心在原点、半径 28 的玻璃圆映射到球盒坐标。
-Matrix4 _orbLensGeometry(
-  Size size, {
-  required double stateScale,
-  required double dragAngle,
-  required double pull,
-  required double breathFactor,
-}) {
-  final double unit = size.shortestSide / kFeedbackOrbIdleDiameter;
-  final double scale = unit * stateScale * breathFactor;
-  final Offset center = size.center(Offset.zero);
-  return Matrix4.identity()
-    ..translateByDouble(center.dx, center.dy, 0, 1)
-    ..rotateZ(dragAngle)
-    ..scaleByDouble(orbStretch(pull), 1, 1, 1)
-    ..rotateZ(-dragAngle)
-    ..scaleByDouble(scale, scale, 1, 1);
-}
-
-/// 以球心为原点放大 [kFeedbackOrbLensCenterScale] 的背景采样矩阵。
-///
-/// 放大发生在透镜自己的坐标帧里：`G · S(k) · G⁻¹`，因此内容不会被拖动角旋转、
-/// 也不会被方向拉伸带偏；球缘采样半径就是 1.7R（A 路线为常数）。
-Matrix4 _orbLensFilter(
-  Size size, {
-  required double stateScale,
-  required double dragAngle,
-  required double pull,
-  required double breathFactor,
-}) {
-  final Matrix4 geometry = _orbLensGeometry(
-    size,
-    stateScale: stateScale,
-    dragAngle: dragAngle,
-    pull: pull,
-    breathFactor: breathFactor,
-  );
-  final Matrix4 zoom = Matrix4.diagonal3Values(
-    kFeedbackOrbLensCenterScale,
-    kFeedbackOrbLensCenterScale,
-    1,
-  );
-  return geometry.multiplied(zoom).multiplied(Matrix4.inverted(geometry));
-}
-
-/// 玻璃圆裁剪：半径 28 的圆按 [_orbLensGeometry] 变换后在球盒里的椭圆。
-class _OrbLensClipper extends CustomClipper<Path> {
-  const _OrbLensClipper({
-    required this.stateScale,
-    required this.dragAngle,
-    required this.pull,
-    required this.breathFactor,
-  });
-
-  final double stateScale;
-  final double dragAngle;
-  final double pull;
-  final double breathFactor;
-
-  @override
-  Path getClip(Size size) {
-    final Matrix4 geometry = _orbLensGeometry(
-      size,
-      stateScale: stateScale,
-      dragAngle: dragAngle,
-      pull: pull,
-      breathFactor: breathFactor,
-    );
-    // 3.41 的 Path.transform 返回新 Path，不原地变换（级联会丢掉结果）。
-    final Path circle = Path()
-      ..addOval(
-        Rect.fromCircle(
-          center: Offset.zero,
-          radius: kFeedbackOrbIdleDiameter / 2,
-        ),
-      );
-    return circle.transform(geometry.storage);
-  }
-
-  @override
-  bool shouldReclip(_OrbLensClipper oldClipper) =>
-      oldClipper.stateScale != stateScale ||
-      oldClipper.dragAngle != dragAngle ||
-      oldClipper.pull != pull ||
-      oldClipper.breathFactor != breathFactor;
-}
-
-/// A 路线透镜层：玻璃圆内以球心为原点放大背景，叠在球体 painter 之下。
-///
-/// 外层 [RepaintBoundary] 把 `ImageFilter.matrix` 的参考坐标系钉在透镜盒本地
-/// 坐标——`BackdropFilter` 的矩阵按最近合成层解释，裸挂时会被祖先的绘制偏移
-/// （Positioned / Transform.translate）平移掉，放大中心就不在球心。
-class _OrbLensLayer extends StatelessWidget {
-  const _OrbLensLayer({
-    required this.stateScale,
-    required this.dragAngle,
-    required this.pull,
-    required this.breathFactor,
-  });
-
-  final double stateScale;
-  final double dragAngle;
-  final double pull;
-  final double breathFactor;
-
-  @override
-  Widget build(BuildContext context) {
-    return RepaintBoundary(
-      child: IgnorePointer(
-        child: ClipPath(
-          clipper: _OrbLensClipper(
-            stateScale: stateScale,
-            dragAngle: dragAngle,
-            pull: pull,
-            breathFactor: breathFactor,
-          ),
-          child: LayoutBuilder(
-            builder: (BuildContext context, BoxConstraints constraints) =>
-                BackdropFilter(
-              filter: ui.ImageFilter.matrix(
-                _orbLensFilter(
-                  constraints.biggest,
-                  stateScale: stateScale,
-                  dragAngle: dragAngle,
-                  pull: pull,
-                  breathFactor: breathFactor,
-                ).storage,
-                filterQuality: ui.FilterQuality.high,
-              ),
-              child: const SizedBox.expand(),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// C 路线透镜层：把单次捕获的宿主背景交给 `shaders/orb_lens.frag`，
-/// 按七点径向表采样；`r/R > 1` 由着色器输出透明，外层再用同一玻璃圆裁剪
-/// 补抗锯齿。
-class _OrbLensShaderLayer extends StatelessWidget {
-  const _OrbLensShaderLayer({
-    super.key,
-    required this.shader,
-    required this.image,
-    required this.imageOffset,
-    required this.pixelRatio,
-    required this.stateScale,
-    required this.dragAngle,
-    required this.pull,
-    required this.breathFactor,
-  });
-
-  final ui.FragmentShader shader;
-  final ui.Image image;
-
-  /// 球盒本地 (0,0) 在捕获图像里的像素坐标。
-  final Offset imageOffset;
-  final double pixelRatio;
-  final double stateScale;
-  final double dragAngle;
-  final double pull;
-  final double breathFactor;
-
-  @override
-  Widget build(BuildContext context) {
-    return RepaintBoundary(
-      child: IgnorePointer(
-        child: ClipPath(
-          clipper: _OrbLensClipper(
-            stateScale: stateScale,
-            dragAngle: dragAngle,
-            pull: pull,
-            breathFactor: breathFactor,
-          ),
-          child: CustomPaint(
-            painter: _OrbLensShaderPainter(
-              shader: shader,
-              image: image,
-              imageOffset: imageOffset,
-              pixelRatio: pixelRatio,
-              stateScale: stateScale,
-              dragAngle: dragAngle,
-              stretch: orbStretch(pull),
-              breathFactor: breathFactor,
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _OrbLensShaderPainter extends CustomPainter {
-  const _OrbLensShaderPainter({
-    required this.shader,
-    required this.image,
-    required this.imageOffset,
-    required this.pixelRatio,
-    required this.stateScale,
-    required this.dragAngle,
-    required this.stretch,
-    required this.breathFactor,
-  });
-
-  final ui.FragmentShader shader;
-  final ui.Image image;
-  final Offset imageOffset;
-  final double pixelRatio;
-  final double stateScale;
-  final double dragAngle;
-
-  /// 玻璃椭圆的长轴倍率（沿拖动方向），与 painter 的 `orbStretch(pull)` 同源。
-  final double stretch;
-  final double breathFactor;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final double unit = size.shortestSide / kFeedbackOrbIdleDiameter;
-    final double radius =
-        kFeedbackOrbIdleDiameter / 2 * unit * stateScale * breathFactor;
-    final Offset center = size.center(Offset.zero);
-    final List<double> uniforms = orbLensUniformValues(
-      imageSize: Size(image.width.toDouble(), image.height.toDouble()),
-      imageOffset: imageOffset,
-      pixelRatio: pixelRatio,
-      center: center,
-      radiusPx: radius,
-      stretch: stretch,
-      angle: dragAngle,
-      dispersion: kFeedbackOrbLensDispersionEdge,
-    );
-    for (int i = 0; i < uniforms.length; i++) {
-      shader.setFloat(i, uniforms[i]);
-    }
-    shader.setImageSampler(0, image);
-    canvas.drawRect(Offset.zero & size, Paint()..shader = shader);
-  }
-
-  @override
-  bool shouldRepaint(_OrbLensShaderPainter oldDelegate) =>
-      oldDelegate.image != image ||
-      oldDelegate.imageOffset != imageOffset ||
-      oldDelegate.pixelRatio != pixelRatio ||
-      oldDelegate.stateScale != stateScale ||
-      oldDelegate.dragAngle != dragAngle ||
-      oldDelegate.stretch != stretch ||
-      oldDelegate.breathFactor != breathFactor;
-}
-
-/// C 路线的一次性快照：宿主位图 + 换成球盒坐标所需的元数据。
+/// One owner for each local masked snapshot. No unmasked fallback exists.
 class _OrbLensSnapshot {
-  const _OrbLensSnapshot({
-    required this.image,
-    required this.sourceRect,
-    required this.pixelRatio,
-    required this.anchorGlobal,
-    required this.shader,
-  });
-
+  const _OrbLensSnapshot(
+      {required this.image, required this.pixelRatio, required this.shader});
   final ui.Image image;
-
-  /// 捕获时宿主边界在全局逻辑坐标下的矩形。
-  final Rect sourceRect;
-
-  /// 捕获时使用的像素比（逻辑像素 → 图像像素）。
   final double pixelRatio;
-
-  /// 捕获时球盒左上角的全局逻辑坐标，与 [sourceRect] 同一时刻取样。
-  ///
-  /// 只是兜底：正常绘制走实时锚点（[_OrbLensShaderLayer] 的 anchor），
-  /// 只有锚点暂时不可得时才用这里的快照值。
-  final Offset anchorGlobal;
-
   final ui.FragmentShader shader;
+}
+
+class _CaptureHandoff {
+  _CaptureHandoff(
+      {required this.seq,
+      required this.image,
+      required this.background,
+      required this.source});
+  final int seq;
+  final ui.Image image;
+  final ui.Image background;
+  final Rect source;
+  Rect? target;
 }

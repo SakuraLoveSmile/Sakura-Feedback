@@ -798,6 +798,10 @@ void main() {
       await tester.tap(find.byKey(settingsGear));
       await tester.pump();
       await tester.enterText(find.byKey(serverInput), 'https://b.test');
+      // 灵感球与唤醒设置位于服务器设置之前，先滚动到真实可点击的保存按钮。
+      await tester.ensureVisible(find.byKey(serverSave));
+      await tester.pumpAndSettle();
+      expect(find.byKey(serverSave).hitTestable(), findsOneWidget);
       await tester.tap(find.byKey(serverSave));
       await tester.pump();
       await tester.pump();

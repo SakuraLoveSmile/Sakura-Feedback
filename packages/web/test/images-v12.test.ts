@@ -6,6 +6,7 @@
  * 真实编码的 PNG 字节经 test/pixel-fixture.ts 的 encodePng 生成。
  */
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
+import type { Window as HappyWindow } from 'happy-dom';
 import '../src/index';
 import { submitFeedback } from '../src/api';
 import {
@@ -31,6 +32,7 @@ import { countUndrawableContent } from '../src/images';
 // ---------- 公共桩 ----------
 
 let urlSeq = 0;
+let iframeLoadingDisabled = false;
 
 /** 构造 1x1 纯色 PNG 文件（真实 PNG 魔数 + IHDR，可被 sniffMime 识别）。 */
 function pngFile(name = 'a.png', rgba: [number, number, number, number] = [10, 20, 30, 255]): File {
@@ -81,13 +83,21 @@ function formParts(call: { rawBody?: unknown }, name: string): unknown[] {
 const IMAGE_CAPABILITIES = { dialogue: true, images: 5 };
 
 beforeEach(() => {
+  // These tests inspect DOM URLs/visibility, never remote frame content. Preserve all
+  // assertions while preventing happy-dom from navigating fixture URLs on append.
+  const browser = window as unknown as HappyWindow;
+  iframeLoadingDisabled = browser.happyDOM.settings.disableIframePageLoading;
+  browser.happyDOM.settings.disableIframePageLoading = true;
   urlSeq = 0;
   vi.spyOn(URL, 'createObjectURL').mockImplementation(() => objectUrl());
   stubCreateElementCanvas(createState());
   stubBitmapDecoder();
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  (window as unknown as HappyWindow).happyDOM.settings.disableIframePageLoading = iframeLoadingDisabled;
+});
 
 // ---------- T2：多图草稿与提交 ----------
 

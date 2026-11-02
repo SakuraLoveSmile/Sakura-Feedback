@@ -1,0 +1,657 @@
+<div id="liquid-orb-preview">
+  <div class="orb-stage viz-dotted-background">
+    <div class="orb-phone" aria-label="灵感球选区与反馈填写预览">
+      <canvas class="orb-scene" role="img" aria-label="透明液滴的中央正立放大文字，球缘出现翻转倒影；拖动时前后轮廓不同步，松手后表面波纹逐渐恢复。">透明灵感球预览需要支持 WebGL 的浏览器。</canvas>
+      <button class="orb-handle" type="button" aria-label="拖动灵感球；方向键移动，空格回弹，Home 回到文字上方"></button>
+      <div class="flow-dim" hidden></div>
+      <div class="capture-selection" hidden>
+        <canvas class="selected-content" aria-hidden="true"></canvas>
+        <button class="selection-move" type="button" aria-label="移动截图选区；方向键微调"></button>
+        <button class="selection-corner nw" type="button" data-corner="nw" aria-label="调整选区左上角"></button>
+        <button class="selection-corner ne" type="button" data-corner="ne" aria-label="调整选区右上角"></button>
+        <button class="selection-corner sw" type="button" data-corner="sw" aria-label="调整选区左下角"></button>
+        <button class="selection-corner se" type="button" data-corner="se" aria-label="调整选区右下角"></button>
+      </div>
+      <div class="capture-tools" hidden>
+        <span>调整截图</span>
+        <button type="button" class="cursor-interaction" data-action="use-selection">使用此区域 <i data-lucide="arrow-right" aria-hidden="true"></i></button>
+      </div>
+      <div class="flow-island" hidden>
+        <span class="island-dot" aria-hidden="true"></span>
+        <span class="island-wave" aria-hidden="true">ııı</span>
+      </div>
+      <button class="capture-close cursor-interaction" type="button" aria-label="关闭选区，回到灵感球" hidden>×</button>
+      <form class="feedback-panel" aria-label="记录体验" hidden>
+        <header class="feedback-header">
+          <div><i data-lucide="message-square" aria-hidden="true"></i><h2>记录体验</h2></div>
+          <button class="feedback-close cursor-interaction" type="button" aria-label="关闭反馈面板"><i data-lucide="x" aria-hidden="true"></i></button>
+        </header>
+        <div class="feedback-content">
+          <label for="orb-feedback-text">哪里不顺手，或者有什么新想法？</label>
+          <div class="feedback-input-wrap">
+            <textarea id="orb-feedback-text" aria-label="反馈内容" placeholder="刚才哪里不顺手？你希望它怎样改进？" maxlength="10000"></textarea>
+            <span class="feedback-counter">0 / 10000</span>
+          </div>
+          <div class="attachment-heading"><span>图片证据</span><span class="attachment-count">1 张</span></div>
+          <div class="feedback-attachment">
+            <div class="attachment-thumbnail" role="img" aria-label="已选取的局部截图"><canvas aria-hidden="true"></canvas><span>局部截图</span></div>
+            <div class="attachment-actions">
+              <button type="button" class="cursor-interaction" data-action="reselect"><i data-lucide="crop" aria-hidden="true"></i>重新选择</button>
+              <button type="button" class="cursor-interaction" data-action="remove-shot"><i data-lucide="trash-2" aria-hidden="true"></i>移除截图</button>
+            </div>
+          </div>
+          <button type="button" class="attachment-add cursor-interaction" data-action="add-shot" hidden><i data-lucide="scan" aria-hidden="true"></i>截取当前页面</button>
+        </div>
+        <footer class="feedback-footer">
+          <button type="button" class="feedback-submit cursor-interaction" disabled>提交（预览）</button>
+          <span>会保留原话，整理为候选改进</span>
+        </footer>
+      </form>
+      <div class="floating-shot" hidden><canvas aria-hidden="true"></canvas></div>
+    </div>
+  </div>
+  <div class="orb-actions">
+    <button class="btn btn-primary" type="button" data-action="demo">播放完整流程</button>
+    <label class="form-check"><input class="form-check-input" type="checkbox" data-action="slow"><span class="form-check-label">慢放</span></label>
+    <label class="form-label"><span class="sr-only">查看阶段</span><select class="form-select" aria-label="查看阶段"><option value="orb">灵感球</option><option value="selection">调整选区</option><option value="transition">进入反馈</option><option value="feedback">填写反馈</option></select></label>
+  </div>
+  <div class="text-small text-muted flow-status" aria-live="polite" data-status>拖动松手，继续调整选区</div>
+  <div class="text-destructive" role="alert" data-error hidden></div>
+</div>
+<style>
+  #liquid-orb-preview { width:100%; }
+  #liquid-orb-preview .orb-stage { display:flex; justify-content:center; padding:20px 12px; }
+  #liquid-orb-preview .orb-phone { position:relative; width:min(350px,100%); aspect-ratio:360/592; border-radius:34px; overflow:hidden; box-shadow:0 0 0 1px light-dark(#d5d8e1,#555866),0 12px 35px #14152c12; background:light-dark(#f3f4fa,#191b24); container-type:inline-size; }
+  #liquid-orb-preview .orb-scene { display:block; width:100%; height:100%; }
+  #liquid-orb-preview .orb-handle { position:absolute; width:30%; height:18.25%; padding:0; border:0; border-radius:50%; background:transparent; cursor:grab; touch-action:none; -webkit-tap-highlight-color:transparent; }
+  #liquid-orb-preview .orb-handle:active { cursor:grabbing; }
+  #liquid-orb-preview .orb-actions { display:flex; align-items:center; justify-content:center; flex-wrap:wrap; gap:14px; margin-top:16px; }
+  #liquid-orb-preview .flow-status { text-align:center; margin-top:10px; }
+  #liquid-orb-preview [data-error] { margin-top:12px; }
+  #liquid-orb-preview .orb-phone [hidden] { display:none !important; }
+  #liquid-orb-preview .flow-dim { position:absolute; inset:0; background:#635d92; pointer-events:none; }
+  #liquid-orb-preview .capture-selection { position:absolute; border-radius:12px; box-shadow:0 0 0 1px #ffffff70; }
+  #liquid-orb-preview .selected-content { width:100%; height:100%; display:block; border-radius:inherit; }
+  #liquid-orb-preview .selection-move { position:absolute; inset:0; border:0; background:transparent; border-radius:inherit; touch-action:none; cursor:move; }
+  #liquid-orb-preview .selection-corner { position:absolute; width:30px; height:30px; padding:0; border:0; background:transparent; touch-action:none; }
+  #liquid-orb-preview .selection-corner::after { content:""; position:absolute; inset:10px; border-color:#fff; border-style:solid; border-width:0; }
+  #liquid-orb-preview .selection-corner.nw { top:-15px; left:-15px; cursor:nwse-resize; }
+  #liquid-orb-preview .selection-corner.ne { top:-15px; right:-15px; cursor:nesw-resize; }
+  #liquid-orb-preview .selection-corner.sw { bottom:-15px; left:-15px; cursor:nesw-resize; }
+  #liquid-orb-preview .selection-corner.se { bottom:-15px; right:-15px; cursor:nwse-resize; }
+  #liquid-orb-preview .selection-corner.nw::after { border-top-width:2px; border-left-width:2px; border-top-left-radius:4px; }
+  #liquid-orb-preview .selection-corner.ne::after { border-top-width:2px; border-right-width:2px; border-top-right-radius:4px; }
+  #liquid-orb-preview .selection-corner.sw::after { border-bottom-width:2px; border-left-width:2px; border-bottom-left-radius:4px; }
+  #liquid-orb-preview .selection-corner.se::after { border-bottom-width:2px; border-right-width:2px; border-bottom-right-radius:4px; }
+  #liquid-orb-preview .capture-tools { position:absolute; height:40px; display:flex; align-items:center; justify-content:space-between; gap:8px; padding:0 5px 0 12px; border-radius:14px; color:#55515f; background:#f9f8fff0; backdrop-filter:blur(14px); box-shadow:0 3px 16px #24203412; white-space:nowrap; font:400 12px/1.2 -apple-system,BlinkMacSystemFont,sans-serif; }
+  #liquid-orb-preview .capture-tools button { display:flex; align-items:center; gap:6px; border:0; border-radius:10px; color:#fff; background:#0071e3; padding:8px 10px; font:500 12px/1.2 -apple-system,BlinkMacSystemFont,sans-serif; min-height:32px; }
+  #liquid-orb-preview .capture-tools button:hover { background:#0077ed; }
+  #liquid-orb-preview .capture-tools svg { width:14px; height:14px; }
+  #liquid-orb-preview .capture-close { position:absolute; bottom:6.8%; left:50%; transform:translateX(-50%); width:38px; height:38px; padding:0; border:0; border-radius:50%; background:#f5f3ffd9; color:#494251; box-shadow:0 3px 8px #18142815; font:400 25px/1 -apple-system,BlinkMacSystemFont,sans-serif; }
+  #liquid-orb-preview .floating-shot { position:absolute; background:#f3f4fa; pointer-events:none; transform:translate(-50%,-50%); overflow:hidden; }
+  #liquid-orb-preview .floating-shot canvas { width:100%; height:100%; display:block; object-fit:contain; }
+  #liquid-orb-preview .flow-island { position:absolute; top:2.365%; left:50%; transform:translateX(-50%); width:32.22%; height:4.055%; min-height:20px; border-radius:30px; background:#111219; color:#f8f5ff; display:flex; align-items:center; justify-content:center; pointer-events:none; }
+  #liquid-orb-preview .island-dot { position:absolute; left:7%; width:13px; height:13px; border-radius:50%; background:radial-gradient(circle at 32% 28%,#f3eaff,#b0a0e5 30%,#55536d 66%,#282430); }
+  #liquid-orb-preview .island-wave { position:absolute; right:8%; color:#a59bb9; font:400 11px/1 sans-serif; letter-spacing:1px; }
+  #liquid-orb-preview .feedback-panel { position:absolute; inset:8.4% 0 0; margin:0; display:flex; flex-direction:column; border-radius:22px 22px 0 0; background:#fff; color:#1d1d1f; box-shadow:0 -12px 32px #15132914; font:400 13px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif; transform-origin:center bottom; }
+  #liquid-orb-preview .feedback-header { display:flex; align-items:center; justify-content:space-between; flex:none; padding:clamp(8px,3.5cqw,13px) clamp(14px,5.5cqw,20px); }
+  #liquid-orb-preview .feedback-header > div { display:flex; align-items:center; gap:8px; }
+  #liquid-orb-preview .feedback-header h2 { font:500 17px/1.4 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif; margin:0; }
+  #liquid-orb-preview .feedback-header svg { width:18px; height:18px; }
+  #liquid-orb-preview .feedback-close { display:grid; place-items:center; width:32px; height:32px; padding:0; border:0; border-radius:50%; background:#f5f5f7; color:#66666c; }
+  #liquid-orb-preview .feedback-content { display:flex; flex-direction:column; gap:clamp(6px,2.4cqw,9px); padding:0 clamp(14px,5.5cqw,20px); }
+  #liquid-orb-preview .feedback-content > label { font-size:clamp(11px,3.65cqw,13px); font-weight:500; }
+  #liquid-orb-preview .feedback-input-wrap { position:relative; }
+  #liquid-orb-preview .feedback-input-wrap textarea { box-sizing:border-box; display:block; width:100%; height:clamp(94px,37cqw,130px); padding:12px 12px 28px; border:1px solid #00000012; border-radius:10px; resize:none; background:#f5f5f7; color:#1d1d1f; font:400 16px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif; }
+  #liquid-orb-preview .feedback-input-wrap textarea::placeholder { color:#86868b; }
+  #liquid-orb-preview .feedback-counter { position:absolute; bottom:7px; right:10px; color:#86868b; font-size:11px; pointer-events:none; }
+  #liquid-orb-preview .attachment-heading { display:flex; align-items:center; justify-content:space-between; margin-top:clamp(3px,1.5cqw,6px); color:#86868b; font-size:12px; }
+  #liquid-orb-preview .feedback-attachment { display:flex; align-items:center; gap:14px; }
+  #liquid-orb-preview .attachment-thumbnail { position:relative; flex:none; width:clamp(94px,34cqw,120px); height:clamp(72px,25.5cqw,90px); border:1px solid #00000012; border-radius:10px; overflow:hidden; background:#f3f4fa; }
+  #liquid-orb-preview .attachment-thumbnail canvas { display:block; width:100%; height:100%; object-fit:contain; }
+  #liquid-orb-preview .attachment-thumbnail > span { position:absolute; left:5px; bottom:5px; padding:2px 6px; border-radius:4px; background:#ffffffeb; color:#5e5e66; font-size:11px; }
+  #liquid-orb-preview .attachment-actions { display:flex; flex-direction:column; gap:4px; }
+  #liquid-orb-preview .attachment-actions button,#liquid-orb-preview .attachment-add { display:flex; align-items:center; gap:6px; width:max-content; padding:7px 9px; border:0; border-radius:8px; color:#55555c; background:#f5f5f7; font:400 12px/1.4 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif; }
+  #liquid-orb-preview .attachment-actions svg,#liquid-orb-preview .attachment-add svg { width:14px; height:14px; }
+  #liquid-orb-preview .feedback-footer { display:flex; flex-direction:column; gap:9px; margin-top:auto; padding:14px clamp(14px,5.5cqw,20px) clamp(20px,8cqw,30px); text-align:center; }
+  #liquid-orb-preview .feedback-submit { border:0; border-radius:999px; min-height:44px; padding:10px 16px; color:#fff; background:#0071e3; font:500 14px/1.4 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif; }
+  #liquid-orb-preview .feedback-submit:disabled { background:#a0c7f5; cursor:default; }
+  #liquid-orb-preview .feedback-footer > span { color:#86868b; font-size:11px; }
+  @media (pointer:coarse) { #liquid-orb-preview .capture-close,#liquid-orb-preview .feedback-close { width:44px; height:44px; } #liquid-orb-preview .capture-tools { height:48px; } #liquid-orb-preview .capture-tools button,#liquid-orb-preview .attachment-actions button,#liquid-orb-preview .attachment-add { min-height:44px; } #liquid-orb-preview .selection-corner { width:44px; height:44px; } #liquid-orb-preview .selection-corner.nw,#liquid-orb-preview .selection-corner.ne { top:-22px; } #liquid-orb-preview .selection-corner.sw,#liquid-orb-preview .selection-corner.se { bottom:-22px; } #liquid-orb-preview .selection-corner.nw,#liquid-orb-preview .selection-corner.sw { left:-22px; } #liquid-orb-preview .selection-corner.ne,#liquid-orb-preview .selection-corner.se { right:-22px; } #liquid-orb-preview .selection-corner::after { inset:17px; } }
+</style>
+<script>
+(() => {
+  const root = document.getElementById('liquid-orb-preview');
+  const canvas = root.querySelector('.orb-scene');
+  const phone = root.querySelector('.orb-phone');
+  const handle = root.querySelector('.orb-handle');
+  const demoButton = root.querySelector('[data-action="demo"]');
+  const slowInput = root.querySelector('[data-action="slow"]');
+  const status = root.querySelector('[data-status]');
+  const phaseSelect = root.querySelector('select[aria-label="查看阶段"]');
+  const captureBox = root.querySelector('.capture-selection');
+  const selectedCanvas = root.querySelector('.selected-content');
+  const captureTools = root.querySelector('.capture-tools');
+  const dimmer = root.querySelector('.flow-dim');
+  const paper = root.querySelector('.floating-shot');
+  const paperCanvas = paper.querySelector('canvas');
+  const island = root.querySelector('.flow-island');
+  const closeCapture = root.querySelector('.capture-close');
+  const feedbackPanel = root.querySelector('.feedback-panel');
+  const feedbackText = root.querySelector('#orb-feedback-text');
+  const feedbackSubmit = root.querySelector('.feedback-submit');
+  const attachment = root.querySelector('.feedback-attachment');
+  const attachmentThumb = root.querySelector('.attachment-thumbnail');
+  const attachmentCanvas = attachmentThumb.querySelector('canvas');
+  const addShot = root.querySelector('[data-action="add-shot"]');
+  let hasAttachment = true;
+  const gl = canvas.getContext('webgl', { alpha:false, antialias:true, preserveDrawingBuffer:true });
+  if (!gl) {
+    root.querySelector('[data-error]').hidden = false;
+    root.querySelector('[data-error]').textContent = '当前浏览器无法绘制透镜，请在支持 WebGL 的浏览器中打开。';
+    demoButton.disabled = true;
+    handle.hidden = true;
+    return;
+  }
+  const W = 360, H = 592;
+  const scale = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = W * scale;
+  canvas.height = H * scale;
+  const scene = document.createElement('canvas');
+  scene.width = W * scale;
+  scene.height = H * scale;
+  const ctx = scene.getContext('2d');
+  const darkMedia = matchMedia('(prefers-color-scheme: dark)');
+  const motionMedia = matchMedia('(prefers-reduced-motion: reduce)');
+  const settings = { magnification:1.62, liquid:1, rim:0.52, appearance:'light' };
+  const vertexSource = `attribute vec2 aPosition; void main(){gl_Position=vec4(aPosition,0.,1.);}`;
+  const fragmentSource = `
+    precision highp float;
+    uniform sampler2D uScene;
+    uniform vec2 uResolution;
+    uniform vec2 uCenter;
+    uniform float uRadius;
+    uniform vec2 uMode2;
+    uniform vec2 uMode3;
+    uniform vec2 uMode4;
+    uniform float uArea;
+    uniform float uMagnification;
+    uniform float uRim;
+    uniform float uDark;
+    uniform float uVisibility;
+    vec3 sampleScene(vec2 p){return texture2D(uScene,clamp(p/vec2(360.,592.),vec2(.001),vec2(.999))).rgb;}
+    void main(){
+      vec2 p=vec2(gl_FragCoord.x/uResolution.x*360.,(1.-gl_FragCoord.y/uResolution.y)*592.);
+      if(uVisibility<.001){gl_FragColor=vec4(sampleScene(p),1.);return;}
+      vec2 offset=p-uCenter;
+      float angle=atan(offset.y,offset.x+.000001);
+      vec2 radial=vec2(cos(angle),sin(angle));
+      vec2 tangent=vec2(-radial.y,radial.x);
+      vec2 harmonic2=vec2(cos(2.*angle),sin(2.*angle));
+      vec2 harmonic3=vec2(cos(3.*angle),sin(3.*angle));
+      vec2 harmonic4=vec2(cos(4.*angle),sin(4.*angle));
+      float contour=uArea*(1.+dot(uMode2,harmonic2)+dot(uMode3,harmonic3)+dot(uMode4,harmonic4));
+      float slope=uArea*(dot(uMode2,2.*vec2(-harmonic2.y,harmonic2.x))
+                       +dot(uMode3,3.*vec2(-harmonic3.y,harmonic3.x))
+                       +dot(uMode4,4.*vec2(-harmonic4.y,harmonic4.x)));
+      vec2 normal=normalize(radial-tangent*slope/contour);
+      float r=length(offset)/(uRadius*contour);
+      float aa=1.1/uRadius;
+      float inside=1.-smoothstep(1.-aa,1.+aa,r);
+      vec3 background=sampleScene(p);
+      float outerGlow=exp(-pow((r-1.025)/.045,2.))*.035;
+      vec3 color=mix(background,vec3(.95,.965,1.),outerGlow*(1.-inside));
+      if(r<1.05){
+        float rr=clamp(r,0.,1.);
+        // The outer annulus runs backwards through the scene: an actual
+        // radial image reversal, not a brighter outline over the core image.
+        float outward=mix(rr/uMagnification,1.18,smoothstep(.64,.86,rr));
+        float folded=mix(1.18,.62,smoothstep(.86,1.,rr));
+        float sourceRadius=rr<.86?outward:folded;
+        vec2 source=uCenter+radial*uRadius*contour*sourceRadius;
+        float dispersion=.68*smoothstep(.75,.98,rr);
+        vec3 glass=vec3(sampleScene(source+normal*dispersion).r,sampleScene(source).g,sampleScene(source-normal*dispersion).b);
+        float light=.5+.5*dot(normal,normalize(vec2(-.6,-.8)));
+        float rim=exp(-pow((r-.993)/.010,2.));
+        float inner=exp(-pow((r-.85)/.025,2.));
+        float caustic=exp(-pow((r-.79)/.07,2.))*(.5+.5*normal.y);
+        float shadow=exp(-pow((r-.978)/.012,2.))*(1.-light);
+        glass*=1.-shadow*.10;
+        glass=mix(glass,vec3(.99,.995,1.),rim*(.16+.40*light)*uRim+inner*.045*light+caustic*.065);
+        glass+=vec3(.001,.002,.005)*(1.-uDark*.5);
+        color=mix(color,glass,inside);
+      }
+      gl_FragColor=vec4(mix(background,color,uVisibility),1.);
+    }
+  `;
+  function shader(kind, source) {
+    const s = gl.createShader(kind);
+    gl.shaderSource(s, source);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    return s;
+  }
+  const program = gl.createProgram();
+  gl.attachShader(program, shader(gl.VERTEX_SHADER, vertexSource));
+  gl.attachShader(program, shader(gl.FRAGMENT_SHADER, fragmentSource));
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
+  gl.useProgram(program);
+  const buffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]), gl.STATIC_DRAW);
+  const position = gl.getAttribLocation(program, 'aPosition');
+  gl.enableVertexAttribArray(position);
+  gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
+  const uniforms = Object.fromEntries(['uScene','uResolution','uCenter','uRadius','uMode2','uMode3','uMode4','uArea','uMagnification','uRim','uDark','uVisibility'].map(n=>[n,gl.getUniformLocation(program,n)]));
+  const texture = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  const origin = {x:214,y:205};
+  const mode = () => ({x:0,y:0,vx:0,vy:0});
+  const model = { x:origin.x,y:origin.y,tx:origin.x,ty:origin.y,vx:0,vy:0,m2:mode(),m3:mode(),m4:mode(),radius:52 };
+  let frame = 0, previousTime = 0, drag = null, demo = null, accumulator = 0, demoPlayback = false;
+  let flow = null, selectionDrag = null;
+  const referenceCrop = {x:48,y:118,w:264,h:132};
+  const flowEnd = 3.4;
+  const stepSize = 1 / 240;
+  let lastSaved = null;
+  const clamp = (v,min,max)=>Math.max(min,Math.min(max,v));
+  const lerp = (a,b,p)=>a+(b-a)*p;
+  const ease = (a,b,t)=>{const p=clamp((t-a)/(b-a),0,1);return p*p*(3-2*p);};
+  const mixRect = (a,b,p)=>Object.fromEntries(['x','y','w','h'].map(k=>[k,lerp(a[k],b[k],p)]));
+  const phaseAt = t=>t<1.9?'selection':t<3.25?'transition':'feedback';
+  function placeRect(el,r){el.style.left=`${r.x/W*100}%`;el.style.top=`${r.y/H*100}%`;el.style.width=`${r.w/W*100}%`;el.style.height=`${r.h/H*100}%`;}
+  function cropInto(target,r){
+    const width=Math.max(1,Math.round(r.w*scale)),height=Math.max(1,Math.round(r.h*scale));
+    if(target.width!==width)target.width=width;if(target.height!==height)target.height=height;
+    target.getContext('2d').drawImage(scene,r.x*scale,r.y*scale,r.w*scale,r.h*scale,0,0,width,height);
+  }
+  function clearOrbMotion(){
+    model.vx=model.vy=0;model.tx=model.x;model.ty=model.y;
+    for(const m of [model.m2,model.m3,model.m4])Object.assign(m,{x:0,y:0,vx:0,vy:0});
+  }
+  function syncFlowControls(){
+    if(!flow)return;
+    const phase=phaseAt(flow.time),running=flow.playing&&!flow.paused;
+    phaseSelect.value=phase;root.dataset.phase=phase;
+    root.dataset.flowTime=flow.time.toFixed(3);
+    root.dataset.playing=String(running);
+    demoButton.setAttribute('aria-pressed',String(running));
+    demoButton.textContent=flow.time>=flowEnd?'重播完整流程':running?'暂停演示':phase==='selection'&&!flow.autoSelection?'播放后续动效':'继续演示';
+    const hint=phase==='selection'?'调整四角，点击「使用此区域」':phase==='transition'?'截图收成附件，展开反馈面板':hasAttachment?'填写反馈 · 截图已附加':'填写反馈 · 可重新添加截图';
+    const message=flow.paused&&phase==='transition'?`已暂停 · ${hint}`:hint;
+    if(status.textContent!==message)status.textContent=message;
+  }
+  function renderFlow(){
+    handle.hidden=Boolean(flow);
+    const parts=[dimmer,captureBox,captureTools,paper,island,closeCapture,feedbackPanel];
+    if(!flow){
+      for(const el of parts)el.hidden=true;
+      canvas.style.filter='none';phaseSelect.value='orb';root.dataset.phase='orb';root.dataset.flowTime='';return;
+    }
+    const t=flow.time,selection=t<1.9,lifting=t>=1.9&&t<3.25;
+    dimmer.hidden=false;island.hidden=false;closeCapture.hidden=!selection;
+    dimmer.style.opacity=String(t<1.9?.26*ease(0,.35,t):.26);
+    canvas.style.filter=`blur(${t<1.9?0:3*ease(1.9,2.25,t)}px)`;
+    closeCapture.style.opacity=String(ease(.12,.4,t));
+    captureBox.hidden=!selection;captureTools.hidden=!selection||t<.4;
+    if(selection){
+      const initial=mixRect(flow.orbRect,flow.seed,ease(0,.4,t));
+      flow.rect=flow.autoSelection?mixRect(initial,referenceCrop,ease(.55,1.5,t)):(t<.4?initial:flow.rect);
+      placeRect(captureBox,flow.rect);cropInto(selectedCanvas,flow.rect);
+      captureBox.style.borderRadius=`${lerp(52,12,ease(0,.4,t))}px`;
+      captureBox.style.opacity=String(ease(.05,.3,t));
+      const toolbarWidth=238;
+      const toolbarX=clamp(flow.rect.x+(flow.rect.w-toolbarWidth)/2,12,W-toolbarWidth-12);
+      captureTools.style.left=`${toolbarX/W*100}%`;captureTools.style.width=`${toolbarWidth/W*100}%`;
+      const toolbarHeight=captureTools.offsetHeight*H/phone.clientHeight;
+      const above=flow.rect.y-toolbarHeight-14,below=flow.rect.y+flow.rect.h+14;
+      const toolbarY=above>=48?above:below+toolbarHeight<=H-102?below:48;
+      captureTools.style.top=`${toolbarY/H*100}%`;
+      captureTools.style.opacity=String(ease(.35,.55,t));
+      flow.capture={...flow.rect};
+    }
+    feedbackPanel.hidden=selection;paper.hidden=!lifting;
+    if(!selection){
+      const reveal=ease(2.02,2.95,t);
+      feedbackPanel.style.transform=`translateY(${(1-reveal)*104}%)`;
+      feedbackPanel.style.opacity=String(ease(1.96,2.2,t));
+      feedbackPanel.inert=t<3.25;
+      attachment.hidden=!hasAttachment;addShot.hidden=hasAttachment;
+      root.querySelector('.attachment-count').textContent=hasAttachment?'1 张':'0 张';
+      attachmentThumb.style.opacity=String(ease(3.12,3.25,t));
+      cropInto(attachmentCanvas,flow.capture);
+    }
+    if(lifting){
+      const r=flow.capture,p0={x:r.x+r.w/2,y:r.y+r.h/2,w:r.w,h:r.h};
+      const bounds=phone.getBoundingClientRect(),target=attachmentThumb.getBoundingClientRect();
+      const destination={x:(target.left-bounds.left+target.width/2)*W/bounds.width,y:(target.top-bounds.top+target.height/2)*H/bounds.height,w:target.width*W/bounds.width,h:target.height*H/bounds.height};
+      const fly=ease(2.08,3.23,t),p=mixRect(p0,destination,fly);
+      p.y-=12*Math.sin(fly*Math.PI);
+      placeRect(paper,p);cropInto(paperCanvas,r);
+      paper.style.borderRadius=`${lerp(12,10,fly)}px`;
+      paper.style.boxShadow=`0 ${16*Math.sin(fly*Math.PI)}px ${30*Math.sin(fly*Math.PI)}px rgba(30,25,60,${.2*(1-fly)})`;
+      paper.style.opacity=String(1-ease(3.12,3.25,t));
+    }
+    syncFlowControls();
+  }
+  function beginSelection(auto,schedule=true){
+    endDemo();clearOrbMotion();demoPlayback=true;hasAttachment=true;
+    const seed={x:clamp(model.x-24,16,W-64),y:clamp(model.y-24,78,H-120),w:48,h:48};
+    flow={time:0,playing:true,paused:false,autoSelection:auto,seed,rect:{...seed},capture:{...seed},orbRect:{x:model.x-52,y:model.y-52,w:104,h:104}};
+    if(motionMedia.matches){flow.time=1.6;flow.playing=false;flow.paused=true;flow.autoSelection=false;if(auto)flow.rect={...referenceCrop};}
+    if(schedule){draw();kick();if(!auto)captureBox.querySelector('.selection-move').focus({preventScroll:true});}
+  }
+  function advanceFlow(dt){
+    if(!flow.playing||flow.paused)return;
+    flow.time=Math.min(flowEnd,flow.time+dt);
+    if(!flow.autoSelection&&flow.time>=.5&&flow.time<1.9){flow.time=1.6;flow.playing=false;flow.paused=true;}
+    if(flow.time>=flowEnd){
+      flow.playing=false;flow.paused=false;
+      if(flow.focusOnComplete){feedbackText.focus({preventScroll:true});flow.focusOnComplete=false;}
+    }
+  }
+  function openFeedback(){
+    if(!flow||phaseAt(flow.time)!=='selection')return;
+    hasAttachment=true;
+    if(motionMedia.matches){showPhase('feedback');feedbackText.focus({preventScroll:true});return;}
+    flow.capture={...flow.rect};flow.time=1.9;flow.playing=true;flow.paused=false;flow.focusOnComplete=true;demoPlayback=true;
+    draw();kick();
+  }
+  function resetToOrb(){
+    cancelAnimationFrame(frame);frame=0;endDemo();flow=null;selectionDrag=null;drag=null;demoPlayback=false;accumulator=0;
+    model.x=origin.x;model.y=origin.y;clearOrbMotion();
+    demoButton.textContent='播放完整流程';status.textContent='拖动松手，继续调整选区';draw();save();
+  }
+  function checkedCrop(value){
+    if(!value||!['x','y','w','h'].every(k=>Number.isFinite(value[k])))return {...referenceCrop};
+    const w=clamp(value.w,48,W-32),h=clamp(value.h,48,H-160);
+    return {x:clamp(value.x,16,W-w-16),y:clamp(value.y,72,H-h-80),w,h};
+  }
+  function showPhase(phase,options={}){
+    if(phase==='orb'){resetToOrb();return;}
+    const times={selection:1.6,transition:2.65,feedback:3.4};
+    if(!(phase in times))return;
+    const crop=checkedCrop(options.crop??flow?.capture);
+    cancelAnimationFrame(frame);frame=0;endDemo();clearOrbMotion();drag=null;selectionDrag=null;accumulator=0;demoPlayback=true;
+    flow={time:Number.isFinite(options.time)?clamp(options.time,0,flowEnd):times[phase],playing:false,paused:true,autoSelection:false,seed:{...crop},rect:{...crop},capture:{...crop},orbRect:{...crop}};
+    if(phase==='selection')hasAttachment=true;
+    draw();if(options.record!==false)save();
+  }
+  function roundedRect(x,y,w,h,r,fill) { ctx.fillStyle=fill; ctx.beginPath();ctx.roundRect(x,y,w,h,r);ctx.fill(); }
+  function text(value,x,y,size,color,weight=400,align='left') { ctx.font=`${weight} ${size}px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif`;ctx.fillStyle=color;ctx.textAlign=align;ctx.fillText(value,x,y); }
+  function paintScene() {
+    const dark=settings.appearance==='dark';
+    const p=dark?{bg:'#191b24',ink:'#f2f2f7',muted:'#a5a8b8',card:'#242631',line:'#343743'}:{bg:'#f3f4fa',ink:'#171925',muted:'#85899c',card:'#fcfcff',line:'#e7e9f1'};
+    ctx.setTransform(scale,0,0,scale,0,0);
+    ctx.fillStyle=p.bg;ctx.fillRect(0,0,W,H);
+    text('16:50',24,30,12,p.ink,500);
+    text('5G  ▰',314,30,11,p.ink,500);
+    roundedRect(122,14,116,24,12,'#111219');
+    for(let i=0;i<5;i++) roundedRect(134+i*3,23-(i%3)*2,1.5,5+(i%3)*4,1,i%2?'#9c91e9':'#c7c2f5');
+    text('我在听',183,30,10,'#e2e3ec',500);
+    const dot=ctx.createRadialGradient(228,22,1,228,25,8);dot.addColorStop(0,'#eeeaff');dot.addColorStop(.5,'#726e9c');dot.addColorStop(1,'#252535');
+    ctx.fillStyle=dot;ctx.beginPath();ctx.arc(227,26,7,0,Math.PI*2);ctx.fill();
+    text('‹',23,70,26,p.ink);
+    text('关于本机',180,69,14,p.ink,500,'center');
+    ctx.font='400 30px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
+    const nameWidth=ctx.measureText('Xiaomi HyperOS').width;
+    const start=(W-nameWidth)/2;
+    text('Xiaomi Hyper',start,174,30,p.ink,400);
+    const osX=start+ctx.measureText('Xiaomi Hyper').width;
+    text('OS',osX,174,30,dark?'#b9a9ff':'#5e36d7');
+    text('4.0.4.0',180,204,12,p.muted,400,'center');
+    roundedRect(28,258,304,46,17,p.card);
+    text('检查更新',180,286,13,p.ink,500,'center');
+    roundedRect(20,331,320,147,20,p.card);
+    const rows=[['设备名称','Xiaomi 17 Pro Max'],['存储空间','已用 62.4 GB / 512 GB'],['OS 版本','4.0.4.0'],['处理器','骁龙 8 Elite']];
+    rows.forEach(([label,value],i)=>{
+      const y=356+i*34;
+      text(label,36,y,12,p.ink);
+      text(value,322,y,11,p.muted,400,'right');
+      if(i<3){ctx.fillStyle=p.line;ctx.fillRect(36,y+13,286,.5);}
+    });
+    text('Xiaomi 17 Pro Max',27,513,17,p.ink,500);
+    text('把灵感留在此刻',27,541,12,p.muted);
+    roundedRect(133,576,94,4,2,p.ink);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,scene);
+    draw();
+  }
+  function draw() {
+    gl.viewport(0,0,canvas.width,canvas.height);
+    gl.uniform1i(uniforms.uScene,0);
+    gl.uniform2f(uniforms.uResolution,canvas.width,canvas.height);
+    gl.uniform2f(uniforms.uCenter,model.x,model.y);
+    gl.uniform1f(uniforms.uRadius,model.radius);
+    let modeEnergy=0;
+    for(const [key,name] of [['m2','uMode2'],['m3','uMode3'],['m4','uMode4']]){
+      const x=model[key].x*settings.liquid,y=model[key].y*settings.liquid;
+      gl.uniform2f(uniforms[name],x,y);modeEnergy+=x*x+y*y;
+    }
+    // Polar Fourier modes have an analytic area; normalize it so stretch
+    // redistributes the liquid rather than growing the entire ball.
+    gl.uniform1f(uniforms.uArea,1/Math.sqrt(1+modeEnergy/2));
+    gl.uniform1f(uniforms.uMagnification,settings.magnification);
+    gl.uniform1f(uniforms.uRim,settings.rim);
+    gl.uniform1f(uniforms.uDark,settings.appearance==='dark'?1:0);
+    gl.uniform1f(uniforms.uVisibility,flow?1-ease(0,.26,flow.time):1);
+    gl.drawArrays(gl.TRIANGLES,0,6);
+    handle.style.left=`${(model.x-54)/W*100}%`;
+    handle.style.top=`${(model.y-54)/H*100}%`;
+    root.dataset.position=`${Math.round(model.x)},${Math.round(model.y)}`;
+    root.dataset.contour=[model.m2.x,model.m2.y,model.m3.x,model.m3.y,model.m4.x,model.m4.y].map(v=>v.toFixed(4)).join(',');
+    root.dataset.demoTime=demo?demo.elapsed.toFixed(3):'';
+    renderFlow();
+  }
+  function save() {
+    const snapshot={revision:4,x:Math.round(model.tx),y:Math.round(model.ty),slow:slowInput.checked,phase:flow?phaseAt(flow.time):'orb',time:flow?Number(flow.time.toFixed(3)):null,crop:flow?flow.capture:null,hasAttachment};
+    if (JSON.stringify(snapshot)===lastSaved) return;
+    lastSaved=JSON.stringify(snapshot);
+    window.openai?.setWidgetState?.({modelContent:{preview:'灵感球 → 调整截图 → 确认选区 → 填写反馈',stage:flow?phaseAt(flow.time):'orb',slow:snapshot.slow},privateContent:snapshot}).catch(()=>{});
+  }
+  function restore(saved) {
+    const v=saved?.privateContent;
+    if([2,3,4].includes(v?.revision)&&Number.isFinite(v.x)&&Number.isFinite(v.y)) {
+      model.x=model.tx=clamp(v.x,82,W-82);model.y=model.ty=clamp(v.y,112,H-82);
+    }
+    if(v||typeof saved?.modelContent?.slow==='boolean')slowInput.checked=Boolean(v?.slow??saved?.modelContent?.slow);
+    if(v?.revision===4&&['selection','transition','feedback'].includes(v.phase)){
+      hasAttachment=v.hasAttachment!==false;
+      showPhase(v.phase,{crop:v.crop,time:v.time,record:false});return;
+    }
+    draw();
+  }
+  function kick() { if(!frame){previousTime=performance.now();frame=requestAnimationFrame(tick);} }
+  function endDemo() { demo=null;demoButton.textContent='播放完整流程';demoButton.setAttribute('aria-pressed','false');root.dataset.playing='false'; }
+  function stepMode(m,x,y,frequency,damping,limit,dt){
+    m.vx+=((x-m.x)*frequency*frequency-m.vx*damping)*dt;
+    m.vy+=((y-m.y)*frequency*frequency-m.vy*damping)*dt;
+    m.x+=m.vx*dt;m.y+=m.vy*dt;
+    const length=Math.hypot(m.x,m.y);
+    if(length>limit){
+      const nx=m.x/length,ny=m.y/length;
+      m.x=nx*limit;m.y=ny*limit;
+      const outward=Math.max(0,m.vx*nx+m.vy*ny);
+      m.vx-=outward*nx;m.vy-=outward*ny;
+    }
+  }
+  function advance(dt){
+    if(flow){advanceFlow(dt);return;}
+    if(demo){
+      demo.elapsed+=dt;
+      const points=demo.points;
+      let i=0;while(i<points.length-2&&demo.elapsed>points[i+1].t)i++;
+      const a=points[i],b=points[i+1];
+      const p=clamp((demo.elapsed-a.t)/(b.t-a.t),0,1),s=p*p*(3-2*p);
+      model.tx=a.x+(b.x-a.x)*s;model.ty=a.y+(b.y-a.y)*s;
+      if(demo.elapsed>=points[points.length-1].t){beginSelection(true,false);return;}
+    }
+    const moving=Boolean(drag||demo);
+    model.vx+=((model.tx-model.x)*440-model.vx*28)*dt;
+    model.vy+=((model.ty-model.y)*440-model.vy*28)*dt;
+    if(motionMedia.matches){
+      model.x=model.tx;model.y=model.ty;model.vx=model.vy=0;
+      for(const m of [model.m2,model.m3,model.m4])Object.assign(m,{x:0,y:0,vx:0,vy:0});
+      return;
+    }
+    model.x+=model.vx*dt;model.y+=model.vy*dt;
+    const speed=Math.hypot(model.vx,model.vy),lag=Math.hypot(model.tx-model.x,model.ty-model.y);
+    const angle=Math.atan2(model.vy,model.vx);
+    const strain=moving?clamp(speed/1050+lag/220,0,.27):0;
+    // Independent capillary modes retain momentum and phase. The third
+    // mode gives a narrow trailing end and a broad head; it relaxes later.
+    stepMode(model.m2,strain*Math.cos(2*angle),strain*Math.sin(2*angle),19,9.5,.34,dt);
+    stepMode(model.m3,-strain*.40*Math.cos(3*angle),-strain*.40*Math.sin(3*angle),13,6.8,.13,dt);
+    const shoulders=.85*strain*strain;
+    stepMode(model.m4,shoulders*Math.cos(4*angle),shoulders*Math.sin(4*angle),26,10,.06,dt);
+  }
+  function tick(now) {
+    frame=0;
+    if(!root.isConnected||demo?.paused||flow?.paused)return;
+    const rate=(demoPlayback&&slowInput.checked)?0.25:1;
+    accumulator+=Math.min((now-previousTime)/1000,.05)*rate;previousTime=now;
+    while(accumulator>=stepSize){advance(stepSize);accumulator-=stepSize;}
+    draw();
+    const residual=[model.m2,model.m3,model.m4].some(m=>Math.hypot(m.x,m.y)>.0005||Math.hypot(m.vx,m.vy)>.003);
+    const active=flow?flow.playing:drag||demo||Math.hypot(model.x-model.tx,model.y-model.ty)>.02||Math.hypot(model.vx,model.vy)>.1||residual;
+    if(active)frame=requestAnimationFrame(tick);
+    else if(!flow){
+      model.x=model.tx;model.y=model.ty;model.vx=model.vy=0;demoPlayback=false;accumulator=0;
+      for(const m of [model.m2,model.m3,model.m4])Object.assign(m,{x:0,y:0,vx:0,vy:0});
+      draw();status.textContent='拖动松手，继续调整选区';save();
+    }
+    else save();
+  }
+  function point(e) {const r=phone.getBoundingClientRect();return {x:(e.clientX-r.left)*W/r.width,y:(e.clientY-r.top)*H/r.height};}
+  handle.addEventListener('pointerdown',e=>{
+    if(e.button!==0||!e.isPrimary||drag||flow) return;
+    endDemo();demoPlayback=false;model.tx=model.x;model.ty=model.y;model.vx=model.vy=0;
+    const p=point(e);drag={id:e.pointerId,dx:p.x-model.x,dy:p.y-model.y,moved:false};skipClick=false;
+    handle.setPointerCapture(e.pointerId);status.textContent='拖动中';kick();
+  });
+  handle.addEventListener('pointermove',e=>{
+    if(!drag||drag.id!==e.pointerId) return;
+    const p=point(e);
+    if(Math.hypot(p.x-drag.dx-model.tx,p.y-drag.dy-model.ty)>2)drag.moved=true;
+    model.tx=clamp(p.x-drag.dx,82,W-82);model.ty=clamp(p.y-drag.dy,112,H-82);kick();
+  });
+  let skipClick=false;
+  function finish(e){
+    if(!drag||e.pointerId!==drag.id) return;
+    skipClick=drag.moved;drag=null;status.textContent='松手回弹';
+    if(handle.hasPointerCapture(e.pointerId))handle.releasePointerCapture(e.pointerId);
+    if(skipClick&&e.type==='pointerup'){beginSelection(false);return;}
+    kick();
+  }
+  handle.addEventListener('pointerup',finish);
+  handle.addEventListener('pointercancel',finish);
+  handle.addEventListener('lostpointercapture',finish);
+  handle.addEventListener('keydown',e=>{
+    const delta={ArrowLeft:[-18,0],ArrowRight:[18,0],ArrowUp:[0,-18],ArrowDown:[0,18]}[e.key];
+    if(delta){e.preventDefault();endDemo();demoPlayback=false;model.tx=clamp(model.tx+delta[0],82,W-82);model.ty=clamp(model.ty+delta[1],112,H-82);kick();}
+    else if(e.key==='Home'){e.preventDefault();endDemo();demoPlayback=false;model.tx=origin.x;model.ty=origin.y;kick();}
+    else if(e.key==='Escape'){e.preventDefault();endDemo();demoPlayback=false;drag=null;model.tx=model.x;model.ty=model.y;kick();}
+  });
+  handle.addEventListener('click',e=>{if(!drag&&(e.detail===0||!skipClick)){model.m2.vx+=1.6;model.m3.vy+=.5;kick();}skipClick=false;});
+  demoButton.addEventListener('click',()=>{
+    if(flow){
+      if(flow.time>=flowEnd)resetToOrb();
+      else if(phaseAt(flow.time)==='selection'&&!flow.playing&&!flow.autoSelection){openFeedback();return;}
+      else{
+        flow.paused=!flow.paused;flow.playing=!flow.paused;
+        if(flow.paused){cancelAnimationFrame(frame);frame=0;}else kick();
+        draw();save();return;
+      }
+    }
+    if(demo){
+      demo.paused=!demo.paused;
+      demoButton.textContent=demo.paused?'继续演示':'暂停演示';demoButton.setAttribute('aria-pressed',String(!demo.paused));
+      root.dataset.playing=String(!demo.paused);status.textContent=demo.paused?'已暂停 · 可查看倒影与形状':'拖动 → 形变 → 回弹';
+      if(demo.paused){cancelAnimationFrame(frame);frame=0;}else kick();return;
+    }
+    if(motionMedia.matches){showPhase('selection');return;}
+    demo={elapsed:0,paused:false,points:[
+      {t:0,x:model.x,y:model.y},{t:.72,x:110,y:204},{t:1.36,x:258,y:218},
+      {t:2.08,x:134,y:185},{t:2.74,x:248,y:244},{t:3.5,x:origin.x,y:origin.y}
+    ]};
+    demoPlayback=true;accumulator=0;
+    demoButton.textContent='暂停演示';demoButton.setAttribute('aria-pressed','true');root.dataset.playing='true';status.textContent='灵感球 → 调整截图 → 填写反馈';kick();
+  });
+  slowInput.addEventListener('change',()=>{
+    save();
+  });
+  phaseSelect.addEventListener('change',()=>showPhase(phaseSelect.value));
+  root.querySelector('[data-action="use-selection"]').addEventListener('click',openFeedback);
+  closeCapture.addEventListener('click',resetToOrb);
+  root.querySelector('.feedback-close').addEventListener('click',()=>{resetToOrb();handle.focus({preventScroll:true});});
+  root.querySelector('[data-action="reselect"]').addEventListener('click',()=>{showPhase('selection');captureBox.querySelector('.selection-move').focus({preventScroll:true});});
+  root.querySelector('[data-action="remove-shot"]').addEventListener('click',()=>{hasAttachment=false;draw();save();addShot.focus({preventScroll:true});});
+  addShot.addEventListener('click',()=>{showPhase('selection');captureBox.querySelector('.selection-move').focus({preventScroll:true});});
+  feedbackText.addEventListener('input',()=>{
+    root.querySelector('.feedback-counter').textContent=`${feedbackText.value.length} / 10000`;
+    feedbackSubmit.disabled=!feedbackText.value.trim();
+    if(flow)syncFlowControls();
+  });
+  const previewSubmit=e=>{e.preventDefault();if(feedbackText.value.trim())status.textContent='提交效果预览 · 未发送反馈';};
+  feedbackPanel.addEventListener('submit',previewSubmit);
+  feedbackSubmit.addEventListener('click',previewSubmit);
+  phone.addEventListener('keydown',e=>{if(e.key==='Escape'&&flow){e.preventDefault();resetToOrb();handle.focus({preventScroll:true});}});
+  function changeSelection(base,corner,dx,dy){
+    if(!corner)return {...base,x:clamp(base.x+dx,16,W-base.w-16),y:clamp(base.y+dy,72,H-base.h-80)};
+    let left=base.x,right=base.x+base.w,top=base.y,bottom=base.y+base.h;
+    if(corner.includes('w'))left=clamp(base.x+dx,16,right-48);
+    if(corner.includes('e'))right=clamp(right+dx,left+48,W-16);
+    if(corner.includes('n'))top=clamp(base.y+dy,72,bottom-48);
+    if(corner.includes('s'))bottom=clamp(bottom+dy,top+48,H-80);
+    return {x:left,y:top,w:right-left,h:bottom-top};
+  }
+  function takeSelection(){
+    flow.autoSelection=false;flow.playing=false;flow.paused=true;flow.time=1.6;
+    cancelAnimationFrame(frame);frame=0;
+  }
+  for(const control of captureBox.querySelectorAll('button')){
+    control.addEventListener('pointerdown',e=>{
+      if(!flow||phaseAt(flow.time)!=='selection'||e.button!==0||!e.isPrimary||selectionDrag)return;
+      takeSelection();selectionDrag={id:e.pointerId,start:point(e),rect:{...flow.rect},corner:control.dataset.corner||'',control};
+      control.setPointerCapture(e.pointerId);draw();
+    });
+    control.addEventListener('pointermove',e=>{
+      if(!selectionDrag||selectionDrag.id!==e.pointerId)return;
+      const p=point(e),d=selectionDrag;
+      flow.rect=changeSelection(d.rect,d.corner,p.x-d.start.x,p.y-d.start.y);draw();
+    });
+    const finishSelection=e=>{
+      if(!selectionDrag||selectionDrag.id!==e.pointerId)return;
+      selectionDrag=null;if(control.hasPointerCapture(e.pointerId))control.releasePointerCapture(e.pointerId);
+      draw();save();
+    };
+    control.addEventListener('pointerup',finishSelection);control.addEventListener('pointercancel',finishSelection);control.addEventListener('lostpointercapture',finishSelection);
+    control.addEventListener('keydown',e=>{
+      const delta={ArrowLeft:[-6,0],ArrowRight:[6,0],ArrowUp:[0,-6],ArrowDown:[0,6]}[e.key];
+      if(!delta||!flow||phaseAt(flow.time)!=='selection')return;
+      e.preventDefault();takeSelection();flow.rect=changeSelection(flow.rect,control.dataset.corner||'',delta[0],delta[1]);draw();save();
+    });
+  }
+  darkMedia.addEventListener('change',paintScene);
+  new ResizeObserver(()=>{if(flow)draw();}).observe(phone);
+  window.addEventListener('blur',()=>{
+    if(demo&&!demo.paused){demo.paused=true;cancelAnimationFrame(frame);frame=0;demoButton.textContent='继续演示';demoButton.setAttribute('aria-pressed','false');root.dataset.playing='false';status.textContent='已暂停 · 可查看倒影与形状';}
+    if(drag){drag=null;model.tx=model.x;model.ty=model.y;kick();}
+    if(flow?.playing){flow.paused=true;flow.playing=false;cancelAnimationFrame(frame);frame=0;draw();}
+  });
+  window.addEventListener('openai:set_globals',e=>{if(!drag&&!demo&&!flow&&e.detail?.globals?.widgetState)restore(e.detail.globals.widgetState);});
+  paintScene();restore(window.openai?.widgetState);
+  if(globalThis.Tweak){
+    const tweak=new Tweak({container:phone,onChange:paintScene});
+    tweak.addSlider(settings,'magnification',{label:'中心放大',min:1.1,max:2,step:.05});
+    tweak.addSlider(settings,'liquid',{label:'液体形变',min:0,max:1.2,step:.05});
+    tweak.addSlider(settings,'rim',{label:'边缘亮度',min:.2,max:1,step:.05});
+    tweak.addSelect(settings,'appearance',{label:'背景',options:[{label:'视频浅色',value:'light'},{label:'深色对照',value:'dark'}]});
+  }
+})();
+</script>

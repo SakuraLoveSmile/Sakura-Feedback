@@ -1,8 +1,8 @@
 // 面板呈现（T2.7 / T2.6 / T4）与既有能力回归验收：
 // - 组件顺序：标题与页签 → 反馈描述 → 图片证据 → 可折叠日志 → 固定提交区；
-// - 缩略图完整显示（contain，禁止 cover 二次裁切）、标记与尺寸、操作在图下方；
+// - 缩略图完整显示（contain，禁止 cover 二次裁切）、标记与尺寸、操作在横卡旁边；
 // - 日志默认只显示摘要，展开后查看 / 预览 / 移除 / 重新采集（T4）；
-// - 点击目标 ≥48dp。
+// - R5 紧凑附件/筛选点击目标 ≥44dp。
 
 import 'dart:convert';
 import 'dart:typed_data';
@@ -16,17 +16,16 @@ import 'capture_test_utils.dart';
 import 'panel_harness.dart';
 
 /// 16x16 生成 PNG（真实编码）。
-Future<Uint8List> makePng(WidgetTester tester, {Color color = Colors.blue}) async {
+Future<Uint8List> makePng(WidgetTester tester,
+    {Color color = Colors.blue}) async {
   final Uint8List? result = await tester.runAsync<Uint8List>(() async {
     final ui.PictureRecorder recorder = ui.PictureRecorder();
     final Canvas canvas = Canvas(recorder);
-    canvas.drawRect(
-        const Rect.fromLTWH(0, 0, 16, 16), Paint()..color = color);
+    canvas.drawRect(const Rect.fromLTWH(0, 0, 16, 16), Paint()..color = color);
     final ui.Picture picture = recorder.endRecording();
     final ui.Image img = await picture.toImage(16, 16);
     picture.dispose();
-    final ByteData? data =
-        await img.toByteData(format: ui.ImageByteFormat.png);
+    final ByteData? data = await img.toByteData(format: ui.ImageByteFormat.png);
     img.dispose();
     return data!.buffer.asUint8List();
   });
@@ -34,6 +33,76 @@ Future<Uint8List> makePng(WidgetTester tester, {Color color = Colors.blue}) asyn
 }
 
 void main() {
+  for (final Brightness brightness in Brightness.values) {
+    for (final double scale in <double>[1, 1.5]) {
+      testWidgets(
+          'R5 compact composer ${brightness.name}, 320px, text scale $scale',
+          (tester) async {
+        final PanelServer server = PanelServer();
+        server.respond('GET /api/auth/session', sessionJson(quotaJson()));
+        await tester.binding.setSurfaceSize(const Size(320, 592));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        await tester.pumpWidget(MaterialApp(
+            theme: ThemeData(
+                colorSchemeSeed: const Color(0xFF0071E3),
+                brightness: brightness),
+            home: Builder(
+                builder: (context) => MediaQuery(
+                    data: MediaQuery.of(context)
+                        .copyWith(textScaler: TextScaler.linear(scale)),
+                    child: Scaffold(
+                        body: FeedbackPanel(
+                            config: FeedbackConfig(
+                                'https://svc.test', 'com.example.app'),
+                            tokenStore: MemoryTokenStore('tok'),
+                            serverPrefStore: MemoryServerPrefStore(),
+                            httpClient: server.client))))));
+        await tester.pumpAndSettle();
+        final Finder input = find.byKey(const Key('feedback-input'));
+        final TextField field = tester.widget(input);
+        expect(tester.getSize(input).height, inInclusiveRange(132, 200));
+        expect(
+            (field.decoration!.focusedBorder! as OutlineInputBorder)
+                .borderSide
+                .width,
+            1.5);
+        expect(tester.getSize(find.byKey(const Key('tab-compose'))).height, 44);
+        expect(
+            tester.getSize(find.byKey(const Key('feedback-close'))).height, 44);
+        await tester.tap(input);
+        await tester.pumpAndSettle();
+        await tester.enterText(input, '可编辑的反馈');
+        final FeedbackPanelState panel =
+            tester.state(find.byType(FeedbackPanel));
+        panel.setScreenshot(
+            await makePng(tester),
+            const FeedbackCaptureInfo(
+                viewportWidth: 320,
+                viewportHeight: 592,
+                pixelWidth: 16,
+                pixelHeight: 16,
+                capturedAt: 't'));
+        await tester.pumpAndSettle();
+        final Finder thumb = find.byKey(const Key('feedback-screenshot-thumb'));
+        await tester.ensureVisible(thumb);
+        await tester.pumpAndSettle();
+        expect(tester.getSize(thumb), const Size(72, 72));
+        expect(panel.captureThumbnailRect, tester.getRect(thumb));
+        expect(thumb.hitTestable(), findsOneWidget);
+        final Rect submit =
+            tester.getRect(find.byKey(const Key('feedback-submit-bar')));
+        expect(submit.bottom, 592);
+        await tester
+            .ensureVisible(find.byKey(const Key('feedback-image-edit-0')));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('feedback-image-edit-0')).hitTestable(),
+            findsOneWidget);
+        expect(tester.takeException(), isNull);
+        await teardownPanel(tester);
+      });
+    }
+  }
+
   group('T2.7：面板组件顺序（标题与页签 → 反馈描述 → 图片 → 日志 → 固定提交区）', () {
     testWidgets('纵向顺序断言', (tester) async {
       final PanelServer server = PanelServer();
@@ -73,8 +142,7 @@ void main() {
   });
 
   group('T2.6：图片缩略图完整显示、标记与尺寸、操作不遮挡内容', () {
-    testWidgets('局部截图标记 + contain 完整显示 + 尺寸标签 + 操作在图下方',
-        (tester) async {
+    testWidgets('局部截图标记 + contain 完整显示 + 尺寸标签 + 操作在横卡旁边', (tester) async {
       final PanelServer server = PanelServer();
       server.respond('GET /api/auth/session', sessionJson(quotaJson()));
       await pumpPanel(tester, server: server);
@@ -90,14 +158,15 @@ void main() {
           pixelWidth: 16,
           pixelHeight: 16,
           capturedAt: 't',
-          region: FeedbackCaptureRegion(
-              x: 0.1, y: 0.1, width: 0.5, height: 0.4),
+          region:
+              FeedbackCaptureRegion(x: 0.1, y: 0.1, width: 0.5, height: 0.4),
         ),
       );
       await tester.pump();
 
       // 标记：局部截图。
-      expect(find.byKey(const Key('feedback-screenshot-badge')), findsOneWidget);
+      expect(
+          find.byKey(const Key('feedback-screenshot-badge')), findsOneWidget);
       expect(find.text('局部截图'), findsOneWidget);
 
       // 完整显示：fit 必须是 contain（禁止 cover 二次裁切）。
@@ -107,24 +176,32 @@ void main() {
       expect(thumb.fit, BoxFit.contain, reason: '缩略图必须完整显示');
 
       // 尺寸标签（图像流解析后出现）。
-      await pumpUntil(tester,
-          () => find.byKey(const Key('feedback-image-size')).evaluate().isNotEmpty);
+      await pumpUntil(
+          tester,
+          () => find
+              .byKey(const Key('feedback-image-size'))
+              .evaluate()
+              .isNotEmpty);
       expect(find.text('16×16'), findsOneWidget);
 
-      // 编辑 / 删除在图片下方，不遮挡图片内容。
-      final Rect imageArea = tester
-          .getRect(find.byKey(const Key('feedback-screenshot-thumb')));
+      // 编辑 / 删除在图片旁边，不遮挡图片内容。
+      final Rect imageArea =
+          tester.getRect(find.byKey(const Key('feedback-screenshot-thumb')));
       final Rect edit =
           tester.getRect(find.byKey(const Key('feedback-image-edit-0')));
       final Rect remove = tester
           .getRect(find.byKey(const Key('feedback-remove-screenshot-btn')));
-      expect(edit.top, greaterThanOrEqualTo(imageArea.bottom - 0.5),
-          reason: '编辑按钮在图片下方');
-      expect(remove.top, greaterThanOrEqualTo(imageArea.bottom - 0.5),
-          reason: '删除按钮在图片下方');
-      // 点击目标 ≥48dp。
-      expect(edit.height, greaterThanOrEqualTo(48));
-      expect(remove.height, greaterThanOrEqualTo(48));
+      expect(imageArea.size, const Size(72, 72));
+      expect(panel.captureThumbnailRect, imageArea,
+          reason: '飞行目标使用真实缩略图，而非整张横卡');
+      expect(edit.left, greaterThanOrEqualTo(imageArea.right + 8));
+      expect(remove.left, greaterThanOrEqualTo(imageArea.right + 8));
+      expect(edit.overlaps(imageArea), isFalse);
+      expect(remove.overlaps(imageArea), isFalse);
+      expect(edit.height, greaterThanOrEqualTo(44));
+      expect(edit.width, greaterThanOrEqualTo(44));
+      expect(remove.height, greaterThanOrEqualTo(44));
+      expect(remove.width, greaterThanOrEqualTo(44));
 
       await teardownPanel(tester);
     });
@@ -171,13 +248,19 @@ void main() {
       // 打开编辑器 → 保存（替换原槽位，source=edited）。
       await tester.tap(find.byKey(const Key('feedback-image-edit-0')),
           warnIfMissed: false);
-      await pumpUntil(tester,
-          () => find.byKey(const Key('feedback-editor-save')).evaluate().isNotEmpty);
+      await pumpUntil(
+          tester,
+          () => find
+              .byKey(const Key('feedback-editor-save'))
+              .evaluate()
+              .isNotEmpty);
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('feedback-editor-save')),
           warnIfMissed: false);
-      await pumpUntil(tester,
-          () => find.byKey(const Key('feedback-editor-save')).evaluate().isEmpty);
+      await pumpUntil(
+          tester,
+          () =>
+              find.byKey(const Key('feedback-editor-save')).evaluate().isEmpty);
       await tester.pumpAndSettle();
 
       expect(panel.imageCount, 1);
@@ -188,8 +271,7 @@ void main() {
   });
 
   group('T4：诊断日志默认折叠摘要，展开可查看 / 预览 / 移除 / 重新采集', () {
-    testWidgets('无日志默认「暂无日志」摘要；展开显示空态、重新采集入口',
-        (tester) async {
+    testWidgets('无日志默认「暂无日志」摘要；展开显示空态、重新采集入口', (tester) async {
       final PanelServer server = PanelServer();
       server.respond('GET /api/auth/session', sessionJson(quotaJson()));
       await pumpPanel(tester, server: server);
@@ -245,7 +327,8 @@ void main() {
       // 预览。
       await tester.tap(find.byKey(const Key('feedback-log-btn-preview-0')));
       await tester.pumpAndSettle();
-      expect(find.byKey(const Key('feedback-log-preview-dialog')), findsOneWidget);
+      expect(
+          find.byKey(const Key('feedback-log-preview-dialog')), findsOneWidget);
       await tester.tap(find.byKey(const Key('feedback-log-preview-close')));
       await tester.pumpAndSettle();
 
@@ -258,8 +341,8 @@ void main() {
     });
   });
 
-  group('点击目标 ≥48dp（冻结视觉规格抽查）', () {
-    testWidgets('页签、日志操作、筛选、添加按钮均 ≥48', (tester) async {
+  group('R5 紧凑附件/筛选点击目标 ≥44dp（冻结视觉规格抽查）', () {
+    testWidgets('R5 页签和筛选44，既有日志操作仍48', (tester) async {
       final PanelServer server = PanelServer();
       server.respond('GET /api/auth/session', sessionJson(quotaJson()));
       server.respond('GET /api/feedback/mine', <String, Object?>{
@@ -285,10 +368,14 @@ void main() {
         const Key('feedback-close'),
       ]) {
         final Size size = tester.getSize(find.byKey(key));
-        expect(size.height, greaterThanOrEqualTo(48),
-            reason: '$key 点击目标高度 ${size.height} < 48');
-        expect(size.width, greaterThanOrEqualTo(48),
-            reason: '$key 点击目标宽度 ${size.width} < 48');
+        final double minimum = key == const Key('feedback-btn-add-log') ||
+                key == const Key('feedback-logs-expand')
+            ? 48
+            : 44;
+        expect(size.height, greaterThanOrEqualTo(minimum),
+            reason: '$key 点击目标高度 ${size.height} < $minimum');
+        expect(size.width, greaterThanOrEqualTo(minimum),
+            reason: '$key 点击目标宽度 ${size.width} < $minimum');
       }
 
       // 状态筛选行（历史页）。
@@ -296,8 +383,8 @@ void main() {
       await tester.pumpAndSettle();
       final Size filter =
           tester.getSize(find.byKey(const Key('feedback-filter-all')));
-      expect(filter.height, greaterThanOrEqualTo(48),
-          reason: '状态筛选点击目标 ≥48dp');
+      expect(filter.height, greaterThanOrEqualTo(44),
+          reason: '状态筛选R5 紧凑附件/筛选点击目标 ≥44dp');
 
       await teardownPanel(tester);
     });

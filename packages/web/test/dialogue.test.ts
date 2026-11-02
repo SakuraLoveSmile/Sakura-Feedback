@@ -173,6 +173,10 @@ describe('Web Issue 对话与我的反馈', () => {
     // 验证展示原话和管理员消息
     expect(m.root.querySelector('.fb-dialogue-view')?.textContent).toContain('启动时直接闪退');
     expect(m.root.querySelector('.fb-dialogue-view')?.textContent).toContain('请补充您的设备型号');
+    const bubble=m.root.querySelector('.fb-dialogue-msg.admin')!;
+    expect(getComputedStyle(bubble).maxWidth).toBe('85%');
+    expect(getComputedStyle(bubble).borderRadius).toBe('14px');
+    expect(getComputedStyle(m.root.querySelector('.fb-dialogue-messages')!).gap).toBe('10px');
 
     // 验证自动触发已读上报
     expect(calls.some((c) => c.includes('POST') && c.includes('/read'))).toBe(true);

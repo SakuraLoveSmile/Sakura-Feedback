@@ -42,11 +42,12 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('初始选区（松手位置为中心，靠边整体移回可见区）', () => {
-  it('视口中央：宽 min(400,80%)、高 min(260,40%)，中心即松手点', () => {
+describe('初始选区（归一化中心，靠边整体移回可见区）', () => {
+  // R4 enlarges the initial seed only; manual adjustments keep the 48px minimum below.
+  it('R4：144×144，按传入的归一化中心定位', () => {
     const sel = initialRegionSelection({ x: 0.5, y: 0.5 }, VP);
-    expect(sel.width).toBe(400);
-    expect(sel.height).toBe(260);
+    expect(sel.width).toBe(144);
+    expect(sel.height).toBe(144);
     expect(sel.x + sel.width / 2).toBeCloseTo(VP.width / 2, 6);
     expect(sel.y + sel.height / 2).toBeCloseTo(VP.height / 2, 6);
     expect(sel.x).toBeGreaterThanOrEqual(0);
@@ -65,11 +66,11 @@ describe('初始选区（松手位置为中心，靠边整体移回可见区）'
       expect(sel.y).toBeGreaterThanOrEqual(0);
       expect(sel.x + sel.width).toBeLessThanOrEqual(VP.width);
       expect(sel.y + sel.height).toBeLessThanOrEqual(VP.height);
-      expect(sel.width).toBe(400);
-      expect(sel.height).toBe(260);
+      expect(sel.width).toBe(144);
+      expect(sel.height).toBe(144);
     }
     // 左上角松手 → 选区贴齐左上
-    expect(initialRegionSelection({ x: 0, y: 0 }, VP)).toEqual({ x: 0, y: 0, width: 400, height: 260 });
+    expect(initialRegionSelection({ x: 0, y: 0 }, VP)).toEqual({ x: 0, y: 0, width: 144, height: 144 });
     // 右下角松手 → 选区贴齐右下
     const br = initialRegionSelection({ x: 1, y: 1 }, VP);
     expect(br.x + br.width).toBe(VP.width);
@@ -85,13 +86,18 @@ describe('初始选区（松手位置为中心，靠边整体移回可见区）'
     expect(right.x + right.width).toBe(VP.width);
   });
 
-  it('小视口：宽高按比例收缩且仍受最小 48×48 约束', () => {
+  it('小视口：初始尺寸缩到可用范围，窄屏只缩窄不足144的一边', () => {
     const small = { width: 100, height: 60 };
     const sel = initialRegionSelection({ x: 0.5, y: 0.5 }, small);
-    // min(400, 100*0.8)=80 → 受最小 48 影响后仍为 80；高 min(260,24)=24 → 撑到 48
-    expect(sel.width).toBe(80);
-    expect(sel.height).toBe(MIN_REGION_SIZE);
-    expect(sel.y + sel.height).toBeLessThanOrEqual(small.height);
+    expect(sel).toEqual({ x: 0, y: 0, width: 100, height: 60 });
+    expect(initialRegionSelection({x:.5,y:.5},{width:100,height:600})).toEqual({x:0,y:228,width:100,height:144});
+    expect(initialRegionSelection({x:.5,y:.5},{width:32,height:20})).toEqual({x:0,y:0,width:32,height:20});
+  });
+
+  it('144px初始框仍能手动缩到48px，重新框选也不继承初始144px限制', () => {
+    const initial = initialRegionSelection({x:.5,y:.5},VP);
+    expect(resizeRegion(initial,'se',-999,-999,VP)).toEqual({x:440,y:312,width:48,height:48});
+    expect(regionFromDrag({x:80,y:90},{x:82,y:92},VP)).toEqual({x:80,y:90,width:48,height:48});
   });
 });
 

@@ -176,7 +176,7 @@ void main() {
     await teardownPanel(tester);
   });
 
-  testWidgets('历史完整标题、动态计数、系统角色与刷新可达', (tester) async {
+  testWidgets('历史两行摘要、详情完整标题、动态计数、系统角色与刷新可达', (tester) async {
     final PanelServer server = _server();
     await pumpPanel(tester,
         server: server,
@@ -185,13 +185,21 @@ void main() {
     await tester.pumpAndSettle();
     await _history(tester);
     final Text title = tester.widget<Text>(find.text(_title));
-    expect(title.maxLines, isNull);
+    // R5 的列表卡片采用两行标题；完整标题仍须能在详情中读取。
+    expect(title.maxLines, 2);
+    expect(title.overflow, TextOverflow.ellipsis);
     expect(find.text('系统: 最新动态'), findsOneWidget);
     expect(find.text('3 条动态'), findsNWidgets(2));
     expect(find.textContaining('最近更新：'), findsNWidgets(2));
     await tester.tap(find.byKey(const Key('feedback-history-refresh')));
     await tester.pumpAndSettle();
     expect(server.count('GET /api/feedback/mine'), 2);
+    await _open(tester);
+    final Text fullTitle =
+        tester.widget<Text>(find.byKey(const Key('feedback-dialogue-title')));
+    expect(fullTitle.data, _title);
+    expect(fullTitle.maxLines, isNull);
+    expect(fullTitle.overflow, isNot(TextOverflow.ellipsis));
     await teardownPanel(tester);
   });
 
@@ -269,6 +277,9 @@ void main() {
     await tester.tap(find.byKey(const Key('reply-attach-image')));
     await tester.pumpAndSettle();
     await tester.ensureVisible(find.byKey(const Key('reply-attach-log')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('reply-attach-log')).hitTestable(),
+        findsOneWidget);
     await tester.tap(find.byKey(const Key('reply-attach-log')));
     await tester.pumpAndSettle();
     final ScrollableState scroll = tester.state<ScrollableState>(find

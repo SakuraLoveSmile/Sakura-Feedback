@@ -1,22 +1,17 @@
 import 'package:feedback_widget/feedback_widget.dart';
-import 'package:feedback_widget/src/orb.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 
 import 'capture_test_utils.dart';
+import 'orb_liquid_test_utils.dart';
 
 final Finder _orb = find.byKey(const Key('feedback-orb'));
 final Finder _body = find.byKey(const Key('feedback-orb-body'));
 final Finder _ring = find.byKey(const Key('feedback-orb-focus-ring'));
 
-OrbPainter _painter(WidgetTester tester) => tester
-    .widgetList<CustomPaint>(
-        find.descendant(of: _body, matching: find.byType(CustomPaint)))
-    .map((CustomPaint paint) => paint.painter)
-    .whereType<OrbPainter>()
-    .single;
+LiquidPaintState _painter(WidgetTester tester) => liquidPaintState(tester);
 
 void main() {
   late FeedbackController controller;
@@ -66,7 +61,7 @@ void main() {
   testWidgets('A 隐藏期间指针移开：恢复后回到 idle', (WidgetTester tester) async {
     await pumpHost(tester);
     final TestGesture mouse = await hoverOrb(tester);
-    expect(_painter(tester).stateScale, closeTo(1.04, 1e-6));
+    expect(_painter(tester).scale, closeTo(1.04, 1e-6));
 
     controller.open();
     await tester.pump();
@@ -83,13 +78,13 @@ void main() {
     await tester.pump(const Duration(milliseconds: 220));
     await tester.pump();
 
-    final OrbPainter painter = _painter(tester);
-    expect(painter.stateScale, closeTo(1.0, 1e-6),
+    final LiquidPaintState painter = _painter(tester);
+    expect(painter.scale, closeTo(1.0, 1e-6),
         reason: '指针已离开，恢复后不得残留 hover 1.04');
-    expect(painter.breathWeight, 1.0);
+    expect(painter.wobble, 0.0, reason: 'R3 无旧光晕或常驻呼吸，静止时无回弹');
     expect(_ring, findsNothing);
-    debugPrint('T7e A restored: stateScale=${painter.stateScale}, '
-        'breathWeight=${painter.breathWeight}, ring=false');
+    debugPrint('T7e A restored: stateScale=${painter.scale}, '
+        'breathWeight=${painter.wobble}, ring=false');
 
     await mouse.removePointer();
     await tester.pumpWidget(const SizedBox.shrink());
@@ -98,7 +93,7 @@ void main() {
   testWidgets('B 隐藏期间指针不动：恢复后回到 hover', (WidgetTester tester) async {
     await pumpHost(tester);
     final TestGesture mouse = await hoverOrb(tester);
-    expect(_painter(tester).stateScale, closeTo(1.04, 1e-6));
+    expect(_painter(tester).scale, closeTo(1.04, 1e-6));
 
     controller.open();
     await tester.pump();
@@ -114,12 +109,12 @@ void main() {
     await tester.pump(const Duration(milliseconds: 220));
     await tester.pump();
 
-    final OrbPainter painter = _painter(tester);
-    expect(painter.stateScale, closeTo(1.04, 1e-6),
+    final LiquidPaintState painter = _painter(tester);
+    expect(painter.scale, closeTo(1.04, 1e-6),
         reason: '指针仍在球上，恢复帧由 MouseTracker 补发 onEnter');
-    expect(painter.breathWeight, 0.0, reason: 'hover 不叠加呼吸');
-    debugPrint('T7e B restored: stateScale=${painter.stateScale}, '
-        'breathWeight=${painter.breathWeight}, ring=false');
+    expect(painter.wobble, 0.0, reason: 'hover 不叠加呼吸');
+    debugPrint('T7e B restored: stateScale=${painter.scale}, '
+        'breathWeight=${painter.wobble}, ring=false');
 
     await mouse.removePointer();
     await tester.pumpWidget(const SizedBox.shrink());

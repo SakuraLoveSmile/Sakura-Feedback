@@ -13,8 +13,8 @@ void main() {
   group('灵感球设计令牌', () {
     test('全部常量与任务卡数值一致', () {
       expect(kFeedbackOrbIdleDiameter, 56.0);
-      expect(kFeedbackOrbDraggingDiameter, 84.0);
-      expect(kFeedbackOrbDragScale, 1.5);
+      expect(kFeedbackOrbDraggingDiameter, 104.0);
+      expect(kFeedbackOrbDragScale, 104 / 56);
       expect(kFeedbackOrbDragStretchMax, 0.04);
       expect(kFeedbackOrbHoverScale, 1.04);
       expect(kFeedbackOrbPressedScale, 0.94);

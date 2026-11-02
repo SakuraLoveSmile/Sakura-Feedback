@@ -51,6 +51,10 @@ import {
 } from './server_pref';
 import { loginErrorMessage, webClientLabel } from './auth';
 import { STYLES } from './styles';
+import { OrbLiquid, liquidBoundary, progress, type LiquidSnapshot } from './orb-liquid';
+import { WAKE_GESTURES, WakeGestures, parseWakePreference, wakePreferenceKey, type WakeGestureId } from './wake-gestures';
+import { OrbLens } from './orb-lens';
+import { constrainOrbIdleHit, interpolateOrbIdle, orbIdleBoundary, orbIdlePreferenceKey, parseOrbIdlePreference, type OrbIdleStyle, type OrbIdleVisual } from './orb-idle';
 import {
   normalizeAppId,
   projectColor,
@@ -309,6 +313,14 @@ interface RegionSession {
   /** 覆盖层显示尺寸 = 打开时的窗口内尺寸（位图铺满该区域显示）。 */
   overlay: RegionViewport;
   sel: RegionRect;
+  displaySignature: string;
+  seq: number;
+  confirming: boolean;
+  phase: 'selection' | 'handoff';
+  pointerId: number | null;
+  startedAt: number;
+  orbRect: RegionRect;
+  orbShape: LiquidSnapshot | null;
   dragging:
     | { mode: 'move' | 'new'; startX: number; startY: number; startSel: RegionRect }
     | { mode: 'resize'; handle: RegionHandle; startX: number; startY: number; startSel: RegionRect }
@@ -556,6 +568,8 @@ function svgGearIcon(): SVGSVGElement {
   return svg;
 }
 
+let orbIdleExteriorSequence = 0;
+
 export class FeedbackWidget extends HTMLElement {
   /** Shadow DOM 模式：默认 open；注册前可设 FeedbackWidget.shadowMode='closed'。 */
   static shadowMode: 'open' | 'closed' = 'open';
@@ -573,6 +587,9 @@ export class FeedbackWidget extends HTMLElement {
       'launcher-bottom',
       'launcher-mode',
       'capture-mode',
+      'hidden',
+      'inert',
+      'aria-disabled',
     ];
   }
 
@@ -794,9 +811,70 @@ export class FeedbackWidget extends HTMLElement {
   private orbPointerId: number | null = null;
   /** pressed 退出的 140ms 过渡窗口计时器（见 .fb-orb.is-unpressing）。 */
   private orbUnpressTimer: ReturnType<typeof setTimeout> | null = null;
-  private orbReleaseFrame: number | null = null;
-  private orbReleaseTimer: ReturnType<typeof setTimeout> | null = null;
-  private orbReleaseGeneration = 0;
+  private readonly liquid = new OrbLiquid();
+  private liquidFrame: number | null = null;
+  private liquidTime = 0;
+  private liquidGeneration = 0;
+  private liquidStarted = 0;
+  private orbDock = { x: 0, y: 0 };
+  private releaseVisual: LiquidSnapshot | null = null;
+  private lastLiquidVisual: LiquidSnapshot | null = null;
+  private orbCollapsed = false;
+  private orbIdleStyle: OrbIdleStyle = 'handle';
+  private orbIdlePreferenceApp: string | null = null;
+  private orbIdleSessionOnly = false;
+  private orbIdleInputs = new Map<OrbIdleStyle, HTMLInputElement>();
+  private orbIdlePreferenceHint!: HTMLParagraphElement;
+  private orbIdleTimer: ReturnType<typeof setTimeout> | null = null;
+  private orbIdleGeneration = 0;
+  private orbIdleIdentityEpoch = -1;
+  private orbIdleAvailable = false;
+  private orbIdleVisual: OrbIdleVisual | null = null;
+  private orbIdleMorph: { from: OrbIdleVisual; to: OrbIdleVisual; startedAt: number } | null = null;
+  private orbIdleFrame: number | null = null;
+  private orbIdleVisualGeneration = 0;
+  private orbHovered = false;
+  private orbKeyboardInput = false;
+  private orbAvailabilityObserver: MutationObserver | null = null;
+  private wakePreferenceApp: string | null = null;
+  private wakeEnabled: WakeGestureId[] = [];
+  private wakePreferenceSessionOnly = false;
+  private wakeInputs = new Map<WakeGestureId, HTMLInputElement>();
+  private wakeAvailability!: HTMLParagraphElement;
+  private wakePreferenceHint!: HTMLParagraphElement;
+  private wakeHint!: HTMLDivElement;
+  private readonly wakeGestures = new WakeGestures({
+    enabled: () => this.wakeEnabled,
+    allowed: () => this.canWakeOrb(),
+    excluded: event => [...event.composedPath(), ...Array.from(event.changedTouches).map(t => t.target)].some(node => node instanceof Element && (this.isOwnFeedbackUi(node) || node.closest('input, textarea, select, button, a, label, summary, [contenteditable]:not([contenteditable="false"]), [role="button"], [role="link"]'))),
+    hint: visible => { if (this.wakeHint) this.wakeHint.hidden = !visible; },
+    trigger: () => {
+      if (!this.canWakeOrb()) return;
+      this.wakeOrb();
+    },
+  });
+  private orbCanvas!: HTMLCanvasElement;
+  private orbOutline!: SVGSVGElement;
+  private orbOutlinePath!: SVGPathElement;
+  private orbOutlineHalo!: SVGPathElement;
+  private orbOutlineArt!: SVGGElement;
+  private orbOutlineExterior!: SVGPathElement;
+  private readonly orbOutlineExteriorId = `fb-orb-idle-exterior-${++orbIdleExteriorSequence}`;
+  private orbLens: OrbLens | null = null;
+  private lensGeneration = 0;
+  private lensBusy = false;
+  private lensRefreshPending: number | null = null;
+  private lensRestoreQueued = false;
+  private orbSurfaceActive = true;
+  private lensContextLost = false;
+  private lensController: AbortController | null = null;
+  private lensFresh = false;
+  private lensCapturedAt = -Infinity;
+  private surfaceSignature = '';
+  private surfaceCleanup: (() => void) | null = null;
+  private flowFrame: number | null = null;
+  private handoffImageId: string | null = null;
+  private handoffUrl: string | null = null;
   private isCapturing = false;
   /** 进行中的捕获会话控制器：cancelCapture / 卸载时 abort，使旧会话失效。 */
   private captureController: AbortController | null = null;
@@ -809,9 +887,16 @@ export class FeedbackWidget extends HTMLElement {
 
   /** 局部选区覆盖层与相关控件（在 buildDom 中构建，默认 hidden）。 */
   private regionOverlay!: HTMLDivElement;
+  private regionEntrance!: SVGSVGElement;
+  private regionEntranceDim!: SVGPathElement;
+  private regionEntranceEdge!: SVGPathElement;
   private regionBg!: HTMLImageElement;
   private regionFrame!: HTMLDivElement;
-  private regionSizeEl!: HTMLSpanElement;
+  private regionToolbar!: HTMLDivElement;
+  private regionTools!: HTMLDivElement;
+  private safeInsetsProbe!: HTMLDivElement;
+  private regionDim!: HTMLDivElement;
+  private flyingShot!: HTMLImageElement;
   private regionErrorEl!: HTMLParagraphElement;
   private regionUseBtn!: HTMLButtonElement;
   private regionAllBtn!: HTMLButtonElement;
@@ -897,6 +982,7 @@ export class FeedbackWidget extends HTMLElement {
     return this._hostBridge;
   }
   set hostBridge(bridge: FeedbackHostBridge | undefined) {
+    if (bridge !== this._hostBridge) this.wakeGestures.reset();
     this._hostBridge = bridge;
     if (bridge?.sessionStore) {
       void this.loadHostSession();
@@ -907,6 +993,7 @@ export class FeedbackWidget extends HTMLElement {
     return this._sessionStore ?? this._hostBridge?.sessionStore;
   }
   set sessionStore(store: FeedbackSessionStore | undefined) {
+    if (store !== this._sessionStore) this.wakeGestures.reset();
     this._sessionStore = store;
     if (store) {
       void this.loadHostSession();
@@ -1157,9 +1244,11 @@ export class FeedbackWidget extends HTMLElement {
   }
 
   open(): void {
+    this.wakeGestures.reset();
     if (this.openState) return;
     this.clearOrbRelease(true);
     this.openState = true;
+    this.syncOrbIdle();
     this.launcher.classList.add('is-hidden');
     this.launcher.setAttribute('aria-expanded', 'true');
     this.orb.classList.add('is-hidden');
@@ -1186,7 +1275,8 @@ export class FeedbackWidget extends HTMLElement {
     this.updateAriaModal();
 
     // 打开时焦点移到 textarea（草稿已恢复）
-    this.textarea.focus();
+    if (this.regionSession?.phase !== 'handoff') this.textarea.focus();
+    this.releaseLens();
 
     // 打开面板即刷新额度（已登录时）；跨 resetAt 后由服务端给出新额度。
     void this.refreshQuota();
@@ -1276,7 +1366,8 @@ export class FeedbackWidget extends HTMLElement {
 
     // 关闭后焦点恢复到呼出入口
     if (this.launcherMode === 'orb') {
-      this.orb.focus();
+      this.syncOrbIdle(true);
+      if (this.canUseOrbLauncher()) this.orb.focus();
     } else {
       this.launcher.focus();
     }
@@ -1304,7 +1395,14 @@ export class FeedbackWidget extends HTMLElement {
    * 与清理 in-flight（旧会话的 finally 不会再恢复新会话的 UI）。
    */
   private invalidateCaptureSession(): void {
+    this.wakeGestures.reset();
+    this.releaseLens();
+    this.releaseVisual = null;
     this.captureSeq++;
+    const pointer = this.orbPointerId;
+    this.orbPointerId = null;
+    if (pointer !== null) { try { this.orb.releasePointerCapture(pointer); } catch { /* already released */ } }
+    this.orb.classList.remove('is-pressed');
     this.captureController?.abort();
     this.captureController = null;
     this.captureInFlight = null;
@@ -1320,6 +1418,7 @@ export class FeedbackWidget extends HTMLElement {
     this.isCapturing = false;
     // 会话失效 / 关闭 / 身份切换时，进行中的局部选区流程一并作废（丢弃冻结画面）
     this.dismissRegionFlow();
+    this.orbCanvas.hidden = true;
     // 会话结束（成功 / 失败 / 失效）后按钮必须回到真实可用性：
     // 首次失败保留手动重试入口，重拍失败保留旧图与文字。
     this.syncShotUi();
@@ -1497,6 +1596,8 @@ export class FeedbackWidget extends HTMLElement {
     const first = images[0] ?? null;
     this.screenshotThumbBox.hidden = first === null;
     if (first) {
+      this.screenshotThumbBox.dataset.imageId = first.id;
+      this.screenshotThumbBox.classList.toggle('is-entering', first.id === this.handoffImageId);
       this.screenshotThumb.src = first.url;
       this.screenshotThumb.alt = `图片 1：${first.filename}`;
       const badge = this.screenshotThumbBox.querySelector('.fb-screenshot-badge');
@@ -1582,6 +1683,8 @@ export class FeedbackWidget extends HTMLElement {
   /** 构建第 index 张图片的网格单元格（index≥1 的次要单元格，重建型）。 */
   private buildImageCell(img: DraftImage, index: number, locked: boolean): HTMLDivElement {
     const cell = el('div', 'fb-image-cell fb-screenshot-thumb-box');
+    cell.dataset.imageId = img.id;
+    cell.classList.toggle('is-entering', img.id === this.handoffImageId);
     cell.setAttribute('role', 'button');
     cell.setAttribute('tabindex', '0');
     cell.setAttribute('aria-label', `查看图片 ${index + 1}`);
@@ -1594,7 +1697,9 @@ export class FeedbackWidget extends HTMLElement {
     const badge = el('span', 'fb-screenshot-badge', this.imageBadgeText(img));
     const sizeLabel = el('span', 'fb-screenshot-size', this.imageSizeText(img));
     const zoomHint = el('span', 'fb-screenshot-zoom-hint', '点击放大');
-    frame.append(thumb, badge, sizeLabel, zoomHint);
+    frame.append(thumb, zoomHint);
+    const info = el('div','fb-thumb-info');
+    const meta = el('div','fb-thumb-meta'); meta.append(badge,sizeLabel);
 
     const cellActions = el('div', 'fb-thumb-actions');
     const editBtn = el('button', 'fb-thumb-edit', '编辑');
@@ -1615,9 +1720,11 @@ export class FeedbackWidget extends HTMLElement {
     });
     cellActions.append(editBtn, delBtn);
 
-    cell.append(frame, cellActions);
+    info.append(meta,cellActions);
+    cell.append(frame, info);
     cell.addEventListener('click', () => this.openZoomModal(img.url));
     cell.addEventListener('keydown', (ev: KeyboardEvent) => {
+      if (ev.target !== cell) return;
       if (ev.key === ' ' || ev.key === 'Enter') {
         ev.preventDefault();
         this.openZoomModal(img.url);
@@ -1771,13 +1878,15 @@ export class FeedbackWidget extends HTMLElement {
   }): Promise<void> {
     const seq = ++this.captureSeq;
     const epoch = this.identityEpoch;
+    const displaySignature = this.displaySignature();
     // 会话有效 = 序号未变 且 服务身份未切换：旧服务 / 旧身份的截图不得写入新身份
-    const active = (): boolean => seq === this.captureSeq && epoch === this.identityEpoch;
+    const active = (): boolean => seq === this.captureSeq && epoch === this.identityEpoch && this.isConnected && displaySignature === this.displaySignature();
     const controller = new AbortController();
     this.captureController = controller;
     const { signal } = controller;
     // 加载 / 禁用态必须在隐藏面板之前落到 DOM（同一 tick，不存在中间帧）：
     // 「截取中…」与 aria-busy 因此永远不可能出现在截图里（面板随后整体不可见）。
+    this.wakeGestures.reset();
     this.isCapturing = true;
     this.syncShotUi();
 
@@ -1949,7 +2058,7 @@ export class FeedbackWidget extends HTMLElement {
 
   // ---------- T1 局部选区覆盖层（拖球 → 松手 → 调整选区 → 确认） ----------
 
-  /** 打开覆盖层：冻结位图铺满显示，初始选区以松手位置为中心并整体移回可见区。 */
+  /** 打开覆盖层：144px选区优先围绕最后可见球心展开，provider落点保持真实指针坐标。 */
   private openRegionFlow(frozen: FrozenCapture): void {
     if (this.regionSession) this.dismissRegionFlow({ focusOrb: false });
     const viewport: RegionViewport = {
@@ -1960,18 +2069,36 @@ export class FeedbackWidget extends HTMLElement {
       width: Math.max(1, typeof window !== 'undefined' ? window.innerWidth || viewport.width : viewport.width),
       height: Math.max(1, typeof window !== 'undefined' ? window.innerHeight || viewport.height : viewport.height),
     };
-    const release = frozen.releasePoint ?? { x: 0.5, y: 0.5 };
+    // The visual snapshot is in overlay pixels; normalize before using the capture viewport.
+    // frozen.releasePoint remains the host's actual pointer coordinate and is never rewritten.
+    const center = this.releaseVisual
+      ? { x: this.releaseVisual.x / overlay.width, y: this.releaseVisual.y / overlay.height }
+      : frozen.releasePoint ?? { x: 0.5, y: 0.5 };
+    const sel = initialRegionSelection(center, viewport);
     const session: RegionSession = {
       epoch: this.identityEpoch,
       frozen,
       url: URL.createObjectURL(frozen.blob),
       viewport,
       overlay,
-      sel: initialRegionSelection(release, viewport),
+      sel,
+      displaySignature: this.displaySignature(),
+      seq: this.captureSeq,
+      confirming: false,
+      phase: 'selection',
+      pointerId: null,
+      startedAt: performance.now() - (this.releaseVisual ? 0 : 550),
+      orbShape: this.releaseVisual ? { ...this.releaseVisual } : null,
+      orbRect: this.releaseVisual ? { x:this.releaseVisual.x-this.releaseVisual.radius, y:this.releaseVisual.y-this.releaseVisual.radius, width:2*this.releaseVisual.radius, height:2*this.releaseVisual.radius } : { x:sel.x*overlay.width/viewport.width,y:sel.y*overlay.height/viewport.height,width:sel.width*overlay.width/viewport.width,height:sel.height*overlay.height/viewport.height },
       dragging: null,
     };
     this.regionSession = session;
+    this.releaseVisual = null;
+    this.orb.classList.add('is-hidden');
     this.regionBg.src = session.url;
+    this.regionOverlay.classList.remove('is-handoff');
+    this.regionUseBtn.disabled = this.regionAllBtn.disabled = false;
+    this.wakeGestures.reset();
     this.regionOverlay.hidden = false;
     this.regionErrorEl.hidden = true;
     this.regionErrorEl.textContent = '';
@@ -1980,6 +2107,7 @@ export class FeedbackWidget extends HTMLElement {
     document.addEventListener('keydown', this.regionKeyHandler, true);
     this.renderRegion();
     this.regionFrame.focus();
+    this.animateSelection(session);
   }
 
   /** 覆盖层显示尺寸 ↔ 捕获视口逻辑像素的换算（位图铺满覆盖层显示）。 */
@@ -1996,25 +2124,129 @@ export class FeedbackWidget extends HTMLElement {
     return { x: ev.clientX / kx, y: ev.clientY / ky };
   }
 
-  /** 重绘选区框（位置 / 尺寸 / 输出尺寸读数）：覆盖层打开期间持续生效。 */
-  private renderRegion(): void {
+  private validRegion(s: RegionSession): boolean {
+    return this.isConnected && this.regionSession === s && s.epoch === this.identityEpoch && s.seq === this.captureSeq && s.displaySignature === this.displaySignature();
+  }
+
+  private animateSelection(s: RegionSession): void {
+    const tick = () => {
+      if (!this.validRegion(s) || s.phase !== 'selection') return;
+      this.flowFrame = null;
+      const elapsed = this.prefersReducedMotion() ? 550 : performance.now() - s.startedAt;
+      this.renderRegion(elapsed);
+      if (elapsed < 550) this.flowFrame = window.requestAnimationFrame(tick);
+    };
+    tick();
+  }
+
+  /** An interaction completes the entrance immediately so geometry never moves under a pointer. */
+  private finishSelectionEntrance(s: RegionSession): void {
+    s.startedAt = performance.now() - 550;
+    if (this.flowFrame !== null) window.cancelAnimationFrame(this.flowFrame);
+    this.flowFrame = null;
+  }
+
+  private renderRegion(elapsed = 550): void {
     const s = this.regionSession;
-    if (!s) return;
+    if (!s || s.phase !== 'selection') return;
     const { kx, ky } = this.regionScale(s);
-    this.regionFrame.style.left = `${s.sel.x * kx}px`;
-    this.regionFrame.style.top = `${s.sel.y * ky}px`;
-    this.regionFrame.style.width = `${s.sel.width * kx}px`;
-    this.regionFrame.style.height = `${s.sel.height * ky}px`;
-    this.regionSizeEl.textContent = `选区 ${Math.round(s.sel.width)}×${Math.round(s.sel.height)} px`;
+    const end = { x: s.sel.x*kx, y: s.sel.y*ky, width: s.sel.width*kx, height: s.sel.height*ky };
+    const p = progress(elapsed, 0, 400);
+    const rect = Object.fromEntries((['x','y','width','height'] as const).map(k => [k, s.orbRect[k] + (end[k]-s.orbRect[k])*p])) as unknown as RegionRect;
+    Object.assign(this.regionFrame.style, { left: `${rect.x}px`, top: `${rect.y}px`, width: `${rect.width}px`, height: `${rect.height}px`, borderRadius: `${s.orbRect.width/2+(12-s.orbRect.width/2)*p}px`, opacity: String(progress(elapsed,50,300)) });
+    this.regionFrame.dataset.size = `${Math.round(s.sel.width)}×${Math.round(s.sel.height)}`;
+    this.regionFrame.setAttribute('aria-description', `选区 ${Math.round(s.sel.width)}×${Math.round(s.sel.height)} px`);
+    // The independent shadow follows the rounded morph as well as its timing;
+    // a rectangular cutout would expose bright corners outside the initial ball.
+    Object.assign(this.regionDim.style, { left:`${rect.x}px`, top:`${rect.y}px`, width:`${rect.width}px`, height:`${rect.height}px`, borderRadius:`${s.orbRect.width/2+(12-s.orbRect.width/2)*p}px`, opacity:String(.26*progress(elapsed,0,350)) });
+    this.renderSelectionContour(s,end,p,elapsed);
+    if (this.orbLens && s.orbShape && elapsed < 260) {
+      this.orbCanvas.hidden = false;
+      this.orbLens.draw(s.orbShape,s.orbShape.radius,s.orbShape,1-progress(elapsed,0,260),this.orbMaterialIsDark());
+    } else this.orbCanvas.hidden = true;
+    this.regionCancelBtn.style.opacity = String(progress(elapsed,120,400));
+    this.regionTools.style.opacity = String(progress(elapsed,350,550));
+    const coarse = window.matchMedia?.('(pointer: coarse)').matches ?? false;
+    const safe = window.getComputedStyle(this.safeInsetsProbe);
+    const left = Math.max(16,parseFloat(safe.paddingLeft)||0), right = Math.max(16,parseFloat(safe.paddingRight)||0);
+    const top = Math.max(16,parseFloat(safe.paddingTop)||0), bottom = Math.max(16,parseFloat(safe.paddingBottom)||0);
+    this.regionTools.style.maxHeight = `${Math.max(1,s.overlay.height-top-bottom)}px`;
+    let w = Math.min(320,Math.max(1,s.overlay.width-left-right));
+    let x = Math.max(left,Math.min(s.overlay.width-right-w,end.x+(end.width-w)/2));
+    const measure = () => {
+      this.regionTools.style.width = `${w}px`;
+      return this.regionTools.getBoundingClientRect().height || (w < 118 ? 132 : w < 234 ? 114 : 62);
+    };
+    let height = measure();
+    const gap = coarse ? 24 : 18;
+    const below = end.y+end.height+gap, above = end.y-gap-height;
+    let placement = below+height <= s.overlay.height-bottom ? 'below' : above >= top ? 'above' : 'top';
+    let y = placement === 'below' ? below : placement === 'above' ? above : top;
+    if (placement === 'top') {
+      const leftSpace=end.x-gap-left, rightSpace=s.overlay.width-right-end.x-end.width-gap;
+      if (Math.max(leftSpace,rightSpace)>=90) {
+        const onLeft=leftSpace>=rightSpace;
+        w=Math.min(320,onLeft?leftSpace:rightSpace); x=onLeft?left:end.x+end.width+gap;
+        height=measure();
+        y=Math.max(top,Math.min(end.y+(end.height-height)/2,s.overlay.height-bottom-height));
+        if (x+w>s.overlay.width-right-44-8 && y<top+44+8) y=top+44+8;
+        if (y+height<=s.overlay.height-bottom) placement=onLeft?'left':'right';
+      }
+    }
+    if (placement === 'top') {
+      // A viewport-filling selection leaves no exterior strip. Keep the existing safe
+      // fallback away from corner handles and the independent close button.
+      if (end.height >= height+2*gap+16) y = Math.max(top,Math.min(end.y+gap+8,s.overlay.height-bottom-height));
+      if (y < top+44+8) { x=left; w=Math.min(w,Math.max(1,s.overlay.width-left-right-44-8)); height=measure(); }
+      const innerLeft=Math.max(left,end.x+gap);
+      const innerRight=Math.min(s.overlay.width-right,end.x+end.width-gap,y<top+44+8?s.overlay.width-right-44-8:Infinity);
+      if (innerRight-innerLeft>=90) {
+        w=Math.min(w,innerRight-innerLeft); x=Math.max(innerLeft,Math.min(x,innerRight-w)); height=measure();
+      }
+      placement = 'top';
+    }
+    Object.assign(this.regionTools.style,{left:`${x}px`,top:`${y}px`,width:`${w}px`,maxHeight:`${Math.max(1,s.overlay.height-y-bottom)}px`});
+    this.regionTools.dataset.placement = placement;
+  }
+
+  private renderSelectionContour(s: RegionSession, end: RegionRect, p: number, elapsed: number): void {
+    const visible = s.orbShape !== null && elapsed < 400;
+    this.regionEntrance.style.display = visible ? '' : 'none';
+    this.regionDim.style.visibility = visible ? 'hidden' : '';
+    this.regionFrame.style.borderColor = visible ? 'transparent' : '';
+    if (!visible) return;
+    const shape=s.orbShape!, points:string[]=[];
+    const cx=end.x+end.width/2, cy=end.y+end.height/2;
+    const halfX=end.width/2, halfY=end.height/2, corner=Math.min(12,halfX,halfY);
+    for (let i=0;i<128;i++) {
+      const theta=i*Math.PI*2/128, nx=Math.cos(theta), ny=Math.sin(theta);
+      const r=shape.radius*liquidBoundary(theta,shape);
+      // Ray intersection with the final rounded rectangle, in the same angular order.
+      let low=0, high=Math.hypot(halfX,halfY);
+      for (let j=0;j<16;j++) {
+        const mid=(low+high)/2;
+        const qx=Math.max(Math.abs(nx*mid)-(halfX-corner),0), qy=Math.max(Math.abs(ny*mid)-(halfY-corner),0);
+        if (Math.hypot(qx,qy)<=corner) low=mid; else high=mid;
+      }
+      points.push(`${shape.x+nx*r+(cx+nx*low-shape.x-nx*r)*p},${shape.y+ny*r+(cy+ny*low-shape.y-ny*r)*p}`);
+    }
+    const path=`M${points.join(' L')}Z`;
+    this.regionEntrance.setAttribute('viewBox',`0 0 ${s.overlay.width} ${s.overlay.height}`);
+    this.regionEntranceDim.setAttribute('d',`M0,0H${s.overlay.width}V${s.overlay.height}H0Z ${path}`);
+    this.regionEntranceDim.setAttribute('opacity',String(.26*progress(elapsed,0,350)));
+    this.regionEntranceEdge.setAttribute('d',path);
+    this.regionEntranceEdge.setAttribute('opacity',String(progress(elapsed,50,300)));
   }
 
   private onRegionPointerDown(ev: PointerEvent): void {
     const s = this.regionSession;
-    if (!s || ev.button !== 0) return;
+    if (!s || s.confirming || s.phase !== 'selection' || s.pointerId !== null || ev.button !== 0 || ev.isPrimary === false) return;
     const target = ev.target as HTMLElement | null;
-    if (target && typeof target.closest === 'function' && target.closest('.fb-region-toolbar')) {
+    if (target && typeof target.closest === 'function' && target.closest('.fb-region-tools, .fb-region-cancel')) {
       return; // 工具栏按钮不进入框选
     }
+    this.finishSelectionEntrance(s);
+    s.pointerId = ev.pointerId;
     const pt = this.regionPoint(s, ev);
     const handleEl =
       target && typeof target.closest === 'function'
@@ -2040,7 +2272,7 @@ export class FeedbackWidget extends HTMLElement {
 
   private onRegionPointerMove(ev: PointerEvent): void {
     const s = this.regionSession;
-    if (!s || !s.dragging) return;
+    if (!s || s.confirming || !s.dragging || s.pointerId !== ev.pointerId) return;
     const d = s.dragging;
     const pt = this.regionPoint(s, ev);
     if (d.mode === 'move') {
@@ -2055,8 +2287,9 @@ export class FeedbackWidget extends HTMLElement {
 
   private onRegionPointerEnd(ev: PointerEvent): void {
     const s = this.regionSession;
-    if (!s || !s.dragging) return;
+    if (!s || !s.dragging || s.pointerId !== ev.pointerId) return;
     s.dragging = null;
+    s.pointerId = null;
     try {
       this.regionOverlay.releasePointerCapture(ev.pointerId);
     } catch {
@@ -2072,42 +2305,145 @@ export class FeedbackWidget extends HTMLElement {
    */
   private async confirmRegion(useSelection: boolean): Promise<void> {
     const s = this.regionSession;
-    if (!s) return;
-    if (s.epoch !== this.identityEpoch) {
+    if (!s || s.confirming || s.phase !== 'selection') return;
+    if (!this.validRegion(s)) {
       this.dismissRegionFlow();
       return;
     }
+    s.confirming = true;
+    this.finishSelectionEntrance(s);
+    this.renderRegion();
+    this.regionUseBtn.disabled = this.regionAllBtn.disabled = true;
+    this.regionErrorEl.hidden = true;
+    const selected = { ...s.sel };
     let blob = s.frozen.blob;
     let pixelWidth = s.frozen.pixelWidth;
     let pixelHeight = s.frozen.pixelHeight;
     let region: FeedbackCaptureRegion | undefined;
     if (useSelection) {
       try {
-        const cropped = await cropFrozenRegion(s.frozen.blob, s.sel, s.viewport);
+        const cropped = await cropFrozenRegion(s.frozen.blob, selected, s.viewport);
         blob = cropped.blob;
         pixelWidth = cropped.width;
         pixelHeight = cropped.height;
-        region = normalizeRegion(s.sel, s.viewport);
+        region = normalizeRegion(selected, s.viewport);
       } catch {
-        if (this.regionSession !== s || s.epoch !== this.identityEpoch) return;
+        if (!this.validRegion(s)) return;
+        s.confirming = false;
+        this.regionUseBtn.disabled = this.regionAllBtn.disabled = false;
         this.regionErrorEl.textContent = '裁剪未完成，可重试，或改用「截取整个窗口」。';
         this.regionErrorEl.hidden = false;
         return;
       }
     }
-    // 异步等待期间被取消 / 关闭 / 切换身份 → 一律丢弃，不写入新身份草稿
-    if (this.regionSession !== s || s.epoch !== this.identityEpoch) return;
+    // A successful crop may only commit once, into the identity that requested it.
+    if (!this.validRegion(s)) return;
+    if (!this.captureImage() && this.draft.images.length >= this.maxImages) {
+      s.confirming = false;
+      this.regionUseBtn.disabled = this.regionAllBtn.disabled = false;
+      this.regionErrorEl.textContent = `已达图片上限 ${this.maxImages} 张，请取消并先整理附件。`;
+      this.regionErrorEl.hidden = false;
+      return;
+    }
     const out: FrozenCapture = { ...s.frozen, blob, pixelWidth, pixelHeight };
-    this.dismissRegionFlow({ focusOrb: false });
     this.commitCapture(out, region);
+    this.handoffImageId = this.captureImage()!.id;
+    s.phase = 'handoff';
+    this.settingsOpen = false;
+    this.switchTab('compose');
     if (!this.openState) this.open();
+    if (!this.validRegion(s) || !this.openState) return;
     this.syncUi();
     this.renderStatus(useSelection ? '已附加局部截图' : '已附加整窗截图');
+    const { kx, ky } = this.regionScale(s);
+    const source = useSelection ? { x: selected.x*kx, y: selected.y*ky, width: selected.width*kx, height: selected.height*ky } : { x: 0, y: 0, width: s.overlay.width, height: s.overlay.height };
+    this.startHandoff(s, out.blob, source);
+  }
+
+  private targetAttachment(): HTMLElement | null {
+    return Array.from(this.screenshotWrap.querySelectorAll<HTMLElement>('[data-image-id]')).find(cell => cell.dataset.imageId === this.handoffImageId) ?? null;
+  }
+
+  /** Final-layout thumbnail bounds, including the compose scroller and sticky footer.
+   * Entry translation is visual only; subtract it before comparing against the viewport.
+   * A partly clipped thumbnail cannot receive the entire flying image safely.
+   */
+  private visibleAttachmentRect(translatedPercent = 0): RegionRect | null {
+    const cell = this.targetAttachment();
+    const frame = cell?.querySelector<HTMLElement>('.fb-thumb-frame');
+    if (!frame || !frame.isConnected || frame.closest('[hidden]') || !this.openState || this.activeTab !== 'compose' || this.settingsOpen) return null;
+    const usable = (rect: DOMRect): boolean => [rect.left,rect.top,rect.right,rect.bottom,rect.width,rect.height].every(Number.isFinite) && rect.width > 0 && rect.height > 0 && rect.right > rect.left && rect.bottom > rect.top;
+    const panel = this.panel.getBoundingClientRect();
+    const body = this.body.getBoundingClientRect();
+    const thumb = frame.getBoundingClientRect();
+    if (![panel,body,thumb].every(usable)) return null;
+    const dy = panel.height * translatedPercent / 100;
+    const left = Math.max(0,panel.left,body.left);
+    const top = Math.max(0,panel.top-dy,body.top-dy);
+    const right = Math.min(window.innerWidth,panel.right,body.right);
+    const bottom = Math.min(window.innerHeight,panel.bottom-dy,body.bottom-dy);
+    const rect = { x:thumb.left,y:thumb.top-dy,width:thumb.width,height:thumb.height };
+    if (right <= left || bottom <= top || rect.x < left-.01 || rect.y < top-.01 || rect.x+rect.width > right+.01 || rect.y+rect.height > bottom+.01) return null;
+    const footer = this.body.querySelector<HTMLElement>('.fb-footer');
+    if (footer && !footer.closest('[hidden]') && window.getComputedStyle(footer).visibility !== 'hidden') {
+      const cover = footer.getBoundingClientRect();
+      if (usable(cover) && cover.left < rect.x+rect.width && cover.right > rect.x && cover.top-dy < rect.y+rect.height && cover.bottom-dy > rect.y) return null;
+    }
+    return rect;
+  }
+
+  private startHandoff(s: RegionSession, blob: Blob, source: RegionRect): void {
+    this.regionOverlay.classList.add('is-handoff');
+    this.orbCanvas.hidden = true;
+    this.panel.classList.add('is-handoff');
+    this.panel.style.transition = 'none';
+    this.panel.style.transform = 'none';
+    this.panel.style.opacity = '1';
+    let translatedPercent = 0;
+    let destination = this.visibleAttachmentRect();
+    let flightCancelled = destination === null;
+    this.handoffUrl = destination ? URL.createObjectURL(blob) : null;
+    if (this.handoffUrl) this.flyingShot.src = this.handoffUrl;
+    else this.flyingShot.removeAttribute('src');
+    this.flyingShot.hidden = flightCancelled;
+    this.panel.inert = !this.prefersReducedMotion();
+    if (!this.prefersReducedMotion()) this.textarea.blur();
+    const started = performance.now();
+    const tick = () => {
+      if (!this.validRegion(s) || !this.openState) return;
+      this.flowFrame = null;
+      if (this.activeTab !== 'compose' || this.settingsOpen) { this.dismissRegionFlow({ focusOrb: false }); return; }
+      const time = this.prefersReducedMotion() ? 1500 : performance.now()-started;
+      if (!flightCancelled) {
+        destination = this.visibleAttachmentRect(translatedPercent);
+        if (!destination) flightCancelled = true;
+      }
+      this.regionBg.style.filter = `blur(${3*progress(time,0,350)}px)`;
+      this.regionDim.style.opacity = '.26';
+      this.panel.style.opacity = String(progress(time,60,300));
+      translatedPercent = 104*(1-progress(time,120,1050));
+      this.panel.style.transform = `translateY(${translatedPercent}%)`;
+      this.panel.style.setProperty('--fb-attachment-opacity', flightCancelled ? '1' : String(progress(time,1220,1350)));
+      if (!flightCancelled && destination) {
+        const target = destination;
+        const fly = progress(time,180,1330);
+        const rect = Object.fromEntries((['x','y','width','height'] as const).map(k => [k, source[k]+(target[k]-source[k])*fly])) as unknown as RegionRect;
+        Object.assign(this.flyingShot.style,{ left: `${rect.x}px`, top: `${rect.y-12*Math.sin(Math.PI*fly)}px`, width: `${rect.width}px`, height: `${rect.height}px`, borderRadius: `${12-2*fly}px`, boxShadow: `0 ${16*Math.sin(Math.PI*fly)}px ${30*Math.sin(Math.PI*fly)}px rgba(30,25,60,${.2*(1-fly)})`, opacity: String(1-progress(time,1220,1350)) });
+      } else this.flyingShot.hidden = true;
+      this.panel.inert = time < 1350;
+      if (time < 1500) this.flowFrame = window.requestAnimationFrame(tick);
+      else {
+        this.dismissRegionFlow({ focusOrb: false });
+        if (this.isConnected && this.openState && s.epoch === this.identityEpoch && s.seq === this.captureSeq) this.textarea.focus({ preventScroll: true });
+      }
+    };
+    tick();
   }
 
   /** 取消：丢弃冻结画面并恢复 UI，不覆盖原草稿、不报失败；焦点回到灵感球。 */
   private cancelRegion(): void {
     this.dismissRegionFlow();
+    this.releaseLens();
   }
 
   /** 收起覆盖层（任何失效路径共用）：回收对象 URL、移除监听、还原焦点。 */
@@ -2115,6 +2451,24 @@ export class FeedbackWidget extends HTMLElement {
     const s = this.regionSession;
     if (!s) return;
     this.regionSession = null;
+    if (this.flowFrame !== null) window.cancelAnimationFrame(this.flowFrame);
+    this.flowFrame = null;
+    if (s.pointerId !== null) {
+      try { this.regionOverlay.releasePointerCapture(s.pointerId); } catch { /* already released */ }
+    }
+    this.panel.inert = false;
+    this.orbCanvas.hidden = true;
+    this.panel.classList.remove('is-handoff');
+    for (const name of ['transition','transform','opacity','--fb-attachment-opacity']) this.panel.style.removeProperty(name);
+    this.handoffImageId = null;
+    for (const cell of this.screenshotWrap.querySelectorAll('.is-entering')) cell.classList.remove('is-entering');
+    this.flyingShot.hidden = true;
+    this.flyingShot.removeAttribute('src');
+    if (this.handoffUrl) URL.revokeObjectURL(this.handoffUrl);
+    this.handoffUrl = null;
+    this.regionBg.style.removeProperty('filter');
+    this.regionDim.style.opacity = '0';
+    if (!this.openState) this.orb.classList.remove('is-hidden');
     if (this.regionKeyHandler) {
       document.removeEventListener('keydown', this.regionKeyHandler, true);
       this.regionKeyHandler = null;
@@ -2128,7 +2482,8 @@ export class FeedbackWidget extends HTMLElement {
     }
     this.regionErrorEl.hidden = true;
     this.regionErrorEl.textContent = '';
-    if (opts.focusOrb !== false && this.isConnected) {
+    this.syncOrbIdle(true);
+    if (opts.focusOrb !== false && this.canUseOrbLauncher()) {
       try {
         this.orb.focus();
       } catch {
@@ -2141,6 +2496,11 @@ export class FeedbackWidget extends HTMLElement {
   private onRegionKeydown(ev: KeyboardEvent): void {
     const s = this.regionSession;
     if (!s) return;
+    if (s.phase === 'handoff') {
+      if (ev.key === 'Escape') { ev.preventDefault(); ev.stopImmediatePropagation(); this.close(); }
+      else if (this.panel.inert) { ev.preventDefault(); ev.stopImmediatePropagation(); }
+      return;
+    }
     if (ev.key === 'Escape') {
       ev.preventDefault();
       ev.stopPropagation();
@@ -2148,6 +2508,8 @@ export class FeedbackWidget extends HTMLElement {
       return;
     }
     if (ev.key === 'Enter') {
+      // Preserve each focused button's action (including whole-window and cancel).
+      if (this.root.activeElement instanceof HTMLButtonElement) return;
       ev.preventDefault();
       ev.stopPropagation();
       void this.confirmRegion(true);
@@ -2156,6 +2518,8 @@ export class FeedbackWidget extends HTMLElement {
     const dx = ev.key === 'ArrowLeft' ? -REGION_KEY_STEP : ev.key === 'ArrowRight' ? REGION_KEY_STEP : 0;
     const dy = ev.key === 'ArrowUp' ? -REGION_KEY_STEP : ev.key === 'ArrowDown' ? REGION_KEY_STEP : 0;
     if (dx !== 0 || dy !== 0) {
+      if (s.confirming) return;
+      this.finishSelectionEntrance(s);
       const active = this.root.activeElement;
       // 焦点在工具栏按钮上时不劫持方向键（浏览器可能用它切换单选/滚动）
       if (active !== this.regionFrame && active !== this.regionOverlay) return;
@@ -2314,6 +2678,9 @@ export class FeedbackWidget extends HTMLElement {
     this.updateMetaInfo();
     // T6：键未变则跳过——避免断开重连把「仅本次生效」的会话内选择覆盖回存储值
     this.loadServerOverride();
+    this.loadWakePreference();
+    this.loadOrbIdlePreference();
+    this.wakeGestures.connect();
 
     // 断开重连：图片字节保留在实例草稿中，重连时重建自己的预览 URL
     for (const img of this.draft.images) {
@@ -2323,6 +2690,8 @@ export class FeedbackWidget extends HTMLElement {
     if (!this.visibilityHandler) {
       this.visibilityHandler = () => {
         if (document.visibilityState === 'visible') {
+          this.syncOrbIdle(true);
+          this.prepareLens();
           this.quotaRefreshFailed = false;
           void this.refreshQuota();
           void this.pollSummary();
@@ -2330,6 +2699,9 @@ export class FeedbackWidget extends HTMLElement {
             void this.loadDialogue(this.activeDialogueId, true);
           }
         } else {
+          this.cancelOrbIdleTimer();
+          this.cancelCapture();
+          this.releaseLens();
           // 退到后台：取消定时查询并使在途查询失效（旧结果不得写回前台状态）；
           // 同时清除补发意图，回前台时重新登记（T1-B）。
           this.invalidateQuotaRefresh();
@@ -2355,9 +2727,22 @@ export class FeedbackWidget extends HTMLElement {
       void this.loadHostSession();
     }
     this.syncUi();
+    this.connectOrbSurface();
+    this.observeOrbAvailability();
+    this.syncOrbIdle(true);
   }
 
   disconnectedCallback(): void {
+    this.cancelOrbIdleTimer();
+    this.clearOrbIdleMorph();
+    this.orbIdleAvailable = false;
+    this.orbHovered = this.orbKeyboardInput = false;
+    this.orbAvailabilityObserver?.disconnect();
+    this.orbAvailabilityObserver = null;
+    this.wakeGestures.disconnect();
+    this.surfaceCleanup?.();
+    this.surfaceCleanup = null;
+    this.releaseLens();
     this.stopDialoguePolling();
     this.stopSummaryPolling();
     this.invalidateLogCollection();
@@ -2404,6 +2789,11 @@ export class FeedbackWidget extends HTMLElement {
   }
 
   attributeChangedCallback(name: string, oldVal: string | null, newVal: string | null): void {
+    if (oldVal !== newVal && ['hidden','inert','aria-disabled'].includes(name) && this.orb) {
+      this.syncOrbIdle(true);
+      if (!this.canUseOrbLauncher()) { this.wakeGestures.reset(); this.releaseLens(); }
+      else this.prepareLens();
+    }
     if (name === 'api-base' && oldVal !== newVal) {
       // 服务身份切换：先递增世代（在途请求全部作废），再清空属于旧服务的一切。
       // T6：偏好槽位随「规范化默认地址 + appId」变化——先按新键重读覆盖再统一重置；
@@ -2419,6 +2809,8 @@ export class FeedbackWidget extends HTMLElement {
     if (name === 'app-id' && oldVal !== newVal) {
       // appId 槽位可能指向不同的实际服务；先加载新覆盖，再决定是否能保留令牌。
       const previousEffectiveApiBase = this.effectiveApiBase;
+      this.loadWakePreference();
+      this.loadOrbIdlePreference();
       this.settingsOpen = false;
       this.settingsConfirmOpen = false;
       this.pendingServerTarget = undefined;
@@ -2438,6 +2830,7 @@ export class FeedbackWidget extends HTMLElement {
       this.updateLauncherBottomCss();
     }
     if (name === 'app-version' || name === 'page-label') {
+      if (name === 'page-label' && oldVal !== newVal) this.invalidateCaptureSession();
       this.updateMetaInfo();
     }
     if (
@@ -2445,6 +2838,21 @@ export class FeedbackWidget extends HTMLElement {
       (name === 'launcher-mode' && newVal !== 'orb')
     ) {
       this.clearOrbRelease(true);
+      this.releaseLens();
+    }
+    if (this.isConnected && (name === 'launcher-mode' || name === 'show-launcher')) this.prepareLens();
+    if (name === 'capture-mode' && oldVal !== newVal) {
+      this.wakeGestures.reset();
+      this.syncWakeSettings();
+    }
+    if (name === 'theme' && oldVal !== newVal) this.redrawOrbMaterial();
+    if (oldVal !== newVal && ['launcher-mode','show-launcher','launcher-bottom','side','app-id','api-base','page-label'].includes(name)) {
+      this.wakeGestures.reset();
+      this.clearOrbIdleMorph();
+      this.orbIdleAvailable=false;
+      this.syncOrbIdle(true);
+      this.drawLiquid();
+      if (this.isConnected) this.prepareLens();
     }
     // theme / side / show-launcher / capture-mode 不触碰草稿、令牌、任务态与截图
   }
@@ -2584,66 +2992,440 @@ export class FeedbackWidget extends HTMLElement {
   }
 
   private clearOrbRelease(resetVisuals = false): void {
-    this.orbReleaseGeneration++;
-    const view = this.ownerDocument.defaultView;
-    if (this.orbReleaseFrame !== null) {
-      view?.cancelAnimationFrame(this.orbReleaseFrame);
-      this.orbReleaseFrame = null;
-    }
-    if (this.orbReleaseTimer !== null) {
-      clearTimeout(this.orbReleaseTimer);
-      this.orbReleaseTimer = null;
-    }
-    this.orb.classList.remove('is-releasing');
+    this.liquidGeneration++;
+    if (this.liquidFrame !== null) window.cancelAnimationFrame(this.liquidFrame);
+    this.liquidFrame = null;
     if (!resetVisuals) return;
-
-    this.orb.style.setProperty('transition', 'none');
+    this.liquid.reset(0,0);
+    this.lastLiquidVisual = null;
     this.isDragging = false;
-    this.orb.classList.remove('is-dragging');
+    this.orb.classList.remove('is-dragging','is-releasing');
     this.clearOrbDragInlineStyles();
-    void this.orb.offsetWidth;
-    this.orb.style.removeProperty('transition');
+    if (this.orbCanvas) this.orbCanvas.hidden = true;
+    if (this.orbOutline) this.hideOrbOutline();
   }
 
-  private canAnimateOrbRelease(): boolean {
-    const view = this.ownerDocument.defaultView;
-    return Boolean(
-      orbRegisteredPropertiesAvailable &&
-        view &&
-        typeof view.requestAnimationFrame === 'function' &&
-        !this.prefersReducedMotion() &&
-        this.isConnected &&
-        this.showLauncher &&
-        this.launcherMode === 'orb' &&
-        !this.openState &&
-        !this.orb.classList.contains('is-hidden') &&
-        this.orb.style.visibility !== 'hidden',
-    );
+  private displaySignature(): string {
+    return `${window.innerWidth}:${window.innerHeight}:${window.devicePixelRatio || 1}`;
   }
 
-  private beginOrbRelease(): void {
-    if (!this.canAnimateOrbRelease()) {
-      this.resetOrbGestureVisuals();
+  private orbHostElements(): Element[] {
+    const elements: Element[] = [this];
+    for (let parent = this.parentElement; parent; parent = parent.parentElement) elements.push(parent);
+    return elements;
+  }
+
+  private canUseOrbLauncher(): boolean {
+    if (!this.isConnected || !this.showLauncher || this.launcherMode !== 'orb' || !this.orbSurfaceActive || document.visibilityState === 'hidden' || this.closest('[hidden], [inert], [aria-disabled="true"]') || this.openState || this.regionSession || this.isCapturing || this.captureInFlight) return false;
+    for (const node of this.orbHostElements()) {
+      const style = window.getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
+    }
+    return true;
+  }
+
+  private cancelOrbIdleTimer(): void {
+    this.orbIdleGeneration++;
+    if (this.orbIdleTimer !== null) clearTimeout(this.orbIdleTimer);
+    this.orbIdleTimer = null;
+  }
+
+  private orbHasKeyboardFocus(): boolean {
+    return this.orbKeyboardInput && this.root.activeElement === this.orb;
+  }
+
+  private clearOrbIdleMorph(): void {
+    this.orbIdleVisualGeneration++;
+    if (this.orbIdleFrame!==null) window.cancelAnimationFrame(this.orbIdleFrame);
+    this.orbIdleFrame=null; this.orbIdleMorph=null; this.orbIdleVisual=null;
+  }
+
+  private orbIdleTarget(collapsed: boolean): OrbIdleVisual {
+    const safe=window.getComputedStyle(this.safeInsetsProbe);
+    const inset=parseFloat(this.side==='left'?safe.paddingLeft:safe.paddingRight)||0;
+    const signed=(distance:number)=>this.side==='left'?distance:window.innerWidth-distance;
+    const handle=collapsed && this.orbIdleStyle==='handle';
+    return {
+      x:signed(collapsed?inset+(handle?9:0):Math.max(20,inset)+28),
+      halfX:handle?6:28,halfY:28,handleMix:handle?1:0,
+      hitX:signed(collapsed?inset+22:Math.max(20,inset)+28),hitWidth:collapsed?44:56,
+      clipLeft:collapsed && !handle && this.side==='left'?.5:0,
+      clipRight:collapsed && !handle && this.side!=='left'?.5:0,
+    };
+  }
+
+  private currentOrbIdleVisual(): OrbIdleVisual {
+    const morph=this.orbIdleMorph;
+    if (morph) {
+      const elapsed=this.prefersReducedMotion()?420:performance.now()-morph.startedAt;
+      this.orbIdleVisual=interpolateOrbIdle(morph.from,morph.to,elapsed);
+      if (elapsed>=420) this.orbIdleMorph=null;
+    }
+    const visual=this.orbIdleVisual ?? (this.orbIdleVisual=this.orbIdleTarget(this.orbCollapsed));
+    const safe=window.getComputedStyle(this.safeInsetsProbe);
+    return constrainOrbIdleHit(visual,window.innerWidth,parseFloat(safe.paddingLeft)||0,parseFloat(safe.paddingRight)||0);
+  }
+
+  private syncOrbAriaLabel(): void {
+    const base=this.orbCollapsed?'唤醒灵感球':'灵感球：拖动指出问题或点击反馈';
+    this.orb.setAttribute('aria-label',base+(this.unreadCount>0?`，${this.unreadCount}条未读`:''));
+  }
+
+  private setOrbCollapsed(collapsed: boolean, animate=true): void {
+    const changed=this.orbCollapsed!==collapsed;
+    const from=this.currentOrbIdleVisual();
+    this.orbCollapsed=collapsed;
+    this.orb.classList.toggle('is-collapsed',collapsed);
+    this.orb.dataset.idleStyle=this.orbIdleStyle;
+    this.syncOrbAriaLabel();
+    if (!changed && animate) return;
+    const target=this.orbIdleTarget(collapsed);
+    if (!animate || this.prefersReducedMotion() || !this.canUseOrbLauncher()) {
+      this.orbIdleMorph=null; this.orbIdleVisual=target;
+      this.drawLiquid(); return;
+    }
+    this.orbIdleMorph={from,to:target,startedAt:performance.now()};
+    this.drawLiquid();
+    if (this.orbIdleFrame!==null) return;
+    const generation=this.orbIdleVisualGeneration,epoch=this.identityEpoch;
+    const tick=()=>{
+      if (generation!==this.orbIdleVisualGeneration || epoch!==this.identityEpoch) return;
+      this.orbIdleFrame=null;
+      if (!this.canUseOrbLauncher() || this.isDragging) { this.clearOrbIdleMorph(); return; }
+      this.drawLiquid();
+      if (this.orbIdleMorph) this.orbIdleFrame=window.requestAnimationFrame(tick);
+    };
+    this.orbIdleFrame=window.requestAnimationFrame(tick);
+  }
+
+  private syncOrbIdle(reset = false): void {
+    if (!this.orb) return;
+    if (this.orbIdleIdentityEpoch!==this.identityEpoch) {
+      this.orbIdleIdentityEpoch=this.identityEpoch;
+      this.cancelOrbIdleTimer();
+      this.clearOrbIdleMorph();
+      this.orbIdleAvailable=false;
+    }
+    const available = this.canUseOrbLauncher();
+    this.orb.classList.toggle('is-unavailable',!available);
+    if (!available) {
+      this.cancelOrbIdleTimer();
+      this.orbIdleAvailable = false;
+      this.orbHovered = false;
+      this.clearOrbIdleMorph();
+      if (this.orbPointerId !== null) {
+        const id = this.orbPointerId;
+        this.orbPointerId = null;
+        this.resetOrbGestureVisuals(); this.clearOrbUnpress();
+        try { this.orb.releasePointerCapture(id); } catch { /* already released */ }
+      }
+      this.setOrbCollapsed(false,false);
       return;
     }
+    if (reset || !this.orbIdleAvailable) {
+      this.cancelOrbIdleTimer();
+      this.setOrbCollapsed(false,this.orbIdleAvailable);
+    }
+    this.orbIdleAvailable = true;
+    if (this.orbPointerId !== null || this.isDragging || this.orbHovered || this.orbHasKeyboardFocus() || this.phase === 'submitting' || this.polling) {
+      this.cancelOrbIdleTimer();
+      return;
+    }
+    if (this.orbCollapsed || this.orbIdleTimer !== null) return;
+    const generation = this.orbIdleGeneration, epoch = this.identityEpoch;
+    this.orbIdleTimer = setTimeout(() => {
+      if (generation !== this.orbIdleGeneration) return;
+      this.orbIdleTimer = null;
+      if (epoch !== this.identityEpoch || !this.canUseOrbLauncher() || this.orbPointerId !== null || this.isDragging || this.orbHovered || this.orbHasKeyboardFocus() || this.phase === 'submitting' || this.polling) return;
+      this.setOrbCollapsed(true);
+      if (!this.orbLens) this.prepareLens();
+    },5000);
+  }
 
-    this.clearOrbRelease();
-    this.clearOrbUnpress();
-    this.orb.classList.add('is-releasing');
-    const generation = this.orbReleaseGeneration;
-    const view = this.ownerDocument.defaultView!;
-    this.orbReleaseFrame = view.requestAnimationFrame(() => {
-      if (generation !== this.orbReleaseGeneration) return;
-      this.orbReleaseFrame = null;
-      this.isDragging = false;
-      this.orb.classList.remove('is-pressed', 'is-dragging');
-      this.clearOrbDragInlineStyles();
-      this.orbReleaseTimer = setTimeout(() => {
-        if (generation !== this.orbReleaseGeneration) return;
-        this.orbReleaseTimer = null;
-        this.orb.classList.remove('is-releasing');
-      }, 460);
+  private wakeOrb(): void {
+    if (!this.canUseOrbLauncher()) return;
+    this.syncOrbIdle(true);
+    if (!this.orbLens || !this.lensFresh) this.prepareLens();
+    else this.drawLiquid();
+  }
+
+  private observeOrbAvailability(): void {
+    this.orbAvailabilityObserver?.disconnect();
+    this.orbAvailabilityObserver = new MutationObserver(records => {
+      const wasAvailable = this.orbIdleAvailable;
+      // Ancestor attributes may hide and restore the host within one observer batch.
+      // Invalidate that batch's old callback even when its final style is visible.
+      this.syncOrbIdle(records.some(record => record.target !== this));
+      if (!this.canUseOrbLauncher()) { this.wakeGestures.reset(); this.releaseLens(); }
+      else if (!wasAvailable) this.prepareLens();
     });
+    for (const node of this.orbHostElements()) {
+      this.orbAvailabilityObserver.observe(node,{attributes:true,attributeFilter:['hidden','inert','aria-disabled','style','class']});
+    }
+  }
+
+  private connectOrbSurface(): void {
+    this.surfaceCleanup?.();
+    this.surfaceSignature = this.displaySignature();
+    this.orbSurfaceActive = document.visibilityState !== 'hidden';
+    // Programmatic focus restoration after pointer dismissal remains accessible,
+    // but only keyboard focus should hold the idle launcher open.
+    const keyboard = (ev: KeyboardEvent) => {
+      if (ev.metaKey || ev.ctrlKey || ev.altKey || ['Shift','Control','Alt','Meta'].includes(ev.key)) return;
+      this.orbKeyboardInput = true;
+      if (this.root.activeElement === this.orb) this.syncOrbIdle();
+    };
+    const pointer = () => {
+      if (!this.orbKeyboardInput) return;
+      this.orbKeyboardInput = false;
+      this.syncOrbIdle();
+    };
+    document.addEventListener('keydown',keyboard,true);
+    document.addEventListener('pointerdown',pointer,true);
+    document.addEventListener('touchstart',pointer,{capture:true,passive:true});
+    let resolution: MediaQueryList | undefined;
+    const resize = () => {
+      const next = this.displaySignature();
+      if (next === this.surfaceSignature) return;
+      this.surfaceSignature = next;
+      this.clearOrbIdleMorph();
+      this.orbIdleAvailable=false;
+      this.syncOrbIdle(true);
+      resolution?.removeEventListener?.('change',resize);
+      resolution = window.matchMedia?.(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+      resolution?.addEventListener?.('change',resize);
+      const hadCapture = this.regionSession !== null || this.isCapturing;
+      this.cancelCapture();
+      if (hadCapture) {
+        if (!this.openState) this.open();
+        this.renderStatus('窗口尺寸或显示比例已改变，请重新截图。');
+      }
+    };
+    const scroll = () => this.invalidateLensTexture();
+    const page = () => { this.cancelOrbIdleTimer(); this.syncOrbIdle(true); this.cancelCapture(); this.releaseLens(); };
+    const suspend = () => { this.orbSurfaceActive = false; page(); };
+    const resume = () => { this.orbSurfaceActive = true; this.syncOrbIdle(true); this.prepareLens(); };
+    resolution = window.matchMedia?.(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+    const color = window.matchMedia?.('(forced-colors: active)');
+    const colors = () => { this.releaseLens(); this.prepareLens(); };
+    const theme = window.matchMedia?.('(prefers-color-scheme: dark)');
+    const recolor = () => { if (this.theme === 'system') this.redrawOrbMaterial(); };
+    const motion = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+    const reduced = () => {
+      if (this.isDragging) this.liquid.advance(0,true,this.prefersReducedMotion());
+      if (this.orbIdleMorph && this.prefersReducedMotion()) { const target=this.orbIdleMorph.to; this.clearOrbIdleMorph(); this.orbIdleVisual=target; }
+      this.drawLiquid();
+      const s = this.regionSession;
+      if (s?.phase === 'selection') { this.finishSelectionEntrance(s); this.renderRegion(); }
+    };
+    window.addEventListener('resize',resize);
+    window.addEventListener('scroll',scroll,true);
+    window.addEventListener('pagehide',suspend);
+    window.addEventListener('pageshow',resume);
+    window.addEventListener('popstate',page);
+    window.addEventListener('hashchange',page);
+    const blur = (ev: Event) => { if (!(ev.target instanceof Element)) suspend(); };
+    const focus = (ev: Event) => { if (!(ev.target instanceof Element)) resume(); };
+    window.addEventListener('blur',blur);
+    window.addEventListener('focus',focus);
+    resolution?.addEventListener?.('change',resize);
+    color?.addEventListener?.('change',colors);
+    motion?.addEventListener?.('change',reduced);
+    theme?.addEventListener?.('change',recolor);
+    this.surfaceCleanup = () => {
+      document.removeEventListener('keydown',keyboard,true);
+      document.removeEventListener('pointerdown',pointer,true);
+      document.removeEventListener('touchstart',pointer,true);
+      window.removeEventListener('resize',resize);
+      window.removeEventListener('scroll',scroll,true);
+      window.removeEventListener('pagehide',suspend);
+      window.removeEventListener('pageshow',resume);
+      window.removeEventListener('popstate',page);
+      window.removeEventListener('hashchange',page);
+      window.removeEventListener('blur',blur);
+      window.removeEventListener('focus',focus);
+      resolution?.removeEventListener?.('change',resize);
+      color?.removeEventListener?.('change',colors);
+      motion?.removeEventListener?.('change',reduced);
+      theme?.removeEventListener?.('change',recolor);
+    };
+    this.prepareLens();
+  }
+
+  private canShowOrbLens(): boolean {
+    if (!this.canUseOrbLauncher()) return false;
+    if (!this.isConnected || !this.orbSurfaceActive || this.lensContextLost || !this.showLauncher || this.launcherMode !== 'orb' || this.openState || this.isCapturing || this.regionSession || this.orb.classList.contains('is-hidden') || this.closest('[hidden]') || document.visibilityState === 'hidden' || window.matchMedia?.('(forced-colors: active)').matches) return false;
+    const orbStyle = window.getComputedStyle(this.orb);
+    const hostStyle = window.getComputedStyle(this);
+    return ![orbStyle,hostStyle].some(style => style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse');
+  }
+
+  private queueLensRestore(): void {
+    if (!this.isConnected || this.lensRestoreQueued) return;
+    this.lensRestoreQueued = true;
+    queueMicrotask(() => {
+      this.lensRestoreQueued = false;
+      // close/cancel/identity changes finish synchronously before this visibility check.
+      this.syncOrbIdle();
+      this.prepareLens();
+    });
+  }
+
+  private prepareLens(): void {
+    if (!this.canShowOrbLens()) { if (this.canUseOrbLauncher()) this.drawLiquid(); return; }
+    if (!this.orbLens) this.orbLens = OrbLens.create(this.orbCanvas);
+    this.orb.classList.toggle('has-lens',this.orbLens !== null);
+    this.drawLiquid();
+    if (this.orbLens) void this.refreshLensSnapshot();
+  }
+
+  private invalidateLensTexture(): void {
+    this.lensGeneration++;
+    this.lensRefreshPending = null;
+    this.lensController?.abort(); this.lensController = null;
+    this.lensFresh = false;
+    this.orbLens?.clearImage();
+    if (!this.isCapturing && !this.regionSession) this.drawLiquid();
+  }
+
+  private releaseLens(): void {
+    this.lensGeneration++;
+    this.lensRefreshPending = null;
+    this.lensController?.abort(); this.lensController = null;
+    this.lensFresh = false;
+    this.orbLens?.dispose(); this.orbLens = null;
+    this.orb.classList.remove('has-lens');
+    if (this.orbCanvas) this.orbCanvas.hidden = true;
+    if (this.orbOutline) this.hideOrbOutline();
+    this.queueLensRestore();
+  }
+
+  private async refreshLensSnapshot(): Promise<void> {
+    const lens = this.orbLens;
+    if (!lens || !this.canShowOrbLens()) return;
+    if (this.lensBusy) {
+      this.lensRefreshPending = this.lensGeneration;
+      return;
+    }
+    if (this.lensFresh && performance.now()-this.lensCapturedAt < 1000) return;
+    this.lensRefreshPending = null;
+    this.lensBusy = true;
+    const generation = this.lensGeneration, epoch = this.identityEpoch;
+    const signature = this.displaySignature();
+    const controller = new AbortController(); this.lensController = controller;
+    const active = () => this.canShowOrbLens() && this.orbLens === lens && generation === this.lensGeneration && epoch === this.identityEpoch && signature === this.displaySignature() && !controller.signal.aborted;
+    try {
+      const viewport = logicalViewport(window);
+      // Only the built-in clone + opaque pixel-mask pipeline may feed this decorative texture.
+      // It never calls the host provider or changes captureSeq / actual capture UI.
+      const result = await captureViewport({ viewport, signal: controller.signal, expectedSensitiveCount: countVisibleSensitiveRegions(document,{ ignore: el => this.isOwnFeedbackUi(el) }), ignore: el => el === this || el.tagName.toLowerCase() === 'feedback-widget' });
+      if (!active()) return;
+      const decoded = await decodeImage(result.blob);
+      try {
+        if (!active()) return;
+        lens.setImage(decoded.source as TexImageSource,result.outputWidth,result.outputHeight,result.viewportWidth);
+        this.lensFresh = true; this.lensCapturedAt = performance.now();
+        this.drawLiquid();
+      } finally { decoded.close?.(); }
+    } catch { if (active()) { lens.clearImage(); this.lensFresh = false; this.drawLiquid(); } }
+    finally {
+      this.lensBusy = false;
+      if (this.lensController === controller) this.lensController = null;
+      const replay = this.lensRefreshPending === this.lensGeneration && generation !== this.lensGeneration;
+      this.lensRefreshPending = null;
+      // An old capture may ignore abort until rendering/decoding finishes. Its successor
+      // starts only now, and only for the latest explicit visible-generation request.
+      if (replay) void this.refreshLensSnapshot();
+    }
+  }
+
+  private orbMaterialIsDark(): boolean {
+    return this.theme === 'dark' || (this.theme === 'system' && (window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false));
+  }
+
+  private redrawOrbMaterial(): void {
+    if (!this.isConnected || !this.orbSurfaceActive || document.visibilityState === 'hidden') return;
+    const session = this.regionSession;
+    if (session?.phase === 'selection') {
+      this.renderRegion(this.prefersReducedMotion() ? 550 : performance.now()-session.startedAt);
+    } else if (this.canShowOrbLens()) {
+      // The host may change its background with the theme. Clear the old safe
+      // texture before requesting the new generation through the same masked pipeline.
+      this.invalidateLensTexture();
+      this.prepareLens();
+    }
+  }
+
+  private dragLiquidRadius(): number {
+    return (this.prefersReducedMotion() ? 52 : 28+24*progress(performance.now()-this.liquidStarted,0,220)) * this.liquid.radius/52;
+  }
+
+  private hideOrbOutline(): void {
+    if (!this.orbOutline) return;
+    this.orbOutline.classList.remove('is-fallback-visible');
+    this.orbOutline.style.display='none';
+  }
+
+  private drawLiquid(): void {
+    if (!this.canUseOrbLauncher()) { this.orbCanvas.hidden = true; this.hideOrbOutline(); return; }
+    if (this.isCapturing || this.regionSession || this.openState) { this.orbCanvas.hidden = true; this.hideOrbOutline(); return; }
+    if (this.isDragging) this.orb.style.transform = `translate3d(${this.liquid.x}px, ${this.liquid.y}px, 0)`;
+    const dock = this.isDragging ? this.orbDock : (() => { const r=this.orb.getBoundingClientRect(); return { x:r.left+r.width/2,y:r.top+r.height/2 }; })();
+    const radius = this.isDragging ? this.dragLiquidRadius() : 28;
+    const visual=this.currentOrbIdleVisual();
+    const center={x:this.isDragging?dock.x+this.liquid.x:visual.x,y:dock.y+(this.isDragging?this.liquid.y:0)};
+    if (!this.isDragging) {
+      Object.assign(this.orb.style,{left:`${visual.hitX-visual.hitWidth/2}px`,right:'auto',width:`${visual.hitWidth}px`,minWidth:`${visual.hitWidth}px`});
+    }
+    const clip=this.isDragging?'inset(0 0 0 0)':`inset(0 ${visual.clipRight*100}% 0 ${visual.clipLeft*100}%)`;
+    for (const layer of [this.orbCanvas,this.orbOutline]) layer.style.clipPath=clip;
+    if (this.isDragging) this.lastLiquidVisual = { ...center, radius, dirX:this.liquid.dirX, dirY:this.liquid.dirY, deform:this.liquid.deform, wobble:this.liquid.wobble };
+    this.orbCanvas.hidden = false;
+    this.hideOrbOutline();
+    if (this.orbLens) this.orbLens.draw(center,radius,this.liquid,1,this.orbMaterialIsDark(),this.isDragging?undefined:{halfSize:{x:visual.halfX,y:visual.halfY},handleMix:visual.handleMix,mist:.74,idleMix:1});
+    else {
+      const forced=window.matchMedia?.('(forced-colors: active)').matches ?? false;
+      const softIdle = !forced && !this.isDragging;
+      const lightIdle = softIdle && !this.orbMaterialIsDark();
+      this.orbOutlinePath.setAttribute('stroke',forced?'ButtonText':lightIdle?'rgba(89,110,143,.32)':softIdle?'rgba(235,237,246,.45)':'rgba(255,255,255,.75)');
+      this.orbOutlinePath.setAttribute('stroke-width',softIdle?'4':'1');
+      this.orbOutline.style.filter=softIdle && !lightIdle?'blur(3px)':'none';
+      this.orbOutlinePath.style.filter=lightIdle?'blur(3px)':'none';
+      this.orbOutlineHalo.style.display=lightIdle?'':'none';
+      if (lightIdle) this.orbOutlineArt.setAttribute('clip-path',`url(#${this.orbOutlineExteriorId})`);
+      else this.orbOutlineArt.removeAttribute('clip-path');
+      const size=radius*3.2, points:string[]=[];
+      this.orbCanvas.hidden=true;
+      this.orbOutline.classList.add('is-fallback-visible');
+      Object.assign(this.orbOutline.style,{display:'',left:`${center.x-size/2}px`,top:`${center.y-size/2}px`,width:`${size}px`,height:`${size}px`});
+      this.orbOutline.setAttribute('viewBox',`0 0 ${size} ${size}`);
+      for (let i=0;i<128;i++) {
+        const theta=i*Math.PI*2/128, r=this.isDragging?radius*liquidBoundary(theta,this.liquid):orbIdleBoundary(theta,radius,this.liquid,visual);
+        points.push(`${size/2+r*Math.cos(theta)},${size/2+r*Math.sin(theta)}`);
+      }
+      const contour=`M${points.join(' L')}Z`;
+      this.orbOutlinePath.setAttribute('d',contour);
+      this.orbOutlineHalo.setAttribute('d',contour);
+      // Clip after both blurs: the narrow capsule's two halos must never tint its interior.
+      this.orbOutlineExterior.setAttribute('d',`M0,0 H${size} V${size} H0 Z ${contour}`);
+      this.orb.classList.add('has-lens');
+    }
+  }
+
+  private kickLiquid(): void {
+    if (this.prefersReducedMotion()) { this.liquid.advance(0,this.isDragging,true); this.drawLiquid(); return; }
+    if (this.liquidFrame !== null) return;
+    this.liquidTime = performance.now();
+    const generation = this.liquidGeneration;
+    const tick = (now: number) => {
+      if (generation !== this.liquidGeneration) return;
+      this.liquidFrame = null;
+      if (!this.isConnected || this.isCapturing || this.regionSession || this.openState) return;
+      this.liquid.advance((now-this.liquidTime)/1000,this.isDragging);
+      this.liquidTime = now; this.drawLiquid();
+      if (this.isDragging || !this.liquid.settled) this.liquidFrame = window.requestAnimationFrame(tick);
+    };
+    this.liquidFrame = window.requestAnimationFrame(tick);
   }
 
   private resetOrbGestureVisuals(): boolean {
@@ -2661,13 +3443,23 @@ export class FeedbackWidget extends HTMLElement {
     let isPointerDown = false;
 
     this.orb.addEventListener('pointerdown', (ev: PointerEvent) => {
-      if (ev.button !== 0) return;
+      if (ev.button !== 0 || ev.isPrimary === false || this.orbPointerId !== null || this.isCapturing || this.regionSession || this.openState) return;
+      if (!this.canUseOrbLauncher()) return;
+      if (this.orbCollapsed) { ev.preventDefault(); ev.stopPropagation(); this.wakeOrb(); return; }
+      if (this.orbIdleMorph) { ev.preventDefault(); return; }
+      this.cancelOrbIdleTimer();
+      this.clearOrbIdleMorph();
+      this.wakeGestures.reset();
       startX = ev.clientX;
       startY = ev.clientY;
       isPointerDown = true;
       this.clearOrbRelease(true);
       this.isDragging = false;
       this.orbPointerId = ev.pointerId;
+      const rect = this.orb.getBoundingClientRect();
+      this.orbDock = { x: rect.left+rect.width/2, y: rect.top+rect.height/2 };
+      this.liquid.reset(0,0);
+      if (!this.orbLens) this.prepareLens();
       this.clearOrbUnpress();
       this.orb.classList.add('is-pressed');
       try {
@@ -2686,23 +3478,13 @@ export class FeedbackWidget extends HTMLElement {
           this.isDragging = true;
           this.orb.classList.remove('is-pressed');
           this.orb.classList.add('is-dragging');
+          this.liquidStarted = performance.now();
+          void this.refreshLensSnapshot();
         }
       }
       if (this.isDragging) {
-        const r = Math.hypot(dx, dy);
-        const angle = r === 0 ? 0 : Math.atan2(dy, dx);
-        const pull = Math.min(1, r / 80);
-        const stretchAlong = 1 + 0.04 * pull;
-        const rawGlowX = -4 * pull * Math.cos(angle);
-        const rawGlowY = -4 * pull * Math.sin(angle);
-        const glowX = Math.abs(rawGlowX) < 1e-12 ? 0 : rawGlowX;
-        const glowY = Math.abs(rawGlowY) < 1e-12 ? 0 : rawGlowY;
-        this.orb.style.setProperty('--fb-orb-drag-angle', `${angle}rad`);
-        this.orb.style.setProperty('--fb-orb-stretch-along', `${stretchAlong}`);
-        this.orb.style.setProperty('--fb-orb-glow-x', `${glowX}px`);
-        this.orb.style.setProperty('--fb-orb-glow-y', `${glowY}px`);
-        // 四层视觉组独立缩放与拉伸；badge 不参与，root 只做无平滑的 1:1 指针平移。
-        this.orb.style.transform = `translate3d(${dx}px, ${dy}px, 0)`;
+        this.liquid.tx = dx; this.liquid.ty = dy;
+        this.kickLiquid();
       }
     });
 
@@ -2718,13 +3500,14 @@ export class FeedbackWidget extends HTMLElement {
 
       const wasDragging = this.isDragging;
       if (wasDragging) {
-        this.beginOrbRelease();
+        this.releaseVisual = this.lastLiquidVisual ? { ...this.lastLiquidVisual } : { x:this.orbDock.x, y:this.orbDock.y, radius:28, dirX:1, dirY:0, deform:0, wobble:0 };
+        this.resetOrbGestureVisuals();
       } else {
         const wasPressed = this.resetOrbGestureVisuals();
         if (wasPressed) this.beginOrbUnpress();
       }
 
-      if (isCancel) return;
+      if (isCancel) { this.syncOrbIdle(true); this.queueLensRestore(); return; }
 
       if (wasDragging) {
         const vw = typeof window !== 'undefined' ? window.innerWidth || 1 : 1;
@@ -2749,9 +3532,20 @@ export class FeedbackWidget extends HTMLElement {
 
     this.orb.addEventListener('pointerup', (ev: PointerEvent) => onPointerFinish(ev, false));
     this.orb.addEventListener('pointercancel', (ev: PointerEvent) => onPointerFinish(ev, true));
+    this.orb.addEventListener('lostpointercapture', (ev: PointerEvent) => onPointerFinish(ev, true));
+    this.orb.addEventListener('click', ev => {
+      if (!this.orbCollapsed) return;
+      ev.preventDefault(); ev.stopPropagation(); this.wakeOrb();
+    });
+    this.orb.addEventListener('pointerenter', ev => { if (ev.pointerType === 'touch') return; this.orbHovered=true; this.syncOrbIdle(); if (!this.orbLens) this.prepareLens(); else this.drawLiquid(); });
+    this.orb.addEventListener('pointerleave', () => { this.orbHovered=false; this.syncOrbIdle(); this.drawLiquid(); });
+    this.orb.addEventListener('focus', () => this.wakeOrb());
+    this.orb.addEventListener('blur', () => this.syncOrbIdle());
     this.orb.addEventListener('keydown', (ev: KeyboardEvent) => {
       if (ev.key === ' ' || ev.key === 'Enter') {
         ev.preventDefault();
+        if (!this.canUseOrbLauncher()) return;
+        if (this.orbCollapsed) { this.wakeOrb(); return; }
         if (this.captureMode === 'viewport') {
           void this.captureAndOpen();
         } else {
@@ -2785,6 +3579,38 @@ export class FeedbackWidget extends HTMLElement {
     if (!orbRegisteredPropertiesAvailable) {
       this.orb.classList.add('fb-orb-properties-unavailable');
     }
+    this.wakeHint = el('div','fb-wake-hint','松开手指唤醒灵感球');
+    this.wakeHint.hidden = true;
+    this.wakeHint.setAttribute('role','status');
+    this.root.append(this.wakeHint);
+    this.orbOutline = document.createElementNS('http://www.w3.org/2000/svg','svg');
+    this.orbOutline.classList.add('fb-orb-lens');
+    this.orbOutline.setAttribute('aria-hidden','true'); this.hideOrbOutline();
+    this.orbOutlineArt = document.createElementNS('http://www.w3.org/2000/svg','g');
+    this.orbOutline.append(this.orbOutlineArt);
+    this.orbOutlinePath = document.createElementNS('http://www.w3.org/2000/svg','path');
+    this.orbOutlinePath.setAttribute('fill','none'); this.orbOutlinePath.setAttribute('stroke','rgba(255,255,255,.75)');
+    this.orbOutlinePath.setAttribute('stroke-width','1'); this.orbOutlineArt.append(this.orbOutlinePath);
+    this.orbOutlineHalo = document.createElementNS('http://www.w3.org/2000/svg','path');
+    this.orbOutlineHalo.setAttribute('fill','none');
+    this.orbOutlineHalo.setAttribute('stroke','rgba(89,110,143,.10)');
+    this.orbOutlineHalo.setAttribute('stroke-width','4');
+    Object.assign(this.orbOutlineHalo.style,{filter:'blur(5px)',display:'none'});
+    this.orbOutlineArt.append(this.orbOutlineHalo);
+    const exteriorDefs = document.createElementNS('http://www.w3.org/2000/svg','defs');
+    const exteriorClip = document.createElementNS('http://www.w3.org/2000/svg','clipPath');
+    exteriorClip.id = this.orbOutlineExteriorId;
+    exteriorClip.setAttribute('clipPathUnits','userSpaceOnUse');
+    this.orbOutlineExterior = document.createElementNS('http://www.w3.org/2000/svg','path');
+    this.orbOutlineExterior.setAttribute('clip-rule','evenodd');
+    exteriorClip.append(this.orbOutlineExterior);
+    exteriorDefs.append(exteriorClip);
+    this.orbOutline.append(exteriorDefs);
+    this.orbCanvas = el('canvas', 'fb-orb-lens');
+    this.orbCanvas.hidden = true;
+    this.orbCanvas.setAttribute('aria-hidden','true');
+    this.orbCanvas.addEventListener('webglcontextlost', ev => { ev.preventDefault(); this.lensContextLost = true; this.releaseLens(); });
+    this.orbCanvas.addEventListener('webglcontextrestored', () => { this.lensContextLost = false; this.prepareLens(); });
     this.orb.type = 'button';
     this.orb.setAttribute('aria-label', '灵感球：拖动指出问题或点击反馈');
     this.orb.setAttribute('aria-expanded', 'false');
@@ -2792,12 +3618,23 @@ export class FeedbackWidget extends HTMLElement {
     this.orbBadge = el('span', 'fb-badge fb-launcher-badge');
     this.orbBadge.hidden = true;
     const orbLayersEl = orbLayers();
+    const idleMark = el('span','fb-orb-idle-mark');
+    idleMark.setAttribute('aria-hidden','true');
+    const idleHandle = el('span','fb-orb-idle-handle');
+    idleHandle.setAttribute('aria-hidden','true');
+    // A transparent rectangular child preserves the declared hit box outside
+    // the rounded button's corners; it follows that same moving box exactly.
+    const orbHit = el('span','fb-orb-hit');
+    orbHit.setAttribute('aria-hidden','true');
     this.orb.append(
       orbLayersEl.bloom,
       orbLayersEl.glow,
       orbLayersEl.sweep,
       orbLayersEl.core,
       orbLayersEl.focusRing,
+      idleMark,
+      idleHandle,
+      orbHit,
       this.orbBadge,
     );
 
@@ -2822,8 +3659,8 @@ export class FeedbackWidget extends HTMLElement {
     const headerActions = el('div', 'fb-header-actions');
     this.settingsBtn = el('button', 'fb-icon-btn fb-settings-btn');
     this.settingsBtn.type = 'button';
-    this.settingsBtn.setAttribute('aria-label', '服务器设置');
-    this.settingsBtn.title = '服务器设置';
+    this.settingsBtn.setAttribute('aria-label', '设置');
+    this.settingsBtn.title = '设置';
     this.settingsBtn.append(svgGearIcon());
     this.settingsBtn.addEventListener('click', () => this.openServerSettings());
 
@@ -2837,8 +3674,6 @@ export class FeedbackWidget extends HTMLElement {
 
     // 导航标签：新建反馈 vs 我的反馈
     const navTabs = el('div', 'fb-nav-tabs');
-    navTabs.style.padding = '0 16px 8px';
-    navTabs.style.borderBottom = '1px solid var(--fb-border)';
 
     this.tabComposeBtn = el('button', 'fb-nav-btn active', '新建反馈');
     this.tabComposeBtn.type = 'button';
@@ -2883,7 +3718,9 @@ export class FeedbackWidget extends HTMLElement {
     const badge = el('span', 'fb-screenshot-badge', '截图');
     const sizeLabel = el('span', 'fb-screenshot-size');
     const zoomHint = el('span', 'fb-screenshot-zoom-hint', '点击放大');
-    thumbFrame.append(this.screenshotThumb, badge, sizeLabel, zoomHint);
+    thumbFrame.append(this.screenshotThumb, zoomHint);
+    const thumbInfo = el('div','fb-thumb-info');
+    const thumbMeta = el('div','fb-thumb-meta'); thumbMeta.append(badge,sizeLabel);
 
     const firstActions = el('div', 'fb-thumb-actions');
     const firstEditBtn = el('button', 'fb-thumb-edit', '编辑');
@@ -2903,7 +3740,8 @@ export class FeedbackWidget extends HTMLElement {
       if (first) this.removeImage(first.id);
     });
     firstActions.append(firstEditBtn, firstDelBtn);
-    this.screenshotThumbBox.append(thumbFrame, firstActions);
+    thumbInfo.append(thumbMeta,firstActions);
+    this.screenshotThumbBox.append(thumbFrame, thumbInfo);
     this.screenshotWrap.append(this.screenshotThumbBox);
 
     // 预览旁提示：不可绘制内容 / 服务端降级 / 体积仍超限
@@ -2952,6 +3790,7 @@ export class FeedbackWidget extends HTMLElement {
 
     this.screenshotThumbBox.addEventListener('click', () => this.openZoomModal());
     this.screenshotThumbBox.addEventListener('keydown', (ev: KeyboardEvent) => {
+      if (ev.target !== this.screenshotThumbBox) return;
       if (ev.key === ' ' || ev.key === 'Enter') {
         ev.preventDefault();
         this.openZoomModal();
@@ -3150,6 +3989,17 @@ export class FeedbackWidget extends HTMLElement {
     // T1 局部选区覆盖层：冻结的已遮挡画面作背景 + 可调整选区 + 三个操作。
     // 覆盖层只读取冻结位图，绝不改动停靠位置或草稿；取消即整体丢弃。
     this.regionOverlay = el('div', 'fb-region-overlay');
+    this.regionEntrance = document.createElementNS('http://www.w3.org/2000/svg','svg');
+    this.regionEntrance.classList.add('fb-region-entrance');
+    this.regionEntrance.setAttribute('aria-hidden','true');
+    this.regionEntranceDim = document.createElementNS('http://www.w3.org/2000/svg','path');
+    this.regionEntranceDim.setAttribute('fill-rule','evenodd');
+    this.regionEntranceDim.setAttribute('fill','#635d92');
+    this.regionEntranceEdge = document.createElementNS('http://www.w3.org/2000/svg','path');
+    this.regionEntranceEdge.setAttribute('fill','none');
+    this.regionEntranceEdge.setAttribute('stroke','#ffffff70');
+    this.regionEntranceEdge.setAttribute('stroke-width','1');
+    this.regionEntrance.append(this.regionEntranceDim,this.regionEntranceEdge);
     this.regionOverlay.setAttribute('role', 'dialog');
     this.regionOverlay.setAttribute('aria-modal', 'true');
     this.regionOverlay.setAttribute('aria-label', '选择截图区域');
@@ -3166,29 +4016,38 @@ export class FeedbackWidget extends HTMLElement {
       'aria-label',
       '截图选区：方向键移动，Shift+方向键缩放，回车确认使用此区域，Esc 取消',
     );
-    for (const handleName of REGION_HANDLES) {
+    for (const handleName of ['nw','ne','sw','se'] as const) {
       const handle = el('span', 'fb-region-handle');
       handle.setAttribute('data-handle', handleName);
       handle.setAttribute('aria-hidden', 'true');
       this.regionFrame.append(handle);
     }
 
-    const regionToolbar = el('div', 'fb-region-toolbar');
-    this.regionSizeEl = el('span', 'fb-region-size');
+    this.regionTools = el('div','fb-region-tools');
+    this.regionToolbar = el('div', 'fb-region-toolbar');
     this.regionUseBtn = el('button', 'fb-region-btn fb-region-use', '使用此区域');
-    this.regionAllBtn = el('button', 'fb-region-btn fb-region-all', '截取整个窗口');
-    this.regionCancelBtn = el('button', 'fb-region-btn fb-region-cancel', '取消');
+    this.regionAllBtn = el('button', 'fb-region-btn fb-region-all', '整个窗口');
+    this.regionCancelBtn = el('button', 'fb-region-btn fb-region-cancel', '×');
     for (const b of [this.regionUseBtn, this.regionAllBtn, this.regionCancelBtn]) b.type = 'button';
     this.regionUseBtn.setAttribute('aria-label', '使用当前选区作为反馈截图');
     this.regionAllBtn.setAttribute('aria-label', '使用整张画面作为反馈截图');
     this.regionCancelBtn.setAttribute('aria-label', '取消局部截图');
-    regionToolbar.append(this.regionSizeEl, this.regionUseBtn, this.regionAllBtn, this.regionCancelBtn);
+    this.regionToolbar.append(this.regionAllBtn, this.regionUseBtn);
+    this.regionTools.append(this.regionToolbar);
+    this.safeInsetsProbe = el('div','fb-safe-insets');
+    this.safeInsetsProbe.setAttribute('aria-hidden','true');
+    this.root.append(this.safeInsetsProbe);
 
     this.regionErrorEl = el('p', 'fb-region-error');
     this.regionErrorEl.hidden = true;
     this.regionErrorEl.setAttribute('role', 'alert');
 
-    this.regionOverlay.append(this.regionBg, this.regionFrame, regionToolbar, this.regionErrorEl);
+    this.regionDim = el('div','fb-region-dim');
+    this.flyingShot = el('img','fb-flying-shot');
+    this.flyingShot.alt = '';
+    this.flyingShot.setAttribute('aria-hidden','true');
+    this.flyingShot.hidden = true;
+    this.regionOverlay.append(this.regionBg, this.regionDim, this.regionEntrance, this.regionFrame, this.regionTools, this.regionCancelBtn, this.regionErrorEl);
 
     this.regionUseBtn.addEventListener('click', () => void this.confirmRegion(true));
     this.regionAllBtn.addEventListener('click', () => void this.confirmRegion(false));
@@ -3198,6 +4057,7 @@ export class FeedbackWidget extends HTMLElement {
     this.regionOverlay.addEventListener('pointermove', (ev) => this.onRegionPointerMove(ev));
     this.regionOverlay.addEventListener('pointerup', (ev) => this.onRegionPointerEnd(ev));
     this.regionOverlay.addEventListener('pointercancel', (ev) => this.onRegionPointerEnd(ev));
+    this.regionOverlay.addEventListener('lostpointercapture', (ev) => this.onRegionPointerEnd(ev));
 
     // 日志文本预览弹窗
     this.logPreviewModal = el('div', 'fb-log-preview-modal');
@@ -3227,10 +4087,13 @@ export class FeedbackWidget extends HTMLElement {
       style,
       this.launcher,
       this.orb,
+      this.orbCanvas,
+      this.orbOutline,
       this.panel,
       this.zoomModal,
       this.logPreviewModal,
       this.regionOverlay,
+      this.flyingShot,
     );
 
     // 监听按键（支持 ⌘/Ctrl + Enter 提交）
@@ -3242,11 +4105,108 @@ export class FeedbackWidget extends HTMLElement {
    * 提供地址输入、保存、取消、恢复默认与当前有效地址展示；
    * 地址变化且有草稿 / 未确认提交时先展开内联确认块。
    */
+  private canWakeOrb(): boolean {
+    return this.canUseOrbLauncher() && this.surfaceSignature === this.displaySignature() && this.captureMode === 'viewport' && this.orbPointerId === null && !this.isDragging && this.phase !== 'submitting' && !this.polling;
+  }
+
+  private loadOrbIdlePreference(): void {
+    const app = this.appId ?? '';
+    if (this.orbIdlePreferenceApp === app) return;
+    this.orbIdlePreferenceApp = app;
+    this.orbIdleSessionOnly = false;
+    // Synchronous reads/writes are ordered and cannot overwrite a newer user choice.
+    try { this.orbIdleStyle = parseOrbIdlePreference(localStorage.getItem(orbIdlePreferenceKey(app))); }
+    catch { this.orbIdleStyle = 'handle'; this.orbIdleSessionOnly = true; }
+    this.orb.dataset.idleStyle = this.orbIdleStyle;
+    this.syncOrbIdleSettings();
+  }
+
+  private buildOrbIdleSettings(): HTMLElement {
+    const group = el('fieldset','fb-orb-idle-settings');
+    group.append(el('legend','fb-settings-title','灵感球'));
+    const cards = el('div','fb-orb-idle-options');
+    for (const [style,title] of [['handle','小把手'],['edge','球体贴边']] as const) {
+      const label = el('label','fb-orb-idle-option');
+      const input = el('input'); input.type='radio'; input.name='orb-idle-style'; input.value=style;
+      input.dataset.orbIdle=style;
+      label.append(input,el('span',undefined,title)); cards.append(label);
+      this.orbIdleInputs.set(style,input);
+      input.addEventListener('change',() => {
+        if (!input.checked) return;
+        this.orbIdleStyle = style;
+        this.orb.dataset.idleStyle = style;
+        try { localStorage.setItem(orbIdlePreferenceKey(this.appId ?? ''),JSON.stringify({version:1,style})); this.orbIdleSessionOnly=false; }
+        catch { this.orbIdleSessionOnly=true; }
+        this.syncOrbIdleSettings(); this.syncOrbIdle(true);
+      });
+    }
+    this.orbIdlePreferenceHint = el('p','fb-orb-idle-pref-hint','仅本次生效');
+    this.orbIdlePreferenceHint.setAttribute('role','status');
+    group.append(cards,el('p','fb-footnote','闲置5秒后收起，轻点或使用手势唤醒'),this.orbIdlePreferenceHint);
+    return group;
+  }
+
+  private syncOrbIdleSettings(): void {
+    if (!this.orbIdlePreferenceHint) return;
+    this.orbIdlePreferenceHint.hidden = !this.orbIdleSessionOnly;
+    for (const [style,input] of this.orbIdleInputs) input.checked = style === this.orbIdleStyle;
+  }
+
+  private loadWakePreference(): void {
+    const app = this.appId ?? '';
+    if (this.wakePreferenceApp === app) return;
+    this.wakeGestures.reset();
+    this.wakePreferenceApp = app;
+    this.wakePreferenceSessionOnly = false;
+    // localStorage is synchronous: no deferred read can overwrite a subsequent user choice.
+    try { this.wakeEnabled = parseWakePreference(localStorage.getItem(wakePreferenceKey(app))); }
+    catch { this.wakeEnabled = []; this.wakePreferenceSessionOnly = true; }
+    this.syncWakeSettings();
+  }
+
+  private buildWakeSettings(): HTMLElement {
+    const group = el('section','fb-wake-settings');
+    const title = el('h3','fb-settings-title','唤醒方式');
+    title.id = 'fb-wake-title'; group.setAttribute('aria-labelledby',title.id);
+    const note = el('p','fb-footnote','可同时开启，仅在当前应用内生效；悬浮入口仍可使用。');
+    const exclusions = el('p','fb-footnote','为避免误触，不在输入框、链接、按钮或可编辑区域识别。');
+    this.wakeAvailability = el('p','fb-wake-availability','应用未开启截图，手势暂不可用');
+    this.wakePreferenceHint = el('p','fb-wake-pref-hint','仅本次生效');
+    this.wakePreferenceHint.setAttribute('role','status');
+    group.append(title);
+    for (const gesture of WAKE_GESTURES) {
+      const row = el('label','fb-wake-option');
+      const input = el('input'); input.type='checkbox'; input.dataset.wakeGesture=gesture.id;
+      const text = el('span','fb-wake-option-text');
+      text.append(el('span','fb-wake-option-title',gesture.title),el('span','fb-footnote',gesture.description));
+      row.append(input,text); group.append(row); this.wakeInputs.set(gesture.id,input);
+      input.addEventListener('change',() => {
+        if (this.captureMode !== 'viewport') { this.syncWakeSettings(); return; }
+        this.wakeGestures.reset();
+        this.wakeEnabled = WAKE_GESTURES.map(g=>g.id).filter(id=>this.wakeInputs.get(id)!.checked);
+        try { localStorage.setItem(wakePreferenceKey(this.appId ?? ''),JSON.stringify({version:1,enabled:this.wakeEnabled})); this.wakePreferenceSessionOnly=false; }
+        catch { this.wakePreferenceSessionOnly=true; }
+        this.syncWakeSettings();
+      });
+    }
+    group.append(note,exclusions,this.wakeAvailability,this.wakePreferenceHint);
+    return group;
+  }
+
+  private syncWakeSettings(): void {
+    if (!this.wakeAvailability) return;
+    const unavailable = this.captureMode !== 'viewport';
+    this.wakeAvailability.hidden = !unavailable;
+    this.wakePreferenceHint.hidden = !this.wakePreferenceSessionOnly;
+    for (const [id,input] of this.wakeInputs) { input.checked=this.wakeEnabled.includes(id); input.disabled=unavailable; }
+  }
+
   private buildSettingsView(): HTMLDivElement {
     this.settingsView = el('div', 'fb-settings');
     this.settingsView.hidden = true;
     this.settingsView.setAttribute('role', 'group');
-    this.settingsView.setAttribute('aria-label', '服务器设置');
+    this.settingsView.setAttribute('aria-label', '设置');
+    this.settingsView.append(this.buildOrbIdleSettings(),this.buildWakeSettings());
 
     const title = el('h3', 'fb-settings-title', 'Feedback 服务器');
 
@@ -3374,6 +4334,7 @@ export class FeedbackWidget extends HTMLElement {
   }
 
   private syncUnreadBadge(): void {
+    this.syncOrbAriaLabel();
     const show = this.unreadCount > 0;
     const text = this.unreadCount > 99 ? '99+' : String(this.unreadCount);
 
@@ -3704,7 +4665,7 @@ export class FeedbackWidget extends HTMLElement {
       chip.setAttribute('title', projectName);
       tags.append(chip);
     }
-    if (item.unread) tags.append(el('span', 'fb-badge', '未读'));
+    if (item.unread) tags.append(el('span', 'fb-badge fb-history-unread', '未读'));
     row.append(tags);
 
     const meta = el('div', 'fb-history-date');
@@ -5295,7 +6256,9 @@ export class FeedbackWidget extends HTMLElement {
     this.settingsHintEl.hidden = true;
     this.settingsHintEl.textContent = '';
     this.syncUi();
-    this.settingsInput.focus();
+    this.settingsView.tabIndex=-1;
+    (this.captureMode === 'viewport' ? this.wakeInputs.values().next().value ?? this.settingsView : this.settingsView).focus();
+    this.settingsView.scrollTop=0;
   }
 
   private closeServerSettings(): void {
@@ -5434,7 +6397,9 @@ export class FeedbackWidget extends HTMLElement {
 
   /** 设置视图的只读展示同步（当前有效地址 / 宿主默认 / 确认块可见性）。 */
   private syncSettingsUi(): void {
+    this.syncOrbIdleSettings();
     if (!this.settingsView) return;
+    this.syncWakeSettings();
     this.settingsView.hidden = !this.settingsOpen;
     if (this.navTabs) this.navTabs.hidden = this.settingsOpen;
     if (this.body) this.body.hidden = this.settingsOpen || this.activeTab !== 'compose';
@@ -5767,6 +6732,7 @@ export class FeedbackWidget extends HTMLElement {
     // 新凭据 = 新身份上下文：epoch 递增作废旧令牌的在途结果（额度 / 轮询 /
     // 提交回执），与 api-base / app-id 切换同一条守卫路径。
     this.identityEpoch++;
+    this.invalidateCaptureSession();
     this.resetTrackingViews();
     this.accessToken = token;
     this.tokenExpiresAt = exp;
@@ -5795,6 +6761,7 @@ export class FeedbackWidget extends HTMLElement {
     this.clearHostSession();
     if (this.accessToken === null) return;
     this.identityEpoch++;
+    this.invalidateCaptureSession();
     this.resetTrackingViews();
     this.accessToken = null;
     this.tokenExpiresAt = 0;
@@ -5838,6 +6805,7 @@ export class FeedbackWidget extends HTMLElement {
   }
 
   private syncUi(): void {
+    this.syncOrbIdle();
     const len = codePointLength(this.textarea.value);
     this.counter.textContent = `${len}/${MAX_TEXT}`;
     this.counter.classList.toggle('is-over', len > MAX_TEXT);
