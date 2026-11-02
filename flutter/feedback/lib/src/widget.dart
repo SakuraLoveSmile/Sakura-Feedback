@@ -171,6 +171,10 @@ class FeedbackWidget extends StatefulWidget {
     this.logProvider,
     this.filePicker,
     this.imagePicker,
+    this.orbIdleStyle,
+    this.onOrbIdleStyleChanged,
+    this.wakeGestures,
+    this.onWakeGesturesChanged,
     @visibleForTesting this.httpClient,
     @visibleForTesting this.tokenStore,
     @visibleForTesting this.tokenStoreFactory,
@@ -194,6 +198,26 @@ class FeedbackWidget extends StatefulWidget {
 
   /// 手动图片选择器（可选，优先于 config.imagePicker；v12）。
   final FeedbackImagePicker? imagePicker;
+
+  /// 宿主可控的灵感球待机样式（v0.8.4 新增，可选）。
+  ///
+  /// 提供时组件不再写入自己的待机样式偏好，直接按该值渲染；用户在内置设置里
+  /// 改选时会回调 [onOrbIdleStyleChanged]，宿主保存后把新值回传即可。为 `null`
+  /// 时保持旧行为：组件自行持久化，按宿主 `appId` 记忆。建议同时提供回调；
+  /// 只提供值时面板内不显示灵感球设置项（由宿主 UI 负责改写）。
+  final FeedbackOrbIdleStyle? orbIdleStyle;
+
+  /// 宿主托管的待机样式变更回调（与 [orbIdleStyle] 配套）。
+  final ValueChanged<FeedbackOrbIdleStyle>? onOrbIdleStyleChanged;
+
+  /// 宿主可控的唤醒手势集合（v0.8.4 新增，可选）。
+  ///
+  /// 提供时组件不再写入自己的唤醒手势偏好，按该集合启用识别；用户在内置设置
+  /// 里勾选时会回调 [onWakeGesturesChanged]。为 `null` 时保持旧行为。
+  final Set<FeedbackWakeGesture>? wakeGestures;
+
+  /// 宿主托管的唤醒手势变更回调（与 [wakeGestures] 配套）。
+  final ValueChanged<Set<FeedbackWakeGesture>>? onWakeGesturesChanged;
 
   /// 测试注入的 HTTP 客户端。
   @visibleForTesting
@@ -244,6 +268,22 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     _snappingOrbMorph = false;
   }
 
+  /// 生效的灵感球待机样式：宿主提供时以宿主值为准（v0.8.4），否则用组件
+  /// 自己持久化的偏好。
+  FeedbackOrbIdleStyle get _orbIdleStyle =>
+      widget.orbIdleStyle ?? _idlePreferences.style;
+
+  /// 生效的唤醒手势：宿主提供时以宿主值为准（v0.8.4）。
+  Set<FeedbackWakeGesture> get _wakeGestures =>
+      widget.wakeGestures ?? _wakePreferences.enabled;
+
+  /// 「仅本次生效」只描述组件自身持久化失败；宿主托管时由宿主负责保存。
+  bool get _orbIdleSessionOnly =>
+      widget.orbIdleStyle == null && _idlePreferences.sessionOnly;
+
+  bool get _wakeGesturesSessionOnly =>
+      widget.wakeGestures == null && _wakePreferences.sessionOnly;
+
   /// 入口是否可见：宿主允许显示入口，且灵感球待机样式不是「隐藏」。
   ///
   /// 「隐藏」是 v0.8.2 新增的待机样式，只作用于 `launcherMode == orb` 的灵感球：
@@ -253,7 +293,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   bool get _launcherVisible =>
       widget.config.showLauncher &&
       !(widget.config.launcherMode == FeedbackLauncherMode.orb &&
-          _idlePreferences.style == FeedbackOrbIdleStyle.hidden);
+          _orbIdleStyle == FeedbackOrbIdleStyle.hidden);
 
   bool get _orbAvailable =>
       _appResumed &&
@@ -333,12 +373,15 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     }
   }
 
-  void _idlePreferencesChanged() {
+  void _idlePreferencesChanged() => _applyOrbIdleStyleChange();
+
+  /// 生效的待机样式变化（组件偏好或宿主托管值）：隐藏时立即收回入口与相关
+  /// 会话状态；改回其他样式时由 build 重新渲染完整球并重新开始 5 秒计时。
+  void _applyOrbIdleStyleChange() {
     if (!mounted || _disposed) return;
-    if (_idlePreferences.style == FeedbackOrbIdleStyle.hidden) {
+    if (_orbIdleStyle == FeedbackOrbIdleStyle.hidden) {
       // 「隐藏」入口立即消失：抢占进行中的拖动 / 回弹 / 悬停，释放透镜快照
-      // 与唤醒识别，避免卸载后的残留状态。改回其他样式时由 build 重新渲染
-      // 完整球并重新开始 5 秒计时（_syncOrbIdle 在入口恢复后重新计时）。
+      // 与唤醒识别，避免卸载后的残留状态。
       _releaseLensSnapshot(allowPrefetch: true);
       _wakeRecognizer?.cancel();
       _orbFocusVisible = false;
@@ -382,8 +425,14 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
 
   void _wakePreferencesChanged() {
     if (!mounted || _disposed) return;
-    _wakeRecognizer?.enabled = _wakePreferences.enabled;
+    _syncWakeRecognizer();
     setState(() {});
+  }
+
+  /// 把生效的唤醒手势同步给注册中的识别器（组件偏好与宿主托管共用）。
+  void _syncWakeRecognizer() {
+    if (!mounted || _disposed) return;
+    _wakeRecognizer?.enabled = _wakeGestures;
   }
 
   void _onWake(Offset releaseGlobal) {
@@ -944,6 +993,12 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     }
     if (oldWidget.config.captureMode != widget.config.captureMode) {
       _invalidateCaptureSession();
+    }
+    if (oldWidget.orbIdleStyle != widget.orbIdleStyle) {
+      _applyOrbIdleStyleChange();
+    }
+    if (!setEquals(oldWidget.wakeGestures, widget.wakeGestures)) {
+      _syncWakeRecognizer();
     }
     if (oldWidget.config.appId != widget.config.appId ||
         oldWidget.config.apiBase != widget.config.apiBase) {
@@ -2063,7 +2118,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
         final _OrbMorphGeometry? orbMorph = _orbMorphVisible
             ? _OrbMorphGeometry(
                 left: isLeft,
-                handle: _idlePreferences.style == FeedbackOrbIdleStyle.handle,
+                handle: _orbIdleStyle == FeedbackOrbIdleStyle.handle,
                 dark: !(MediaQuery.maybeOf(context)?.highContrast ??
                         View.of(context)
                             .platformDispatcher
@@ -2118,7 +2173,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
                                 ..isAvailable = (() => _wakeAvailable)
                                 ..onReleaseHint = _setWakeReleaseHint
                                 ..onWake = _onWake
-                                ..enabled = _wakePreferences.enabled;
+                                ..enabled = _wakeGestures;
                             },
                           ),
                         },
@@ -2330,7 +2385,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   Widget _buildCollapsedOrb(
       BuildContext context, FeedbackConfig config, _OrbMorphGeometry geometry) {
     final bool left = config.side == FeedbackSide.left;
-    final bool handle = _idlePreferences.style == FeedbackOrbIdleStyle.handle;
+    final bool handle = _orbIdleStyle == FeedbackOrbIdleStyle.handle;
     final double t = geometry.progress;
     final double halfWidth = geometry.halfWidth;
     final double halfHeight = geometry.halfHeight;
@@ -2755,12 +2810,18 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
           tokenStore: widget.tokenStore,
           tokenStoreFactory: widget.tokenStoreFactory,
           serverPrefStore: widget.serverPrefStore,
-          orbIdleStyle: _idlePreferences.style,
-          orbIdleSessionOnly: _idlePreferences.sessionOnly,
-          onOrbIdleStyleChanged: _idlePreferences.select,
-          wakeGestures: _wakePreferences.enabled,
-          wakeGesturesSessionOnly: _wakePreferences.sessionOnly,
-          onWakeGesturesChanged: _wakePreferences.select,
+          // 宿主托管（v0.8.4）：值以宿主为准，变更回调透传给宿主保存；
+          // 宿主只给值不给回调时隐藏面板内对应的设置区，避免无效操作。
+          orbIdleStyle: _orbIdleStyle,
+          orbIdleSessionOnly: _orbIdleSessionOnly,
+          onOrbIdleStyleChanged: widget.orbIdleStyle != null
+              ? widget.onOrbIdleStyleChanged
+              : _idlePreferences.select,
+          wakeGestures: _wakeGestures,
+          wakeGesturesSessionOnly: _wakeGesturesSessionOnly,
+          onWakeGesturesChanged: widget.wakeGestures != null
+              ? widget.onWakeGesturesChanged
+              : _wakePreferences.select,
           // T6/T7：向控制器上报实际使用地址；地址变化时使外层截图会话
           // 失效（旧会话的迟到交付不得写入新身份的草稿）。
           onEffectiveApiBaseChange: _onEffectiveApiBaseChange,

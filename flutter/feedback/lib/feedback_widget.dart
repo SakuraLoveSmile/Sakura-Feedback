@@ -52,6 +52,8 @@ export 'src/images.dart'
         FeedbackImageException,
         kFeedbackMaxImages,
         normalizeFeedbackImage;
+export 'src/orb_idle.dart' show FeedbackOrbIdleStyle;
+export 'src/wake_gestures.dart' show FeedbackWakeGesture;
 export 'src/capture_mask.dart' show FeedbackCaptureMask;
 export 'src/config.dart'
     show

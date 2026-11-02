@@ -7,6 +7,24 @@
 [`docs/integration.md`](docs/integration.md) §1.7。标注 **破坏性** 的条目表示
 宿主升级时需要处理；未标注的均为兼容变更（新增可选字段 / 属性 / 端点）或内部变更。
 
+## [0.8.4] — 2026-11-02
+
+### 新增
+
+- **宿主托管的灵感球设置**：`FeedbackWidget` 新增可选参数 `orbIdleStyle` / `onOrbIdleStyleChanged`
+  与 `wakeGestures` / `onWakeGesturesChanged`。提供取值时组件不再写自己的待机样式 / 唤醒手势
+  偏好，改由宿主保存并在回调后回传；内置「设置 → 灵感球 / 唤醒方式」改用同一份值并回调宿主，
+  **只给值不给回调**时对应设置区隐藏。导出 `FeedbackOrbIdleStyle`
+  （`handle` / `edge` / `hidden`）与 `FeedbackWakeGesture`
+  （双指长按 / 三指上滑 / 双指双击）供宿主设置 UI 使用。
+- 未传新参数的宿主保持原行为：组件继续按 `appId` 自己持久化这两项设置。
+
+### 升级与兼容
+
+- root、server、admin、Web 与 Flutter 组件统一为 **0.8.4**；数据库 schema 保持 **14**，无需迁移。
+- 兼容增量：新参数均可选、默认关闭，旧接入方无需改动；Web 组件行为无变化。
+- Web 使用本 Release 的 `feedback-web-0.8.4.tgz`，Flutter 固定 Git 标签 `v0.8.4`；不发布到 pub.dev。
+
 ## [0.8.3] — 2026-11-02
 
 ### 修复
