@@ -46,3 +46,9 @@
 - 隔离后台：`http://127.0.0.1:62634/admin/?page=changelog`（已登录的浏览器页停在星光笔记）；公开示例：`http://127.0.0.1:62634/changelog/com.demo.notes`。只绑定回环地址，全部名称、反馈和版本均为合成验收数据。
 - 预览进程 PID `50342` / exec session `77187`；数据目录 `/var/folders/3f/d270m3fx56b4ff4x8l0xcn8m0000gn/T/feedback-test-EmqD3a`。启动脚本在本工作树忽略目录 `apps/server/.agent-teams/changelog-preview.ts`；演示凭据/完整资源元数据在忽略文件 `e2e/shots/changelog-20261104/run.json`。外部 AI/Kaneo 均注入 mock，更新检查及远程同步定时器关闭。
 - 功能本地验证后用户已授权合并上线；本次准备发布 0.9.0。生产已只读确认位于 `blog-prod:/opt/1panel/docker/compose/feedback`，当前镜像 v0.8.5。合入 main 前整合本地 main 的两项已提交改动与最新发布线；必要组合态验证通过后发布、备份并升级生产，最后停止预览、保存需要的截图/演示资料并清理本任务 worktree。该中央目录为按约定手动创建的 Git worktree，App 因非受管目录未能附加，实际路径与分支见本文开头。
+
+## 合并与上线（进行中）
+
+- 功能提交 `4a03439`；0.9.0 对齐五处组件版本与固定接入文档。合并本地 main 的 `37fd109`（设计令牌/宽屏分栏）和 `4d80f4a`（中央路径政策）；其管理页代码已经等效存在于最新发布线，冲突选择保留发布线后续新增样式，合并后业务源码相对功能提交无差异。政策措辞统一为主分支版本。
+- 远端 main 当前 `10f42db`，是本任务发布线祖先；先在此工作树完成合并和最终验证，再快进推送 origin/main，主目录中其他任务的未提交内容保持原样。
+- 已只读核实生产 0.8.5 容器健康、公开 HTTPS `/healthz` 与管理页为 200；schema14→15 前将保留在线 SQLite 一致性快照、compose/env 备份及停机后的整个 data 备份。
