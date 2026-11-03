@@ -25,7 +25,7 @@
 
 - 实现与本地适用验证已完成；正式 Release、远端流水线与下载资产核验将在发布后补记。
 - 旧用例中“成功后永久不再捕获”和“滚动后不重采”与本次明确目标相冲突，需替换为受限串行更新与相关像素/生命周期断言；保留失败不自动重试、遮挡、隔离、草稿、冻结选区、身份与资源释放门槛，不删除/跳过适用检查。
-- 收尾：仅本任务未合入约定目标则保留发布工作树并记录原因；不清理其他活跃工作树。证据位于当前聊天 visualization 目录下 orb-idle-background-fix/，记录候选源码与发布资产的对应关系。
+- 收尾：发布提交、签名标签与远端分支保全后，仅清理本任务临时工作树，保留来源分支供后续统一合入 main；不清理其他工作树。验证证据与下载资产已外置到本聊天 visualization 下 orb-idle-background-fix/，最终本机移除结果记在该目录 worktree-cleanup.json，不依赖临时工作树恢复成果。
 
 ## 本轮核验进展
 
@@ -44,3 +44,13 @@
 - 额外 Flutter Web release 构建真实浏览器核验：固定 pageLabel、child key/type 不变，宿主内部 State 在 2 秒后蓝→绿；截图与屏幕像素确认球内更新为当前绿色，球区域无残留蓝色，pageErrors 为空；未复现早期尖刺里周期捕获丢背景的问题。使用仓库外一次性入口与静态 loopback 服务，未改正式示例逻辑；截图 `flutter-web-current-green.png` 与 `flutter-web-results.json`。
 - 既有测试调整依据：把旧“永不续采 / 滚动后永久不采 / 1秒闸门”换成持续安全像素与有界次数；T7f-F 的一次 transient callback 已定位为新纹理触发的 LayoutBuilder 提交，补一帧后继续断言原尺寸、零 wobble、零 transient。未跳过测试或降低遮挡、草稿、provider、旧 generation、冻结选区、资源释放门槛。
 - 限制：250ms 为成功捕获完成后的调度间隔，不能承诺逐显示帧同步；复杂真实宿主、Android/iOS 原生真机与移动 GPU 的长期功耗/帧性能未实测，未据简单色块结果外推。源码和 Web/Flutter 公共配置均无新增依赖，服务接口/schema14不变。
+
+## 正式发布与资产核验
+
+- 发布提交：`a345ca67de03153ebb8a4594b33b22475d0dff61`；签名标签 `v0.8.6`；发布分支 `fix/20261103-fb-rel-086-orb-background`，均已推送。后续仅补充本发布记录，不移动已发布标签。
+- [Release 流水线 41610859298](https://github.com/SakuraLoveSmile/Sakura-Feedback/actions/runs/41610859298)：**11 个 job 全部成功**，含完整 Node、Flutter 组件/示例和 secure_storage 9.2.2 / 10.3.1 / 11.0.0 兼容性门禁。
+- [v0.8.6 正式 Release](https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/tag/v0.8.6)：台北时间 **2026-11-03 17:30:52** 公开；已独立核对非 draft、非 prerelease、Latest 为 true。
+- 七份资产全部独立下载，**12 项资产检查通过**：三份构建产物 SHA256 与 SHA256SUMS 一致；SOURCE/manifest 指向本候选提交与本次 run、stable/v0.8.6/schema14/linux-amd64；tarball 内版本 0.8.6 与 ESM/UMD/types 入口齐全；admin bundle 含 0.8.6；tarball 与 Web dist UMD 相同，且与最终真实浏览器实测候选 **逐字节一致**（SHA256 `d221ffcadceaaeeb1f2d010591e2a35684391b7ca2d4161f4d61341ba3051d4d`）。
+- GHCR 镜像 `ghcr.io/sakuralovesmile/sakura-feedback@sha256:ee3d6b694ef6941e94e860b07a9dabeee17bbb4781f00c516a1eed8776eba86c`：匿名读取 OCI index，响应头、实际响应内容 SHA256 与 Release manifest 三方相符，含 linux/amd64。
+- 服务端接口与 schema 均未变；本次未操作生产部署或其他宿主。宿主使用 `feedback-web-0.8.6.tgz` / Flutter `v0.8.6` 后生效。
+- 本发布继续沿用 0.8.0–0.8.5 的发布分支流程；main 含用户已有未提交成果且历史分叉，本次不改写或混入。后续统一合并发布链不依赖本临时工作树；来源本地/远端分支、已发布标签保留。
