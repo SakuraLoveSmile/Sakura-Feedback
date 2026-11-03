@@ -181,23 +181,23 @@ Shadow DOM 查询节点或覆盖内部样式）；`test/` 下的测试辅助文�
 
 ### 2.1 Web：通过构建出的 npm tarball 安装（打包器宿主推荐）
 
-包名 `@feedback/web`，当前版本 `0.8.5`，因此 tarball 文件名为 **`feedback-web-0.8.5.tgz`**（版本变了文件名跟着变）。
+包名 `@feedback/web`，当前版本 `0.8.6`，因此 tarball 文件名为 **`feedback-web-0.8.6.tgz`**（版本变了文件名跟着变）。
 
 优先安装正式 Release 的固定产物（保留锁文件）；不要把工作区源码或 `main` 当成稳定版本：
 
 ```bash
-pnpm add https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/download/v0.8.5/feedback-web-0.8.5.tgz
+pnpm add https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/download/v0.8.6/feedback-web-0.8.6.tgz
 ```
 
-完整 Web dist、SHA256 与服务端镜像清单均在 [v0.8.5 Release](https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/tag/v0.8.5)。
-需要自行构建时，先检出 `v0.8.5`，再执行：
+完整 Web dist、SHA256 与服务端镜像清单均在 [v0.8.6 Release](https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/tag/v0.8.6)。
+需要自行构建时，先检出 `v0.8.6`，再执行：
 
 ```bash
 # ① 在仓库根构建组件包
 pnpm install
 pnpm --filter @feedback/web build
 
-# ② 打成 tarball（真实产物：/tmp/fbpack/feedback-web-0.8.5.tgz）
+# ② 打成 tarball（真实产物：/tmp/fbpack/feedback-web-0.8.6.tgz）
 mkdir -p /tmp/fbpack
 pnpm --filter @feedback/web pack --pack-destination /tmp/fbpack
 ```
@@ -206,8 +206,8 @@ tarball 内含 `dist/` 全部产物（含 ESM 懒加载分块）、`package.json
 
 ```bash
 # ③ 在你的宿主项目里安装这个 tgz
-pnpm add /tmp/fbpack/feedback-web-0.8.5.tgz
-# 等价写法：npm install /tmp/fbpack/feedback-web-0.8.5.tgz
+pnpm add /tmp/fbpack/feedback-web-0.8.6.tgz
+# 等价写法：npm install /tmp/fbpack/feedback-web-0.8.6.tgz
 ```
 
 ```ts
@@ -268,7 +268,7 @@ dependencies:
   feedback_widget:
     git:
       url: https://github.com/SakuraLoveSmile/Sakura-Feedback.git
-      ref: v0.8.5                    # 或该标签对应的完整 commit SHA
+      ref: v0.8.6                    # 或该标签对应的完整 commit SHA
       path: flutter/feedback        # 包在仓库的子目录里
 ```
 
@@ -908,6 +908,8 @@ widget.open();     // ← 只有这一句
 ## 5. 路由、生命周期与交互
 
 ### 5.1 单页应用路由切换（Web）
+
+- **灵感球背景（0.8.6 起）**：灵感球背景在完整球、贴边球和小把手可见时持续更新：每次成功采样后间隔 250ms 串行续采，动态内容无需依赖页面标识变化；隐藏待机、面板/选区、后台和卸载时停止。采样始终复用敏感区域不透明遮挡链，失败清除旧图并退为透明轮廓，后续显式恢复可重新尝试。此刷新是装饰纹理，不修改草稿、附件或冻结选区，也不调用宿主 `captureProvider`。
 
 - **组件实例应由宿主顶层持有**：把 `<feedback-widget>` 放在应用壳（root layout / App 组件）里，
   而不是某个会被卸载的路由页面组件内。草稿（文字 + 截图字节）**只存在元素实例内存中**，

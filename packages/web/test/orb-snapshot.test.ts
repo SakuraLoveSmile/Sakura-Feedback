@@ -15,12 +15,16 @@ let clear:ReturnType<typeof vi.fn>;
 let dispose:ReturnType<typeof vi.fn>;
 let draws:Parameters<OrbLens['draw']>[];
 
-async function settle() { for(let i=0;i<8;i++) await new Promise(resolve=>setTimeout(resolve,5)); }
+// Keep the refresh clock explicit while allowing Blob/image tasks to finish.
+async function settle() { for(let i=0;i<8;i++) {await nextTask(0);await vi.advanceTimersByTimeAsync(0);} }
+async function nextCapture() { await vi.advanceTimersByTimeAsync(250); await settle(); }
 function pointer(orb:Element,type:string,x=100,y=100) {
   orb.dispatchEvent(new PointerEvent(type,{bubbles:true,button:0,isPrimary:true,pointerId:1,clientX:x,clientY:y}));
 }
 
 beforeEach(()=>{
+  vi.useFakeTimers(); vi.setSystemTime(0);
+  vi.spyOn(performance,'now').mockImplementation(()=>Date.now());
   uploads=[]; closes=[]; draws=[];
   restoreGeometry=installGeometryPatch();
   const state=createState(); stubCreateElementCanvas(state);
@@ -59,6 +63,7 @@ describe('decorative lens capture privacy and lifetime',()=>{
     expect(isCoverPixel(uploads[0]!,150,110)).toBe(true);
     expect(closes[0]).toHaveBeenCalledTimes(1);
     const provider=vi.fn(()=>new Promise<never>(()=>{})); m.widget.captureProvider=provider;
+    await nextCapture();
     pointer(m.orb,'pointerdown'); await settle();
     pointer(m.orb,'pointermove',180,140); pointer(m.orb,'pointermove',240,190);
     expect(provider).not.toHaveBeenCalled();
@@ -73,21 +78,22 @@ describe('decorative lens capture privacy and lifetime',()=>{
     expect(dispose).toHaveBeenCalled();
   });
 
-  it('prefetch once, no polling; refresh after 1000ms only on drag, scroll invalidates without recapturing',async()=>{
-    let now=0; vi.spyOn(performance,'now').mockImplementation(()=>now);
+  it('drag refreshes are bounded; scroll discards old pixels and captures the current scene',async()=>{
     const m=mount({'launcher-mode':'orb'}); await settle();
     expect(renders).toHaveBeenCalledTimes(1);
-    now=900;
+    await vi.advanceTimersByTimeAsync(100);
     pointer(m.orb,'pointerdown'); pointer(m.orb,'pointermove',120,100); await settle();
     expect(renders).toHaveBeenCalledTimes(1);
     pointer(m.orb,'pointercancel');
-    now=1100;
+    await vi.advanceTimersByTimeAsync(200); await settle();
     pointer(m.orb,'pointerdown'); pointer(m.orb,'pointermove',120,100); await settle();
     expect(renders).toHaveBeenCalledTimes(2);
     pointer(m.orb,'pointermove',150,100); await settle();
     expect(renders).toHaveBeenCalledTimes(2);
     window.dispatchEvent(new Event('scroll')); await settle();
     expect(clear).toHaveBeenCalled(); expect(renders).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(250); await settle();
+    expect(renders).toHaveBeenCalledTimes(3);
     pointer(m.orb,'pointercancel');
     pointer(m.orb,'pointerdown'); pointer(m.orb,'pointermove',140,100); await settle();
     expect(renders).toHaveBeenCalledTimes(3);
@@ -114,6 +120,131 @@ describe('decorative lens capture privacy and lifetime',()=>{
     vi.stubGlobal('matchMedia',(media:string)=>({matches:media==='(forced-colors: active)',media,addEventListener:vi.fn(),removeEventListener:vi.fn()}));
     mount({'launcher-mode':'orb'}); await settle();
     expect(OrbLens.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('continuously updated safe background',()=>{
+  beforeEach(()=>{
+    vi.useFakeTimers(); vi.setSystemTime(0);
+    vi.spyOn(performance,'now').mockImplementation(()=>Date.now());
+    vi.spyOn(window,'innerWidth','get').mockReturnValue(390);
+    vi.spyOn(window,'innerHeight','get').mockReturnValue(844);
+    vi.stubGlobal('matchMedia',(media:string)=>({matches:media==='(prefers-reduced-motion: reduce)',media,addEventListener:vi.fn(),removeEventListener:vi.fn()}));
+  });
+  async function settled() { for(let i=0;i<8;i++) {await nextTask(0);await vi.advanceTimersByTimeAsync(0);} }
+
+  it.each(['full','edge','handle'] as const)('updates changed host pixels in %s without page-label or pointer changes, preserving opaque masks',async style=>{
+    const background=addNode('<div>host background</div>','0,0,390,844',{color:[0,0,255]});
+    addNode('<div data-feedback-capture-mask>private account</div>','100,100,120,24');
+    if(style==='edge') localStorage.setItem(orbIdlePreferenceKey(APP_ID),'{"version":1,"style":"edge"}');
+    const m=mount({'launcher-mode':'orb','show-launcher':'false'});
+    const provider=vi.fn(); m.widget.captureProvider=provider; m.widget.showLauncher=true;
+    await settled();
+    expect(pixelColor(uploads.at(-1)!,20,20)).toEqual([0,0,255,255]);
+    if(style!=='full') {vi.advanceTimersByTime(5000);await settled();}
+    const count=renders.mock.calls.length;
+    background.setAttribute('data-fake-color','rgb(0,255,0)');
+    await vi.advanceTimersByTimeAsync(249); await settled();
+    expect(renders).toHaveBeenCalledTimes(count);
+    await vi.advanceTimersByTimeAsync(1); await settled();
+    expect(renders).toHaveBeenCalledTimes(count+1);
+    expect(pixelColor(uploads.at(-1)!,20,20)).toEqual([0,255,0,255]);
+    background.setAttribute('data-fake-color','rgb(255,255,0)');
+    await vi.advanceTimersByTimeAsync(250); await settled();
+    expect(pixelColor(uploads.at(-1)!,20,20)).toEqual([255,255,0,255]);
+    expect(m.widget.pageLabel).toBe('settings/account');
+    expect(m.orb.classList.contains('is-collapsed')).toBe(style!=='full');
+    for(const image of uploads) expect(isCoverPixel(image,150,110)).toBe(true);
+    expect(provider).not.toHaveBeenCalled();
+  });
+
+  it('waits 250ms after a slow capture completes and never overlaps or accumulates captures',async()=>{
+    const bitmap=globalThis.createImageBitmap;
+    let finish!:()=>void;
+    vi.stubGlobal('createImageBitmap',async(blob:Blob)=>{
+      const image=await bitmap(blob);
+      return new Promise(resolve=>{finish=()=>resolve(image);});
+    });
+    mount({'launcher-mode':'orb'}); await settled();
+    await vi.advanceTimersByTimeAsync(5000); await settled();
+    expect(renders).toHaveBeenCalledTimes(1); expect(uploads).toHaveLength(0);
+    finish(); await settled();
+    expect(uploads).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(249); await settled();
+    expect(renders).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1); await settled();
+    expect(renders).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(5000); await settled();
+    expect(renders).toHaveBeenCalledTimes(2);
+    finish(); await settled();
+    expect(uploads).toHaveLength(2);
+  });
+
+  it('coalesces 20 scroll events at 16ms intervals into bounded captures and samples the final scene',async()=>{
+    const background=addNode('<div>host background</div>','0,0,390,844',{color:[0,0,255]});
+    addNode('<div data-feedback-capture-mask>private account</div>','100,100,120,24');
+    const started:number[]=[],finished:number[]=[];
+    const render=renders.getMockImplementation()!;
+    renders.mockImplementation(async(...args:Parameters<typeof render>)=>{
+      started.push(Date.now());
+      try {return await render(...args);}
+      finally {finished.push(Date.now());}
+    });
+    mount({'launcher-mode':'orb'}); await settled();
+    for(let i=0;i<20;i++) {
+      await vi.advanceTimersByTimeAsync(16);
+      background.setAttribute('data-fake-color',i===19?'rgb(0,255,0)':`rgb(${i},0,255)`);
+      window.dispatchEvent(new Event('scroll')); await settled();
+    }
+    expect(clear.mock.calls.length).toBeGreaterThanOrEqual(20);
+    expect(renders.mock.calls.length).toBeLessThanOrEqual(2);
+    await vi.advanceTimersByTimeAsync(250); await settled();
+    expect(pixelColor(uploads.at(-1)!,20,20)).toEqual([0,255,0,255]);
+    expect(renders.mock.calls.length).toBeLessThanOrEqual(3);
+    for(let i=1;i<started.length;i++) expect(started[i]!-finished[i-1]!).toBeGreaterThanOrEqual(250);
+    for(const image of uploads) expect(isCoverPixel(image,150,110)).toBe(true);
+  });
+
+  it('clears a failed refresh and stops automatic retries until an explicit restore',async()=>{
+    const m=mount({'launcher-mode':'orb'}); await settled();
+    expect(uploads).toHaveLength(1);
+    renders.mockRejectedValueOnce(new Error('capture blocked'));
+    await vi.advanceTimersByTimeAsync(250); await settled();
+    expect(clear).toHaveBeenCalled(); expect(renders).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(2000); await settled();
+    expect(renders).toHaveBeenCalledTimes(2);
+    m.widget.open(); m.widget.close(); await settled();
+    expect(renders).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(250); await settled();
+    expect(renders).toHaveBeenCalledTimes(4);
+  });
+
+  it.each(['panel','document','host','detach','idle hidden'] as const)('stops background captures while %s and resumes with current host pixels',async gate=>{
+    const background=addNode('<div>host background</div>','0,0,390,844',{color:[0,0,255]});
+    if(gate==='idle hidden') localStorage.setItem(orbIdlePreferenceKey(APP_ID),'{"version":1,"style":"hidden"}');
+    const m=mount({'launcher-mode':'orb'}); await settled();
+    if(gate==='panel') m.widget.open();
+    if(gate==='document') {vi.spyOn(document,'visibilityState','get').mockReturnValue('hidden');document.dispatchEvent(new Event('visibilitychange'));}
+    if(gate==='host') m.widget.hidden=true;
+    if(gate==='detach') m.widget.remove();
+    if(gate==='idle hidden') vi.advanceTimersByTime(5000);
+    await settled(); const count=renders.mock.calls.length;
+    background.setAttribute('data-fake-color','rgb(0,255,0)');
+    await vi.advanceTimersByTimeAsync(1000); await settled();
+    expect(renders).toHaveBeenCalledTimes(count);
+    if(gate==='panel') m.widget.close();
+    if(gate==='document') {vi.spyOn(document,'visibilityState','get').mockReturnValue('visible');document.dispatchEvent(new Event('visibilitychange'));}
+    if(gate==='host') m.widget.hidden=false;
+    if(gate==='detach') document.body.append(m.widget);
+    if(gate==='idle hidden') {
+      // A configured wake gesture calls the same internal path; DOM events here
+      // cannot hit a display:none launcher, so restore via the supported host panel.
+      m.widget.open(); m.widget.close();
+    }
+    await settled();
+    expect(pixelColor(uploads.at(-1)!,20,20)).toEqual([0,255,0,255]);
+    await vi.advanceTimersByTimeAsync(250); await settled();
+    expect(renders.mock.calls.length).toBeGreaterThan(count);
   });
 });
 
@@ -145,14 +276,15 @@ describe('R7 safe-texture ownership',()=>{
     if(style==='edge') localStorage.setItem(orbIdlePreferenceKey(APP_ID),'{"version":1,"style":"edge"}');
     const m=launcher({theme:trigger==='system'?'system':'light'}); await settled();
     expect(renders).toHaveBeenCalledTimes(1); expect(pixelColor(uploads[0]!,20,20)).toEqual([245,246,250,255]);
-    if(style!=='full') vi.advanceTimersByTime(5000);
+    if(style!=='full') {vi.advanceTimersByTime(5000);await settled();}
     expect(m.orb.classList.contains('is-collapsed')).toBe(style!=='full');
+    const beforeTheme=renders.mock.calls.length;
     clear.mockClear(); background.setAttribute('data-fake-color','rgb(20,22,28)');
     if(trigger==='system') change(true); else m.widget.theme='dark';
-    await settled();
-    expect(renders).toHaveBeenCalledTimes(2); expect(uploads).toHaveLength(2);
+    await nextCapture();
+    expect(renders).toHaveBeenCalledTimes(beforeTheme+1); expect(uploads).toHaveLength(beforeTheme+1);
     expect(clear).toHaveBeenCalledTimes(1); expect(draws.at(-1)![4]).toBe(true);
-    expect(pixelColor(uploads[1]!,20,20)).toEqual([20,22,28,255]);
+    expect(pixelColor(uploads.at(-1)!,20,20)).toEqual([20,22,28,255]);
     for(const image of uploads) expect(isCoverPixel(image,150,110)).toBe(true);
     for(const close of closes) expect(close).toHaveBeenCalledTimes(1);
     expect(m.orb.classList.contains('is-collapsed')).toBe(style!=='full');
@@ -161,7 +293,9 @@ describe('R7 safe-texture ownership',()=>{
       expect(m.panel.classList.contains('is-open')).toBe(false);
       vi.advanceTimersByTime(5000); await settled();
     }
-    expect(renders).toHaveBeenCalledTimes(2); expect(uploads).toHaveLength(2);
+    expect(renders).toHaveBeenCalledTimes(beforeTheme+(style==='full'?1:2));
+    expect(uploads).toHaveLength(renders.mock.calls.length);
+    expect(pixelColor(uploads.at(-1)!,20,20)).toEqual([20,22,28,255]);
     expect(dispose).not.toHaveBeenCalled(); expect(m.provider).not.toHaveBeenCalled();
   });
   it('R7 theme changes discard the old decoded pixels, close them once and queue only the latest masked capture',async()=>{
@@ -180,6 +314,8 @@ describe('R7 safe-texture ownership',()=>{
     expect(closes[0]).not.toHaveBeenCalled();
     finish(); await settled();
     expect(closes[0]).toHaveBeenCalledTimes(1);
+    expect(renders).toHaveBeenCalledTimes(1);
+    await nextCapture();
     expect(renders).toHaveBeenCalledTimes(2); expect(uploads).toHaveLength(1);
     expect(pixelColor(uploads[0]!,20,20)).toEqual([20,22,28,255]);
     expect(isCoverPixel(uploads[0]!,150,110)).toBe(true); expect(closes[1]).toHaveBeenCalledTimes(1);
@@ -200,24 +336,30 @@ describe('R7 safe-texture ownership',()=>{
     if(gate==='panel') m.widget.close();
     if(gate==='host') m.widget.hidden=false;
     if(gate==='background') {vi.spyOn(document,'visibilityState','get').mockReturnValue('visible');document.dispatchEvent(new Event('visibilitychange'));}
-    await settled();
+    await nextCapture();
     expect(renders).toHaveBeenCalledTimes(count+1); expect(uploads).toHaveLength(uploaded+1);
     expect(draws.at(-1)![4]).toBe(true); expect(m.textarea.value).toBe('keep the existing draft');
     expect(m.provider).not.toHaveBeenCalled();
   });
-  it('collapse and wake retain the same masked upload without rendering, releasing or calling the formal provider',async()=>{
+  it('collapse and wake retain sampler ownership while continuing masked refreshes without calling the formal provider',async()=>{
+    const background=addNode('<div>host background</div>','0,0,1024,768',{color:[0,0,255]});
     addNode('<div data-feedback-capture-mask>private account</div>','100,100,120,24');
     const m=launcher(); await settled();
     expect(renders).toHaveBeenCalledTimes(1); expect(uploads).toHaveLength(1);
     expect(isCoverPixel(uploads[0]!,150,110)).toBe(true); expect(closes[0]).toHaveBeenCalledTimes(1);
+    background.setAttribute('data-fake-color','rgb(0,255,0)');
     vi.advanceTimersByTime(5000); await settled(); expectHandle();
+    expect(pixelColor(uploads.at(-1)!,20,20)).toEqual([0,255,0,255]);
     const canvas=m.root.querySelector<HTMLCanvasElement>('canvas.fb-orb-lens')!;
     expect(canvas.hidden).toBe(false); expect(canvas.width).toBeGreaterThan(1);
     pointer(m.orb,'pointerdown'); pointer(m.orb,'pointerup'); m.orb.click(); await settled();
     expect(draws.at(-1)![5]).toEqual({halfSize:{x:28,y:28},handleMix:0,mist:.74,idleMix:1});
     expect(m.panel.classList.contains('is-open')).toBe(false);
+    background.setAttribute('data-fake-color','rgb(255,255,0)');
     vi.advanceTimersByTime(5000); await settled(); expectHandle();
-    expect(renders).toHaveBeenCalledTimes(1); expect(uploads).toHaveLength(1);
+    expect(renders).toHaveBeenCalledTimes(3); expect(uploads).toHaveLength(3);
+    expect(pixelColor(uploads.at(-1)!,20,20)).toEqual([255,255,0,255]);
+    for(const image of uploads) expect(isCoverPixel(image,150,110)).toBe(true);
     expect(dispose).not.toHaveBeenCalled(); expect(m.provider).not.toHaveBeenCalled();
   });
   it('an in-flight safe decode crosses full→handle once, uploads to the visible capsule and closes exactly once',async()=>{
@@ -254,7 +396,9 @@ describe('R7 safe-texture ownership',()=>{
     if(action==='detach') document.body.append(m.widget);
     await settled(); expect(renders).toHaveBeenCalledTimes(1); // old decode is still the sole in-flight request
     const close=vi.fn(); resolve({width:1024,height:768,close}); await settled();
-    expect(close).toHaveBeenCalledTimes(1); expect(renders).toHaveBeenCalledTimes(2);
+    expect(close).toHaveBeenCalledTimes(1); expect(renders).toHaveBeenCalledTimes(1);
+    await nextCapture();
+    expect(renders).toHaveBeenCalledTimes(2);
     expect(uploads).toHaveLength(1); expect(closes[0]).toHaveBeenCalledTimes(1);
     expect(canvas.hidden).toBe(false); expect(m.provider).not.toHaveBeenCalled();
     expect(draws.at(-1)![5]).toEqual({halfSize:{x:28,y:28},handleMix:0,mist:.74,idleMix:1});
@@ -268,7 +412,7 @@ describe('visible orb lens restoration',()=>{
     expect(uploads).toHaveLength(1);
     m.widget.open();
     expect(canvas.hidden).toBe(true); expect(canvas.width).toBe(1);
-    m.widget.close(); await settle();
+    m.widget.close(); await nextCapture();
     expect(canvas.hidden).toBe(false); expect(canvas.width).toBeGreaterThan(1);
     expect(m.orb.classList.contains('has-lens')).toBe(true);
     expect(uploads).toHaveLength(2);
@@ -287,7 +431,7 @@ describe('visible orb lens restoration',()=>{
     const before=uploads.length;
     if(action==='Escape') document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
     else m.root.querySelector<HTMLButtonElement>('.fb-region-cancel')!.click();
-    await settle();
+    await nextCapture();
     const canvas=m.root.querySelector<HTMLCanvasElement>('.fb-orb-lens')!;
     expect(canvas.hidden).toBe(false); expect(canvas.width).toBeGreaterThan(1);
     expect(uploads).toHaveLength(before+1);
@@ -310,6 +454,8 @@ describe('visible orb lens restoration',()=>{
     expect(renders).toHaveBeenCalledTimes(1); expect(uploads).toHaveLength(0);
     const close=vi.fn(); resolve({width:1024,height:768,close}); await settle();
     expect(close).toHaveBeenCalledTimes(1);
+    expect(renders).toHaveBeenCalledTimes(1);
+    await nextCapture();
     expect(renders).toHaveBeenCalledTimes(2); expect(uploads).toHaveLength(1);
     expect(m.root.querySelector<HTMLCanvasElement>('.fb-orb-lens')!.hidden).toBe(false);
     expect(provider).not.toHaveBeenCalled();
@@ -346,6 +492,10 @@ describe('visible orb lens restoration',()=>{
     m.widget.open(); m.widget.close(); await settle();
     expect(renders).toHaveBeenCalledTimes(1);
     finish(await renderer(...oldArgs)); await settle();
+    expect(renders).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(249); await settle();
+    expect(renders).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1); await settle();
     expect(renders).toHaveBeenCalledTimes(2);
     expect(uploads).toHaveLength(1);
     expect(m.root.querySelector<HTMLCanvasElement>('.fb-orb-lens')!.hidden).toBe(false);
@@ -379,9 +529,9 @@ describe('R3 neutral glass and component theme',()=>{
     expect(draws.at(-1)![4]).toBe(false);
     const captures=renders.mock.calls.length;
     m.widget.theme='dark'; expect(draws.at(-1)![4]).toBe(true);
-    await settle(); expect(renders).toHaveBeenCalledTimes(captures+1);
+    await nextCapture(); expect(renders).toHaveBeenCalledTimes(captures+1);
     m.widget.theme='light'; expect(draws.at(-1)![4]).toBe(false);
-    await settle(); expect(renders).toHaveBeenCalledTimes(captures+2);
+    await nextCapture(); expect(renders).toHaveBeenCalledTimes(captures+2);
     const count=draws.length; change(false); change(true);
     await settle(); expect(draws).toHaveLength(count); expect(renders).toHaveBeenCalledTimes(captures+2);
     expect(document.documentElement.getAttribute('data-host-theme')).toBe('unchanged');
@@ -393,13 +543,13 @@ describe('R3 neutral glass and component theme',()=>{
     expect(draws.at(-1)![4]).toBe(false);
     const captures=renders.mock.calls.length;
     change(true); expect(draws.at(-1)![4]).toBe(true);
-    await settle(); expect(renders).toHaveBeenCalledTimes(captures+1);
+    await nextCapture(); expect(renders).toHaveBeenCalledTimes(captures+1);
     m.widget.theme='light'; expect(draws.at(-1)![4]).toBe(false);
-    await settle(); expect(renders).toHaveBeenCalledTimes(captures+2);
+    await nextCapture(); expect(renders).toHaveBeenCalledTimes(captures+2);
     change(false); change(true); await settle(); expect(draws.at(-1)![4]).toBe(false);
     expect(renders).toHaveBeenCalledTimes(captures+2);
     m.widget.theme='system'; expect(draws.at(-1)![4]).toBe(true);
-    await settle(); expect(renders).toHaveBeenCalledTimes(captures+3);
+    await nextCapture(); expect(renders).toHaveBeenCalledTimes(captures+3);
     m.widget.remove(); const count=draws.length; change(false); await settle();
     expect(draws).toHaveLength(count); expect(renders).toHaveBeenCalledTimes(captures+3);
   });

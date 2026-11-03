@@ -25,15 +25,21 @@ bool debugDisableOrbLensCapture = false;
 /// 仅在测试中让 C 路线着色器加载必定失败，用于验证退化到 A。
 bool debugFailOrbLensShader = false;
 
-/// 仅在测试中让 C 路线的宿主捕获必定抛错，用于验证「首次 + 两次重试」上限。
+/// 仅在测试中让 C 路线的宿主捕获必定抛错，验证失败后停止自动续采。
 bool debugFailOrbLensCapture = false;
 
-/// C 路线两次捕获之间的最小间隔；测试可调小以免依赖真实等待。
+/// C 路线成功完成后的续采间隔，也限制显式拖动刷新频率。
 ///
-/// 生产值保持 [Duration(seconds: 1)]，不随宿主配置变化。
-Duration debugOrbLensGateDuration = const Duration(seconds: 1);
+/// 生产值为 250ms，不随宿主配置变化；测试可调长以隔离静态光学检查。
+Duration debugOrbLensGateDuration = const Duration(milliseconds: 250);
 
 /// C 路线真正调用 `toImage` 的次数，供测试观测触发节奏与重试上限。
 ///
 /// 只在通过前置检查、即将捕获时自增；shader 不可用或闸门拦截都不计。
 int debugOrbLensCaptureAttempts = 0;
+
+/// 仅供测试挂起一次透镜捕获，验证慢捕获期间不会重叠或累积续采任务。
+Future<void> Function()? debugOrbLensCaptureBarrier;
+
+/// 仅供测试延迟正式截图 PNG 编码，验证装饰采样不会抢占进行中的捕获。
+Future<void> Function()? debugCaptureEncodeBarrier;

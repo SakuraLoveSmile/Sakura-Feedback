@@ -304,6 +304,10 @@ void main() {
     expect(tester.getSize(_body), const Size(56, 56));
     expect(_painter(tester).scale, closeTo(1.0, 1e-6));
     expect(_painter(tester).wobble, 0.0);
+    // The 250ms background refresh can publish a texture after this layout.
+    // Commit that single scheduled LayoutBuilder rebuild before checking that
+    // the size/spring transition owns no persistent ticker.
+    await tester.pump();
     expect(tester.binding.transientCallbackCount, 0);
 
     await tester.pumpWidget(const SizedBox.shrink());

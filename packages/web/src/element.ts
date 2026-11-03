@@ -348,6 +348,7 @@ const POLL_BUDGET_MS = 120000; // ~2 分钟
  * 或忙碌结束后立即补发一次（见 consumeQuotaRefreshIntent）。
  */
 const QUOTA_RETRY_MS = 30_000;
+const ORB_LENS_REFRESH_MS = 250;
 
 /**
  * 额度定时查询的最大等待。服务端 `resetAt` 正常在 24 小时内（北京时间日切）；
@@ -876,8 +877,8 @@ export class FeedbackWidget extends HTMLElement {
   private orbSurfaceActive = true;
   private lensContextLost = false;
   private lensController: AbortController | null = null;
-  private lensFresh = false;
-  private lensCapturedAt = -Infinity;
+  private lensCaptureReadyAt = -Infinity;
+  private lensRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private surfaceSignature = '';
   private surfaceCleanup: (() => void) | null = null;
   private flowFrame: number | null = null;
@@ -3103,6 +3104,7 @@ export class FeedbackWidget extends HTMLElement {
     this.orb.dataset.idleStyle=this.orbIdleStyle;
     // 同一次收起里的 changed===false 早退也必须同步，避免样式切到 hidden 后 class 残留/缺失。
     this.syncOrbIdleHidden();
+    if (this.orbIdleHidden()) this.releaseLens();
     this.syncOrbAriaLabel();
     if (!changed && animate) return;
     const target=this.orbIdleTarget(collapsed);
@@ -3171,8 +3173,7 @@ export class FeedbackWidget extends HTMLElement {
   private wakeOrb(): void {
     if (!this.canUseOrbLauncher()) return;
     this.syncOrbIdle(true);
-    if (!this.orbLens || !this.lensFresh) this.prepareLens();
-    else this.drawLiquid();
+    this.prepareLens();
   }
 
   private observeOrbAvailability(): void {
@@ -3309,24 +3310,39 @@ export class FeedbackWidget extends HTMLElement {
   }
 
   private invalidateLensTexture(): void {
+    this.cancelLensRefresh();
     this.lensGeneration++;
     this.lensRefreshPending = null;
     this.lensController?.abort(); this.lensController = null;
-    this.lensFresh = false;
     this.orbLens?.clearImage();
     if (!this.isCapturing && !this.regionSession) this.drawLiquid();
+    this.queueLensRestore();
   }
 
   private releaseLens(): void {
+    this.cancelLensRefresh();
     this.lensGeneration++;
     this.lensRefreshPending = null;
     this.lensController?.abort(); this.lensController = null;
-    this.lensFresh = false;
     this.orbLens?.dispose(); this.orbLens = null;
     this.orb.classList.remove('has-lens');
     if (this.orbCanvas) this.orbCanvas.hidden = true;
     if (this.orbOutline) this.hideOrbOutline();
     this.queueLensRestore();
+  }
+
+  private cancelLensRefresh(): void {
+    if (this.lensRefreshTimer !== null) clearTimeout(this.lensRefreshTimer);
+    this.lensRefreshTimer = null;
+  }
+
+  private scheduleLensRefresh(delay = ORB_LENS_REFRESH_MS): void {
+    if (this.lensRefreshTimer !== null || !this.canShowOrbLens()) return;
+    const generation = this.lensGeneration;
+    this.lensRefreshTimer = setTimeout(() => {
+      this.lensRefreshTimer = null;
+      if (generation === this.lensGeneration) void this.refreshLensSnapshot();
+    }, delay);
   }
 
   private async refreshLensSnapshot(): Promise<void> {
@@ -3336,13 +3352,16 @@ export class FeedbackWidget extends HTMLElement {
       this.lensRefreshPending = this.lensGeneration;
       return;
     }
-    if (this.lensFresh && performance.now()-this.lensCapturedAt < 1000) return;
+    const wait = this.lensCaptureReadyAt-performance.now();
+    if (wait > 0) { this.scheduleLensRefresh(wait); return; }
+    this.cancelLensRefresh();
     this.lensRefreshPending = null;
     this.lensBusy = true;
     const generation = this.lensGeneration, epoch = this.identityEpoch;
     const signature = this.displaySignature();
     const controller = new AbortController(); this.lensController = controller;
     const active = () => this.canShowOrbLens() && this.orbLens === lens && generation === this.lensGeneration && epoch === this.identityEpoch && signature === this.displaySignature() && !controller.signal.aborted;
+    let uploaded = false;
     try {
       const viewport = logicalViewport(window);
       // Only the built-in clone + opaque pixel-mask pipeline may feed this decorative texture.
@@ -3353,18 +3372,24 @@ export class FeedbackWidget extends HTMLElement {
       try {
         if (!active()) return;
         lens.setImage(decoded.source as TexImageSource,result.outputWidth,result.outputHeight,result.viewportWidth);
-        this.lensFresh = true; this.lensCapturedAt = performance.now();
+        uploaded = true;
         this.drawLiquid();
       } finally { decoded.close?.(); }
-    } catch { if (active()) { lens.clearImage(); this.lensFresh = false; this.drawLiquid(); } }
+    } catch { if (active()) { lens.clearImage(); this.drawLiquid(); } }
     finally {
       this.lensBusy = false;
+      // Clearing a texture must not reset the work budget. This also spaces
+      // canceled captures, so scroll events cannot start one render per event.
+      this.lensCaptureReadyAt = performance.now()+ORB_LENS_REFRESH_MS;
       if (this.lensController === controller) this.lensController = null;
       const replay = this.lensRefreshPending === this.lensGeneration && generation !== this.lensGeneration;
       this.lensRefreshPending = null;
       // An old capture may ignore abort until rendering/decoding finishes. Its successor
       // starts only now, and only for the latest explicit visible-generation request.
       if (replay) void this.refreshLensSnapshot();
+      // Refresh only after a successful frame. A blocked/unsupported capture
+      // keeps the safe outline until an explicit restore or refresh trigger.
+      else if (uploaded && active()) this.scheduleLensRefresh();
     }
   }
 

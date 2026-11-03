@@ -25,7 +25,8 @@ Future<void> _expectQuiet(WidgetTester tester, int attempts) async {
     await tester.pump(const Duration(milliseconds: 200));
   }
   expect(debugOrbLensCaptureAttempts, attempts,
-      reason: 'restoration is one capture, with no periodic retry');
+      reason:
+          'the explicit one-day test interval prevents unrelated refreshes');
   expect(tester.takeException(), isNull);
 }
 
@@ -283,8 +284,8 @@ void main() {
           fallback.color, Theme.of(tester.element(face)).colorScheme.onSurface);
       tester.platformDispatcher.clearAccessibilityFeaturesTestValue();
       await tester.pump();
-      expect(painted().image, same(original.image));
-      expect(debugOrbLensCaptureAttempts, 1);
+      expect((await _waitLens(tester)).image, isNot(same(original.image)));
+      expect(debugOrbLensCaptureAttempts, 2);
       // No perpetual material/morph ticker is left at rest.
       await tester.pump(const Duration(milliseconds: 1));
       expect(tester.binding.transientCallbackCount, 0);
@@ -309,7 +310,7 @@ void main() {
       await tester.pump();
       expect(liquidOrb, findsOneWidget);
       expect((await _waitLens(tester)).image, isNot(same(original.image)));
-      expect(debugOrbLensCaptureAttempts, 2);
+      expect(debugOrbLensCaptureAttempts, 3);
       expect(tester.takeException(), isNull);
     });
   }
@@ -686,8 +687,10 @@ void main() {
       expect(find.byKey(const Key('feedback-orb-focus-ring')), findsOneWidget);
       tester.platformDispatcher.clearAccessibilityFeaturesTestValue();
       await tester.pump();
-      expect((await _waitLens(tester)).image, same(live.image));
-      expect(debugOrbLensCaptureAttempts, 1);
+      expect((await _waitLens(tester)).image, isNot(same(live.image)));
+      expect(debugOrbLensCaptureAttempts, 2,
+          reason:
+              'high contrast suspends invisible sampling and restores fresh glass');
       expect(tester.takeException(), isNull);
     });
 
@@ -827,7 +830,8 @@ void main() {
     });
   }
 
-  testWidgets('scroll invalidates a queued return without automatic recapture',
+  testWidgets(
+      'scroll invalidates a queued return and captures the painted scroll scene',
       (tester) async {
     host.content =
         Builder(builder: (_) => const ColoredBox(color: Colors.blue));
@@ -853,13 +857,20 @@ void main() {
                 context: context)
             .dispatch(context);
       });
-      return const ColoredBox(color: Colors.blue);
+      return const ColoredBox(color: Color(0xFF00FF00));
     });
+    // The held old request uses a one-day gate for isolation. This scroll
+    // scenario now exercises the actual bounded refresh deadline instead.
+    debugOrbLensGateDuration = const Duration(milliseconds: 250);
     host.rebuild();
     await tester.pump();
     await tester.idle();
-    expect(_shader, findsNothing);
-    await _expectQuiet(tester, 2);
+    final OrbLiquidLensPainter refreshed = await _waitLens(tester);
+    final Uint8List? pixels = await tester.runAsync<Uint8List?>(
+        () async => (await refreshed.image.toByteData())?.buffer.asUint8List());
+    expect(pixels!.sublist(0, 4), <int>[0, 255, 0, 255]);
+    expect(debugOrbLensCaptureAttempts, 3);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('a failed replay does not automatically retry its generation',

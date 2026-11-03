@@ -95,7 +95,7 @@ packages:
       path: "../../flutter/feedback"
       relative: true
     source: path
-    version: "0.8.5"
+    version: "0.8.6"
   ffi:
     dependency: transitive
     description:

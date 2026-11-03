@@ -505,6 +505,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   bool _lensPrefetchDone = false;
   bool _lensFirstCaptureScheduled = false;
   Timer? _lensThemeRefresh;
+  Timer? _lensRefreshTimer;
   Brightness? _lensAncestorBrightness;
   Brightness _lensPlatformBrightness =
       WidgetsBinding.instance.platformDispatcher.platformBrightness;
@@ -616,7 +617,9 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     }
     _wakeRecognizer?.cancel();
     _invalidateCaptureSession();
-    _releaseLensSnapshot();
+    // A paused app may not draw another frame before resuming. Re-open the
+    // visibility prefetch here rather than relying on a hidden build to do it.
+    _releaseLensSnapshot(allowPrefetch: true);
     _resetOrbReleaseState();
     if (mounted) setState(() {});
   }
@@ -781,19 +784,21 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   // Neutral glass has no idle ticker or legacy brand/sweep/breathing layer.
   void _syncOrbFlow() {}
 
-  /// 每次球从 hidden 恢复可见时捕获一次，hidden 时释放快照。
+  /// 可见时持续串行更新已遮挡的背景；hidden 时释放快照并停止更新。
   ///
   /// 待机隐藏（收起且样式为「隐藏」）视同不可见：入口不在屏幕上，透镜采样
   /// 没有意义，快照随之释放；唤醒后按既有规则重新捕获。
-  /// 同一可见期不周期捕获；拖动刷新受一秒间隔与单在途约束。
+  /// 每次成功完成后间隔 250ms 再捕获；失败停止，直到下次显式刷新。
   bool get _lensVisible =>
       _appResumed &&
       !_controller.isOpen &&
+      _capturePendingSeq == null &&
       _selectionCapture == null &&
       !_temporarilyHideForCapture &&
       _handoff == null &&
       _launcherVisible &&
       !_orbIdleHidden &&
+      !MediaQuery.highContrastOf(context) &&
       widget.config.launcherMode == FeedbackLauncherMode.orb;
 
   void _invalidateLensTheme() {
@@ -814,6 +819,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   void _syncOrbLensCapture(
       {required bool open, required FeedbackConfig config}) {
     if (!_lensVisible) {
+      _cancelLensRefresh();
       _lensPrefetchDone = false;
       _lensPendingCaptureGeneration = null;
       if (_lensSnapshot.value != null || _lensCaptureInFlight) {
@@ -843,6 +849,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   }
 
   void _releaseLensSnapshot({bool allowPrefetch = false}) {
+    _cancelLensRefresh();
     ++_lensGeneration;
     _lensPendingCaptureGeneration = null;
     _lensFirstCaptureScheduled = false;
@@ -877,7 +884,27 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     WidgetsBinding.instance.scheduleFrame();
   }
 
-  Future<void> _captureLensSnapshot() async {
+  void _cancelLensRefresh() {
+    _lensRefreshTimer?.cancel();
+    _lensRefreshTimer = null;
+  }
+
+  void _scheduleLensRefresh(
+      {bool allowMissing = false, bool keepExisting = false}) {
+    if (!_lensVisible || (!allowMissing && _lensSnapshot.value == null)) return;
+    if (keepExisting && _lensRefreshTimer != null) return;
+    _cancelLensRefresh();
+    _lensRefreshTimer = Timer(debugOrbLensGateDuration, () {
+      _lensRefreshTimer = null;
+      if (!mounted || _disposed) return;
+      // Lifecycle/identity changes cancel this timer. Scroll keeps its deadline
+      // but uses the latest generation, so repeated notifications neither fire
+      // a full capture every frame nor postpone the final sample indefinitely.
+      unawaited(_captureLensSnapshot(fromRefreshTimer: true));
+    });
+  }
+
+  Future<void> _captureLensSnapshot({bool fromRefreshTimer = false}) async {
     if (debugDisableOrbLensCapture ||
         _lensThemeRefresh != null ||
         _disposed ||
@@ -885,9 +912,10 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
         !_lensVisible) {
       return;
     }
-    // An invalid/missing texture may be refreshed immediately; a usable one
-    // refreshes only on a drag trigger at least 1000ms after the last capture.
-    if (_lensSnapshot.value != null &&
+    // Explicit drag requests share the same bounded cadence. A missing texture
+    // may refresh immediately; the completion timer has already waited its gap.
+    if (!fromRefreshTimer &&
+        _lensSnapshot.value != null &&
         _lensGate.isRunning &&
         _lensGate.elapsed < debugOrbLensGateDuration) {
       return;
@@ -901,6 +929,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
       }
       return;
     }
+    _cancelLensRefresh();
     final int generation = ++_lensGeneration;
     final RenderRepaintBoundary? boundary = _repaintBoundaryKey.currentContext
         ?.findRenderObject() as RenderRepaintBoundary?;
@@ -916,10 +945,8 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
         boundary.size == size &&
         _dpr == dpr;
     _lensCaptureGeneration = generation;
-    _lensGate
-      ..reset()
-      ..start();
     ui.FragmentShader? shader;
+    bool captured = false;
     try {
       shader = await _lensShaderOrNull();
       if (!current()) return;
@@ -929,6 +956,11 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
       }
       debugOrbLensCaptureAttempts++;
       if (debugFailOrbLensCapture) throw StateError('debugFailOrbLensCapture');
+      final Future<void> Function()? barrier = debugOrbLensCaptureBarrier;
+      if (barrier != null) {
+        await barrier();
+        if (!current()) return;
+      }
       final _FrozenCapture? frozen = await _captureFrozen(isCurrent: current);
       if (frozen == null) {
         if (current()) _releaseLensSnapshot();
@@ -943,6 +975,10 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
       _lensSnapshot.value = _OrbLensSnapshot(
           image: frozen.image, pixelRatio: frozen.scale, shader: shader);
       shader = null; // the snapshot now owns its sampler and image handle
+      _lensGate
+        ..reset()
+        ..start();
+      captured = true;
       if (previous != null) _disposeLensAfterFrame(previous);
     } catch (error) {
       if (current()) {
@@ -960,6 +996,8 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
           !_disposed &&
           _lensVisible) {
         unawaited(_captureLensSnapshot());
+      } else if (captured && current()) {
+        _scheduleLensRefresh();
       }
     }
   }
@@ -1132,6 +1170,9 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   /// （宿主布局回到常规状态后再等待 paint / 捕获）。
   void _startCaptureSession() {
     _invalidateCaptureSession();
+    // Formal capture owns rasterization/encoding until completion or cancel.
+    // Stop decoration synchronously, before the next refresh timer can run.
+    _releaseLensSnapshot(allowPrefetch: true);
     final RenderRepaintBoundary? boundary = _repaintBoundaryKey.currentContext
         ?.findRenderObject() as RenderRepaintBoundary?;
     _capturePendingSeq = _captureSeq;
@@ -1183,6 +1224,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     _wakeRecognizer?.cancel();
     _capturePendingSeq = null;
     ++_captureSeq;
+    _cancelLensRefresh();
     ++_lensGeneration;
     _lensPendingCaptureGeneration = null;
     _resetOrbReleaseState();
@@ -1215,6 +1257,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   void dispose() {
     _disposed = true;
     _lensThemeRefresh?.cancel();
+    _cancelLensRefresh();
     _cancelOrbIdle();
     _idlePreferences.dispose();
     _wakeRecognizer?.cancel();
@@ -1604,6 +1647,8 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   /// （最多 1 + [kFeedbackCaptureRetryLimit] 次）。返回字节与最终输出像素；
   /// 重试耗尽仍超限返回 null（调用方保留旧草稿旧图，可重试）。
   Future<(Uint8List, int, int)?> _encodeCapturePng(ui.Image image) async {
+    final Future<void> Function()? barrier = debugCaptureEncodeBarrier;
+    if (barrier != null) await barrier();
     double factor = 1.0;
     for (int attempt = 0; attempt <= kFeedbackCaptureRetryLimit; attempt++) {
       ui.Image? current;
@@ -2013,12 +2058,16 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     _lensPendingCaptureGeneration = null;
     _lensFirstCaptureScheduled = false;
     _lensPrefetchDone = true;
+    final int generation = _lensGeneration;
     final _OrbLensSnapshot? previous = _lensSnapshot.value;
     // Scroll only invalidates decoration; a frozen selection keeps its
-    // original pixels, geometry and capture metadata.
+    // original pixels, geometry and capture metadata. Clear after the host's
+    // new scroll position paints, then coalesce resampling at the bounded cadence.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && !_disposed && identical(previous, _lensSnapshot.value)) {
-        _clearLensImage();
+      if (!mounted || _disposed) return;
+      if (identical(previous, _lensSnapshot.value)) _clearLensImage();
+      if (generation == _lensGeneration) {
+        _scheduleLensRefresh(allowMissing: true, keepExisting: true);
       }
     });
     WidgetsBinding.instance.scheduleFrame();
