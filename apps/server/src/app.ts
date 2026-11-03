@@ -17,6 +17,7 @@ import { loginPageHtml } from "./pages/login.ts";
 import { createWorker, type Worker } from "./pipeline/worker.ts";
 import { adminRoutes } from "./routes/admin.ts";
 import { authRoutes, ensureInitialUser } from "./routes/auth.ts";
+import { changelogAdminRoutes, changelogPageRoutes, changelogPublicRoutes } from "./routes/changelog.ts";
 import { feedbackRoutes } from "./routes/feedback.ts";
 import {
   createSystemUpdateService,
@@ -212,6 +213,9 @@ export function createApp(config: ServerConfig, deps: AppDeps = {}): FeedbackApp
       ...(deps.now ? { now: deps.now } : {}),
     }),
   );
+  app.route("/api/changelog", changelogPublicRoutes(db));
+  app.route("/changelog", changelogPageRoutes(db));
+  app.route("/api/admin/changelog", changelogAdminRoutes({ db, config }));
   app.route("/api/admin", adminRoutes({ db, masterKey: config.masterKey, config, kaneo, ai, worker }));
   // 「检查更新」接口（同样是 /api/admin 下的管理员守卫路由；只检查不安装）。
   app.route("/api/admin/system", systemUpdateRoutes({ db, config, system }));

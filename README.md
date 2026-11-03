@@ -4,7 +4,7 @@
 > —— React / Vue / 原生 HTML / SSR / Flutter 的完整接入步骤、属性与方法清单、
 > 截图与遮挡的已知限制，都集中在这一篇。
 
-当前接入版本 **0.8.6**：[正式产物与校验文件](https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/tag/v0.8.6)。Web 固定安装 Release 的 `feedback-web-0.8.6.tgz`；Flutter 固定 Git 标签 `v0.8.6` 与 `flutter/feedback` 子目录，详细步骤见接入指南。
+当前接入版本 **0.9.0**：[正式产物与校验文件](https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/tag/v0.9.0)。Web 固定安装 Release 的 `feedback-web-0.9.0.tgz`；Flutter 固定 Git 标签 `v0.9.0` 与 `flutter/feedback` 子目录，详细步骤见接入指南。
 
 个人使用的反馈收集组件 + 归档服务。流程：**呼出面板 →（可选）截取当前应用视口并自动遮挡敏感区 → 输入文字 → 服务保存原话与截图（首次提交自动发现软件）→ AI 整理内容 →（后台停止）→ 管理员在管理页确认来源并配置规则 →「启用自动同步到 Kaneo 并处理积压」（或逐条「保存并同步到 Kaneo」）→ 写入 Kaneo**。
 
@@ -43,6 +43,15 @@
 | `docs/api.md` | HTTP 契约（认证、软件配置、连接测试、反馈四组接口与状态机） |
 | `docs/deployment.md` | 部署与运维说明 |
 | `CHANGELOG.md` | 逐版本变更记录与破坏性标注（宿主升级前先看这里） |
+| `docs/changelog-template.md` | 各接入软件的标准更新日志模板、反馈提出者署名与发布步骤 |
+
+## 各软件的更新日志与反馈致谢
+
+管理员在「更新日志」选择软件，填写版本、日期、摘要和新增/改进/修复条目，关联该软件的反馈后可带入提出者名称，也可改为公开昵称或匿名。先保存草稿并预览，再显式发布。
+
+发布内容可通过 `/changelog/<appId>` 展示页、`GET /api/changelog/<appId>` JSON 或 `/api/changelog/<appId>/markdown` 接入宿主软件；公开产物只包含更新内容与选定署名。完整步骤见 [规范模板](docs/changelog-template.md) 与 [接入说明](docs/integration.md#软件更新日志与反馈致谢)。
+
+服务端会自动迁移至 schema **15**（新增更新日志表，保留原有反馈与账号）。升级前备份数据目录；回退旧服务时恢复升级前备份。
 
 ## 快速开始（开发）
 

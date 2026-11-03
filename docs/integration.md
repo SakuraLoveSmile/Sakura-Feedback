@@ -181,23 +181,23 @@ Shadow DOM 查询节点或覆盖内部样式）；`test/` 下的测试辅助文�
 
 ### 2.1 Web：通过构建出的 npm tarball 安装（打包器宿主推荐）
 
-包名 `@feedback/web`，当前版本 `0.8.6`，因此 tarball 文件名为 **`feedback-web-0.8.6.tgz`**（版本变了文件名跟着变）。
+包名 `@feedback/web`，当前版本 `0.9.0`，因此 tarball 文件名为 **`feedback-web-0.9.0.tgz`**（版本变了文件名跟着变）。
 
 优先安装正式 Release 的固定产物（保留锁文件）；不要把工作区源码或 `main` 当成稳定版本：
 
 ```bash
-pnpm add https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/download/v0.8.6/feedback-web-0.8.6.tgz
+pnpm add https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/download/v0.9.0/feedback-web-0.9.0.tgz
 ```
 
-完整 Web dist、SHA256 与服务端镜像清单均在 [v0.8.6 Release](https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/tag/v0.8.6)。
-需要自行构建时，先检出 `v0.8.6`，再执行：
+完整 Web dist、SHA256 与服务端镜像清单均在 [v0.9.0 Release](https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/tag/v0.9.0)。
+需要自行构建时，先检出 `v0.9.0`，再执行：
 
 ```bash
 # ① 在仓库根构建组件包
 pnpm install
 pnpm --filter @feedback/web build
 
-# ② 打成 tarball（真实产物：/tmp/fbpack/feedback-web-0.8.6.tgz）
+# ② 打成 tarball（真实产物：/tmp/fbpack/feedback-web-0.9.0.tgz）
 mkdir -p /tmp/fbpack
 pnpm --filter @feedback/web pack --pack-destination /tmp/fbpack
 ```
@@ -206,8 +206,8 @@ tarball 内含 `dist/` 全部产物（含 ESM 懒加载分块）、`package.json
 
 ```bash
 # ③ 在你的宿主项目里安装这个 tgz
-pnpm add /tmp/fbpack/feedback-web-0.8.6.tgz
-# 等价写法：npm install /tmp/fbpack/feedback-web-0.8.6.tgz
+pnpm add /tmp/fbpack/feedback-web-0.9.0.tgz
+# 等价写法：npm install /tmp/fbpack/feedback-web-0.9.0.tgz
 ```
 
 ```ts
@@ -268,7 +268,7 @@ dependencies:
   feedback_widget:
     git:
       url: https://github.com/SakuraLoveSmile/Sakura-Feedback.git
-      ref: v0.8.6                    # 或该标签对应的完整 commit SHA
+      ref: v0.9.0                    # 或该标签对应的完整 commit SHA
       path: flutter/feedback        # 包在仓库的子目录里
 ```
 
@@ -1544,3 +1544,32 @@ Blog 的反馈入口建议显式声明：`launcher-mode="orb"` + `capture-mode="
 
 管理面明确不含：彻底删除（purge）、内容编辑、管理员回复与复杂 Kaneo 恢复操作。
 回收站恢复不自动重启处理；归档仅本地归档区语义（不代表创建 Kaneo 任务）。
+
+## 软件更新日志与反馈致谢
+
+管理后台「更新日志」中选择宿主的 `appId`，新建版本并填写日期、摘要与新增/改进/修复条目；关联反馈会带入提出者的账号名称，可改为公开昵称或匿名。保存草稿后检查预览，再点击「发布更新日志」。格式与示例见 [规范模板](changelog-template.md)，字段与错误见 [HTTP 契约](api.md#软件更新日志)。
+
+最少接入只需要在宿主的「关于 / 更新日志」入口链接到服务展示页：
+
+```html
+<a href="https://feedback.example.com/changelog/com.example.app"
+   target="_blank" rel="noopener noreferrer">更新日志</a>
+```
+
+也可以在宿主页面嵌入同一地址，或读取 JSON 后用自己的界面展示：
+
+```js
+const appId = "com.example.app";
+const response = await fetch(
+  `https://feedback.example.com/api/changelog/${encodeURIComponent(appId)}`,
+  { credentials: "omit" },
+);
+if (!response.ok) throw new Error(`更新日志读取失败：${response.status}`);
+const { appName, items } = await response.json();
+// items[i].entries[j].contributors 是管理员选定的公开署名列表。
+// 用框架文本插值或 textContent 渲染 title/description/署名。
+```
+
+Flutter 等原生宿主也可直接读取该公开 JSON，或在自己的更新日志入口打开展示页，无需管理员令牌。`/api/changelog/<appId>/markdown` 提供同一模板的文本，后台也可复制已发布 Markdown，用于软件发布说明。
+
+公开日志只包含显式发布的更新内容与署名。取消发布后接口与页面立即停止返回该版本；软件删除后公开入口停用。反馈关联用于溯源，不会自动改变“已解决”状态或触发宿主软件升级。宿主需要自行添加更新日志入口，现有反馈组件接入方式保持兼容。

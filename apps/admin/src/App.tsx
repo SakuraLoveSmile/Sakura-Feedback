@@ -11,16 +11,23 @@ import { Field, Icon, Modal, ToastProvider } from "./ui.tsx";
 import { useUrlState } from "./url.ts";
 import AccountsView from "./views/AccountsView.tsx";
 import AppsView from "./views/AppsView.tsx";
+import ChangelogView from "./views/ChangelogView.tsx";
 import ConnectionsView from "./views/ConnectionsView.tsx";
 import FeedbacksView from "./views/FeedbacksView.tsx";
 import SessionsView from "./views/SessionsView.tsx";
 import SettingsView from "./views/SettingsView.tsx";
 import SystemUpdateView from "./views/SystemUpdateView.tsx";
 
-type Page = "feedbacks" | "apps" | "accounts" | "connections" | "sessions" | "settings" | "system-update";
+type Page = "feedbacks" | "changelog" | "apps" | "accounts" | "connections" | "sessions" | "settings" | "system-update";
 
 const NAV_GROUPS: { label: string; items: { id: Page; label: string; icon: string }[] }[] = [
-  { label: "工作台", items: [{ id: "feedbacks", label: "反馈", icon: "feedback" }] },
+  {
+    label: "工作台",
+    items: [
+      { id: "feedbacks", label: "反馈", icon: "feedback" },
+      { id: "changelog", label: "更新日志", icon: "file" },
+    ],
+  },
   {
     label: "管理",
     items: [
@@ -453,6 +460,8 @@ function renderPage(page: Page, onCredentialsUpdated: (username: string) => void
   switch (page) {
     case "feedbacks":
       return <FeedbacksView />;
+    case "changelog":
+      return <ChangelogView />;
     case "apps":
       return <AppsView />;
     case "connections":

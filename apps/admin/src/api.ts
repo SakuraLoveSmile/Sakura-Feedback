@@ -96,6 +96,30 @@ export const api = {
   del: <T>(url: string) => req<T>("DELETE", url),
 };
 
+/** 各宿主软件的结构化更新日志；公开接口使用不含 feedbackId 的独立视图。 */
+export type ChangelogEntryType = "added" | "improved" | "fixed";
+
+export interface ChangelogEntry {
+  type: ChangelogEntryType;
+  title: string;
+  description: string;
+  feedbacks: { feedbackId: string; creditName: string | null }[];
+}
+
+export interface ChangelogRelease {
+  id: string;
+  appId: string;
+  version: string;
+  releaseDate: string;
+  summary: string;
+  upgradeNotes: string;
+  entries: ChangelogEntry[];
+  revision: number;
+  publishedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 // ---------- 类型 ----------
 
 /** 本地管理区域（与处理状态 status 完全分离）。 */

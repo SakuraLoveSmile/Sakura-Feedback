@@ -249,7 +249,7 @@ describe("迁移 12：多图附件与撤销停止派发", () => {
     const dir = makeV11Db(seedV11);
     const db = openDb(dir);
 
-    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(14);
+    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(15);
     expect(db.prepare("PRAGMA foreign_key_check").all()).toHaveLength(0);
 
     // feedback_images 表已建（空表，可插入且按 (feedback_id, sort) 唯一）
@@ -423,7 +423,7 @@ describe("迁移 12：多图附件与撤销停止派发", () => {
     fix.exec("DROP TABLE kaneo_cancellation_tasks_v14");
     fix.close();
     const db = openDb(dir);
-    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(14);
+    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(15);
     expect(db.prepare("PRAGMA foreign_key_check").all()).toHaveLength(0);
     // 重建完成后：pending/processing 已置 cancelled
     const after = db.prepare("SELECT status FROM kaneo_cancellation_tasks WHERE id = 'kct-pending'").get() as {
@@ -446,7 +446,7 @@ describe("迁移 12：多图附件与撤销停止派发", () => {
     first.close();
 
     const second = openDb(dir);
-    expect((second.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(14);
+    expect((second.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(15);
     expect(digest(second)).toBe(snapshot);
     expect(second.prepare("PRAGMA foreign_key_check").all()).toHaveLength(0);
     second.close();

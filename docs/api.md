@@ -825,4 +825,86 @@ App 对象：
   （即使浏览器带上了后台会话 Cookie，也只按 Bearer 判定身份）；
 - 其余路径（人工恢复动作、后台管理、会话管理、旧握手、系统更新）**不参与跨源放行**，保持第一方同源 Cookie 限制。
 
+匿名公开的 `/api/changelog/*` 使用独立的只读 CORS，见下节，不复用组件鉴权。
+
 Flutter 原生（非浏览器）不受 CORS 约束；无 `Origin` 的请求按原生客户端处理，来源记为 `native`。
+
+## 软件更新日志
+
+每个接入软件按 `appId` 独立管理版本，规范模板见 [changelog-template.md](changelog-template.md)。服务数据库新增 `changelog_releases` 表（schema 15），原账号、反馈、对话与处理状态不变。
+
+### 管理端
+
+以下接口使用**管理员 Cookie 会话与既有同源检查**，请求体沿用 64 KiB 上限。日志先保存草稿，再显式发布；已发布内容必须先取消发布才能修改。日志发布不调用 AI/Kaneo，不改变反馈状态。
+
+```ts
+type ReleaseEntry = {
+  type: "added" | "improved" | "fixed";
+  title: string;
+  description: string;
+  feedbacks: { feedbackId: string; creditName: string | null }[];
+};
+type ReleaseInput = {
+  appId: string;
+  version: string;
+  releaseDate: string; // YYYY-MM-DD
+  summary: string;
+  upgradeNotes: string;
+  entries: ReleaseEntry[];
+};
+type Release = ReleaseInput & {
+  id: string;
+  revision: number;
+  publishedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+```
+
+| 方法与路径 | 输入 | 返回 |
+|---|---|---|
+| `GET /api/admin/changelog/apps` | 无 | `{items: {appId,name,deleted}[]}`，包含活跃软件及拥有日志的历史软件，活跃名称优先 |
+| `GET /api/admin/changelog?appId=...` | 必填软件标识 | `{items: Release[]}`，日期、新建时间倒序，包含草稿 |
+| `POST /api/admin/changelog` | `ReleaseInput` | `201 Release` |
+| `GET /api/admin/changelog/:id` | 日志 ID | `Release` |
+| `PUT /api/admin/changelog/:id` | `ReleaseInput & {expectedRevision: number}` | 更新后的 `Release`，`appId` 不可改 |
+| `POST /api/admin/changelog/:id/publish` | `{expectedRevision: number}` | 发布后的 `Release` |
+| `POST /api/admin/changelog/:id/unpublish` | `{expectedRevision: number}` | 取消发布后的 `Release` |
+
+约束与错误：
+
+- `version` 为 1..80 字符单行，同一 `appId + version` 唯一；重复为 `409 release_exists`。`releaseDate` 必须为真实日历日期。
+- `summary` ≤2000、`upgradeNotes` ≤4000，均为必传字符串，可为空；`entries` 为 1..100 条，每条 `title` 为 1..120 字符单行，`description` ≤2000 字符字符串。
+- 每条 `feedbacks` 必传，可为空，至多 20 条，不能重复 `feedbackId`。新增关联只接受本 `appId` 存在且未在回收站的反馈。已经保存的历史关联在源反馈删除或移入回收站后仍可保留与修改署名。
+- `creditName` 为 1..80 字符单行文字，`null` 表示匿名；默认名称由管理页从反馈提出者账号带入。当前账号只有用户名，没有独立昵称字段，管理员可改为公开昵称。账号改名/停用、反馈删除不回写已保存日志。每条更新中的同名署名去重，匿名显示“匿名用户”。
+- 字段无效/跨软件关联：`400 invalid_request`；未知记录/已删除软件创建或发布：`404 not_found`；已发布日志编辑：`409 release_published`；过期 `expectedRevision`：`409 version_conflict`，不会覆盖较新内容。同一状态且版本一致的发布操作不增加 revision。
+- 软件软删除后历史日志保留，公开入口停用；同一 `appId` 重新登记后可继续管理历史版本。
+
+### 公开展示与宿主读取
+
+以下端点为**匿名只读**，仅返回已发布版本，响应 `Cache-Control: no-store`；API 返回 `Access-Control-Allow-Origin: *`，只允许 GET/HEAD/OPTIONS，无凭据跨域。公开写请求为 `405 method_not_allowed`。
+
+| 路径 | 结果 |
+|---|---|
+| `GET /changelog/:appId` | 可直接链接/嵌入的 HTML 更新日志页，支持深浅色与窄屏 |
+| `GET /api/changelog/:appId` | `{appId, appName, items: PublicRelease[]}`，日期、新建时间倒序 |
+| `GET /api/changelog/:appId/markdown` | `text/plain`，统一模板的所有已发布版本 Markdown |
+
+```ts
+type PublicRelease = {
+  id: string;
+  version: string;
+  releaseDate: string;
+  summary: string;
+  upgradeNotes: string;
+  publishedAt: string;
+  entries: {
+    type: "added" | "improved" | "fixed";
+    title: string;
+    description: string;
+    contributors: string[];
+  }[];
+};
+```
+
+软件不存在或已删除为 `404`。软件存在但没有已发布版本时，JSON 的 `items` 为空，展示页显示“暂未发布更新日志”。公开内容按字段白名单生成，不含反馈 ID、原话、用户 ID、附件或内部 Kaneo 信息；HTML/Markdown 都按普通文字转义。宿主自行渲染 JSON 时同样应按文本处理。
