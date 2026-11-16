@@ -21,14 +21,19 @@ final Uint8List kPng = base64Decode(
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==');
 
 /// 会话响应体：可选携带 capabilities 对象。
-Map<String, Object?> sessionWithCaps([Map<String, Object?>? caps]) =>
-    <String, Object?>{
-      'authenticated': true,
-      'kind': 'client',
-      'user': userJson(),
-      'quota': quotaJson(),
-      if (caps != null) 'capabilities': caps,
-    };
+///
+/// 用语句追加而不是 `?caps` 空值感知元素：组件包 sdk 约束仍是 ^3.6.0，
+/// 空值感知元素需要 Dart 3.8，宿主工具链较旧时会在构建测试源码时报错。
+Map<String, Object?> sessionWithCaps([Map<String, Object?>? caps]) {
+  final body = <String, Object?>{
+    'authenticated': true,
+    'kind': 'client',
+    'user': userJson(),
+    'quota': quotaJson(),
+  };
+  if (caps != null) body['capabilities'] = caps;
+  return body;
+}
 
 /// 单个图片文件的选择器返回值。
 List<FeedbackImageFile> oneImage(String id) => <FeedbackImageFile>[
