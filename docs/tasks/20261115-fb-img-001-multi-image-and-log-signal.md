@@ -28,4 +28,4 @@
 
 - Flutter 只在 widget 测试与 mock HTTP 下验证，未在真机/桌面平台跑能力协商；宿主工程需升级到本修复后的 SDK 版本才生效（MediaPlayer 现 pin v0.8.6、Music v0.5.2、Assistant v0.6.0 均带旧缺陷或早于 v12）。
 - 各宿主仍需按 5.6 实际核验日志接入并保存证据（FB-LOG-001 未闭环项）。
-- 未提交、推送、发布；用户尚未确认验收。
+- 提交 `c6ceb39` 已合并并推送到 main，随 **v0.9.1** 于 2026-11-16 正式发布（[Release 43881404665](https://github.com/SakuraLoveSmile/Sakura-Feedback/actions/runs/43881404665)）；生产与各宿主尚未升级，用户尚未确认验收。
