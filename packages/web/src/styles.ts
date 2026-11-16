@@ -1411,6 +1411,18 @@ export const STYLES = /* css */ `
   border-radius: 4px;
 }
 
+/*
+ * 宿主未接入 logProvider 时的说明（对齐 Flutter feedback-logs-no-provider）：
+ * 说明「没有自动采集」而不是让「重新采集」按钮无声消失。
+ * 只作说明文本：不占命中区、不进 Tab 顺序，随 [hidden] 全局兜底一起隐藏。
+ */
+.fb-logs-no-provider {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fb-text-tertiary);
+}
+
 .fb-log-preview-modal {
   position: fixed;
   inset: 0;

@@ -178,16 +178,13 @@ void main() {
           isEmpty);
     });
 
-    testWidgets('能力缺失（旧服务）：单图模式 + 升级提示', (tester) async {
+    testWidgets('能力确认但缺 images（旧服务）：单图模式 + 升级提示', (tester) async {
       final PanelServer server = PanelServer();
-      // session 无 images 字段；features 也无（404）。
-      server.respond('GET /api/auth/session', <String, Object?>{
-        'authenticated': true,
-        'kind': 'client',
-        'user': userJson(),
-        'quota': quotaJson(),
-        // 无 capabilities。
-      });
+      // 旧服务端：session 带 capabilities 对象但**缺 images 数值**——
+      // 这是「已确认的单图服务端」。注意「探测失败 / 无 capabilities 对象」
+      // 不再等于单图（那只是没探到，界面乐观按 5 张放行、由服务端裁决），
+      // 见 capabilities_probe_test.dart。
+      server.respond('GET /api/auth/session', _sessionJson());
       int picks = 0;
       await pumpPanelWithPicker(
         tester,
@@ -206,7 +203,7 @@ void main() {
         },
       );
       await tester.pump();
-      // 先手动加一张：触发能力探测（features 404 → 单图模式）。
+      // 先手动加一张：session 已确认单图（capabilities 无 images 数值）。
       await tester.tap(find.byKey(const Key('feedback-btn-add-image')));
       final FeedbackPanelState panel =
           tester.state<FeedbackPanelState>(find.byType(FeedbackPanel));

@@ -249,6 +249,10 @@ describe('面板内手动截图入口', () => {
     const m = mount();
     const d = deferred<Shot>();
     m.widget.captureProvider = vi.fn(() => d.promise);
+    // 本用例的 warnSpy 只用来捕捉「迟到结果导致的意外告警」。宿主未接入 logProvider 时
+    // 组件会在首次打开时给出一条**预期内**的一次性提示，故这里接入 provider 把该提示排除在外，
+    // 保证断言仍只覆盖本用例关心的意外告警（该提示本身由 logs-no-provider.test.ts 覆盖）。
+    m.widget.logProvider = async () => [];
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     m.fab.click();

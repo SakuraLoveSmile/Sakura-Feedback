@@ -378,6 +378,13 @@ const MAX_LOG_FILES = 3;
 const MAX_LOG_BYTES = 1024 * 1024; // 1 MiB
 const ALLOWED_LOG_EXTENSIONS = new Set(['.log', '.txt', '.json', '.jsonl']);
 
+/**
+ * 宿主未接入 logProvider 时的可见文案（对齐 Flutter 的
+ * Key('feedback-logs-no-provider')：「未配置自动采集器，可手动添加日志文件」）。
+ * Web 侧额外点明接入方式（属性名 logProvider），让接入者不必翻文档就知道缺什么。
+ */
+const LOGS_NO_PROVIDER_TEXT = '未接入日志采集，可手动添加日志文件；宿主接入需提供 logProvider';
+
 function getLogExtension(name: string): string {
   const dot = name.lastIndexOf('.');
   if (dot === -1) return '';
@@ -659,6 +666,8 @@ export class FeedbackWidget extends HTMLElement {
   private logFileInput!: HTMLInputElement;
   private logStatusEl!: HTMLSpanElement;
   private logErrorEl!: HTMLDivElement;
+  /** 宿主未接入 logProvider 时的可见提示（让「没有自动采集」在界面上可见）。 */
+  private logsNoProviderHint!: HTMLParagraphElement;
   /** 采集失败时的显式重试入口（挂在 logErrorEl 内，错误清空时随之移除）。 */
   private logRetryBtn!: HTMLButtonElement;
   private logPreviewModal!: HTMLDivElement;
@@ -934,6 +943,8 @@ export class FeedbackWidget extends HTMLElement {
 
   /** 日志采集异步操作序号，防止迟到结果写入已切换的身份或草稿。 */
   private logOpSeq = 0;
+  /** 每个 widget 实例只向宿主 console 提示一次「未接入日志采集」（重复打开不刷屏）。 */
+  private logsNoProviderWarned = false;
 
   private invalidateLogCollection(): void {
     this.logOpSeq++;
@@ -1295,6 +1306,16 @@ export class FeedbackWidget extends HTMLElement {
       if (this.tokenValid() && this.phase !== 'submitting' && this.phase !== 'tracking') {
         this.startSummaryPolling();
       }
+    }
+
+    // 未接入 logProvider：给出一次面向接入者的 console 提示（同一实例只提示一次，
+    // 避免重复打开/轮询刷屏）。这是「宿主漏接」的运行时可观测信号，不阻断任何流程。
+    if (!this._logProvider && !this.logsNoProviderWarned) {
+      this.logsNoProviderWarned = true;
+      console.warn(
+        '[Feedback] 未接入日志采集：宿主需通过 widget.logProvider 提供日志采集函数' +
+          '（见 docs/integration.md §5.6）。当前可手动添加日志文件，提交不受影响。',
+      );
     }
 
     // 打开面板时若配置了 logProvider 且尚未采集过日志，则自动采集
@@ -3934,6 +3955,13 @@ export class FeedbackWidget extends HTMLElement {
     logsActions.append(this.addLogBtn, this.recollectLogBtn, this.logFileInput);
     logsHeader.append(logsLabel, logsActions);
 
+    // 宿主未接入 logProvider 时的可见提示：与 Flutter 的 feedback-logs-no-provider 对齐，
+    // 说明「没有自动采集」而不是让「重新采集」按钮无声消失。默认隐藏，由 syncLogsUi() 按
+    // 是否接入了 provider 决定可见性；不参与焦点序列（纯说明文本，不进 Tab 顺序）。
+    this.logsNoProviderHint = el('p', 'fb-logs-no-provider', LOGS_NO_PROVIDER_TEXT);
+    this.logsNoProviderHint.setAttribute('role', 'note');
+    this.logsNoProviderHint.hidden = true;
+
     this.logStatusEl = el('span', 'fb-log-status');
     this.logStatusEl.hidden = true;
 
@@ -3949,7 +3977,13 @@ export class FeedbackWidget extends HTMLElement {
     });
 
     this.logsList = el('ul', 'fb-logs-list');
-    this.logsBody.append(logsHeader, this.logStatusEl, this.logErrorEl, this.logsList);
+    this.logsBody.append(
+      logsHeader,
+      this.logsNoProviderHint,
+      this.logStatusEl,
+      this.logErrorEl,
+      this.logsList,
+    );
     this.logsArea.append(this.logsToggleBtn, this.logsBody);
 
     // 面板组件顺序（T2.6）：标题与页签 → 反馈描述 → 图片证据 → 可折叠日志 → 固定提交区
@@ -5616,6 +5650,8 @@ export class FeedbackWidget extends HTMLElement {
     // T4：默认只显示简短摘要；「重新采集」仅在配置了 logProvider 且空闲时可用。
     this.logsSummaryEl.textContent = this.logsSummaryText();
     this.recollectLogBtn.hidden = !this._logProvider || busy;
+    // 没有 logProvider 时不让「重新采集」按钮无声消失：展开区给出固定说明。
+    this.logsNoProviderHint.hidden = !!this._logProvider;
     this.recollectLogBtn.disabled = busy;
     this.setLogsOpen(this.logsOpen);
     // 错误必须让用户看见：日志区处于折叠态时有错误 → 自动展开

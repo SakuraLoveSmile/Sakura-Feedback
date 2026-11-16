@@ -1,7 +1,7 @@
 # 完整接入指南（宿主应用 → 反馈服务 → Kaneo）
 
 本篇是**唯一的完整接入入口**。目标读者是从未看过 `apps/server` 源码的宿主开发者：
-按本文配置服务、安装组件、挂载悬浮球，即可在独立宿主中完成**登录 → 截图 → 反馈 → 归档**。
+按本文配置服务、安装组件、挂载悬浮球、接入宿主诊断日志，即可在独立宿主中完成**登录 → 截图 → 反馈 → 归档**。
 
 - HTTP 字段与认证契约不在本文重复：见 [`docs/api.md`](api.md)。
 - 部署、备份、升级/回退等运维细节不在本文重复：见 [`docs/deployment.md`](deployment.md)。
@@ -18,7 +18,7 @@
 
 | 角色 | 负责什么 | 不负责什么 |
 |---|---|---|
-| **宿主应用**（你的 HTML / React / Vue / SSR 站点或 Flutter App） | 提供页面与视口；挂载 `<feedback-widget>` / `FeedbackWidget`；显式传入 `api-base`（`apiBase`）与 `app-id`（`appId`），可选 `app-version` / `page-label`；用 `data-feedback-capture-mask` / `FeedbackCaptureMask` 声明敏感区域；持有组件实例并（Flutter）持有 `FeedbackController` 的生命周期；在宿主 UI 里提供呼出入口 | 不持有 AI / Kaneo 密钥；不指定归档到的 Kaneo 项目或列；不重发"服务端已接收"的反馈；不实现截图、遮挡、幂等、轮询 |
+| **宿主应用**（你的 HTML / React / Vue / SSR 站点或 Flutter App） | 提供页面与视口；挂载 `<feedback-widget>` / `FeedbackWidget`；显式传入 `api-base`（`apiBase`）与 `app-id`（`appId`）；必须通过 `logProvider` 接入宿主自身的诊断日志（见 5.6）；可选 `app-version` / `page-label`；用 `data-feedback-capture-mask` / `FeedbackCaptureMask` 声明敏感区域；持有组件实例并（Flutter）持有 `FeedbackController` 的生命周期；在宿主 UI 里提供呼出入口 | 不持有 AI / Kaneo 密钥；不指定归档到的 Kaneo 项目或列；不重发"服务端已接收"的反馈；不实现截图、遮挡、幂等、轮询 |
 | **反馈服务**（`apps/server`） | 保存原话与截图（先落库再回执）；调 AI **整理内容**；提供管理页（`/admin/`）与登录窗口（`/login`）；**由管理员在管理页逐条完成人工分类（项目 / 列 / 工作区标签 / 可选负责人）并显式授权同步到 Kaneo** 后才调 Kaneo 建任务、挂标签、传图、写评论；幂等与限流；以 `FEEDBACK_MASTER_KEY` 加密存放 AI / Kaneo 密钥 | 不自动创建 Kaneo 项目、列或看板；不自动分配标签或负责人；**提交成功不自动同步到 Kaneo**，也不会因为重启或保存草稿而发起远端写入；不托管宿主页面（只托管自己的管理页与登录页）；不重发结果不确定的评论或图片 |
 | **Kaneo** | 提供目标项目与列、工作区级标签、工作区成员、任务与评论、图片资产的最终宿主；提供 API Key（Kaneo Web UI → 设置 → 账户 → API Keys）；提供任务的真实链接 | 不保存反馈原文的原始存档（原文在服务端 SQLite）；不参与 AI 整理 |
 
@@ -36,7 +36,7 @@
 | 2 | 管理员 / 浏览器 | 打开 `http://<host>:8787/admin/` 登录 | 进入管理页 |
 | 3 | 管理员 / 管理页「连接配置」 | 填 **Kaneo** API 地址（如 `http://kaneo:1337` 或 `https://kaneo.example.com`，含不含 `/api` 均可）与 API Key，点连接测试 | 测试返回项目名与列列表 |
 | 4 | 管理员 / 管理页「连接配置」 | 填 **AI**（OpenAI 兼容 Chat Completions）地址（如 `https://api.openai.com/v1`）、模型与密钥，点连接测试 | 返回 `ping` 回显 |
-| 5 | 宿主开发者 / 宿主代码 | 在组件上填 `api-base`（= 第 1 步的服务地址）、`app-id`（宿主自己的稳定标识，如 `com.example.app`）与可选 `app-name` / `app-version` / `page-label` | 面板能打开、能登录、能提交 |
+| 5 | 宿主开发者 / 宿主代码 | 在组件上填 `api-base`（= 第 1 步的服务地址）、`app-id`（宿主自己的稳定标识，如 `com.example.app`）与可选 `app-name` / `app-version` / `page-label` | 面板能打开、能登录、能提交，且宿主日志通过第 5.6 节接入验收 |
 | 6 | 管理员 / 管理页「软件配置」 | 首次提交后列表里会**自动出现**这条软件（待配置）：确认它的**来源**（新来源需点「确认来源」） | 来源变为「已确认」 |
 | 7 | 管理员 / 管理页「软件配置」 | 选 **Kaneo 项目** → **目标列** → **至少一个工作区标签** →（可选）负责人，点「保存配置（不触发同步）」 | 规则完整（列表显示 `规则 v1`），**此时不会同步到 Kaneo** |
 | 8 | 管理员 / 管理页「软件配置」 | 点「**启用自动同步到 Kaneo 并处理积压**」 | 积压与后续反馈各同步一次，状态 `已同步`，出现 Kaneo 任务链接 |
@@ -492,7 +492,7 @@ pnpm --filter @feedback/example-html serve            # http://127.0.0.1:8080/
 
 <script>
   const widget = document.getElementById('widget');
-  // 可选：注册日志提供者，在打开面板时自动收集（至多 3 份，每份 ≤1MiB，3秒超时保护）
+  // 必须：注册宿主应用日志提供者（示例内容须替换为真实诊断数据），在打开面板时自动收集（至多 3 份，每份 ≤1MiB，3秒超时保护）
   widget.logProvider = async () => [
     { filename: 'console.log', blob: new Blob(['2026-09-14 12:00:00 [INFO] app loaded\n'], { type: 'text/plain' }) }
   ];
@@ -542,7 +542,7 @@ pnpm --filter @feedback/example-react dev
    ```tsx
    useEffect(() => {
      if (!widget) return;
-     // 可选：注入日志采集回调（打开面板自动收集，3秒超时保护）
+     // 必须：注入宿主应用日志采集回调（示例内容须替换为真实诊断数据）（打开面板自动收集，3秒超时保护）
      widget.logProvider = async () => [
        { filename: 'client.log', blob: new Blob(['app runtime diagnostic logs...\n'], { type: 'text/plain' }) },
      ];
@@ -606,7 +606,7 @@ const widget = useTemplateRef<FeedbackWidget>('widget');   // 用模板 ref，�
 
 onMounted(() => {
   if (widget.value) {
-    // 可选：设置自动日志采集提供者
+    // 必须：设置宿主应用日志提供者（示例内容须替换为真实诊断数据）
     widget.value.logProvider = async () => [
       { filename: 'frontend.log', blob: new Blob(['vue runtime logs\n'], { type: 'text/plain' }) },
     ];
@@ -720,7 +720,7 @@ MaterialApp(
             side: FeedbackSide.right,
             launcherMode: FeedbackLauncherMode.orb,      // 默认 tab，必须显式写
             captureMode: FeedbackCaptureMode.viewport,   // 默认 off，必须显式写
-            // 可选：日志采集提供者（面板打开自动抓取，至多 3 份，每份 ≤1MiB，3秒超时容错）
+            // 必须：宿主应用日志提供者（示例内容须替换为真实诊断数据）（面板打开自动抓取，至多 3 份，每份 ≤1MiB，3秒超时容错）
             logProvider: () async => [
               FeedbackLogFile(
                 filename: 'app.log',
@@ -772,7 +772,7 @@ MaterialApp(
 | `launcher-mode` | `launcherMode` | `tab`（贴边标签） \| `orb`（**灵感球**，可拖拽指出位置并截图） | **`tab`** | 入口形态 | 纯展示；切到 `orb` 时标签隐藏、切到 `tab` 时灵感球隐藏。**不影响草稿与截图开关** |
 | `capture-mode` | `captureMode` | `off` \| `viewport` | **`off`** | 呼出时是否**自动**截取当前应用视口 | 只改下一次呼出的行为；**不清空草稿**。`off` 只关闭**自动**截图：面板里始终有手动的「截取当前页面」 |
 | — | `effectiveApiBase` | string \| null（只读 property） | — | 当前实际使用的服务地址：用户本机覆盖优先于 `api-base`，未覆盖时等于 `api-base` | 用户通过面板内「服务器设置」改变；语义见 5.3.1 |
-| — | `logProvider` | `FeedbackLogProvider?`（即 `() => Promise<FeedbackLogFile[]> \| FeedbackLogFile[]`） | `undefined` | 自动日志采集提供者；呼出面板时调用（3秒超时容错），至多采集 3 份附件，单文件 ≤1MiB | 仅 property，替换后下一次呼出面板生效；**不清空草稿** |
+| — | `logProvider` | `FeedbackLogProvider?`（即 `() => Promise<FeedbackLogFile[]> \| FeedbackLogFile[]`） | `undefined` | **宿主接入必配**（验收要求见 5.6；SDK 类型仍允许缺省）；自动日志采集提供者，呼出面板时调用（3秒超时容错），至多采集 3 份附件，单文件 ≤1MiB | 仅 property，替换后下一次呼出面板生效；**不清空草稿** |
 
 **明确结论（易踩坑）**：
 
@@ -799,7 +799,7 @@ MaterialApp(
 | `launcherBottom` | `String` | `'25%'` | 入口距可用区域底部的位置；支持百分比（`25%`）、像素（`80px`）或裸数字；**解析失败回落 25%** |
 | `launcherMode` | `FeedbackLauncherMode.tab` \| `.orb` | **`.tab`** | 经典侧边悬浮按钮 / 灵感球 |
 | `captureMode` | `FeedbackCaptureMode.off` \| `.viewport` | **`.off`** | 关闭截图 / 呼出时捕获当前视口完整截图 |
-| `logProvider` | `FeedbackLogProvider?`（即 `FutureOr<List<FeedbackLogFile>> Function()?`） | `null` | 自动日志采集提供者；呼出面板时调用（3秒超时容错），至多采集 3 份附件，单文件 ≤1MiB |
+| `logProvider` | `FeedbackLogProvider?`（即 `FutureOr<List<FeedbackLogFile>> Function()?`） | `null` | **宿主接入必配**（验收要求见 5.6；SDK 类型仍允许缺省）；自动日志采集提供者，呼出面板时调用（3秒超时容错），至多采集 3 份附件，单文件 ≤1MiB |
 | `filePicker` | `FeedbackFilePicker?`（即 `FutureOr<List<FeedbackLogFile>> Function()?`） | `null` | 手动选择日志回调；用户点击「添加日志」时调用，未提供时默认使用 `file_selector` 打开系统文件选择器 |
 
 **`position` 的优先级规则**（[`flutter/feedback/lib/src/widget.dart`](../flutter/feedback/lib/src/widget.dart)）：
@@ -1018,11 +1018,32 @@ Flutter：
   客户端等比缩小并展示最终预览；仍超限则提示且**保留草稿**。
 - 面板内编辑器：裁剪、矩形标注、不透明遮挡、撤销、取消、保存；保存替换当前附件，
   不额外占用名额。自动敏感遮挡先执行，用户编辑不能撤销它；只上传最终编辑结果。
-- **能力降级**：`capabilities.images` 缺失时保持单图模式并提示升级，不静默丢图。
+- **能力判定**：只有服务端**明确返回 `capabilities` 对象而 `images` 缺失**才算「单图服务端」——
+  此时保持单图模式并提示升级，不静默丢图。能力**未知**（`/api/features` 404、网络异常、尚未登录探测）
+  不等于单图：两端都按契约上限 5 张乐观放行，由服务端最终裁决（超限时服务端拒绝，客户端保留草稿）。
+  这条区分是必须的：把「没探到」当成「只能单图」会让已经截到一张图的用户在界面上看不到「添加图片」。
 - **跨源查看**：历史附件一律以 Bearer `fetch` 取回后渲染（Web 转对象 URL、Flutter
   `Image.memory`）；URL 本身不带凭据。
 
 ### 5.6 诊断日志接入（v12）
+
+**宿主日志接入是必过的接入验收项，适用于 Web 和 Flutter。** 新接入及已有宿主的后续接入升级均按本节核对；仅面板可打开、登录与提交成功，不能算接入完成。
+
+- 宿主必须配置 `logProvider`，从应用自己的诊断缓冲或现有日志系统导出经过脱敏的近期日志。可复用下述记录器，但必须把宿主实际请求、错误码或关键操作事件接入记录器。
+- 仅记录 Feedback 组件自身的请求、仅提供手动选文件入口、固定示例文本或永久返回空数组，均不满足要求。文中示例日志字符串只演示附件格式，接入时必须替换。
+- **强制的是接入能力**：运行中确实暂无事件、采集超时或失败，以及用户主动移除日志时，仍允许无日志提交；不制造占位日志，也不后台上传日志。日志预览、移除、身份切换清空与隐私规则继续适用。
+- 当前 SDK 的 `logProvider` 保留可空类型，服务端仍接受无日志请求；本要求通过宿主接入验收执行，不新增运行时提交拦截，也不自动升级其他应用。
+- **漏接的运行时可观测信号**：宿主未接入 `logProvider` 时，两端组件都会指出这件事，便于自查与接入核对——
+  Web 在展开的诊断日志区显示固定说明 `未接入日志采集，可手动添加日志文件；宿主接入需提供 logProvider`
+  （`.fb-logs-no-provider`），并在首次呼出面板时向宿主 console 输出**一次** `[Feedback] 未接入日志采集…` 警告；
+  Flutter 显示 `Key('feedback-logs-no-provider')` 的说明文本。二者都只是提示：手动添加日志、提交反馈不受影响。
+  看到这条提示即代表宿主接入未完成，按本节补齐 `logProvider`。
+
+接入验收必须保留以下实际验证证据（宿主版本、平台及测试反馈记录）：
+
+1. 在宿主执行一个会产生诊断事件的真实操作，再打开反馈面板；预览中能看到对应的脱敏事件，而非固定示例或仅组件请求。
+2. 提交该反馈，在管理后台对应记录中预览或下载日志，确认包含同一宿主事件。仅配置了回调不能代替这一步。
+3. 验证暂无事件、采集失败或超时、用户移除全部日志时仍可提交；验证凭据、请求正文及敏感数据不会进入附件，账号或服务切换不携带旧身份缓冲。
 
 - 两端提供通用内存诊断记录器（`FeedbackDiagnosticsRecorder`），缓冲至多 **200 条 /
   256KiB**，直接产出 `logProvider` 所需附件；旧的手写 `logProvider` 接入继续可用。
@@ -1150,7 +1171,7 @@ Flutter 端只提供内置视口截图 + `FeedbackCaptureMask` 遮挡。
 | 总请求体 | multipart 请求体上限 **10 MiB** | 超出返回 `413 too_large` |
 
 #### 2) 客户端采集与交互
-- **自动采集**：宿主通过 `logProvider` 注入，面板呼出时自动执行，享有 **3 秒超时保护**；超时或抛错静默忽略，不阻碍面板打开与文字输入。
+- **自动采集**：宿主必须通过 `logProvider` 注入自身日志（接入验收见 5.6），面板呼出时自动执行，享有 **3 秒超时保护**；超时或抛错静默忽略，不阻碍面板打开与文字输入。
 - **手动选择**：面板提供「添加日志」按钮（Web 端自动呼起系统文件选择器；Flutter 端通过 `filePicker` 回调或默认通道），支持手动添加日志。
 - **安全预览与移除**：面板以只读纯文本弹窗展示日志内容，用户可在提交前点击单行预览并手动移除任意附件。
 - **快照冻结与幂等**：提交瞬间冻结文本、截图与全部日志（`SubmitSnapshot` / `_FrozenSubmit`）。提交失败重试沿用相同快照与幂等键；用户增删或修改日志即刻使旧键失效并生成新键。
@@ -1429,7 +1450,7 @@ Blog 侧**不需要**、也**不应该**配置：管理员用户名/口令、AI 
 
 Blog 的反馈入口建议显式声明：`launcher-mode="orb"` + `capture-mode="viewport"`（悬浮球 + 当前视口截图），
 主题与站点一致时传 `theme="dark"` / `theme="light"`（默认 `system` 跟随系统）。
-接入完成后，Blog 侧只需确认「面板能打开 → 能登录 → 提交成功且提示等待配置/等待同步」；
+接入完成前，Blog 侧必须通过第 5.6 节宿主日志验收，并确认「面板能打开 → 能登录 → 提交成功且提示等待配置/等待同步」；
 **提交成功不等于已进 Kaneo**，管理员确认来源并启用自动同步到 Kaneo（或逐条人工同步）后才会写入（见 9.0 与 1.5）。
 
 ### 9.2 通用核对清单
@@ -1438,7 +1459,7 @@ Blog 的反馈入口建议显式声明：`launcher-mode="orb"` + `capture-mode="
 - [ ] `app-id` 是宿主自己**稳定且拼写正确**的标识（拼错只会多出一条待配置软件，不会报错）；
 - [ ] 组件版本已锁定（tarball 或整份 `dist/`），不依赖 CDN `latest`；
 - [ ] 深色模式与站点一致（`theme`），截图遮挡区域已用 `data-feedback-capture-mask` / `FeedbackCaptureMask` 标注；
-- [ ] 日志接入已按附件规范实现（≤3 份、≤1 MiB、UTF-8、扩展名 `.log/.txt/.json/.jsonl`，并随 `metadata.logs` 提供摘要）；
+- [ ] **必须通过第 5.6 节宿主日志接入验收**：真实宿主事件随反馈送达、脱敏与身份隔离、偶发无日志仍可提交；附件按规范实现（≤3 份、≤1 MiB、UTF-8、扩展名 `.log/.txt/.json/.jsonl`，并随 `metadata.logs` 提供摘要）；
 - [ ] 产品文案已改为「反馈已保存」，等待态（等待配置 / 等待来源确认 / 等待人工同步）**不显示为失败**，也不再无限轮询；
 - [ ] 管理员已知晓：先确认来源 → 配置规则 → 点「启用自动同步到 Kaneo 并处理积压」（或逐条人工同步）。
 

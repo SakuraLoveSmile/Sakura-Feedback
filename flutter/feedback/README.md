@@ -220,13 +220,16 @@ FeedbackWidget(
     辅助边框、网格、控制点只画在覆盖层，**不写入图片**；
   - **存在未应用选区时禁止保存**（禁用并说明原因）；
   - 图片选择器可经 `FeedbackConfig.imagePicker` 覆盖（默认 file_selector）。
-  服务端未声明 `capabilities.images` 时自动降级为单图模式（走旧
-  `screenshot` 字段）并提示升级服务端。
+  **能力判定**：只有服务端**明确返回 `capabilities` 对象而 `images` 缺失**才降级为
+  单图模式（走旧 `screenshot` 字段）并提示升级服务端；能力**未知**（`/api/features`
+  404、网络异常、尚未登录）不等于单图——界面按契约上限 5 张乐观放行，由服务端裁决。
+  否则已截到一张图的用户会看不到「添加图片」，也就无从添加第二张。
 - **我的反馈**：历史列表支持分页（10 条/页）与状态筛选
   （待处理 / 待补充 / 待管理员回复 / 已解决）；列表项点击进入对话详情
   （原话 / 处理状态 / `resolutionNote` / 图片与日志附件经 Bearer 鉴权
   下载渲染）。面板关闭期间 30s 轮询未读摘要，详情打开时 10s 轮询对话增量；
   轮询不重置回复草稿、不强制滚动跳位。
+- **宿主日志必须接入**：配置 `logProvider` 导出真实、脱敏的宿主应用日志，并通过[完整接入指南第 5.6 节](../../docs/integration.md#56-诊断日志接入v12)的验收；仅组件自身请求或固定示例日志不算完成。采集失败、暂无事件或用户移除日志仍允许提交。
 - **诊断日志（T4）**：`FeedbackDiagnosticsRecorder` 环形缓冲
   （200 条 / 256KiB，白名单字段，世代清除）；`FeedbackHttpClient` 包装
   宿主 `http.Client` 自动记录请求事件；`FeedbackExceptionCapture.install`

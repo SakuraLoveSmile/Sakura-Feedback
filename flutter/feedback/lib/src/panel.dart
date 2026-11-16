@@ -406,15 +406,32 @@ class FeedbackPanelState extends State<FeedbackPanel>
   /// 最近一次接受的截图交付所属捕获序号（null 表示无会化交付）。
   int? _lastCaptureSeq;
 
-  /// 服务端能力（v12）：images 缺失 → 单图模式 + 升级提示。
+  /// 服务端能力（v12）。
+  ///
+  /// null 表示还没拿到 capabilities 对象——能力**未知**（可能是旧服务，也可能
+  /// 只是本次探测失败），此时按契约上限乐观放行多图、由服务端裁决；
+  /// 「对象存在但缺 images 数值」才代表**已确认的单图服务端**。
   FeedbackCapabilities? _capabilities;
+
+  /// 能力是否**已确认**（拿到 session 或 `GET /api/features` 的 capabilities 对象）。
+  ///
+  /// 探测失败 / 404 / 网络异常**不得**置 true：那只是「没探测到」，与「服务端
+  /// 确认只支持单图」是两件事——后者由 [_singleImageMode] 判定并降级提交。
   bool _capabilitiesLoaded = false;
 
-  /// 最大图片数（缺省按契约 5；服务端缺失 capabilities.images 时为 1）。
-  int get _maxImages =>
+  /// 服务端明确给出的最大图片数（仅在能力已确认时有意义；缺省单图）。
+  int get _knownMaxImages =>
       (_capabilities?.images ?? 1).clamp(1, kFeedbackMaxImages);
 
-  /// 能力降级：已探测且服务端不支持多图。
+  /// 生效图片上限：能力未确认时按契约上限（[kFeedbackMaxImages]）乐观放行，
+  /// 已确认时按服务端数值（缺 images 数值 → 单图）。与 Web 组件的
+  /// `maxImages = MAX_IMAGES`（能力未知时乐观）保持一致；数量文案、
+  /// 「添加图片」可见性、选图截断、捕获前置检查共用这一个来源。
+  int get _imageLimit =>
+      _capabilitiesLoaded ? _knownMaxImages : kFeedbackMaxImages;
+
+  /// 能力降级：已确认且服务端不支持多图（capabilities 存在但缺 images 数值
+  /// 同样按单图处理）。
   bool get _singleImageMode =>
       _capabilitiesLoaded && (_capabilities?.images ?? 0) < 2;
 
@@ -435,10 +452,9 @@ class FeedbackPanelState extends State<FeedbackPanel>
   /// 面板是否持有任意图片附件（只读）。
   bool get hasImages => _images.isNotEmpty;
 
-  /// 图片上限（T1.4 捕获前置检查用）：能力未知时按契约上限 5 张判断，
-  /// 已探测后按服务端能力（缺省单图）判断。
-  int get captureImageLimit =>
-      _capabilitiesLoaded ? _maxImages : kFeedbackMaxImages;
+  /// 图片上限（T1.4 捕获前置检查用）：能力未确认时乐观按契约上限判断，
+  /// 确认后按服务端能力（缺省单图）判断——与界面文案同一个来源。
+  int get captureImageLimit => _imageLimit;
 
   /// 是否还能接纳一张新截图（只读）：已持有截图（可替换）或未达图片上限。
   /// 达到上限且无可替换截图时，宿主必须先提示整理附件、不发起捕获。
@@ -656,7 +672,7 @@ class FeedbackPanelState extends State<FeedbackPanel>
   final TextEditingController _replyController = TextEditingController();
   final FocusNode _replyFocus = FocusNode();
 
-  /// v12：回复图片列表（≤_maxImages，可与日志并存）。
+  /// v12：回复图片列表（≤[_imageLimit]，可与日志并存）。
   final List<FeedbackImageFile> _replyImages = <FeedbackImageFile>[];
   final List<FeedbackLogFile> _replyLogs = <FeedbackLogFile>[];
   bool _replySending = false;
@@ -1058,32 +1074,44 @@ class FeedbackPanelState extends State<FeedbackPanel>
   }
 
   /// v12 能力探测：`session.capabilities` 由 [_refreshQuota] 合并；
-  /// 缺失时再探测 `GET /api/features`（无需登录）。旧服务一律按
-  /// `capabilities.images` 缺失处理——单图模式 + 升级提示，不静默丢图。
+  /// 能力仍未知时再探测 `GET /api/features`（无需登录，跨源放行）。
+  ///
+  /// 只有**真的拿到 capabilities 对象**才确认能力（[_applyCapabilities]）：
+  /// 响应缺 `images` 数值 → 已确认的单图服务端（单图模式 + 升级提示）；
+  /// 探测失败（404 / 非 200 / 网络异常）→ 保持未确认，界面上继续乐观放行
+  /// 多图，提交时由服务端裁决——不把「没探到」误判成「只能单图」。
   Future<void> _refreshCapabilities() async {
     final int idSeq = _identitySeq;
-    // session 已带回能力时无需额外请求（不重复 fetchSession：额度/会话
-    // 请求计数是许多测试的断言面）。
-    if (_capabilities?.images != null) {
+    // 能力已确认（含「对象存在但无 images 数值」的单图服务端）时无需再探测：
+    // 不重复 fetchSession / fetchCapabilities（请求计数是许多测试的断言面）。
+    if (_capabilitiesLoaded) {
       return;
     }
-    FeedbackCapabilities? caps = _capabilities;
+    FeedbackCapabilities? features;
     try {
-      final FeedbackCapabilities? features = await _api.fetchCapabilities();
-      if (features != null) {
-        caps = FeedbackCapabilities(
-          dialogue: features.dialogue || (caps?.dialogue ?? false),
-          images: features.images ?? caps?.images,
-        );
-      }
+      features = await _api.fetchCapabilities();
     } catch (_) {
-      // 探测失败：保持现状（缺省即单图模式）。
+      // 探测失败：保持未确认（乐观多图），下次需要判断时再试。
+      return;
     }
     if (!mounted || idSeq != _identitySeq) return;
-    setState(() {
-      _capabilities = caps;
-      _capabilitiesLoaded = true;
-    });
+    final FeedbackCapabilities? caps = features;
+    if (caps == null) {
+      // 404 / 旧服务无此端点 / 非 200：同样只是「没探到」，保持乐观。
+      return;
+    }
+    setState(() => _applyCapabilities(caps));
+  }
+
+  /// 应用一份**服务端明确给出**的 capabilities：确认能力并采用其 `images`。
+  ///
+  /// 缺 `images` 数值 → 单图（[_singleImageMode]）且不覆盖已知数值。
+  void _applyCapabilities(FeedbackCapabilities caps) {
+    _capabilities = FeedbackCapabilities(
+      dialogue: caps.dialogue || (_capabilities?.dialogue ?? false),
+      images: caps.images ?? _capabilities?.images,
+    );
+    _capabilitiesLoaded = true;
   }
 
   void _focusFirstField() {
@@ -1258,10 +1286,11 @@ class FeedbackPanelState extends State<FeedbackPanel>
         _quota = info.quota ?? _quota;
         _user = info.user ?? _user;
         _quotaRefreshFailed = false;
-        // v12：session 已带 capabilities 时直接采用（images 缺失才另行探测）。
-        if (info.capabilities != null) {
-          _capabilities = info.capabilities;
-          _capabilitiesLoaded = true;
+        // v12：session 带 capabilities 对象即视为服务端明确表态（缺 images
+        // 数值 → 单图服务端）；逐字段合并，绝不用 null 覆盖已知数值。
+        final FeedbackCapabilities? caps = info.capabilities;
+        if (caps != null) {
+          _applyCapabilities(caps);
         }
       });
     } on ApiException {
@@ -2322,7 +2351,9 @@ class FeedbackPanelState extends State<FeedbackPanel>
       await _refreshCapabilities();
       if (!valid()) return;
     }
-    final int limit = maxCount ?? _maxImages;
+    // 上限取「生效上限」：能力未确认时乐观按契约上限，确认后才按服务端数值
+    // （探测失败不会把这里压成单图，用户仍可继续加图）。
+    final int limit = maxCount ?? _imageLimit;
     final int remaining = limit - target.length;
     if (remaining <= 0) {
       _showToast('最多附加 $limit 张图片');
@@ -3620,7 +3651,8 @@ class FeedbackPanelState extends State<FeedbackPanel>
   /// 「添加图片」；不可绘制内容提示与单图模式升级提示。
   Widget _buildImagesArea(BuildContext context) {
     final ThemeData theme = Theme.of(context);
-    final int limit = _maxImages;
+    // 能力未确认时展示乐观上限（能力探测失败不改变这里）。
+    final int limit = _imageLimit;
     final bool canAdd = _images.length < limit && !_busy;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
