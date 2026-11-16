@@ -7,6 +7,23 @@
 [`docs/integration.md`](docs/integration.md) §1.7。标注 **破坏性** 的条目表示
 宿主升级时需要处理；未标注的均为兼容变更（新增可选字段 / 属性 / 端点）或内部变更。
 
+## [0.9.1] — 2026-11-16
+
+### 新增
+
+- **未接入日志采集时的运行时提示（Web）**：未提供 `logProvider` 时，日志区显示固定说明并在宿主 console 输出一次警告（同一实例不重复），「重新采集」保持隐藏；不拦截提交，接入后提示自动消失。Flutter 侧原有的说明文本保持不变。
+
+### 修复
+
+- **Flutter 多图附件只能上传一张（自 v0.7.0 起存在）**：能力探测失败（`features` 404、网络异常或非 200）不再被当作「已确认的单图服务端」，界面恢复按契约上限 5 张乐观放行；自动截入 1 张后仍可继续「添加图片」，提交使用 `images` 多图字段。session 后续响应缺少 `capabilities` 时不再把已确认上限降级。
+- **Windows 宿主 `pub get` 失败**：`flutter/feedback/pubspec.yaml` 的 description 改为 ASCII，修复 Windows 下解析 Flutter 包时的非 ASCII 描述错误。
+
+### 升级说明
+
+- root、server、admin、Web 与 Flutter 统一为 **0.9.1**；数据库 schema 保持 **15**，无迁移、无新增公共接口或配置。
+- Web 使用本 Release 的 `feedback-web-0.9.1.tgz`，Flutter 固定 Git 标签 `v0.9.1` 与 `flutter/feedback` 子目录；不发布到 pub.dev。宿主需升级组件才获得上述修复，服务端接口与 0.9.0 相同。
+- 管理后台「更新日志」与公开展示/JSON/Markdown 接口保持不变。
+
 ## [0.9.0] — 2026-11-04
 
 ### 新增
