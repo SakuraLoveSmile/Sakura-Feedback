@@ -44,7 +44,7 @@ Base URL：`http(s)://<host>:8787`。所有 JSON 请求必须 `Content-Type: app
   `GET /api/feedback/:id`、`GET /api/feedback/:id/screenshot`、`POST /api/auth/login`、
   `GET /api/auth/session`、`POST /api/auth/logout`，以及 v11/v12 对话与附件端点
   （`GET /api/feedback/mine`、`GET /api/feedback/unread-summary`、`GET /api/feedback/:id/dialogue`、
-  `POST /api/feedback/:id/messages`、`POST /api/feedback/:id/read`、
+  `POST /api/feedback/:id/messages`、`POST /api/feedback/:id/read`、`POST /api/feedback/read-all`、
   `GET /api/feedback/messages/attachments/:id`、`GET /api/feedback/:id/images/:imageId`、
   `GET /api/feedback/:id/logs/:logId/download`、`GET /api/feedback/:id/logs/:logId/preview`、
   `GET /api/features`）。
@@ -660,6 +660,14 @@ App 对象：
 - 管理员未读：该反馈存在 `seq > lastReadSeq` 且发送者为用户（`sender_type = 'user'`）的消息。
 - 游标上报：`POST /api/feedback/:id/read` 与 `POST /api/admin/feedback/:id/read` 接收 `{ "lastReadSeq": number }`，服务端取 `max(last_read_seq, input.lastReadSeq)` 写入，旧确认不覆盖新消息。
 - 未读摘要：`GET /api/feedback/unread-summary?appId=` 返回 `{ unreadFeedbacksCount: number, totalUnreadMessages: number }`。
+- 一键已读（0.8.2 新增，兼容旧版）：`POST /api/feedback/read-all?appId=`，鉴权与 `GET /api/feedback/mine` 相同
+  （Bearer 令牌或 Cookie 会话；未登录 `401 unauthorized`）。`appId` 可选，语义与 `unread-summary` 一致：
+  指定时只处理该应用的反馈，缺省处理该账号全部项目。服务端把当前账号所有仍有未读的反馈的读游标
+  推进到该反馈 `sender_type IN ('admin', 'system')` 消息的最大 `seq`；只推进不回退，排除回收站
+  （`mgmt_state = 'trash'`）且只处理本人反馈；没有未读的反馈不写游标。响应
+  `{ "ok": true, "markedFeedbacks": number, "markedMessages": number }`，分别为本次清除的未读反馈数
+  （调用前存在未读的反馈数）与未读消息数。幂等：无未读时再次调用返回 `markedFeedbacks: 0,
+  markedMessages: 0`；之后管理员再发消息会重新计为未读。
 - 轮询策略：面板打开时每 10 秒刷新；已登录但面板关闭时每 30 秒查未读摘要；面板销毁、隐藏或退出登录停止。
 
 ### Kaneo 撤销闭环与重新归档（v11 规则，v12 起停止派发）
@@ -683,11 +691,28 @@ App 对象：
 - 确认删除后清除有效远端链接，归档轮次 `archive_round` 递增。
 - 重新归档：必须在旧任务确认已删除后方可进行。新轮次归档打包初始反馈、双方全部对话记录及全部附件（长内容分段同步），生成新任务链接。
 
+### Kaneo 完成状态回读（0.8.0）
+
+问题状态仍由管理员显式操作决定；本能力只**读取** Kaneo 任务，绝不写 Kaneo。
+
+- **完成判定**：任务当前列等于其所属项目中 `isFinal = true` 的列（Kaneo v2 `GET /api/column/:projectId` 返回的 `isFinal`；缺字段时**不推断**为完成）。任务读取需返回 `status`（当前列 slug）与 `projectId`。
+- **自动扫描**：服务端每 `FEEDBACK_KANEO_SYNC_INTERVAL_MS`（默认 10 分钟，`0` 关闭）扫描「已归档 + `kaneo_task_id` 非空 + `issueStatus = open` + 非回收站」的反馈，每批最多 50 条。命中完成列时：
+  - `issueStatus` 置为 `resolved`，`dialogueVersion` 递增；
+  - 写入一条 `senderType = "system"` 的消息，文本与 `resolutionNote` 均为「任务看板中的对应任务已完成，问题已标记为已解决。」；
+  - 计入用户未读摘要（用户端「我的反馈」徽标与对话时间线可见）。
+  - 已是 `resolved` 不重复写入；`waiting_user` / `waiting_admin` 的人工对话记录**不被自动关闭**；任务未完成、项目无完成列、`task_state_missing`、Kaneo 不可达均不改本地状态。
+- **管理端单条**：`POST /api/admin/feedback/:id/sync-kaneo`（管理员显式触发，可对非 `open` 记录同步；已 `resolved` 不重复写入）。
+  - 200 `{ ok: true, result: { kind, message, ... } }`；`kind` 为 `resolved | already_resolved | no_task | task_missing | task_state_missing | no_final_column | not_final | skipped_status`。
+  - Kaneo 不可达返回 `502 kaneo_unavailable`；回收站记录 `403 readonly_trashed`。
+- **管理端批量**：`POST /api/admin/feedback/sync-kaneo`，可选 `{ "limit"?: number }`（默认 50，上限 200）；
+  返回 `{ ok: true, checked, resolved, skipped, failed, results: [{ id, kind, message }] }`。批量只处理自动候选集合（已归档 + `open` + 有任务），不会关闭进行中的人工对话。
+- **审计与通知边界**：系统同步写入 `feedback_audit.action = "kaneo_status_sync"`（actor 显示为「系统（Kaneo 同步）」，与人工「标记已解决」区分）；不发邮件/系统推送，用户端通过「我的反馈」未读标签与未读摘要感知（0.8.2 起入口不再渲染数字角标）。
+
 ### API 接口清单
 - **用户端接口（需 Bearer 令牌）**：
   - `GET /api/feedback/mine?appId=&page=1&limit=20&issueStatus=`：用户历史列表，按 `lastActivityAt` 倒序。
     - 每条 `items` 新增 `appName`（所属项目显示名，`apps` 表无对应行或已软删时为 `null`，前端回退显示 `appId`）、`imageCount`（图片附件总数 = `feedback_images` 与 `feedback_screenshots` 两表计数之和；旧截图按 `feedback_id` 主键每反馈至多 1 行，无多轮归档重复）、`logCount`（日志附件总数 = `feedback_logs` 行数）。
-  - `GET /api/feedback/unread-summary?appId=`：未读徽标摘要。
+  - `GET /api/feedback/unread-summary?appId=`：未读摘要（0.8.2 起用于「我的反馈」一键已读状态与灵感球无障碍标签，入口不再渲染数字角标）。
   - `GET /api/feedback/:id/dialogue`：获取完整 Issue 时间线及消息附件列表（限本人）。
     - v12：`feedback.images` 返回初始反馈的有序图片列表（每项 `{ id, sort, source, mime, filename, byteSize, sha256, width, height, createdAt }`）；
       历史单图记录经兼容读取进入同一列表（`screenshot` 元数据仍保留返回）。
@@ -695,6 +720,8 @@ App 对象：
   - `POST /api/feedback/:id/messages`：用户回复（纯文本或 multipart，含可选图片/日志），写入幂等。
     - v12：multipart 增加 `metadata`（JSON：`{ text, idempotencyKey?, images?: [...] }`）与 `images` 部件（≤5，规则同首次提交）；旧 `screenshot`/`logs` 字段继续接受，与 `images` 互斥。回复总请求体上限 32 MiB。
   - `POST /api/feedback/:id/read`：用户标记已读 `{ "lastReadSeq": number }`。
+  - `POST /api/feedback/read-all?appId=`：0.8.2 新增，用户一键已读（可选 `appId`，口径同 `unread-summary`；
+    只推进本人非回收站反馈的读游标），返回 `{ "ok": true, "markedFeedbacks": number, "markedMessages": number }`。
   - `GET /api/feedback/messages/attachments/:id`：下载/查看消息附件流（v12：`kind="image"` 按 `mime` 返回 `image/*`）。
   - `GET /api/feedback/:id/images/:imageId`：v12 新增，下载/查看初始反馈某张图片流（按 `mime` 返回，`no-store`）。
   - `GET /api/feedback/:id/logs/:logId/download`：v12 新增，用户下载本人反馈的日志附件（限本人，管理员可读全量）；`GET /api/feedback/:id/logs/:logId/preview` 内联预览纯文本。
@@ -706,6 +733,8 @@ App 对象：
   - `POST /api/admin/feedback/:id/issue-status`：修改问题状态 `{ "issueStatus": "open"|"waiting_user"|"waiting_admin"|"resolved", "resolutionNote"?: string, "expectedDialogueVersion"?: number }`。
     - v12：`issueStatus === "resolved"` 时 `resolutionNote` **必填**；处理说明在用户端对话中以系统/管理员消息形式可见。
   - `POST /api/admin/feedback/:id/read`：管理员标记已读。
+  - `POST /api/admin/feedback/:id/sync-kaneo`：读取该反馈关联 Kaneo 任务的当前列；任务进入 `isFinal` 完成列时置为已解决并写入用户可见系统说明（详见「Kaneo 完成状态回读」）。
+  - `POST /api/admin/feedback/sync-kaneo`：批量回读自动候选（已归档 + `open` + 有任务），返回 `checked/resolved/skipped/failed` 汇总。
   - `POST /api/admin/feedback/:id/cancellation/retry`：重试/核对 Kaneo 撤销任务（v12 起仅用于存量 `uncertain`/`failed` 人工核对）。
 - **能力探测**：
   - `GET /api/features` → `{ "dialogue": true, "images": 5 }`。
@@ -789,7 +818,7 @@ App 对象：
 - 允许跨源的路径仅限：`POST /api/auth/login`、`POST /api/auth/logout`、`GET /api/auth/session`、
   `POST /api/feedback`、`GET /api/feedback/:id`、`GET /api/feedback/:id/screenshot`、
   `GET /api/feedback/mine`、`GET /api/feedback/unread-summary`、`GET /api/feedback/:id/dialogue`、
-  `POST /api/feedback/:id/messages`、`POST /api/feedback/:id/read`、
+  `POST /api/feedback/:id/messages`、`POST /api/feedback/:id/read`、`POST /api/feedback/read-all`、
   `GET /api/feedback/messages/attachments/:id`、`GET /api/feedback/:id/images/:imageId`、
   `GET /api/feedback/:id/logs/:logId/download`、`GET /api/feedback/:id/logs/:logId/preview`、
   `GET /api/features`；
@@ -799,4 +828,86 @@ App 对象：
   （即使浏览器带上了后台会话 Cookie，也只按 Bearer 判定身份）；
 - 其余路径（人工恢复动作、后台管理、会话管理、旧握手、系统更新）**不参与跨源放行**，保持第一方同源 Cookie 限制。
 
+匿名公开的 `/api/changelog/*` 使用独立的只读 CORS，见下节，不复用组件鉴权。
+
 Flutter 原生（非浏览器）不受 CORS 约束；无 `Origin` 的请求按原生客户端处理，来源记为 `native`。
+
+## 软件更新日志
+
+每个接入软件按 `appId` 独立管理版本，规范模板见 [changelog-template.md](changelog-template.md)。服务数据库新增 `changelog_releases` 表（schema 15），原账号、反馈、对话与处理状态不变。
+
+### 管理端
+
+以下接口使用**管理员 Cookie 会话与既有同源检查**，请求体沿用 64 KiB 上限。日志先保存草稿，再显式发布；已发布内容必须先取消发布才能修改。日志发布不调用 AI/Kaneo，不改变反馈状态。
+
+```ts
+type ReleaseEntry = {
+  type: "added" | "improved" | "fixed";
+  title: string;
+  description: string;
+  feedbacks: { feedbackId: string; creditName: string | null }[];
+};
+type ReleaseInput = {
+  appId: string;
+  version: string;
+  releaseDate: string; // YYYY-MM-DD
+  summary: string;
+  upgradeNotes: string;
+  entries: ReleaseEntry[];
+};
+type Release = ReleaseInput & {
+  id: string;
+  revision: number;
+  publishedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+```
+
+| 方法与路径 | 输入 | 返回 |
+|---|---|---|
+| `GET /api/admin/changelog/apps` | 无 | `{items: {appId,name,deleted}[]}`，包含活跃软件及拥有日志的历史软件，活跃名称优先 |
+| `GET /api/admin/changelog?appId=...` | 必填软件标识 | `{items: Release[]}`，日期、新建时间倒序，包含草稿 |
+| `POST /api/admin/changelog` | `ReleaseInput` | `201 Release` |
+| `GET /api/admin/changelog/:id` | 日志 ID | `Release` |
+| `PUT /api/admin/changelog/:id` | `ReleaseInput & {expectedRevision: number}` | 更新后的 `Release`，`appId` 不可改 |
+| `POST /api/admin/changelog/:id/publish` | `{expectedRevision: number}` | 发布后的 `Release` |
+| `POST /api/admin/changelog/:id/unpublish` | `{expectedRevision: number}` | 取消发布后的 `Release` |
+
+约束与错误：
+
+- `version` 为 1..80 字符单行，同一 `appId + version` 唯一；重复为 `409 release_exists`。`releaseDate` 必须为真实日历日期。
+- `summary` ≤2000、`upgradeNotes` ≤4000，均为必传字符串，可为空；`entries` 为 1..100 条，每条 `title` 为 1..120 字符单行，`description` ≤2000 字符字符串。
+- 每条 `feedbacks` 必传，可为空，至多 20 条，不能重复 `feedbackId`。新增关联只接受本 `appId` 存在且未在回收站的反馈。已经保存的历史关联在源反馈删除或移入回收站后仍可保留与修改署名。
+- `creditName` 为 1..80 字符单行文字，`null` 表示匿名；默认名称由管理页从反馈提出者账号带入。当前账号只有用户名，没有独立昵称字段，管理员可改为公开昵称。账号改名/停用、反馈删除不回写已保存日志。每条更新中的同名署名去重，匿名显示“匿名用户”。
+- 字段无效/跨软件关联：`400 invalid_request`；未知记录/已删除软件创建或发布：`404 not_found`；已发布日志编辑：`409 release_published`；过期 `expectedRevision`：`409 version_conflict`，不会覆盖较新内容。同一状态且版本一致的发布操作不增加 revision。
+- 软件软删除后历史日志保留，公开入口停用；同一 `appId` 重新登记后可继续管理历史版本。
+
+### 公开展示与宿主读取
+
+以下端点为**匿名只读**，仅返回已发布版本，响应 `Cache-Control: no-store`；API 返回 `Access-Control-Allow-Origin: *`，只允许 GET/HEAD/OPTIONS，无凭据跨域。公开写请求为 `405 method_not_allowed`。
+
+| 路径 | 结果 |
+|---|---|
+| `GET /changelog/:appId` | 可直接链接/嵌入的 HTML 更新日志页，支持深浅色与窄屏 |
+| `GET /api/changelog/:appId` | `{appId, appName, items: PublicRelease[]}`，日期、新建时间倒序 |
+| `GET /api/changelog/:appId/markdown` | `text/plain`，统一模板的所有已发布版本 Markdown |
+
+```ts
+type PublicRelease = {
+  id: string;
+  version: string;
+  releaseDate: string;
+  summary: string;
+  upgradeNotes: string;
+  publishedAt: string;
+  entries: {
+    type: "added" | "improved" | "fixed";
+    title: string;
+    description: string;
+    contributors: string[];
+  }[];
+};
+```
+
+软件不存在或已删除为 `404`。软件存在但没有已发布版本时，JSON 的 `items` 为空，展示页显示“暂未发布更新日志”。公开内容按字段白名单生成，不含反馈 ID、原话、用户 ID、附件或内部 Kaneo 信息；HTML/Markdown 都按普通文字转义。宿主自行渲染 JSON 时同样应按文本处理。

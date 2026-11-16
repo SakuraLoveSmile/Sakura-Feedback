@@ -30,6 +30,7 @@ import {
   type KaneoCancellationTask,
   type LifecycleAction,
   STATUS_LABELS,
+  syncFeedbackKaneoStatus,
 } from "../api.ts";
 import { ConfirmDialog, Drawer, EmptyState, Icon, InlineError, Modal, SkeletonRows, useToast } from "../ui.tsx";
 
@@ -139,6 +140,8 @@ export default function FeedbackDrawer({
   const [replyText, setReplyText] = useState("");
   const [replySubmitting, setReplySubmitting] = useState(false);
   const [statusUpdating, setStatusUpdating] = useState(false);
+  /** 读取 Kaneo 任务当前列的进行中文案（单条同步）。 */
+  const [kaneoSyncBusy, setKaneoSyncBusy] = useState(false);
   const [retryingCancel, setRetryingCancel] = useState(false);
   /** 「标记已解决」弹窗：status=仅改状态（issue-status 接口）；message=回复并解决（messages 接口）。 */
   const [resolveModal, setResolveModal] = useState<{ kind: "status" | "message" } | null>(null);
@@ -203,7 +206,7 @@ export default function FeedbackDrawer({
     }
   }, [detail, loadDialogue]);
 
-  const dialogueBusy = replySubmitting || statusUpdating || resolveSubmitting;
+  const dialogueBusy = replySubmitting || statusUpdating || resolveSubmitting || kaneoSyncBusy;
   /** 所有关闭入口共用：提交中保留现场，其他时候检查分类草稿与未发送回复。 */
   const requestClose = useCallback(() => {
     if (dialogueBusy) {
@@ -373,6 +376,40 @@ export default function FeedbackDrawer({
     }
   }
 
+  /**
+   * 「同步看板状态」：读取 Kaneo 任务当前列。任务已进入 isFinal 列时，服务端把工单置为
+   * 已解决、写入系统处理说明并产生未读；其余结果（无任务/找不到任务/无完成列/未完成）
+   * 仅做中性提示，不改本地状态。成功后沿用「更新工单状态」的刷新路径，保留回复草稿。
+   */
+  async function syncKaneo() {
+    if (kaneoSyncBusy) return;
+    setKaneoSyncBusy(true);
+    try {
+      const r = await syncFeedbackKaneoStatus(d.id);
+      const result = r.result;
+      const fallback: Record<string, string> = {
+        resolved: "已同步为已解决，并已通知提交者",
+        already_resolved: "该问题已是已解决状态",
+        no_task: "该反馈没有关联的任务，无法同步",
+        task_missing: "Kaneo 中找不到对应任务",
+        no_final_column: "任务所属项目没有标记为完成（isFinal）的列",
+        not_final: "任务尚未完成",
+      };
+      const message = result.message || fallback[result.kind] || "已读取 Kaneo 任务状态";
+      if (result.kind === "resolved" || result.kind === "already_resolved") {
+        toast("ok", message);
+        onChanged();
+        void loadDialogue(d.id);
+      } else {
+        toast("info", message);
+      }
+    } catch (err) {
+      toast("err", err instanceof ApiError ? err.message : "同步看板状态失败");
+    } finally {
+      setKaneoSyncBusy(false);
+    }
+  }
+
   return (
     <Drawer
       inline={inline}
@@ -498,7 +535,7 @@ export default function FeedbackDrawer({
         <dl className="kv">
           <dt>工单状态</dt>
           <dd>
-            <div className="row" style={{ alignItems: "center", gap: 8 }}>
+            <div className="row" style={{ alignItems: "center", gap: 8, flexWrap: "wrap" }}>
               {detail.issueStatus && (
                 <span
                   className={`tag ${detail.issueStatus === "waiting_admin" ? "tone-warn" : detail.issueStatus === "waiting_user" ? "tone-info" : detail.issueStatus === "resolved" ? "tone-ok" : ""}`}
@@ -543,6 +580,20 @@ export default function FeedbackDrawer({
                     </option>
                   ))}
                 </select>
+              )}
+              {!readOnly && (
+                <button
+                  type="button"
+                  className="btn sm"
+                  title="读取 Kaneo 任务当前列，若已完成则标记已解决并通知提交者"
+                  aria-label="同步看板状态"
+                  aria-busy={kaneoSyncBusy}
+                  disabled={dialogueBusy}
+                  onClick={() => void syncKaneo()}
+                >
+                  <Icon name="check" size={14} />
+                  {kaneoSyncBusy ? "同步中…" : "同步看板状态"}
+                </button>
               )}
             </div>
           </dd>

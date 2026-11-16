@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, api, type SystemUpdateStatus } from "../api.ts";
-import { InlineError, SkeletonRows } from "../ui.tsx";
+import { Icon, InlineError, SkeletonRows } from "../ui.tsx";
 
 function fmt(iso: string | null): string {
   return iso ? new Date(iso).toLocaleString() : "—";
@@ -56,7 +56,7 @@ export default function SystemUpdateView() {
 
   if (!status) {
     return (
-      <div>
+      <div className="update-page">
         <div className="page-header">
           <div>
             <h1>系统更新</h1>
@@ -77,12 +77,37 @@ export default function SystemUpdateView() {
     );
   }
 
+  const checkInfo = status.check;
+  const latest = checkInfo.state === "up_to_date" || checkInfo.state === "ok" ? checkInfo.latest : null;
+  const stateTag =
+    checkInfo.state === "never" ? (
+      <span className="tag">尚未检查</span>
+    ) : checkInfo.state === "failed" ? (
+      <span className="tag tone-err">检查失败</span>
+    ) : checkInfo.state === "up_to_date" ? (
+      <span className="tag archived">已是最新</span>
+    ) : (
+      <span className="tag received">可更新</span>
+    );
+  const stateText =
+    checkInfo.state === "never"
+      ? "尚未检查过"
+      : checkInfo.state === "failed"
+        ? "检查失败，可重试"
+        : checkInfo.state === "up_to_date"
+          ? "已是最新稳定版"
+          : "发现新版本，请在服务器上更新";
+  const noteLines = (latest?.notes ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^[-*]\s*/, "").trim())
+    .filter(Boolean);
+
   return (
-    <div>
+    <div className="update-page">
       <div className="page-header">
         <div>
           <h1>系统更新</h1>
-          <div className="sub">只检查是否有新版本；安装更新请在服务器上手动执行。</div>
+          <div className="sub">只检查是否有新版本；安装更新请在服务器上手动执行，检查失败不影响正在运行的服务。</div>
         </div>
       </div>
       {error && <InlineError message={error} onRetry={() => void loadStatus().catch(() => undefined)} />}
@@ -92,136 +117,159 @@ export default function SystemUpdateView() {
         </p>
       )}
 
-      <div className="card">
-        <div className="kv">
-          <span className="muted">当前版本</span>
-          <span>
-            <code>{status.current.version}</code>
-          </span>
-          <span className="muted">检查来源</span>
-          <span>
-            {status.config.manifestUrl ? (
-              <code className="wrap-anywhere">{status.config.manifestUrl}</code>
-            ) : (
-              <span className="muted">已关闭（FEEDBACK_UPDATE_MANIFEST_URL=off）</span>
-            )}
-          </span>
-          <span className="muted">自动检查</span>
-          <span className="muted">
-            {status.config.checkIntervalMs > 0
-              ? `每 ${Math.round(status.config.checkIntervalMs / 3600_000)} 小时检查一次（只检查，绝不自动安装）`
-              : "已关闭自动检查（仅手动）"}
-          </span>
-        </div>
-      </div>
-
-      <div className="card">
-        <div className="row row-wrap spread" style={{ marginBottom: 12 }}>
-          <h2 style={{ margin: 0 }}>版本状态</h2>
-          <div className="btn-row">
-            <button
-              type="button"
-              className="btn"
-              onClick={check}
-              disabled={checking || !status.config.manifestUrl}
-              title={
-                checking
-                  ? "正在检查…"
-                  : !status.config.manifestUrl
-                    ? "已关闭更新检查（FEEDBACK_UPDATE_MANIFEST_URL=off），无法手动检查"
-                    : undefined
-              }
-              aria-busy={checking}
-            >
-              {checking ? "检查中…" : "检查更新"}
-            </button>
+      <section className="version-hero">
+        <div className="version-hero-main">
+          <div className="version-eyebrow">Current Version</div>
+          <div className="version-line">
+            <b>{status.current.version}</b>
+            <span className="muted">{stateText}</span>
+          </div>
+          <div className="version-meta muted small">
+            <span>上次检查：{checkInfo.state === "never" ? "尚未检查" : fmt(checkInfo.checkedAt)}</span>
+            <span>
+              自动检查：
+              {status.config.checkIntervalMs > 0
+                ? `每 ${Math.round(status.config.checkIntervalMs / 3600_000)} 小时`
+                : "已关闭"}
+            </span>
+            <span>来源：{status.config.manifestUrl ? "GitHub Releases 清单" : "已关闭"}</span>
           </div>
         </div>
-        {/* 禁用原因可见化：配置关闭检查时说明为什么按钮不可点 */}
-        {!status.config.manifestUrl && (
-          <p className="muted small">已关闭更新检查（FEEDBACK_UPDATE_MANIFEST_URL=off），无法手动检查。</p>
-        )}
-        {/* 检查请求失败：贴近按钮回显，点「检查更新」即重试 */}
-        {checkError && <InlineError message={checkError} onRetry={() => void check()} />}
-        <CheckSummary check={status.check} />
+        <div className="version-hero-side">
+          {stateTag}
+          <button
+            type="button"
+            className="btn sm"
+            onClick={check}
+            disabled={checking || !status.config.manifestUrl}
+            title={
+              checking
+                ? "正在检查…"
+                : !status.config.manifestUrl
+                  ? "已关闭更新检查（FEEDBACK_UPDATE_MANIFEST_URL=off），无法手动检查"
+                  : undefined
+            }
+            aria-busy={checking}
+          >
+            <Icon name="refresh" size={14} />
+            {checking ? "检查中…" : "检查更新"}
+          </button>
+        </div>
+      </section>
+      {/* 禁用原因可见化：配置关闭检查时说明为什么按钮不可点 */}
+      {!status.config.manifestUrl && (
+        <p className="muted small">已关闭更新检查（FEEDBACK_UPDATE_MANIFEST_URL=off），无法手动检查。</p>
+      )}
+      {/* 检查请求失败：贴近按钮回显，点「检查更新」即重试 */}
+      {checkError && <InlineError message={checkError} onRetry={() => void check()} />}
+      {checkInfo.state === "failed" && (
+        <p className="err">
+          检查失败：{checkInfo.failedMessage ?? "未知原因"}
+          {checkInfo.failedCode ? `（${checkInfo.failedCode}）` : ""}
+        </p>
+      )}
+
+      <div className="update-grid">
+        <div className="card update-card">
+          <div className="update-card-head">
+            <h2 className="update-card-title">版本信息</h2>
+            <span className="tag">版本清单</span>
+          </div>
+          <dl className="kv">
+            <dt>当前版本</dt>
+            <dd>
+              <code>{status.current.version}</code>
+            </dd>
+            <dt>最新稳定版</dt>
+            <dd>
+              {latest ? (
+                <>
+                  <code>{latest.version}</code> {stateTag}
+                </>
+              ) : (
+                <span className="muted">—</span>
+              )}
+            </dd>
+            <dt>发布时间</dt>
+            <dd className="muted">{latest ? fmt(latest.publishedAt) : "—"}</dd>
+            <dt>检查来源</dt>
+            <dd>
+              {status.config.manifestUrl ? (
+                <code className="wrap-anywhere">{status.config.manifestUrl}</code>
+              ) : (
+                <span className="muted">已关闭（FEEDBACK_UPDATE_MANIFEST_URL=off）</span>
+              )}
+              {checkInfo.source ? <span className="muted">（本次来源：{checkInfo.source}）</span> : null}
+            </dd>
+            <dt>自动检查</dt>
+            <dd className="muted">
+              {status.config.checkIntervalMs > 0
+                ? `每 ${Math.round(status.config.checkIntervalMs / 3600_000)} 小时一次（只检查，绝不自动安装）`
+                : "已关闭自动检查（仅手动）"}
+            </dd>
+            {latest?.image && (
+              <>
+                <dt>镜像</dt>
+                <dd>
+                  <code className="wrap-anywhere">{latest.image}</code>
+                  {latest.digest ? <span className="muted">（{latest.digest}）</span> : null}
+                </dd>
+              </>
+            )}
+          </dl>
+          <div className="update-note">
+            <i style={{ background: "var(--ok-text)" }} aria-hidden="true" />
+            <span>检查来源与自动检查间隔由服务器环境变量控制；本页不提供在线安装。</span>
+          </div>
+        </div>
+
+        <div className="card update-card">
+          <div className="update-card-head">
+            <h2 className="update-card-title">发布说明</h2>
+          </div>
+          {latest ? (
+            noteLines.length > 0 ? (
+              <ul className="notes-list">
+                {noteLines.map((line) => (
+                  <li key={line} className="note-item">
+                    <i aria-hidden="true" />
+                    <span>{line}</span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="muted">该版本清单未包含发布说明。</p>
+            )
+          ) : (
+            <p className="muted">还没有可用的版本信息；点击「检查更新」获取最新稳定版与发布说明。</p>
+          )}
+          {latest?.releaseUrl && (
+            <p style={{ marginTop: 12, marginBottom: 0 }}>
+              <a className="btn sm" href={latest.releaseUrl} target="_blank" rel="noreferrer">
+                查看完整发布页
+                <Icon name="external" size={14} />
+              </a>
+            </p>
+          )}
+        </div>
       </div>
 
-      <div className="card">
-        <h2 style={{ marginTop: 0 }}>如何更新</h2>
-        <p className="muted" style={{ marginBottom: 0 }}>
-          本页不提供在线安装。确认有新版本后，请在服务器上进入部署目录执行 <code>bash deploy/update.sh</code>
-          （会先备份数据卷再拉取重建），或手动 <code>docker compose pull && docker compose up -d</code>
-          。详见部署文档「升级」一节。
+      <div className="card update-card how-to">
+        <div className="update-card-head">
+          <h2 className="update-card-title">如何在服务器上更新</h2>
+          <span className="tag tone-warn">确认有新版本后再执行</span>
+        </div>
+        <p className="muted">
+          进入部署目录执行下面的命令。脚本会先备份数据卷，再拉取镜像并重建服务；详见部署文档「升级」一节。
         </p>
+        <div className="code-block">
+          <span className="prompt">$</span> bash deploy/update.sh
+          <br />
+          <span className="comment"># 或手动：</span>
+          <br />
+          <span className="prompt">$</span> docker compose pull &amp;&amp; docker compose up -d
+        </div>
       </div>
     </div>
-  );
-}
-
-function CheckSummary({ check }: { check: SystemUpdateStatus["check"] }) {
-  if (check.state === "never") return <p className="muted">尚未检查过。点击「检查更新」获取最新稳定版信息。</p>;
-  if (check.state === "failed") {
-    return (
-      <>
-        <p className="err">
-          检查失败：{check.failedMessage ?? "未知原因"}
-          {check.failedCode ? `（${check.failedCode}）` : ""}
-        </p>
-        <p className="muted" style={{ marginBottom: 0 }}>
-          检查失败不影响正在运行的服务。上次检查：{fmt(check.checkedAt)}。
-        </p>
-      </>
-    );
-  }
-  const latest = check.latest;
-  if (!latest) return <p className="muted">没有可用的版本信息。</p>;
-  return (
-    <>
-      <div className="kv">
-        <span className="muted">最新稳定版</span>
-        <span>
-          <code>{latest.version}</code>{" "}
-          {check.state === "up_to_date" ? (
-            <span className="tag archived">已是最新</span>
-          ) : (
-            <span className="tag received">可更新</span>
-          )}
-          {latest.releaseUrl && (
-            <>
-              {" "}
-              <a href={latest.releaseUrl} target="_blank" rel="noreferrer">
-                查看发布页
-              </a>
-            </>
-          )}
-        </span>
-        <span className="muted">发布时间</span>
-        <span className="muted">{fmt(latest.publishedAt)}</span>
-        <span className="muted">本次检查</span>
-        <span className="muted">
-          {fmt(check.checkedAt)}
-          {check.source ? `（来源：${check.source}）` : ""}
-        </span>
-        {latest.image && (
-          <>
-            <span className="muted">镜像</span>
-            <span>
-              <code className="wrap-anywhere">{latest.image}</code>
-              {latest.digest ? <span className="muted">（{latest.digest}）</span> : null}
-            </span>
-          </>
-        )}
-      </div>
-      {latest.notes ? (
-        <div style={{ marginTop: 12 }}>
-          <div className="muted" style={{ marginBottom: 4 }}>
-            发布说明
-          </div>
-          <blockquote className="quote">{latest.notes}</blockquote>
-        </div>
-      ) : (
-        <p className="muted">该版本清单未包含发布说明。</p>
-      )}
-    </>
   );
 }

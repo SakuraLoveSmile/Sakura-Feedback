@@ -1988,7 +1988,10 @@ F4_GAP_JS = (
     " return {"
     " sectionGap: ls && cs ? +(cs.top - ls.bottom).toFixed(2) : null,"
     " boxGap: tw && cd ? +(cd.top - tw.bottom).toFixed(2) : null,"
-    " cssGap: secs ? getComputedStyle(secs).rowGap : null }; }"
+    " sectionColGap: ls && cs ? +(cs.left - ls.right).toFixed(2) : null,"
+    " boxColGap: tw && cd ? +(cd.left - tw.right).toFixed(2) : null,"
+    " cssGap: secs ? getComputedStyle(secs).rowGap : null,"
+    " cssColGap: secs ? getComputedStyle(secs).columnGap : null }; }"
 )
 
 
@@ -2016,9 +2019,11 @@ def sec_f4_accounts_spacing(page) -> None:
     """F4 账号页：.accounts-sections gap 24px(≥768)/16px(≤767)±1；
     断点×明暗×空/有账号矩阵、加载/错误骨架留白、390 局部横滚、焦点环与账号操作。"""
 
-    def gap_close(exp: float):
+    def gap_close(exp: float, horizontal: bool = False):
+        """宽屏账号页为左右两栏，沿布局轴测 24px；窄屏仍测上下两段。"""
         g = f4_gap(page)
-        return g is not None and g["boxGap"] is not None and abs(g["boxGap"] - exp) <= 1, g
+        key = "boxColGap" if horizontal else "boxGap"
+        return g is not None and g[key] is not None and abs(g[key] - exp) <= 1, g
 
     step("F4.0 进入账号视图（1440 桌面宽导航）")
     page.set_viewport_size({"width": 1440, "height": 900})
@@ -2055,7 +2060,7 @@ def sec_f4_accounts_spacing(page) -> None:
         for w, exp in ((390, 16), (767, 16), (768, 24), (1280, 24), (2048, 24)):
             page.set_viewport_size({"width": w, "height": 844 if w == 390 else 900})
             page.wait_for_timeout(300)
-            ok, g = gap_close(exp)
+            ok, g = gap_close(exp, horizontal=w >= 1200)
             record(f"F4.A 有账号·{theme}·{w}px 两区间距 {exp}±1px", ok, f"gap={g}")
             info = scroll_probe(page)
             record(
@@ -2119,7 +2124,7 @@ def sec_f4_accounts_spacing(page) -> None:
             for w, exp in ((390, 16), (767, 16), (768, 24), (1280, 24), (2048, 24)):
                 page.set_viewport_size({"width": w, "height": 844 if w == 390 else 900})
                 page.wait_for_timeout(300)
-                ok, g = gap_close(exp)
+                ok, g = gap_close(exp, horizontal=w >= 1200)
                 record(f"F4.C 空账号·{theme}·{w}px 两区间距 {exp}±1px", ok, f"gap={g}")
             page.set_viewport_size({"width": 1440, "height": 900})
             page.wait_for_timeout(250)
@@ -2172,8 +2177,8 @@ def sec_f4_accounts_spacing(page) -> None:
         record(
             "F4.D 加载态两区间距 24±1px",
             g_loading is not None
-            and g_loading["boxGap"] is not None
-            and abs(g_loading["boxGap"] - 24) <= 1,
+            and g_loading["boxColGap"] is not None
+            and abs(g_loading["boxColGap"] - 24) <= 1,
             f"gap={g_loading}",
         )
         shot(page, "f4-accounts-loading-1280")
@@ -2221,7 +2226,7 @@ def sec_f4_accounts_spacing(page) -> None:
         g_err = f4_gap(page)
         record(
             "F4.E 错误态骨架两区间距 24±1px",
-            g_err is not None and g_err["boxGap"] is not None and abs(g_err["boxGap"] - 24) <= 1,
+            g_err is not None and g_err["boxColGap"] is not None and abs(g_err["boxColGap"] - 24) <= 1,
             f"gap={g_err}",
         )
         shot(page, "f4-accounts-error-1280")
@@ -2310,7 +2315,7 @@ def sec_f4_accounts_spacing(page) -> None:
         record("F4.G 重置密码弹窗出现", modal_ok)
         if modal_ok:
             page.fill("#prompt-input", "pw2-" + secrets.token_hex(6))
-            page.locator(".modal .btn.primary", has_text="重置密码").click()
+            page.locator(".modal .btn.danger", has_text="重置密码").click()
             toast_ok = False
             deadline = time.time() + 8
             while time.time() < deadline:

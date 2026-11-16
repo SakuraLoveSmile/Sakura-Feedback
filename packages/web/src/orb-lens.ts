@@ -35,7 +35,11 @@ vec3 sampleMist(vec2 p) {
   }
   return blurred;
 }
+vec3 sampleClearIdle(vec2 p) {
+  return (sampleBg(p)*4.+sampleBg(p+vec2(-.35,0.))+sampleBg(p+vec2(.35,0.))+sampleBg(p+vec2(0.,-.35))+sampleBg(p+vec2(0.,.35)))/8.;
+}
 vec3 sampleGlass(vec2 p) {
+  if (uIdleMix*uDark>.5) return sampleClearIdle(p);
   vec3 base=sampleBg(p);
   if (uMist<=0. || uHasImage<.5) return base;
   return mix(base,sampleMist(p),uMist);
@@ -54,13 +58,14 @@ float shape(float theta) {
   return contour/length(q);
 }
 float sourceBend(float r) {
-  return 1./uMagnification+.54*pow(clamp(r,0.,1.),7.);
+  float rr=pow(clamp(r,0.,1.),7.);
+  return mix(1./uMagnification+.54*rr,.61+.46*rr,uIdleMix*uDark);
 }
 float sourcePoint(float point, float offset, float r) {
   return point+offset*(sourceBend(r)-1.);
 }
 float dispersionWidth(float r) {
-  return .52*pow(clamp(r,0.,1.),8.);
+  return .52*pow(clamp(r,0.,1.),8.)*(1.-uIdleMix*uDark);
 }
 float glassWhiteMix(float r, float theta) {
   float light=.55+.45*cos(theta+2.25);
@@ -74,27 +79,59 @@ float glassWhiteMix(float r, float theta) {
 float idleSheen(float r, float theta) {
   return uIdleMix*exp(-sq((r-.91)/.065))*pow(max(0.,cos(theta+2.25)),8.)*(.05+.04*uHandleMix);
 }
+float clearIdleShine(float theta) {
+  return pow(max(0.,cos(theta+2.3)),5.);
+}
+float clearIdleHighlight(float r, float theta) {
+  float shine=clearIdleShine(theta);
+  float rim=exp(-sq((r-.985)/(.016+.30/uHalfSize.x)));
+  float inner=exp(-sq((r-.90)/.06));
+  float side=uHandleMix*exp(-sq((r*cos(theta)+.56)/.28))*.055;
+  return rim*(.015+shine*.16+uHandleMix*.055)+inner*shine*.025+side;
+}
+float clearIdleShadow(float r, float theta) {
+  return exp(-sq((r-.97)/.045))*(1.-clearIdleShine(theta))*.12;
+}
+vec3 clearIdleGlass(vec3 glass, float r, float theta) {
+  glass*=1.-clearIdleShadow(r,theta);
+  glass=mix(glass,vec3(.5176470588235295,.5372549019607843,.6),.016+.026*uHandleMix);
+  return mix(glass,vec3(.8509803921568627,.8705882352941177,.9176470588235294),clearIdleHighlight(r,theta));
+}
 vec3 shadeGlass(vec3 glass, float r, float theta) {
+  vec3 sampled=glass;
   float light=.55+.45*cos(theta+2.25);
   float shadow=exp(-sq((r-.973)/.018))*(1.-light);
   glass*=1.-shadow*.19*(1.-uIdleMix);
   glass=mix(glass,vec3(.99,.995,1.),glassWhiteMix(r,theta)*(1.-uIdleMix));
-  float haze=uIdleMix*uMist*(.045+.035*uDark);
+  float darkIdle=uIdleMix*uDark;
+  float haze=uIdleMix*uMist*.045*(1.-uDark);
   glass=mix(glass,vec3(.965,.98,1.),haze);
   glass=mix(glass,vec3(1.,1.,1.),idleSheen(r,theta));
   // Tint can exceed white; clamp straight RGB before premultiplying by coverage and opacity.
-  return clamp(glass+vec3(.002,.003,.009)*(1.-uDark*.5),0.,1.);
+  return mix(clamp(glass+vec3(.002,.003,.009)*(1.-uDark*.5),0.,1.),clearIdleGlass(sampled,r,theta),darkIdle);
 }
 vec4 compositeGlass(vec3 glass, float inside, float r, float theta) {
   float lightIdle=uIdleMix*(1.-uDark);
+  float darkIdle=uIdleMix*uDark;
   float glowWidth=mix(mix(.065,.14,uIdleMix),4.5/mix(uRadius,uHalfSize.x,uHandleMix),lightIdle);
   float glowStrength=mix(mix(.055,.10,uIdleMix),.18,lightIdle);
   float glow=exp(-sq((r-1.04)/glowWidth))*glowStrength;
   vec3 glowColor=mix(vec3(.95,.965,1.),vec3(.35,.43,.56),lightIdle);
+  float distance=max(0.,r-1.)*mix(uRadius,uHalfSize.x,uHandleMix);
+  float darkShadow=exp(-sq(distance/4.5))*.11;
+  float darkSheen=exp(-sq(distance/3.6))*(.006+clearIdleShine(theta)*.044);
+  glow=mix(glow,darkShadow,darkIdle);
+  glowColor=mix(glowColor,vec3(.6823529411764706,.7176470588235294,.803921568627451)*darkSheen/max(darkShadow,.00001),darkIdle);
   float aGlow=glow*(1.-inside)*(1.-inside);
-  // Missing safe texture keeps only the idle halo; clear drag retains its transparent edge.
-  float surfaceAlpha=inside*mix(clamp(glassWhiteMix(r,theta)+idleSheen(r,theta),0.,1.)*(1.-uIdleMix),1.,uHasImage);
-  vec3 surfaceColor=mix(vec3(.99,.995,1.),glass,uHasImage);
+  // The texture-free cue uses the same clear tint and local reflection only.
+  // Its alpha includes a soft dark edge, never a smoked opaque body.
+  float haze=.016+.026*uHandleMix;
+  float highlight=clearIdleHighlight(r,theta);
+  float clearAlpha=1.-(1.-haze)*(1.-highlight)*(1.-clearIdleShadow(r,theta));
+  vec3 clearColor=(vec3(.5176470588235295,.5372549019607843,.6)*haze*(1.-highlight)+vec3(.8509803921568627,.8705882352941177,.9176470588235294)*highlight)/max(clearAlpha,.00001);
+  float fallbackAlpha=clamp(glassWhiteMix(r,theta)+idleSheen(r,theta),0.,1.)*(1.-uIdleMix)+clearAlpha*darkIdle;
+  float surfaceAlpha=inside*mix(fallbackAlpha,1.,uHasImage);
+  vec3 surfaceColor=mix(mix(vec3(.99,.995,1.),clearColor,darkIdle),glass,uHasImage);
   vec3 rgb=(surfaceColor*surfaceAlpha+glowColor*aGlow)*uOpacity;
   float alpha=(surfaceAlpha+aGlow)*uOpacity;
   return vec4(rgb,alpha);

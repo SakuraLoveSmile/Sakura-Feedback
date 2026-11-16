@@ -550,6 +550,17 @@ export interface UnreadSummaryResponse {
   totalUnreadMessages: number;
 }
 
+/**
+ * v0.8.2 一键已读响应（`POST /api/feedback/read-all`）：
+ * `markedFeedbacks` / `markedMessages` 分别为本次清除未读的反馈数与消息数；
+ * 无未读时二者均为 0（幂等）。
+ */
+export interface MarkAllReadResponse {
+  ok: boolean;
+  markedFeedbacks: number;
+  markedMessages: number;
+}
+
 export interface FeedbackDialogueResponse {
   feedback: {
     id: string;
@@ -618,6 +629,23 @@ export function getUnreadSummary(
 ): Promise<UnreadSummaryResponse> {
   const p = appId ? `?appId=${encodeURIComponent(appId)}` : '';
   return request<UnreadSummaryResponse>(apiBase, 'GET', `/api/feedback/unread-summary${p}`, {
+    token,
+    fetchFn: opts.fetchFn,
+  });
+}
+
+/**
+ * v0.8.2 一键已读：把当前账号（可选 `appId` 范围内）所有未读反馈的读游标推进到最新。
+ * 该接口只推进、不回退，服务端无未读时不写游标（幂等）；响应语义见
+ * `MarkAllReadResponse`（docs/api.md 侧同步说明）。
+ */
+export function markAllRead(
+  apiBase: string,
+  token: string,
+  opts: { appId?: string; fetchFn?: FetchLike } = {},
+): Promise<MarkAllReadResponse> {
+  const p = opts.appId ? `?appId=${encodeURIComponent(opts.appId)}` : '';
+  return request<MarkAllReadResponse>(apiBase, 'POST', `/api/feedback/read-all${p}`, {
     token,
     fetchFn: opts.fetchFn,
   });

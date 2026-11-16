@@ -119,7 +119,7 @@ describe("数据库迁移 v2 → v4", () => {
     const fb = db.prepare("SELECT user_id FROM feedbacks WHERE id = 'fb-old'").get() as any;
     expect(fb.user_id).toBe(userId);
     const uv = (db.prepare("PRAGMA user_version").get() as any).user_version;
-    expect(uv).toBe(14);
+    expect(uv).toBe(15);
     const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as any[]).map((t) => t.name);
     expect(tables).toContain("feedback_logs");
     db.prepare("INSERT INTO daily_usage (user_id, day, used, reset_at) VALUES (?, '2026-01-01', 0, 'x')").run(userId);
@@ -152,7 +152,7 @@ describe("数据库迁移 v2 → v4", () => {
 
     const db = openDb(dir);
     const uv = (db.prepare("PRAGMA user_version").get() as any).user_version;
-    expect(uv).toBe(14);
+    expect(uv).toBe(15);
     const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as any[]).map((t) => t.name);
     expect(tables).toContain("feedback_logs");
     db.close();

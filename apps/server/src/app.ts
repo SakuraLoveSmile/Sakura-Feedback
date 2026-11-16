@@ -17,6 +17,7 @@ import { loginPageHtml } from "./pages/login.ts";
 import { createWorker, type Worker } from "./pipeline/worker.ts";
 import { adminRoutes } from "./routes/admin.ts";
 import { authRoutes, ensureInitialUser } from "./routes/auth.ts";
+import { changelogAdminRoutes, changelogPageRoutes, changelogPublicRoutes } from "./routes/changelog.ts";
 import { feedbackRoutes } from "./routes/feedback.ts";
 import {
   createSystemUpdateService,
@@ -27,6 +28,7 @@ import {
 import { type AiClient, createAiClient } from "./services/ai.ts";
 import type { KaneoClient } from "./services/kaneo.ts";
 import { createKaneoHttpClient } from "./services/kaneo-http.ts";
+import { createKaneoIssueSync, type KaneoIssueSyncService } from "./services/kaneo-issue-sync.ts";
 
 export interface AppDeps {
   ai?: AiClient;
@@ -55,6 +57,8 @@ export interface FeedbackApp {
   system: SystemUpdateService;
   /** Assist 投递 worker（未配置 FEEDBACK_ASSIST_HUB_URL 时为 null）。 */
   assist: AssistWorker | null;
+  /** Kaneo 完成状态回读服务（自动扫描 + 手动触发共用；间隔为 0 时不自动扫描）。 */
+  kaneoSync: KaneoIssueSyncService;
   /** 释放后台定时器（不影响数据库连接的生命周期）。 */
   close: () => void;
 }
@@ -90,6 +94,12 @@ export function createApp(config: ServerConfig, deps: AppDeps = {}): FeedbackApp
     }
   };
   const kaneo = deps.kaneo ?? createKaneoHttpClient(snapshotKaneoSettings);
+  // Kaneo 完成状态回读：默认每 10 分钟扫描；显式 0 关闭自动扫描（管理端手动入口仍可用）。
+  const kaneoSync = createKaneoIssueSync({
+    db,
+    kaneo,
+    intervalMs: config.kaneoSyncIntervalMs ?? 0,
+  });
   const worker = createWorker({
     db,
     masterKey: config.masterKey,
@@ -203,6 +213,9 @@ export function createApp(config: ServerConfig, deps: AppDeps = {}): FeedbackApp
       ...(deps.now ? { now: deps.now } : {}),
     }),
   );
+  app.route("/api/changelog", changelogPublicRoutes(db));
+  app.route("/changelog", changelogPageRoutes(db));
+  app.route("/api/admin/changelog", changelogAdminRoutes({ db, config }));
   app.route("/api/admin", adminRoutes({ db, masterKey: config.masterKey, config, kaneo, ai, worker }));
   // 「检查更新」接口（同样是 /api/admin 下的管理员守卫路由；只检查不安装）。
   app.route("/api/admin/system", systemUpdateRoutes({ db, config, system }));
@@ -256,6 +269,9 @@ export function createApp(config: ServerConfig, deps: AppDeps = {}): FeedbackApp
   }
   app.get("/admin", (c) => c.redirect("/admin/"));
 
+  // 启动自动同步（interval=0 时为空操作；测试与关闭自动同步的部署不产生定时器）。
+  kaneoSync.start();
+
   return {
     app,
     db,
@@ -263,8 +279,10 @@ export function createApp(config: ServerConfig, deps: AppDeps = {}): FeedbackApp
     worker,
     system,
     assist,
+    kaneoSync,
     // T3：先停调度与定时器（此后不再有任何回调访问数据库），再释放检查更新定时器。
     close: () => {
+      kaneoSync.stop();
       worker.stop();
       assist?.stop();
       system.close();

@@ -4,7 +4,14 @@ import 'package:flutter/foundation.dart';
 import 'server_pref.dart';
 
 /// Internal preference; independent from server URLs and wake gesture choices.
-enum FeedbackOrbIdleStyle { handle, edge }
+///
+/// `hidden` 是 v0.8.2 新增、v0.8.5 澄清语义的第三种待机样式：只隐藏「待机
+/// （收起）状态」——收起后不渲染任何入口；完整球（初始 / 唤醒后 / 面板关闭
+/// 后）仍正常显示。已开启的唤醒手势仍可唤醒它，唤醒后闲置 5 秒再次进入待机
+/// 隐藏。未开启手势时宿主始终可用 `controller.open()` 打开面板并改回其他
+/// 样式（宿主托管时由宿主设置页改写）。旧版本只认识 `handle` / `edge`，未知
+/// 值一律回退默认。
+enum FeedbackOrbIdleStyle { handle, edge, hidden }
 
 String orbIdleStorageKey(String appId) =>
     'feedback:orb-idle:v1:${Uri.encodeComponent(appId)}';
@@ -14,8 +21,12 @@ FeedbackOrbIdleStyle decodeOrbIdleStyle(String? value) {
     final Object? json = value == null ? null : jsonDecode(value);
     if (json is Map<String, dynamic> &&
         json['version'] == 1 &&
-        json['style'] == 'edge') {
-      return FeedbackOrbIdleStyle.edge;
+        json['style'] is String) {
+      final String style = json['style'] as String;
+      for (final FeedbackOrbIdleStyle candidate
+          in FeedbackOrbIdleStyle.values) {
+        if (candidate.name == style) return candidate;
+      }
     }
   } on FormatException {/* Invalid values use the default. */}
   return FeedbackOrbIdleStyle.handle;

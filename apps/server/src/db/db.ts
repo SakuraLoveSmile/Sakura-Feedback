@@ -3,6 +3,26 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
+/** 独立快照，不外键关联反馈：彻底删除反馈不改写已经发布的更新说明。 */
+const CHANGELOG_DDL = `
+CREATE TABLE IF NOT EXISTS changelog_releases (
+  id TEXT PRIMARY KEY,
+  app_id TEXT NOT NULL,
+  version TEXT NOT NULL,
+  release_date TEXT NOT NULL,
+  summary TEXT NOT NULL DEFAULT '',
+  upgrade_notes TEXT NOT NULL DEFAULT '',
+  entries_json TEXT NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+  published_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (app_id, version)
+);
+CREATE INDEX IF NOT EXISTS idx_changelog_app_date
+  ON changelog_releases(app_id, release_date DESC, created_at DESC);
+`;
+
 /**
  * feedbacks 表 DDL 生成器：全新库（SCHEMA）与迁移重建（feedbacks_v6）共用同一份定义，
  * 避免新库与升级库结构漂移。分类字段与归档授权字段在 v6 引入；
@@ -1043,6 +1063,17 @@ export function migrate(db: DatabaseSync): void {
       throw err;
     } finally {
       if (fkWasOn) db.exec("PRAGMA foreign_keys = ON");
+    }
+  }
+  if (v < 15) {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.exec(CHANGELOG_DDL);
+      db.exec("PRAGMA user_version = 15;");
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
     }
   }
 }

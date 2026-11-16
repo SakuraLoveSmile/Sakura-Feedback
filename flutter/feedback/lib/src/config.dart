@@ -2,6 +2,7 @@ import 'dart:ui' show Offset;
 
 import 'api_client.dart'
     show FeedbackFilePicker, FeedbackImagePicker, FeedbackLogProvider;
+import 'server_pref.dart' show idnHostToAscii;
 
 /// 悬浮按钮停靠的侧边。
 enum FeedbackSide {
@@ -156,7 +157,27 @@ class FeedbackConfig {
     while (b.endsWith('/')) {
       b = b.substring(0, b.length - 1);
     }
-    return b;
+    // 中文等国际化域名：Dart 的 Uri 会把 Unicode 主机名百分号编码，直接用于
+    // 请求无法解析；构造配置时转成 ASCII/punycode（与面板设置入口一致）。
+    final Uri? uri = Uri.tryParse(b);
+    if (uri == null || uri.host.isEmpty) return b;
+    final String rawHost = uri.host;
+    if (!rawHost.contains('%') &&
+        rawHost.codeUnits.every((int c) => c <= 0x7F)) {
+      return b; // 纯 ASCII：保持原有行为
+    }
+    String decodedHost = rawHost;
+    if (rawHost.contains('%')) {
+      try {
+        decodedHost = Uri.decodeComponent(rawHost);
+      } catch (_) {
+        return b;
+      }
+    }
+    if (decodedHost.codeUnits.every((int c) => c <= 0x7F)) return b;
+    final String? asciiHost = idnHostToAscii(decodedHost);
+    if (asciiHost == null) return b;
+    return uri.replace(host: asciiHost).toString();
   }
 
   static bool _isHttpUrl(String base) {
@@ -174,4 +195,3 @@ String? normalizeAppName(String? raw) {
   if (t.isEmpty) return null;
   return t.length > 100 ? t.substring(0, 100) : t;
 }
-

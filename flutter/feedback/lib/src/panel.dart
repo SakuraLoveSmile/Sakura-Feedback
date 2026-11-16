@@ -16,6 +16,7 @@ import 'image_editor.dart';
 import 'images.dart';
 import 'platform.dart';
 import 'server_pref.dart';
+import 'status_style.dart';
 import 'wake_gestures.dart';
 import 'orb_idle.dart';
 import 'token_coordination.dart';
@@ -211,7 +212,8 @@ class FeedbackPanel extends StatefulWidget {
   /// 连接与展示配置。
   final FeedbackConfig config;
 
-  /// 未读数变化回调（通知外层悬浮入口更新红点徽标）。
+  /// 未读数变化回调（通知宿主未读数量；组件内部入口不再绘制数字角标，
+  /// 宿主可自行决定是否展示提示）。
   final ValueChanged<int>? onUnreadCountChange;
 
   /// 请求关闭面板（关闭按钮触发）。
@@ -647,6 +649,12 @@ class FeedbackPanelState extends State<FeedbackPanel>
   /// v11 标签、未读数与历史对话状态
   _PanelTab _panelTab = _PanelTab.compose;
   int _unreadCount = 0;
+
+  /// F2：一键已读请求进行中（按钮禁用，防止重复提交）。
+  bool _readAllBusy = false;
+
+  /// F2：一键已读失败提示（独立于列表加载错误，避免覆盖整个历史视图）。
+  String? _readAllError;
   Timer? _summaryTimer;
 
   bool _historyLoading = false;
@@ -709,6 +717,8 @@ class FeedbackPanelState extends State<FeedbackPanel>
     _historyPage = 1;
     _historyFilter = null;
     _myFeedbacks = <UserFeedbackListItem>[];
+    _readAllBusy = false;
+    _readAllError = null;
     _replyController.clear();
     _replyImages.clear();
     _replyLogs.clear();
@@ -1915,6 +1925,7 @@ class FeedbackPanelState extends State<FeedbackPanel>
     setState(() {
       _historyLoading = true;
       _historyError = null;
+      _readAllError = null;
     });
     try {
       final UserFeedbackListResponse res = await api.fetchMyFeedbacks(
@@ -1956,6 +1967,49 @@ class FeedbackPanelState extends State<FeedbackPanel>
       _myFeedbacks = <UserFeedbackListItem>[];
     });
     unawaited(_loadHistoryList(reset: true));
+  }
+
+  /// F2：一键已读——把当前账号（appId 范围内）的全部未读反馈标记为已读。
+  ///
+  /// 成功：本地未读清零并通知宿主，提示「已全部标记为已读」，随后按当前
+  /// 筛选回到第 1 页刷新列表；失败：保留未读状态、行内显示错误并恢复按钮。
+  Future<void> _markAllRead() async {
+    if (_readAllBusy || _unreadCount == 0) return;
+    final int session = _trackingSession;
+    final ApiClient api = _api;
+    bool valid() => _trackingValid(session, api);
+    setState(() {
+      _readAllBusy = true;
+      _readAllError = null;
+    });
+    try {
+      await api.markAllRead(appId: widget.config.appId);
+      if (!valid()) return;
+      setState(() {
+        _readAllBusy = false;
+        _readAllError = null;
+        _unreadCount = 0;
+      });
+      widget.onUnreadCountChange?.call(0);
+      _showToast('已全部标记为已读');
+      unawaited(_loadHistoryList(reset: true));
+    } on ApiException catch (e) {
+      if (!valid()) return;
+      final String message = _friendlyApiError(e);
+      setState(() {
+        _readAllBusy = false;
+        _readAllError = message;
+      });
+      _showToast(message);
+    } catch (_) {
+      if (!valid()) return;
+      const String message = '标记已读失败，请检查网络';
+      setState(() {
+        _readAllBusy = false;
+        _readAllError = message;
+      });
+      _showToast(message);
+    }
   }
 
   /// 翻页（v12）：服务端分页，上一页 / 下一页。
@@ -2690,6 +2744,15 @@ class FeedbackPanelState extends State<FeedbackPanel>
   /// 保存按钮：校验 → 同址仅持久化 / 异址确认后完整切换。
   Future<void> _saveServerSetting() async {
     if (_settingsBusy) return;
+    // 未填写地址 = 不更改：沿用当前实际使用的服务器（上次生效的地址），
+    // 不报错、不要求用户重新输入；清除覆盖仍走「恢复默认」。
+    if (_serverInput.text.trim().isEmpty) {
+      setState(() {
+        _serverError = null;
+        _serverHint = '未填写服务器地址，保持当前服务器不变';
+      });
+      return;
+    }
     final ServerBaseNormalization norm = normalizeServerBase(
       _serverInput.text,
       pageIsHttps: kIsWeb && Uri.base.scheme == 'https',
@@ -2946,14 +3009,9 @@ class FeedbackPanelState extends State<FeedbackPanel>
                                         fontSize: 14,
                                         fontWeight: FontWeight.w600)),
                                 onPressed: () => _switchTab(tab),
-                                child:
-                                    tab == _PanelTab.history && _unreadCount > 0
-                                        ? Badge.count(
-                                            count: _unreadCount,
-                                            child: const Text('我的反馈'))
-                                        : Text(tab == _PanelTab.compose
-                                            ? '新建反馈'
-                                            : '我的反馈'))),
+                                child: Text(tab == _PanelTab.compose
+                                    ? '新建反馈'
+                                    : '我的反馈'))),
                     ])),
               ],
             ]));
@@ -3083,7 +3141,8 @@ class FeedbackPanelState extends State<FeedbackPanel>
           if (widget.onOrbIdleStyleChanged != null) ...<Widget>[
             Text('灵感球', style: theme.textTheme.titleSmall),
             const SizedBox(height: 4),
-            Text('闲置5秒后收起，轻点或使用手势唤醒', style: theme.textTheme.bodySmall),
+            Text('闲置 5 秒后收起；选择「隐藏」后待机时不显示灵感球，可用已开启的唤醒手势唤醒，或从宿主入口打开面板改回。',
+                style: theme.textTheme.bodySmall),
             const SizedBox(height: 8),
             for (final FeedbackOrbIdleStyle style
                 in FeedbackOrbIdleStyle.values)
@@ -3105,9 +3164,11 @@ class FeedbackPanelState extends State<FeedbackPanel>
                                       ? Icons.radio_button_checked
                                       : Icons.radio_button_off,
                                   color: theme.colorScheme.primary),
-                              title: Text(style == FeedbackOrbIdleStyle.handle
-                                  ? '小把手'
-                                  : '球体贴边'),
+                              title: Text(switch (style) {
+                                FeedbackOrbIdleStyle.handle => '小把手',
+                                FeedbackOrbIdleStyle.edge => '球体贴边',
+                                FeedbackOrbIdleStyle.hidden => '隐藏',
+                              }),
                               onTap: () =>
                                   widget.onOrbIdleStyleChanged!(style))))),
             if (widget.orbIdleSessionOnly)
@@ -4434,6 +4495,24 @@ class FeedbackPanelState extends State<FeedbackPanel>
       children: <Widget>[
         Row(children: <Widget>[
           Expanded(child: filterRow),
+          // F2：一键已读。无未读或请求进行中时禁用，避免无效请求与重复点击。
+          TextButton.icon(
+            key: const Key('feedback-history-read-all'),
+            onPressed: _unreadCount == 0 || _readAllBusy ? null : _markAllRead,
+            style: TextButton.styleFrom(
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                minimumSize: const Size(0, 44),
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                textStyle:
+                    const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+            icon: _readAllBusy
+                ? const SizedBox.square(
+                    dimension: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.mark_email_read_outlined, size: 18),
+            label: const Text('一键已读'),
+          ),
           IconButton(
             key: const Key('feedback-history-refresh'),
             tooltip: '刷新我的反馈',
@@ -4441,6 +4520,15 @@ class FeedbackPanelState extends State<FeedbackPanel>
             icon: const Icon(Icons.refresh),
           ),
         ]),
+        // F2：一键已读失败提示——独立行内文本，不覆盖历史列表/工具栏。
+        if (_readAllError != null)
+          Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+              child: Text(_readAllError!,
+                  key: const Key('feedback-history-read-all-error'),
+                  style: TextStyle(
+                      fontSize: 12,
+                      color: Theme.of(context).colorScheme.error))),
         if (_historyError != null)
           Padding(
               padding: const EdgeInsets.all(8), child: Text(_historyError!)),
@@ -4523,24 +4611,10 @@ class FeedbackPanelState extends State<FeedbackPanel>
 
   Widget _buildHistoryItem(BuildContext context, UserFeedbackListItem item) {
     final ColorScheme scheme = Theme.of(context).colorScheme;
-    final (Color bg, Color fg) = switch (item.issueStatus) {
-      IssueStatus.waitingUser => (
-          scheme.secondaryContainer,
-          scheme.onSecondaryContainer
-        ),
-      IssueStatus.waitingAdmin => (
-          scheme.primaryContainer,
-          scheme.onPrimaryContainer
-        ),
-      IssueStatus.resolved => (
-          scheme.tertiaryContainer,
-          scheme.onTertiaryContainer
-        ),
-      IssueStatus.open => (
-          scheme.surfaceContainerHighest,
-          scheme.onSurfaceVariant
-        ),
-    };
+    // F3：固定状态色板（待处理=琥珀、待补充=蓝、等待回复=紫、已解决=绿），
+    // 深浅主题各一套，不再借用 ColorScheme 的 container 语义色。
+    final FeedbackStatusColors statusColors =
+        feedbackStatusColors(item.issueStatus, Theme.of(context).brightness);
     return Material(
         color: scheme.surface,
         shape: RoundedRectangleBorder(
@@ -4570,16 +4644,19 @@ class FeedbackPanelState extends State<FeedbackPanel>
                           crossAxisAlignment: WrapCrossAlignment.center,
                           children: <Widget>[
                             Container(
+                                key: Key('feedback-history-status-${item.id}'),
                                 padding: const EdgeInsets.symmetric(
                                     horizontal: 8, vertical: 3),
                                 decoration: BoxDecoration(
-                                    color: bg,
+                                    color: statusColors.background,
                                     borderRadius: BorderRadius.circular(8)),
                                 child: RichText(
                                     text: TextSpan(
                                         text: item.issueStatus.label,
                                         style: TextStyle(
-                                            fontSize: 12, color: fg)))),
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w600,
+                                            color: statusColors.foreground)))),
                             if (item.unread)
                               Row(
                                   mainAxisSize: MainAxisSize.min,
@@ -4675,6 +4752,8 @@ class FeedbackPanelState extends State<FeedbackPanel>
 
     final FeedbackDialogueResponse dialogue = _dialogueData!;
     final ColorScheme scheme = Theme.of(context).colorScheme;
+    final FeedbackStatusColors dialogueStatusColors = feedbackStatusColors(
+        dialogue.issueStatus, Theme.of(context).brightness);
     final List<FeedbackMessageItem> messages =
         List<FeedbackMessageItem>.from(dialogue.messages)
           ..sort((FeedbackMessageItem a, FeedbackMessageItem b) =>
@@ -4708,11 +4787,19 @@ class FeedbackPanelState extends State<FeedbackPanel>
                   '提交于 ${_formatTime(dialogue.createdAt)} · 最近更新 ${_formatTime(dialogue.lastActivityAt)}',
                   style: Theme.of(context).textTheme.bodySmall),
               const SizedBox(height: 8),
-              Text(dialogue.issueStatus.label,
-                  style: TextStyle(
-                      color: scheme.primary,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600)),
+              // F3：与历史列表共用同一固定色板，同一状态在列表与详情里同色。
+              Container(
+                key: const Key('feedback-dialogue-status'),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                    color: dialogueStatusColors.background,
+                    borderRadius: BorderRadius.circular(8)),
+                child: Text(dialogue.issueStatus.label,
+                    style: TextStyle(
+                        color: dialogueStatusColors.foreground,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600)),
+              ),
               const SizedBox(height: 4),
               Text(_nextStep(dialogue.issueStatus),
                   key: const Key('feedback-next-step'),

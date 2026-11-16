@@ -109,7 +109,7 @@ interface ShaderMath {
  * This checks their behavior rather than reimplementing the production optics in a test mock.
  */
 function shaderMath(source:string, values:Map<string,unknown>, channel:number):ShaderMath {
-  const names=['sq','safeUv','gaussianWeight','capsuleRadius','sourceBend','sourcePoint','dispersionWidth','glassWhiteMix','idleSheen','shadeGlass','compositeGlass'];
+  const names=['sq','safeUv','gaussianWeight','capsuleRadius','sourceBend','sourcePoint','dispersionWidth','glassWhiteMix','idleSheen','clearIdleShine','clearIdleHighlight','clearIdleShadow','clearIdleGlass','shadeGlass','compositeGlass'];
   const functions=names.map(name=>{
     const match=source.match(new RegExp(`(?:float|vec3|vec4) ${name}\\(([^)]*)\\) \\{([^}]+)\\}`));
     if(!match) throw new Error(`Shader math function missing: ${name}`);
@@ -123,8 +123,8 @@ function shaderMath(source:string, values:Map<string,unknown>, channel:number):S
   const uniforms=['uMagnification','uRimStrength','uHasImage','uOpacity','uDark','uRadius','uHalfSize','uHandleMix','uMist','uIdleMix'];
   const mix=(a:number,b:number,t:number)=>a+(b-a)*t;
   const clamp=(x:number,a:number,b:number)=>Math.max(a,Math.min(b,x));
-  return Function(...uniforms,'pow','exp','cos','sin','sqrt','max','mix','clamp',`${functions}\nreturn {${names.join(',')}};`)(
-    ...uniforms.map(name=>name==='uHalfSize'?{x:(values.get(name) as number[])[0],y:(values.get(name) as number[])[1]}:(values.get(name) as number[])[0]),Math.pow,Math.exp,Math.cos,Math.sin,Math.sqrt,Math.max,mix,clamp,
+  return Function(...uniforms,'pow','exp','cos','sin','sqrt','max','mix','clamp','smoothstep',`${functions}\nreturn {${names.join(',')}};`)(
+    ...uniforms.map(name=>name==='uHalfSize'?{x:(values.get(name) as number[])[0],y:(values.get(name) as number[])[1]}:(values.get(name) as number[])[0]),Math.pow,Math.exp,Math.cos,Math.sin,Math.sqrt,Math.max,mix,clamp,(a:number,b:number,x:number)=>{const t=clamp((x-a)/(b-a),0,1);return t*t*(3-2*t);},
   ) as ShaderMath;
 }
 function fragment(calls:ReturnType<typeof gpu>['calls']):string {
@@ -263,7 +263,7 @@ describe('R3 first-preview uploaded shader math',()=>{
  * shader-math approach. Sampling records real logical offsets and the shader's
  * safeUv helper; this is software evidence, not a claim of hardware GPU execution.
  */
-function mistSampler(source:string,math:ShaderMath,mist:number,sample:(p:{x:number;y:number})=>number) {
+function mistSampler(source:string,math:ShaderMath,mist:number,sample:(p:{x:number;y:number})=>number,dark=false) {
   const body=(name:string)=>{
     const start=source.indexOf(`vec3 ${name}(vec2 p) {`);
     if(start<0) throw new Error(`Missing uploaded sampler ${name}`);
@@ -272,12 +272,56 @@ function mistSampler(source:string,math:ShaderMath,mist:number,sample:(p:{x:numb
     for(;end<source.length && depth;end++) {if(source[end]==='{') depth++;if(source[end]==='}') depth--;}
     return source.slice(first,end-1)
       .replace(/p\+vec2\(float\(([^)]+)\),float\(([^)]+)\)\)\*([\d.]+)/g,'offset(p,($1)*($3),($2)*($3))')
+      .replace(/p\+vec2\(([-.\d]+),([-.\d]+)\)/g,'offset(p,$1,$2)')
       .replace(/vec3\(0\.\)/g,'0').replace(/\b(?:vec3|int)\s+/g,'let ');
   };
-  return Function('sampleBg','gaussianWeight','offset','uMist','uHasImage','mix',`function sampleMist(p){${body('sampleMist')}}; return function(p){${body('sampleGlass')}}`)(
-    sample,math.gaussianWeight,(p:{x:number;y:number},x:number,y:number)=>({x:p.x+x,y:p.y+y}),mist,1,(a:number,b:number,t:number)=>a+(b-a)*t,
+  return Function('sampleBg','gaussianWeight','offset','uMist','uHasImage','uDark','uIdleMix','mix',`function sampleClearIdle(p){${body('sampleClearIdle')}}; function sampleMist(p){${body('sampleMist')}}; return function(p){${body('sampleGlass')}}`)(
+    sample,math.gaussianWeight,(p:{x:number;y:number},x:number,y:number)=>({x:p.x+x,y:p.y+y}),mist,1,dark?1:0,1,(a:number,b:number,t:number)=>a+(b-a)*t,
   ) as (p:{x:number;y:number})=>number;
 }
+
+describe('R11 confirmed clear-glass standby material',()=>{
+  it('preserves the background with a restrained local reflection and a low-alpha texture-free cue',()=>{
+    const {canvas,values,calls}=gpu(),lens=OrbLens.create(canvas)!;
+    lens.setImage(document.createElement('canvas'),400,300,400);
+    for(const material of [{halfSize:{x:28,y:28},handleMix:0},{halfSize:{x:5,y:24},handleMix:1}]) {
+      lens.draw({x:100,y:100},28,new OrbLiquid(),1,true,{...material,mist:.74,idleMix:1});
+      for(let channel=0;channel<3;channel++) {
+        const math=shaderMath(fragment(calls),values,channel);
+        const center=math.shadeGlass(.4,0,0);
+        expect(center).toBeGreaterThan(.39); expect(center).toBeLessThan(.42);
+        expect(math.shadeGlass(.88,.5,0)-math.shadeGlass(.12,.5,0)).toBeGreaterThan(.72);
+        expect(math.shadeGlass(.1,.985,-2.3)).toBeGreaterThan(math.shadeGlass(.1,.985,.85));
+        expect(math.sourceBend(0)).toBeCloseTo(.61,12); expect(math.sourceBend(1)).toBeCloseTo(1.07,12);
+        expect(math.dispersionWidth(1)).toBe(0);
+        const [rgb,alpha]=math.compositeGlass(0,0,1+2/material.halfSize.x,0);
+        expect(alpha).toBeCloseTo(.11*Math.exp(-((2/4.5)**2)),12);
+        // On the chosen dark surface the exterior remains subtle, not a white halo.
+        expect(Math.abs(rgb+18/255*(1-alpha)-18/255)).toBeLessThan(8/255);
+      }
+    }
+    lens.clearImage(); lens.draw({x:100,y:100},28,new OrbLiquid(),1,true,{mist:.74,idleMix:1});
+    for(let channel=0;channel<3;channel++) {
+      const math=shaderMath(fragment(calls),values,channel);
+      const [rgb,alpha]=math.compositeGlass(1,1,0,0);
+      expect(alpha).toBeCloseTo(.016,12);
+      expect(rgb/alpha).toBeCloseTo([132,137,153][channel]!/255,12);
+    }
+    lens.dispose();
+  });
+  it('uses only five taps within0.35 logical pixels for dark standby, while preserving the sample constant',()=>{
+    const {canvas,values,calls}=gpu(),lens=OrbLens.create(canvas)!;
+    lens.setImage(document.createElement('canvas'),400,300,400);
+    lens.draw({x:100,y:100},28,new OrbLiquid(),1,true,{mist:.74,idleMix:1});
+    const source=fragment(calls),math=shaderMath(source,values,0),taps:{x:number;y:number}[]=[];
+    const sampler=mistSampler(source,math,.74,p=>{taps.push(p);return p.x===100 && p.y===100?1:0;},true);
+    expect(sampler({x:100,y:100})).toBe(.5);
+    expect(taps).toHaveLength(5);
+    expect(taps).toEqual([{x:100,y:100},{x:99.65,y:100},{x:100.35,y:100},{x:100,y:99.65},{x:100,y:100.35}]);
+    expect(mistSampler(source,math,.74,()=>.41,true)({x:100,y:100})).toBeCloseTo(.41,12);
+    lens.dispose();
+  });
+});
 
 describe('R7 uploaded safe mist and capsule behavior',()=>{
   it('R9 light idle halo stays visible2–6px outside on white and pale gray, with a soft fade for sphere and capsule',()=>{
@@ -349,10 +393,14 @@ describe('R7 uploaded safe mist and capsule behavior',()=>{
     }
     lens.clearImage(); lens.draw({x:9,y:100},28,new OrbLiquid(),1,dark,{halfSize:{x:6,y:28},handleMix:1,mist:.74,idleMix:1});
     const math=shaderMath(fragment(calls),values,0);
-    expect(math.compositeGlass(1,1,0,0)[1]).toBeLessThan(1e-20);
-    // Idle without a safe texture is an unfilled soft halo, not a narrow glass rim.
-    expect(math.compositeGlass(1,1,1-.35/6,0)[1]).toBe(0);
-    expect(math.compositeGlass(1,0,1.04,0)[1]).toBeCloseTo(dark?.10:.18,12);
+    // R11 replaces the rejected smoke with a clear low-alpha body and local rim.
+    const centerAlpha=math.compositeGlass(1,1,0,0)[1];
+    expect(centerAlpha).toBeGreaterThanOrEqual(0); expect(centerAlpha).toBeLessThan(.05);
+    expect(math.compositeGlass(1,1,1-.35/6,0)[1]).toBeLessThan(.25);
+    if(!dark) {
+      expect(centerAlpha).toBe(0);
+      expect(math.compositeGlass(1,0,1.04,0)[1]).toBeCloseTo(.18,12);
+    }
     expect(math.compositeGlass(1,0,1.18,0)[1]).toBeGreaterThan(.03);
     lens.dispose();
   });

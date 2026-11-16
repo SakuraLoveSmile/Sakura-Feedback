@@ -24,6 +24,7 @@ import {
   type LifecycleItemResult,
   type MgmtView,
   STATUS_LABELS,
+  syncFeedbacksKaneoStatus,
   VIEW_LABELS,
 } from "../api.ts";
 import { ConfirmDialog, EmptyState, Icon, InlineError, MoreMenu, SkeletonRows, useToast } from "../ui.tsx";
@@ -82,6 +83,12 @@ export default function FeedbacksView() {
   const [batchResult, setBatchResult] = useState<{
     action: string;
     failures: { id: string; message: string }[];
+  } | null>(null);
+  /** 批量同步完成状态：进行中标记 + 最近一次汇总（请求失败也保留一行错误文案）。 */
+  const [kaneoSyncing, setKaneoSyncing] = useState(false);
+  const [kaneoSyncSummary, setKaneoSyncSummary] = useState<{
+    tone: "ok" | "neutral" | "err";
+    text: string;
   } | null>(null);
   const [detail, setDetail] = useState<FeedbackDetail | "loading" | "purged" | "error" | null>(null);
   /** 「更多筛选」（日期）折叠区：默认收起；纯 UI 状态，不进 URL。 */
@@ -356,6 +363,29 @@ export default function FeedbacksView() {
     }
   }, [loadList, loadCounts, detailId]);
 
+  /**
+   * 批量同步完成状态：服务端读取关联 Kaneo 任务的当前列，把已完成的问题标记为已解决
+   * 并通知提交者；逐条跳过/失败只做汇总，不回滚。完成后沿用现有刷新函数更新列表/计数/详情。
+   */
+  const syncKaneoBatch = useCallback(async () => {
+    if (kaneoSyncing) return;
+    setKaneoSyncing(true);
+    setKaneoSyncSummary(null);
+    try {
+      const r = await syncFeedbacksKaneoStatus();
+      setKaneoSyncSummary({
+        tone: r.failed > 0 ? "neutral" : r.resolved > 0 ? "ok" : "neutral",
+        text: `已检查 ${r.checked} 条：标记已解决 ${r.resolved} 条，跳过 ${r.skipped} 条，失败 ${r.failed} 条`,
+      });
+      await refreshAfterAction();
+    } catch (err) {
+      // 批量入口失败（如 502 kaneo_unavailable）：直接展示后端 error.message。
+      setKaneoSyncSummary({ tone: "err", text: err instanceof ApiError ? err.message : "同步失败，请稍后重试" });
+    } finally {
+      setKaneoSyncing(false);
+    }
+  }, [kaneoSyncing, refreshAfterAction]);
+
   const runLifecycle = useCallback(
     async (action: LifecycleAction, targets: { id: string; expectedVersion: number }[]): Promise<boolean> => {
       try {
@@ -450,20 +480,49 @@ export default function FeedbacksView() {
           <h1>反馈</h1>
           <div className="sub">查看用户反馈、回复并跟进问题，处理完成后归档整理。</div>
         </div>
-        <button
-          type="button"
-          className="btn"
-          disabled={loading === "initial"}
-          onClick={() => {
-            setHasNew(false);
-            void loadList("reset");
-            void loadCounts();
-          }}
-        >
-          <Icon name="refresh" size={16} />
-          刷新
-        </button>
+        <div className="btn-row">
+          <button
+            type="button"
+            className="btn"
+            disabled={loading === "initial"}
+            onClick={() => {
+              setHasNew(false);
+              void loadList("reset");
+              void loadCounts();
+            }}
+          >
+            <Icon name="refresh" size={16} />
+            刷新
+          </button>
+          <button
+            type="button"
+            className="btn"
+            aria-label="同步完成状态"
+            aria-busy={kaneoSyncing}
+            disabled={kaneoSyncing}
+            title="读取 Kaneo 关联任务的当前列，把已完成的问题标记为已解决并通知提交者（单次最多 50 条）"
+            onClick={() => void syncKaneoBatch()}
+          >
+            <Icon name="check" size={16} />
+            {kaneoSyncing ? "同步中…" : "同步完成状态"}
+          </button>
+        </div>
       </div>
+
+      {kaneoSyncSummary && (
+        <div
+          className={
+            kaneoSyncSummary.tone === "err"
+              ? "inline-error"
+              : kaneoSyncSummary.tone === "ok"
+                ? "inline-ok"
+                : "notice-bar"
+          }
+          role={kaneoSyncSummary.tone === "err" ? "alert" : "status"}
+        >
+          {kaneoSyncSummary.text}
+        </div>
+      )}
 
       <div className="view-tabs" role="tablist" aria-label="反馈区域">
         {VIEWS.map((v) => (

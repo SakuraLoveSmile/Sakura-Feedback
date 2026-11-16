@@ -3,7 +3,7 @@
 手动触发一次发布之后发生什么、`release-manifest.json` 里必须有什么、以及为什么 GitHub Release
 在全部产物齐全之前一直是 draft。实现见 [`.github/workflows/release.yml`](../.github/workflows/release.yml)。
 
-> **验证状态**：v0.7.0 的手动发布流水线已于2026-11-02成功运行，全部资产与GHCR镜像digest已独立核验，详见 [FB-REL-070](tasks/20261102-fb-rel-070.md)。下文第6节仍是早期静态验证快照，不代表当前流水线形态或本次实测。
+> **验证状态**：v0.7.1 的手动发布流水线已于2026-11-02成功运行，全部资产与GHCR镜像digest已独立核验，详见 [FB-REL-071](tasks/20261102-fb-rel-071.md)；v0.7.0历史结果见 [FB-REL-070](tasks/20261102-fb-rel-070.md)。下文第6节仍是早期静态验证快照，不代表当前流水线形态或本次实测。
 
 > **更新日志**：正式标签发布前必须在 `CHANGELOG.md` 添加唯一的对应版本段落。流水线通过 `tools/release-notes.py` 提取该段落，使用 `--notes-file` 写入 Release；缺失、重复或空白更新日志会阻止公开。草稿重跑也使用相同标签源码中的日志。
 
@@ -70,7 +70,7 @@
 | `channel` | string | 稳定清单恒为 `"stable"`；非 stable 时根本不产出清单 |
 | `services.feedback.image` / `.digest` | string | `ghcr.io/sakuralovesmile/sakura-feedback` + `sha256:<64 位小写十六进制>`（必填） |
 | `platform` | string | 固定 `linux/amd64` |
-| `dbSchemaVersion` | number | 服务端 `PRAGMA user_version` 的当前值（现为 `14`），见下 |
+| `dbSchemaVersion` | number | 服务端 `PRAGMA user_version` 的当前值（现为 `15`），见下 |
 | `publishedAt` | string | 生成清单的时刻（UTC，`YYYY-MM-DDTHH:MM:SSZ`） |
 | `releaseNotes` | string | 可选；发布说明（当前由 `gh release` 正文承载，清单内可不填） |
 
@@ -101,7 +101,7 @@
 要点：
 
 - **`dbSchemaVersion` 读自源码**：生成脚本解析 `apps/server/src/db/db.ts` 里所有 `PRAGMA user_version = N`，
-  取最大值（现为 `14`）。不是硬编码，也不是猜的；读不到就失败退出。
+  取最大值（现为 `15`）。不是硬编码，也不是猜的；读不到就失败退出。
 - **镜像 digest 必须存在且非空**：`publish` job digest 为空或格式非法就失败退出，
   后续 `manifest` job 根本不会运行；`manifest` job 还会把 digest 与记录文件、job output 交叉核对。
 - **清单必须能被服务端接受**：生成后立刻按「检查更新」的解析规则验收

@@ -228,21 +228,21 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets('T7a-4 键盘聚焦后拖动 >8px：球 104、环随外扩、badge 不变形',
+  testWidgets('T7a-4 键盘聚焦后拖动 >8px：球 104、环随外扩、未读数不绘制徽标',
       (WidgetTester tester) async {
     final _VisualController controller = _VisualController();
     addTearDown(controller.dispose);
     await pumpHost(tester, controller);
     controller.setUnreadCount(1);
     await tester.pump();
-    final Finder badge = find.text('1');
-    expect(badge, findsOneWidget);
+    // v0.8.2：未读数只保留在 controller / Semantics，不再绘制数字角标。
+    expect(find.byType(Badge), findsNothing);
+    expect(find.text('1'), findsNothing);
 
-    // 对照组：无焦点拖动，记录 badge 几何。
+    // 对照组：无焦点拖动。
     TestGesture gesture = await dragBeyondThreshold(tester);
     expect(_ring, findsNothing, reason: '未聚焦拖动不得出现环');
     expect(tester.getSize(_body), const Size(104, 104));
-    final Rect idleBadge = tester.getRect(badge);
     final Rect idleBody = tester.getRect(_body);
     await gesture.cancel();
     await tester.pump();
@@ -260,10 +260,11 @@ void main() {
     expect(ring.height, 112.0);
     expect(ring.center,
         tester.getCenter(find.byKey(const Key('feedback-orb-lens'))));
-    expect(tester.getRect(badge), idleBadge, reason: 'badge 不随焦点环改变');
     expect(tester.getRect(_body), idleBody, reason: '球体几何不受环影响');
+    expect(find.byType(Badge), findsNothing,
+        reason: '未读数不再绘制徽标，也不随焦点环改变');
 
-    debugPrint('T7a DRAG body=104 ring=$ring badge=${tester.getRect(badge)}');
+    debugPrint('T7a DRAG body=104 ring=$ring');
     await gesture.cancel();
     await tester.pumpWidget(const SizedBox.shrink());
   });

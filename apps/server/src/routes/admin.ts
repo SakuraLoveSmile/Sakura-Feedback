@@ -89,6 +89,7 @@ import type { AiClient } from "../services/ai.ts";
 import { resolveArchiveTarget } from "../services/archive-target.ts";
 import type { KaneoClient } from "../services/kaneo.ts";
 import { normalizeKaneoApiBase } from "../services/kaneo-http.ts";
+import { syncFeedbackFromKaneo, syncOpenArchivedFeedbacks } from "../services/kaneo-issue-sync.ts";
 import type { PublicApp } from "../types.ts";
 
 export interface AdminDeps {
@@ -1367,6 +1368,42 @@ export function adminRoutes(deps: AdminDeps): Hono {
     }
 
     return c.json({ ok: true, issueStatus: res.issueStatus, dialogueVersion: res.dialogueVersion });
+  });
+
+  /**
+   * v13（0.8）：Kaneo 完成状态回读——管理端单条显式同步。
+   * 读取任务当前列；若命中项目 isFinal 完成列，则置为已解决并写入用户可见系统说明。
+   * 管理员显式触发，可对非 open 的人工对话记录同步（已 resolved 的不重复写入）。
+   */
+  routes.post("/feedback/:id/sync-kaneo", async (c) => {
+    const actor = adminActor(db, c);
+    if (actor instanceof Response) return actor;
+    const result = await syncFeedbackFromKaneo({ db, kaneo: deps.kaneo }, c.req.param("id"), { allowNonOpen: true });
+    if (result.kind === "not_found") return fail(c, err("not_found", "反馈不存在", 404));
+    if (result.kind === "trash") {
+      return fail(c, err("readonly_trashed", "回收站中的反馈只读，无法同步", 403));
+    }
+    if (result.kind === "kaneo_unavailable") return fail(c, err("kaneo_unavailable", result.message, 502));
+    return c.json({ ok: true, result });
+  });
+
+  /**
+   * v13（0.8）：Kaneo 完成状态回读——批量同步自动候选（已归档 + 有任务 + open）。
+   * 只处理候选集合，避免把正在人工沟通的记录自动关闭。
+   */
+  routes.post("/feedback/sync-kaneo", async (c) => {
+    const actor = adminActor(db, c);
+    if (actor instanceof Response) return actor;
+    const body = await readJson<{ limit?: unknown }>(c);
+    if (isErr(body)) return fail(c, body);
+    const rawLimit = typeof body.limit === "number" && Number.isFinite(body.limit) ? Math.trunc(body.limit) : undefined;
+    const limit = rawLimit === undefined ? undefined : Math.min(Math.max(1, rawLimit), 200);
+    try {
+      const report = await syncOpenArchivedFeedbacks({ db, kaneo: deps.kaneo }, limit === undefined ? {} : { limit });
+      return c.json({ ok: true, ...report });
+    } catch (error) {
+      return fail(c, err("internal", `同步失败：${(error as Error).message ?? String(error)}`, 500));
+    }
   });
 
   routes.post("/feedback/:id/read", async (c) => {

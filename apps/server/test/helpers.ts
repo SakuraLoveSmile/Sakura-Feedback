@@ -114,6 +114,10 @@ export interface MockKaneo extends KaneoClient {
   labelAttaches: Array<{ labelId: string; taskId: string }>;
   /** 覆盖工作区级标签（模拟标签在授权后被删除/改名）。 */
   setWorkspaceLabels(labels: Array<{ id: string; name: string; color?: string }>): void;
+  /** 注入任务当前列状态（完成状态回读）：taskId → { status, projectId? }。 */
+  setTaskState(taskId: string, state: { status: string; projectId?: string }): void;
+  /** 读取任务状态故障注入（null = 正常）。 */
+  taskReadError: { kind: "definite" | "uncertain"; message: string } | null;
   testError: string | null;
   listError: string | null;
   /**
@@ -155,6 +159,8 @@ export function makeMockKaneo(opts: MockKaneoOptions = {}): MockKaneo {
   );
   // taskId → 已关联的任务级标签（含从工作区级标签复制而来的新行）。
   const taskLabels = new Map<string, Array<{ id: string; name: string; color: string }>>();
+  // taskId → 任务当前列状态（完成状态回读测试注入）。
+  const taskStates = new Map<string, { status: string; projectId?: string }>();
   let existing = opts.existingTasks ?? [];
   let remoteCalls = 0;
   let remoteWrites = 0;
@@ -189,6 +195,10 @@ export function makeMockKaneo(opts: MockKaneoOptions = {}): MockKaneo {
       workspaceLabelDefs.length = 0;
       for (const l of labels) workspaceLabelDefs.push({ id: l.id, name: l.name, color: l.color ?? "#888888" });
     },
+    setTaskState(taskId, state) {
+      taskStates.set(taskId, { ...state });
+    },
+    taskReadError: null,
     testError: null,
     listError: null,
     readError: null,
@@ -337,8 +347,14 @@ export function makeMockKaneo(opts: MockKaneoOptions = {}): MockKaneo {
     },
     async getTask(taskId) {
       count();
+      if (mock.taskReadError !== null) throwReadError(mock.taskReadError);
       if (taskId.includes("not-found")) return null;
-      return { taskId, taskUrl: `http://kaneo.test/task/${taskId}` };
+      const state = taskStates.get(taskId);
+      return {
+        taskId,
+        taskUrl: `http://kaneo.test/task/${taskId}`,
+        ...(state ? { status: state.status, ...(state.projectId ? { projectId: state.projectId } : {}) } : {}),
+      };
     },
     deleted: [] as string[],
     async deleteTask(taskId) {

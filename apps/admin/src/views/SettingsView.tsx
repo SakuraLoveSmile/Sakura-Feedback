@@ -80,85 +80,105 @@ export default function SettingsView({ onCredentialsUpdated }: { onCredentialsUp
       </div>
       {loadError && <InlineError message={loadError} onRetry={() => void load()} />}
 
-      <form className="card" style={{ maxWidth: 420 }} onSubmit={submit}>
-        <div className="form-section">
-          <h3 className="form-section-title">登录身份</h3>
-          <p className="form-section-desc">
-            修改后需用新用户名登录。当前密码用于确认本次修改；保存后全部会话失效，更换密码时旧密码也会失效。
-          </p>
-          <Field id="me-username" label="用户名" hint="1..100 字符。">
-            {(ctl) => (
-              <input
-                {...ctl}
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                autoComplete="username"
-                required
-              />
-            )}
-          </Field>
-          <Field id="me-current" label="当前密码" hint="必须输入当前密码才能保存。">
-            {(ctl) => (
-              <input
-                {...ctl}
-                type="password"
-                value={currentPassword}
-                onChange={(e) => setCurrentPassword(e.target.value)}
-                autoComplete="current-password"
-                required
-              />
-            )}
-          </Field>
+      <form className="settings-grid" onSubmit={submit}>
+        <div className="card settings-card">
+          <div className="profile-top">
+            <span className="profile-avatar" aria-hidden="true">
+              {(username || "A").slice(0, 1).toUpperCase()}
+            </span>
+            <div className="profile-text">
+              <b>{username || "admin"}</b>
+              <span className="muted small">管理员 · 当前登录</span>
+            </div>
+            <span className="tag archived">会话正常</span>
+          </div>
+          <div className="form-section">
+            <h3 className="form-section-title">登录身份</h3>
+            <p className="form-section-desc">
+              修改后需用新用户名登录。当前密码用于确认本次修改；保存后全部会话失效，更换密码时旧密码也会失效。
+            </p>
+            <Field id="me-username" label="用户名" hint="1..100 字符。">
+              {(ctl) => (
+                <input
+                  {...ctl}
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  autoComplete="username"
+                  required
+                />
+              )}
+            </Field>
+            <Field id="me-current" label="当前密码" hint="必须输入当前密码才能保存。">
+              {(ctl) => (
+                <input
+                  {...ctl}
+                  type="password"
+                  value={currentPassword}
+                  onChange={(e) => setCurrentPassword(e.target.value)}
+                  autoComplete="current-password"
+                  required
+                />
+              )}
+            </Field>
+          </div>
         </div>
 
-        <div className="form-section">
-          <h3 className="form-section-title">更换密码</h3>
-          <p className="form-section-desc">新密码 8..200 字符，首尾空格也算字符；两个字段都留空则只改用户名。</p>
-          <Field id="me-new" label="新密码（留空表示只改用户名）">
-            {(ctl) => (
-              <input
-                {...ctl}
-                type="password"
-                value={newPassword}
-                onChange={(e) => {
-                  setNewPassword(e.target.value);
-                  setConfirmError(null);
-                }}
-                autoComplete="new-password"
-              />
-            )}
-          </Field>
-          <Field id="me-confirm" label="确认新密码" error={confirmError}>
-            {(ctl) => (
-              <input
-                {...ctl}
-                type="password"
-                value={confirmPassword}
-                onChange={(e) => {
-                  setConfirmPassword(e.target.value);
-                  setConfirmError(null);
-                }}
-                autoComplete="new-password"
-              />
-            )}
-          </Field>
-        </div>
+        <div className="card settings-card">
+          <div className="form-section">
+            <h3 className="form-section-title">更换密码</h3>
+            <p className="form-section-desc">新密码 8..200 字符，首尾空格也算字符；两个字段都留空则只改用户名。</p>
+            <Field id="me-new" label="新密码（留空表示只改用户名）">
+              {(ctl) => (
+                <input
+                  {...ctl}
+                  type="password"
+                  value={newPassword}
+                  onChange={(e) => {
+                    setNewPassword(e.target.value);
+                    setConfirmError(null);
+                  }}
+                  autoComplete="new-password"
+                />
+              )}
+            </Field>
+            <Field id="me-confirm" label="确认新密码" error={confirmError}>
+              {(ctl) => (
+                <input
+                  {...ctl}
+                  type="password"
+                  value={confirmPassword}
+                  onChange={(e) => {
+                    setConfirmPassword(e.target.value);
+                    setConfirmError(null);
+                  }}
+                  autoComplete="new-password"
+                />
+              )}
+            </Field>
+          </div>
 
-        {/* 保存失败贴近提交按钮：修正后直接再点保存即重试 */}
-        {formError && <InlineError message={formError} />}
-        <div className="form-actions">
-          <button
-            className="btn primary"
-            type="submit"
-            disabled={saving}
-            title={saving ? "正在保存…" : undefined}
-            aria-busy={saving}
-          >
-            {saving ? "保存中…" : "保存"}
-          </button>
-          <p className="save-hint">
-            保存位置：写入本服务器的管理员账号；成功后该账号全部会话（含当前）立即失效，回到登录页重新登录。
-          </p>
+          {/* 保存失败贴近提交按钮：修正后直接再点保存即重试 */}
+          {formError && <InlineError message={formError} />}
+          <div className="form-actions">
+            <button
+              className="btn primary"
+              type="submit"
+              disabled={saving}
+              title={saving ? "正在保存…" : undefined}
+              aria-busy={saving}
+            >
+              {saving ? "保存中…" : "保存"}
+            </button>
+            <p className="save-hint">
+              保存位置：写入本服务器的管理员账号；成功后该账号全部会话（含当前）立即失效，回到登录页重新登录。
+            </p>
+          </div>
+          <div className="settings-note">
+            <span>
+              密码只保存在组件内存中，不写入 localStorage、sessionStorage 或
+              URL。管理员提交反馈不限次数，因此没有管理员额度设置。
+            </span>
+          </div>
         </div>
       </form>
     </div>

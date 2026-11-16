@@ -176,6 +176,62 @@ void main() {
     });
   });
 
+  group('中文域名（IDN）', () {
+    test('中文主机名按 IDNA 转成 punycode（全角句点按 . 处理）', () {
+      expect(normalizeServerBase('https://反馈.中国').base,
+          'https://xn--kors63n.xn--fiqs8s');
+      expect(normalizeServerBase(' https://例子.测试/api/ ').base,
+          'https://xn--fsqu00a.xn--0zwm56d/api');
+      expect(normalizeServerBase('https://例子。测试').base,
+          'https://xn--fsqu00a.xn--0zwm56d');
+      expect(normalizeServerBase('https://例子．测试').base,
+          'https://xn--fsqu00a.xn--0zwm56d');
+      expect(normalizeServerBase('https://例子｡测试').base,
+          'https://xn--fsqu00a.xn--0zwm56d');
+      // 中文输入法全角模式：全角 ASCII 按 UTS46 映射回 ASCII。
+      expect(
+          normalizeServerBase('https://ｆｂ.中国').base, 'https://fb.xn--fiqs8s');
+      expect(normalizeServerBase('https://ｅｘａｍｐｌｅ．测试').base,
+          'https://example.xn--0zwm56d');
+      // ASCII 标签小写、默认端口省略，与浏览器 URL 的规范化一致。
+      expect(normalizeServerBase('https://UPPER.例子.测试:443/').base,
+          'https://upper.xn--fsqu00a.xn--0zwm56d');
+      // 中文写法与已编码的 punycode 写法规范化后一致（同址比较 / 偏好槽位）。
+      expect(normalizeServerBase('https://例子.测试').base,
+          normalizeServerBase('https://xn--fsqu00a.xn--0zwm56d').base);
+    });
+
+    test('punycode 编码与浏览器 URL 的参考向量一致', () {
+      expect(normalizeServerBase('https://中国').base, 'https://xn--fiqs8s');
+      expect(normalizeServerBase('https://反馈').base, 'https://xn--kors63n');
+      expect(normalizeServerBase('https://例子abc.测试').base,
+          'https://xn--abc-uc0e315c.xn--0zwm56d');
+      expect(normalizeServerBase('https://例子-测试.中国').base,
+          'https://xn----kb7ap09ad7r428a.xn--fiqs8s');
+    });
+
+    test('非法中文主机名被拒绝', () {
+      expect(normalizeServerBase('https://例 子.测试').ok, isFalse);
+      expect(normalizeServerBase('https://例子.测试:99999').ok, isFalse);
+    });
+
+    test('FeedbackConfig.apiBase 在构造时转为 punycode', () {
+      final FeedbackConfig config =
+          FeedbackConfig('https://例子.测试/', 'com.example.app');
+      expect(config.apiBase, 'https://xn--fsqu00a.xn--0zwm56d');
+    });
+
+    test('覆盖偏好槽位按 punycode 派生：中文与已编码地址视为同一身份', () {
+      expect(
+        serverOverrideStorageKey(
+            appId: 'com.example.app', defaultApiBase: 'https://例子.测试'),
+        serverOverrideStorageKey(
+            appId: 'com.example.app',
+            defaultApiBase: 'https://xn--fsqu00a.xn--0zwm56d'),
+      );
+    });
+  });
+
   group('serverOverrideStorageKey', () {
     test('按 appId 与规范化默认地址隔离；确定性可复现', () {
       final String k1 = serverOverrideStorageKey(
@@ -234,6 +290,64 @@ void main() {
       await teardownPanel(tester);
     });
 
+    testWidgets('未填写地址保存：保持当前服务器不变，不报错也不要求重新输入', (tester) async {
+      final PanelServer server = PanelServer();
+      await pumpPanel(
+        tester,
+        server: server,
+        tokenStore: MemoryTokenStore(),
+      );
+      await tester.tap(find.byKey(settingsGear));
+      await tester.pump();
+      final FeedbackPanelState panel =
+          tester.state<FeedbackPanelState>(find.byType(FeedbackPanel));
+      // 未保存过覆盖时输入框为空：空不是「必须补填」的错误。
+      expect(
+        tester.widget<TextField>(find.byKey(serverInput)).controller!.text,
+        isEmpty,
+      );
+      await tester.tap(find.byKey(serverSave));
+      await tester.pump();
+      expect(find.textContaining('请输入服务器地址'), findsNothing);
+      expect(find.textContaining('保持当前服务器不变'), findsOneWidget);
+      expect(panel.effectiveApiBase, 'https://svc.test');
+      expect(panel.serverOverride, isNull);
+      expect(server.requests, isEmpty); // 地址未变化：不探测、不重登
+      await teardownPanel(tester);
+    });
+
+    testWidgets('已有覆盖时清空地址保存：保持当前服务器不变，不撤销覆盖', (tester) async {
+      final MemoryServerPrefStore prefs = MemoryServerPrefStore();
+      final String key = serverOverrideStorageKey(
+          appId: 'com.example.app', defaultApiBase: 'https://svc.test');
+      await prefs.write(key, 'https://b.test');
+      final PanelServer server = PanelServer();
+      await pumpPanel(
+        tester,
+        server: server,
+        tokenStore: MemoryTokenStore(),
+        serverPrefStore: prefs,
+      );
+      await tester.pump();
+      await tester.pump();
+      final FeedbackPanelState panel =
+          tester.state<FeedbackPanelState>(find.byType(FeedbackPanel));
+      expect(panel.effectiveApiBase, 'https://b.test');
+
+      await tester.tap(find.byKey(settingsGear));
+      await tester.pump();
+      await tester.enterText(find.byKey(serverInput), '   ');
+      await tester.tap(find.byKey(serverSave));
+      await tester.pump();
+
+      expect(find.textContaining('保持当前服务器不变'), findsOneWidget);
+      expect(find.byKey(const Key('feedback-server-confirm')), findsNothing);
+      expect(panel.effectiveApiBase, 'https://b.test');
+      expect(panel.serverOverride, 'https://b.test');
+      expect(await prefs.read(key), 'https://b.test'); // 覆盖保留
+      await teardownPanel(tester);
+    });
+
     testWidgets('保存自定义地址：生效 + 持久化 + 探测 /healthz 提示连通', (tester) async {
       final PanelServer serverA = PanelServer();
       final PanelServer serverB = PanelServer();
@@ -271,6 +385,46 @@ void main() {
       // 保存后探测 B 的 /healthz 并提示连通。
       expect(serverB.count('GET /healthz'), 1);
       expect(find.textContaining('服务连接正常'), findsOneWidget);
+      await teardownPanel(tester);
+    });
+
+    testWidgets('保存中文域名：转为 punycode 后生效、探测并持久化', (tester) async {
+      const String asciiBase = 'https://xn--fsqu00a.xn--0zwm56d';
+      final PanelServer serverPuny = PanelServer();
+      serverPuny.respond('GET /healthz', {'ok': true});
+      final MemoryServerPrefStore prefs = MemoryServerPrefStore();
+      await tester.binding.setSurfaceSize(const Size(1000, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(MaterialApp(
+        home: FeedbackPanel(
+          config: cfgA(),
+          tokenStore: MemoryTokenStore(),
+          serverPrefStore: prefs,
+          httpClient: routedClient(
+              <String, PanelServer>{'xn--fsqu00a.xn--0zwm56d': serverPuny}),
+        ),
+      ));
+      await tester.pump();
+      await tester.pump();
+
+      await tester.tap(find.byKey(settingsGear));
+      await tester.pump();
+      await tester.enterText(find.byKey(serverInput), 'https://例子.测试');
+      await tester.tap(find.byKey(serverSave));
+      await tester.pump();
+      await tester.pump();
+
+      final FeedbackPanelState panel =
+          tester.state<FeedbackPanelState>(find.byType(FeedbackPanel));
+      expect(panel.effectiveApiBase, asciiBase);
+      expect(panel.serverOverride, asciiBase);
+      // 探测请求的主机名必须是可解析的 punycode，而不是百分号编码。
+      expect(serverPuny.count('GET /healthz'), 1);
+      expect(serverPuny.lastMatching('GET /healthz').url.host,
+          'xn--fsqu00a.xn--0zwm56d');
+      final String key = serverOverrideStorageKey(
+          appId: 'com.example.app', defaultApiBase: 'https://a.test');
+      expect(await prefs.read(key), asciiBase);
       await teardownPanel(tester);
     });
 

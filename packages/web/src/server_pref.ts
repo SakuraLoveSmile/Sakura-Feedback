@@ -15,6 +15,10 @@ export type NormalizeServerBaseResult = { ok: true; base: string } | { ok: false
  * 输出为「协议小写 + host（URL 解析已小写主机名并省略默认端口）+ 路径前缀
  * （只去末尾斜杠，支持部署路径前缀）」。
  *
+ * 中文等国际化域名（IDN）由浏览器 `URL` 按 IDNA 转成 ASCII/punycode
+ * （`。` / `．` / `｡` 视为 `.`），因此校验、比较与请求都使用 ASCII 主机名；
+ * Flutter 端自行实现同一转换（Dart 的 `Uri` 只会百分号编码 Unicode 主机名）。
+ *
  * [opts.pageIsHttps] 为 true 时拒绝 http 覆盖：HTTPS 页面发起 HTTP 请求会被
  * 浏览器按混合内容拦截，提前在校验层给出可读原因。
  */

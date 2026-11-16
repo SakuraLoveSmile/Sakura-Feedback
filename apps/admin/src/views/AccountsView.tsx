@@ -1,6 +1,6 @@
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { type AccountItem, ApiError, api } from "../api.ts";
-import { EmptyState, Field, InlineError, PromptDialog, SkeletonRows, useToast } from "../ui.tsx";
+import { EmptyState, Field, Icon, InlineError, PromptDialog, SkeletonRows, useToast } from "../ui.tsx";
 
 interface Draft {
   username: string;
@@ -134,6 +134,11 @@ export default function AccountsView() {
   /** 禁用态的可见原因：busy 一律说明「进行中」，创建按钮还区分必填未完成。 */
   const busyTitle = busy ? "有操作进行中，稍候重试" : undefined;
 
+  const accountTotal = accounts?.length ?? 0;
+  const enabledTotal = accounts?.filter((a) => a.enabled).length ?? 0;
+  const usedToday = accounts?.reduce((sum, a) => sum + a.used, 0) ?? 0;
+  const remainingToday = accounts?.reduce((sum, a) => sum + a.remaining, 0) ?? 0;
+
   return (
     <div className="accounts-page">
       <div className="page-header">
@@ -146,6 +151,57 @@ export default function AccountsView() {
         </div>
       </div>
       {error && <InlineError message={error} onRetry={() => void reload()} />}
+
+      <div className="stat-row">
+        <div className="stat-card">
+          <span className="stat-icon">
+            <Icon name="users" size={18} />
+          </span>
+          <div>
+            <div className="stat-label">账号总数</div>
+            <div className="stat-value">
+              {accounts === null ? "—" : accountTotal}
+              <small>个</small>
+            </div>
+          </div>
+        </div>
+        <div className="stat-card">
+          <span className="stat-icon tone-ok">
+            <Icon name="check" size={18} />
+          </span>
+          <div>
+            <div className="stat-label">启用中</div>
+            <div className="stat-value">
+              {accounts === null ? "—" : enabledTotal}
+              <small>个</small>
+            </div>
+          </div>
+        </div>
+        <div className="stat-card">
+          <span className="stat-icon tone-info">
+            <Icon name="feedback" size={18} />
+          </span>
+          <div>
+            <div className="stat-label">今日提交</div>
+            <div className="stat-value">
+              {accounts === null ? "—" : usedToday}
+              <small>次</small>
+            </div>
+          </div>
+        </div>
+        <div className="stat-card">
+          <span className="stat-icon tone-warn">
+            <Icon name="clock" size={18} />
+          </span>
+          <div>
+            <div className="stat-label">剩余额度</div>
+            <div className="stat-value">
+              {accounts === null ? "—" : remainingToday}
+              <small>次</small>
+            </div>
+          </div>
+        </div>
+      </div>
 
       <div className="accounts-sections">
         <div className="accounts-list-section">
@@ -184,7 +240,12 @@ export default function AccountsView() {
                   {accounts.map((a) => (
                     <tr key={a.id}>
                       <td>
-                        <code>{a.username}</code>
+                        <span className="account-name">
+                          <span className={`account-avatar${a.enabled ? "" : " is-disabled"}`} aria-hidden="true">
+                            {a.username.slice(0, 1).toUpperCase()}
+                          </span>
+                          <code>{a.username}</code>
+                        </span>
                       </td>
                       <td>{statusTag(a.enabled)}</td>
                       <td>
@@ -214,11 +275,25 @@ export default function AccountsView() {
                           </div>
                         )}
                       </td>
-                      <td className="muted">{a.used}</td>
                       <td>
-                        <b>{a.remaining}</b>
-                        <span className="muted small" style={{ marginLeft: 6 }}>
-                          （{resetLabel(a.resetAt)}刷新）
+                        <span className="quota-cell">
+                          <span className="quota-bar" aria-hidden="true">
+                            <i
+                              className={a.dailyLimit > 0 && a.used >= a.dailyLimit ? "is-full" : undefined}
+                              style={{
+                                width: `${a.dailyLimit > 0 ? Math.min(100, (a.used / a.dailyLimit) * 100) : 0}%`,
+                              }}
+                            />
+                          </span>
+                          <span className="small tnum">
+                            {a.used} / {a.dailyLimit}
+                          </span>
+                        </span>
+                      </td>
+                      <td>
+                        <b className={a.remaining === 0 ? "quota-empty tnum" : "tnum"}>{a.remaining}</b>
+                        <span className="muted small" style={{ marginLeft: 6 }} title={`${resetLabel(a.resetAt)}刷新`}>
+                          （{resetDate(a.resetAt)}刷新）
                         </span>
                       </td>
                       <td>
@@ -248,6 +323,12 @@ export default function AccountsView() {
                   ))}
                 </tbody>
               </table>
+            )}
+            {accounts !== null && accounts.length > 0 && (
+              <div className="table-foot">
+                <span>额度在北京时间 00:00 统一刷新</span>
+                <span>共 {accounts.length} 个账号</span>
+              </div>
             )}
           </div>
         </div>
@@ -347,4 +428,10 @@ function resetLabel(resetAt: string): string {
   const d = new Date(resetAt);
   if (Number.isNaN(d.getTime())) return "";
   return `${d.toLocaleString()} `;
+}
+
+function resetDate(resetAt: string): string {
+  const d = new Date(resetAt);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleDateString();
 }

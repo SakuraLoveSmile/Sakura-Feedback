@@ -3412,6 +3412,73 @@ export function getUnreadSummaryForUser(
   };
 }
 
+/**
+ * v0.8.2 一键已读：把当前用户在各反馈上的读游标一次性推进到该反馈
+ * `sender_type IN ('admin', 'system')` 消息的最大 `seq`。
+ *
+ * 过滤口径与 `getUnreadSummaryForUser` 完全一致：只处理本人反馈、排除
+ * `mgmt_state = 'trash'`、可选 `appId` 范围，且只统计未读的 admin/system 消息。
+ * 游标只推进不回退（`MAX` 合并），没有未读的反馈不写游标。
+ * 返回本次清除的反馈数与未读消息数（二次调用为 0）。
+ */
+export function markAllReadForUser(
+  db: Db,
+  userId: string,
+  appId?: string,
+): { markedFeedbacks: number; markedMessages: number } {
+  let appClause = "";
+  const selectParams: (string | number)[] = [userId, userId];
+  if (appId) {
+    appClause = " AND f.app_id = ?";
+    selectParams.push(appId);
+  }
+
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const rows = db
+      .prepare(
+        `SELECT
+           f.id AS feedback_id,
+           MAX(m.seq) AS max_seq,
+           COUNT(m.id) AS unread_messages
+         FROM feedbacks f
+         JOIN feedback_messages m ON m.feedback_id = f.id
+         LEFT JOIN feedback_read_cursors rc ON rc.feedback_id = f.id AND rc.user_id = ?
+         WHERE f.user_id = ?
+           AND f.mgmt_state != 'trash'
+           AND m.sender_type IN ('admin', 'system')
+           AND m.seq > COALESCE(rc.last_read_seq, 0)
+           ${appClause}
+         GROUP BY f.id`,
+      )
+      .all(...selectParams) as { feedback_id: string; max_seq: number; unread_messages: number }[];
+
+    if (rows.length === 0) {
+      db.exec("COMMIT");
+      return { markedFeedbacks: 0, markedMessages: 0 };
+    }
+
+    const now = nowIso();
+    const upsert = db.prepare(
+      `INSERT INTO feedback_read_cursors (user_id, feedback_id, last_read_seq, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(user_id, feedback_id) DO UPDATE SET
+         last_read_seq = MAX(feedback_read_cursors.last_read_seq, excluded.last_read_seq),
+         updated_at = excluded.updated_at`,
+    );
+    let markedMessages = 0;
+    for (const row of rows) {
+      upsert.run(userId, row.feedback_id, Math.max(0, Number(row.max_seq)), now);
+      markedMessages += Number(row.unread_messages);
+    }
+    db.exec("COMMIT");
+    return { markedFeedbacks: rows.length, markedMessages };
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+}
+
 export interface UserFeedbackItem {
   id: string;
   appId: string;
@@ -3443,6 +3510,28 @@ function nextFeedbackActivityAt(previous: string, now: string): string {
   const nowMs = Date.parse(now);
   if (!Number.isFinite(previousMs) || nowMs > previousMs) return now;
   return new Date(previousMs + 1).toISOString();
+}
+
+/**
+ * Kaneo 完成状态回读候选（后台自动同步用）：
+ * 已归档、有关联任务、问题仍为 `open`（尚未有人工对话/结论）、且不在回收站。
+ * 按最近活动时间升序取前 N 条，避免每次扫描都集中在同一批。
+ */
+export function listKaneoSyncCandidates(db: Db, limit = 50): string[] {
+  const capped = Math.min(Math.max(1, Math.trunc(limit)), 200);
+  const rows = db
+    .prepare(
+      `SELECT id FROM feedbacks
+       WHERE status = 'archived'
+         AND kaneo_task_id IS NOT NULL
+         AND TRIM(kaneo_task_id) <> ''
+         AND issue_status = 'open'
+         AND mgmt_state != 'trash'
+       ORDER BY last_activity_at ASC, created_at ASC
+       LIMIT ?`,
+    )
+    .all(capped) as { id: string }[];
+  return rows.map((r) => r.id);
 }
 
 export function listUserFeedbacks(
@@ -3718,6 +3807,11 @@ export function updateIssueStatusInTx(
   expectedDialogueVersion?: number,
   /** v12：处理说明（resolved 时必填，1..2000 字符；其余状态可选携带），对用户可见。 */
   resolutionNote?: string | null,
+  /**
+   * 审计覆盖（v13+）：系统自动同步等非管理员显式操作使用独立 action 并附加来源信息；
+   * 缺省保持历史行为（issue_status_change）。
+   */
+  audit?: { action?: string; detail?: Record<string, unknown> },
 ):
   | { ok: true; dialogueVersion: number; issueStatus: IssueStatus; seq?: number }
   | { ok: false; error: "not_found" | "version_conflict" | "invalid_state" } {
@@ -3778,12 +3872,13 @@ export function updateIssueStatusInTx(
     insertFeedbackAuditInTx(db, {
       feedbackId,
       actor,
-      action: "issue_status_change",
+      action: audit?.action ?? "issue_status_change",
       detail: {
         from: row.issue_status,
         to: newStatus,
         dialogueVersion: nextVer,
         ...(note !== null ? { resolutionNote: note, seq: noteSeq } : {}),
+        ...(audit?.detail ?? {}),
       },
     });
 

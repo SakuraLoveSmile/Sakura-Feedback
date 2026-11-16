@@ -115,6 +115,44 @@ describe('T6 normalizeServerBase 地址校验与规范化', () => {
       base: 'https://fb.example.com',
     });
   });
+
+  it('接受中文域名（IDN）：规范化为 punycode，全角句点按 . 处理', () => {
+    // 与浏览器 URL / Flutter（RFC 3492）一致的参考向量。
+    expect(normalizeServerBase('https://反馈.中国')).toEqual({
+      ok: true,
+      base: 'https://xn--kors63n.xn--fiqs8s',
+    });
+    expect(normalizeServerBase(' https://例子.测试/api/ ')).toEqual({
+      ok: true,
+      base: 'https://xn--fsqu00a.xn--0zwm56d/api',
+    });
+    expect(normalizeServerBase('https://例子。测试')).toEqual({
+      ok: true,
+      base: 'https://xn--fsqu00a.xn--0zwm56d',
+    });
+    expect(normalizeServerBase('https://例子．测试')).toEqual({
+      ok: true,
+      base: 'https://xn--fsqu00a.xn--0zwm56d',
+    });
+    // 中文输入法全角模式：全角 ASCII 按 UTS46 映射回 ASCII。
+    expect(normalizeServerBase('https://ｆｂ.中国')).toEqual({
+      ok: true,
+      base: 'https://fb.xn--fiqs8s',
+    });
+    expect(normalizeServerBase('https://ｅｘａｍｐｌｅ．测试')).toEqual({
+      ok: true,
+      base: 'https://example.xn--0zwm56d',
+    });
+    // ASCII 标签小写、默认端口省略。
+    expect(normalizeServerBase('https://UPPER.例子.测试:443/')).toEqual({
+      ok: true,
+      base: 'https://upper.xn--fsqu00a.xn--0zwm56d',
+    });
+    // 中文写法与已编码写法规范化后一致（同址判断 / 偏好槽位一致）。
+    const zh = normalizeServerBase('https://例子.测试');
+    const ascii = normalizeServerBase('https://xn--fsqu00a.xn--0zwm56d');
+    expect(zh).toEqual(ascii);
+  });
 });
 
 describe('T6 设置视图与 effectiveApiBase', () => {
@@ -163,6 +201,36 @@ describe('T6 设置视图与 effectiveApiBase', () => {
     expect(s.error.hidden).toBe(false);
     expect(s.error.textContent).toContain('http');
     expect(m.widget.effectiveApiBase).toBe(API_BASE);
+  });
+
+  it('未填写地址保存不报错：保持当前服务器不变，不探测不切换', () => {
+    const { calls } = recordFetch(async () => httpResponse(200, { ok: true }));
+    const m = mount();
+    m.widget.open();
+    const s = openSettings(m);
+    s.input.value = '   ';
+    s.save.click();
+    expect(s.error.hidden).toBe(true);
+    expect(s.hint.textContent).toContain('保持当前服务器不变');
+    expect(m.widget.effectiveApiBase).toBe(API_BASE);
+    expect(window.localStorage.getItem(key())).toBeNull();
+    expect(calls.some((c) => c.url.includes('/healthz'))).toBe(false);
+  });
+
+  it('已有覆盖时清空输入保存：保持当前服务器不变，不撤销覆盖', () => {
+    recordFetch(async () => httpResponse(200, { ok: true }));
+    window.localStorage.setItem(key(), BASE_B);
+    const m = mount();
+    m.widget.open();
+    expect(m.widget.effectiveApiBase).toBe(BASE_B);
+    const s = openSettings(m);
+    s.input.value = '';
+    s.save.click();
+    expect(s.error.hidden).toBe(true);
+    expect(s.confirm.hidden).toBe(true); // 不触发切换确认
+    expect(s.hint.textContent).toContain('保持当前服务器不变');
+    expect(m.widget.effectiveApiBase).toBe(BASE_B);
+    expect(window.localStorage.getItem(key())).toBe(BASE_B); // 覆盖保留
   });
 
   it('相同规范化地址的保存不触发重置：草稿保留', () => {

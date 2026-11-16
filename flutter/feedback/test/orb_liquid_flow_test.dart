@@ -627,8 +627,7 @@ void main() {
     }
   });
 
-  testWidgets(
-      'masked lens contains only opaque mask pixels; scroll invalidates decoration without polling',
+  testWidgets('masked lens stays opaque after bounded scroll refresh',
       (tester) async {
     debugDisableOrbLensCapture = false;
     debugOrbLensCaptureAttempts = 0;
@@ -675,23 +674,37 @@ void main() {
     await tester.pump();
     await tester.pump();
     expect(find.byKey(const Key('feedback-orb-lens-shader')), findsNothing);
-    for (int i = 0; i < 10; i++) {
-      await tester.pump(const Duration(milliseconds: 200));
-    }
-    expect(debugOrbLensCaptureAttempts, captured);
+    await pumpUntil(
+        tester,
+        () => find
+            .byKey(const Key('feedback-orb-lens-shader'))
+            .evaluate()
+            .isNotEmpty);
+    final OrbLiquidLensPainter refreshed = tester
+        .widget<CustomPaint>(find.byKey(const Key('feedback-orb-lens-shader')))
+        .painter! as OrbLiquidLensPainter;
+    expect(refreshed.image, isNot(same(painter.image)));
+    final Uint8List? updated = await tester.runAsync<Uint8List?>(
+        () async => (await refreshed.image.toByteData())?.buffer.asUint8List());
+    final int refreshedIndex =
+        ((120 * refreshed.scale).floor() * refreshed.image.width +
+                (120 * refreshed.scale).floor()) *
+            4;
+    expect(updated!.sublist(refreshedIndex, refreshedIndex + 4),
+        <int>[110, 110, 115, 255]);
+    expect(debugOrbLensCaptureAttempts, captured + 1);
     expect(find.byType(BackdropFilter), findsNothing);
   });
 
-  testWidgets(
-      'drag refresh obeys the one-second gate and remains single-flight',
+  testWidgets('drag refresh obeys the bounded gate and remains single-flight',
       (tester) async {
     debugDisableOrbLensCapture = false;
     debugOrbLensCaptureAttempts = 0;
-    expect(debugOrbLensGateDuration, const Duration(seconds: 1));
+    expect(debugOrbLensGateDuration, const Duration(milliseconds: 250));
     final Duration originalGate = debugOrbLensGateDuration;
     addTearDown(() => debugOrbLensGateDuration = originalGate);
     // Use a large gate while testing the blocked branch so engine speed cannot
-    // make the test cross the real-time boundary. Production stays at 1000ms.
+    // make the test cross the real-time boundary. Production uses 250ms.
     debugOrbLensGateDuration = const Duration(days: 1);
     await host.mount(tester);
     await pumpUntil(
@@ -721,6 +734,9 @@ void main() {
     final TestGesture second =
         await tester.startGesture(tester.getCenter(liquidOrb));
     await second.moveBy(const Offset(-80, -30));
+    // Keep this single-flight drag check isolated from automatic success
+    // refreshes, which have their own production-cadence pixel tests.
+    debugOrbLensGateDuration = const Duration(days: 1);
     await pumpUntil(tester, () {
       final Finder shader = find.byKey(const Key('feedback-orb-lens-shader'));
       if (shader.evaluate().isEmpty) return false;
@@ -731,7 +747,8 @@ void main() {
     expect(debugOrbLensCaptureAttempts, initial + 1);
     await tester.pump(const Duration(seconds: 2));
     expect(debugOrbLensCaptureAttempts, initial + 1,
-        reason: 'holding a drag does not start a timer or per-frame capture');
+        reason:
+            'holding a drag does not add per-frame work within the test gate');
     await second.cancel();
     await tester.pump();
     expect(tester.takeException(), isNull);

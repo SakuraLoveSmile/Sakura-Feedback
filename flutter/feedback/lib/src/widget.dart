@@ -171,6 +171,10 @@ class FeedbackWidget extends StatefulWidget {
     this.logProvider,
     this.filePicker,
     this.imagePicker,
+    this.orbIdleStyle,
+    this.onOrbIdleStyleChanged,
+    this.wakeGestures,
+    this.onWakeGesturesChanged,
     @visibleForTesting this.httpClient,
     @visibleForTesting this.tokenStore,
     @visibleForTesting this.tokenStoreFactory,
@@ -194,6 +198,26 @@ class FeedbackWidget extends StatefulWidget {
 
   /// 手动图片选择器（可选，优先于 config.imagePicker；v12）。
   final FeedbackImagePicker? imagePicker;
+
+  /// 宿主可控的灵感球待机样式（v0.8.4 新增，可选）。
+  ///
+  /// 提供时组件不再写入自己的待机样式偏好，直接按该值渲染；用户在内置设置里
+  /// 改选时会回调 [onOrbIdleStyleChanged]，宿主保存后把新值回传即可。为 `null`
+  /// 时保持旧行为：组件自行持久化，按宿主 `appId` 记忆。建议同时提供回调；
+  /// 只提供值时面板内不显示灵感球设置项（由宿主 UI 负责改写）。
+  final FeedbackOrbIdleStyle? orbIdleStyle;
+
+  /// 宿主托管的待机样式变更回调（与 [orbIdleStyle] 配套）。
+  final ValueChanged<FeedbackOrbIdleStyle>? onOrbIdleStyleChanged;
+
+  /// 宿主可控的唤醒手势集合（v0.8.4 新增，可选）。
+  ///
+  /// 提供时组件不再写入自己的唤醒手势偏好，按该集合启用识别；用户在内置设置
+  /// 里勾选时会回调 [onWakeGesturesChanged]。为 `null` 时保持旧行为。
+  final Set<FeedbackWakeGesture>? wakeGestures;
+
+  /// 宿主托管的唤醒手势变更回调（与 [wakeGestures] 配套）。
+  final ValueChanged<Set<FeedbackWakeGesture>>? onWakeGesturesChanged;
 
   /// 测试注入的 HTTP 客户端。
   @visibleForTesting
@@ -244,9 +268,41 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     _snappingOrbMorph = false;
   }
 
+  /// 生效的灵感球待机样式：宿主提供时以宿主值为准（v0.8.4），否则用组件
+  /// 自己持久化的偏好。
+  FeedbackOrbIdleStyle get _orbIdleStyle =>
+      widget.orbIdleStyle ?? _idlePreferences.style;
+
+  /// 生效的唤醒手势：宿主提供时以宿主值为准（v0.8.4）。
+  Set<FeedbackWakeGesture> get _wakeGestures =>
+      widget.wakeGestures ?? _wakePreferences.enabled;
+
+  /// 「仅本次生效」只描述组件自身持久化失败；宿主托管时由宿主负责保存。
+  bool get _orbIdleSessionOnly =>
+      widget.orbIdleStyle == null && _idlePreferences.sessionOnly;
+
+  bool get _wakeGesturesSessionOnly =>
+      widget.wakeGestures == null && _wakePreferences.sessionOnly;
+
+  /// 入口是否可见：只看宿主配置。
+  ///
+  /// 待机样式「隐藏」（v0.8.2 新增、v0.8.5 澄清语义）不是入口开关：入口可见性
+  /// （唤醒手势可用性、透镜快照、面板关闭后的焦点回归等）必须与完整球状态一致，
+  /// 否则选择「隐藏」会把唤醒能力一并禁用。待机隐藏只影响 build 时是否渲染
+  /// launcher slot，见 [_orbIdleHidden]。
+  bool get _launcherVisible => widget.config.showLauncher;
+
+  /// 待机（收起）状态下不渲染入口：仅灵感球模式 + 待机样式「隐藏」+ 已收起 /
+  /// 正在收起。完整球（初始、刚唤醒、面板关闭后）仍按 [_launcherVisible] 正常
+  /// 渲染；`launcherMode == tab` 的悬浮按钮与灵感球无关，不受影响。
+  bool get _orbIdleHidden =>
+      widget.config.launcherMode == FeedbackLauncherMode.orb &&
+      _orbIdleStyle == FeedbackOrbIdleStyle.hidden &&
+      _orbMorphVisible;
+
   bool get _orbAvailable =>
       _appResumed &&
-      widget.config.showLauncher &&
+      _launcherVisible &&
       widget.config.launcherMode == FeedbackLauncherMode.orb &&
       !_controller.isOpen &&
       _selectionCapture == null &&
@@ -311,20 +367,37 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   void _wakeOrb() {
     if (!_orbAvailable) return;
     _cancelOrbIdle();
+    // 从待机隐藏唤醒时屏幕上看不到收起把手，展开动画没有可衔接的起点：
+    // 直接把形变归零，完整球立即出现（与 reduced motion 的即时唤醒一致）。
+    final bool fromIdleHidden = _orbIdleHidden;
     setState(() {
       _orbCollapsed = false;
       _orbWasAvailable = true;
     });
-    if (_orbGlowReduced) {
+    if (_orbGlowReduced || fromIdleHidden) {
       _snapOrbMorph(0);
     } else {
       _orbMorph.reverse();
     }
   }
 
-  void _idlePreferencesChanged() {
+  void _idlePreferencesChanged() => _applyOrbIdleStyleChange();
+
+  /// 生效的待机样式变化（组件偏好或宿主托管值）：无论切到「隐藏」还是改回
+  /// 其他样式，都从完整球重新开始 5 秒计时（切到「隐藏」也不例外：先恢复
+  /// 完整球，闲置后才进入待机隐藏）。唤醒能力由 [_wakeAvailable] 与手势识别
+  /// 器的 `enabled` 决定，不随该偏好取消；这里只清理拖动 / 回弹 / 焦点残留，
+  /// 避免样式切换时留下悬空状态。
+  void _applyOrbIdleStyleChange() {
     if (!mounted || _disposed) return;
-    setState(_resetOrbIdle);
+    // 只中止当前一轮识别（未完成的手势需要重新开始），不禁用识别器：否则
+    // 待机隐藏后已开启的唤醒手势会失效。
+    _wakeRecognizer?.cancel();
+    setState(() {
+      _orbFocusVisible = false;
+      // 内含 _resetOrbIdle：从完整球重新开始 5 秒计时。
+      _resetOrbReleaseState();
+    });
   }
 
   FeedbackWakeGestureRecognizer? _wakeRecognizer;
@@ -332,11 +405,14 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   bool _appResumed = true;
   int? _capturePendingSeq;
 
+  /// 唤醒手势是否可用。待机样式「隐藏」只让入口在收起时不渲染，不影响这里：
+  /// 否则隐藏待机后手势失效，用户再也无法呼出完整球（未开启手势时仍可由宿主
+  /// `controller.open()` 打开面板改回）。
   bool get _wakeAvailable =>
       !_disposed &&
       mounted &&
       _appResumed &&
-      widget.config.showLauncher &&
+      _launcherVisible &&
       widget.config.launcherMode == FeedbackLauncherMode.orb &&
       widget.config.captureMode == FeedbackCaptureMode.viewport &&
       !_controller.isOpen &&
@@ -362,8 +438,14 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
 
   void _wakePreferencesChanged() {
     if (!mounted || _disposed) return;
-    _wakeRecognizer?.enabled = _wakePreferences.enabled;
+    _syncWakeRecognizer();
     setState(() {});
+  }
+
+  /// 把生效的唤醒手势同步给注册中的识别器（组件偏好与宿主托管共用）。
+  void _syncWakeRecognizer() {
+    if (!mounted || _disposed) return;
+    _wakeRecognizer?.enabled = _wakeGestures;
   }
 
   void _onWake(Offset releaseGlobal) {
@@ -423,6 +505,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   bool _lensPrefetchDone = false;
   bool _lensFirstCaptureScheduled = false;
   Timer? _lensThemeRefresh;
+  Timer? _lensRefreshTimer;
   Brightness? _lensAncestorBrightness;
   Brightness _lensPlatformBrightness =
       WidgetsBinding.instance.platformDispatcher.platformBrightness;
@@ -534,7 +617,9 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     }
     _wakeRecognizer?.cancel();
     _invalidateCaptureSession();
-    _releaseLensSnapshot();
+    // A paused app may not draw another frame before resuming. Re-open the
+    // visibility prefetch here rather than relying on a hidden build to do it.
+    _releaseLensSnapshot(allowPrefetch: true);
     _resetOrbReleaseState();
     if (mounted) setState(() {});
   }
@@ -699,16 +784,21 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   // Neutral glass has no idle ticker or legacy brand/sweep/breathing layer.
   void _syncOrbFlow() {}
 
-  /// 每次球从 hidden 恢复可见时捕获一次，hidden 时释放快照。
+  /// 可见时持续串行更新已遮挡的背景；hidden 时释放快照并停止更新。
   ///
-  /// 同一可见期不周期捕获；拖动刷新受一秒间隔与单在途约束。
+  /// 待机隐藏（收起且样式为「隐藏」）视同不可见：入口不在屏幕上，透镜采样
+  /// 没有意义，快照随之释放；唤醒后按既有规则重新捕获。
+  /// 每次成功完成后间隔 250ms 再捕获；失败停止，直到下次显式刷新。
   bool get _lensVisible =>
       _appResumed &&
       !_controller.isOpen &&
+      _capturePendingSeq == null &&
       _selectionCapture == null &&
       !_temporarilyHideForCapture &&
       _handoff == null &&
-      widget.config.showLauncher &&
+      _launcherVisible &&
+      !_orbIdleHidden &&
+      !MediaQuery.highContrastOf(context) &&
       widget.config.launcherMode == FeedbackLauncherMode.orb;
 
   void _invalidateLensTheme() {
@@ -729,6 +819,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   void _syncOrbLensCapture(
       {required bool open, required FeedbackConfig config}) {
     if (!_lensVisible) {
+      _cancelLensRefresh();
       _lensPrefetchDone = false;
       _lensPendingCaptureGeneration = null;
       if (_lensSnapshot.value != null || _lensCaptureInFlight) {
@@ -758,6 +849,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   }
 
   void _releaseLensSnapshot({bool allowPrefetch = false}) {
+    _cancelLensRefresh();
     ++_lensGeneration;
     _lensPendingCaptureGeneration = null;
     _lensFirstCaptureScheduled = false;
@@ -792,7 +884,27 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     WidgetsBinding.instance.scheduleFrame();
   }
 
-  Future<void> _captureLensSnapshot() async {
+  void _cancelLensRefresh() {
+    _lensRefreshTimer?.cancel();
+    _lensRefreshTimer = null;
+  }
+
+  void _scheduleLensRefresh(
+      {bool allowMissing = false, bool keepExisting = false}) {
+    if (!_lensVisible || (!allowMissing && _lensSnapshot.value == null)) return;
+    if (keepExisting && _lensRefreshTimer != null) return;
+    _cancelLensRefresh();
+    _lensRefreshTimer = Timer(debugOrbLensGateDuration, () {
+      _lensRefreshTimer = null;
+      if (!mounted || _disposed) return;
+      // Lifecycle/identity changes cancel this timer. Scroll keeps its deadline
+      // but uses the latest generation, so repeated notifications neither fire
+      // a full capture every frame nor postpone the final sample indefinitely.
+      unawaited(_captureLensSnapshot(fromRefreshTimer: true));
+    });
+  }
+
+  Future<void> _captureLensSnapshot({bool fromRefreshTimer = false}) async {
     if (debugDisableOrbLensCapture ||
         _lensThemeRefresh != null ||
         _disposed ||
@@ -800,9 +912,10 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
         !_lensVisible) {
       return;
     }
-    // An invalid/missing texture may be refreshed immediately; a usable one
-    // refreshes only on a drag trigger at least 1000ms after the last capture.
-    if (_lensSnapshot.value != null &&
+    // Explicit drag requests share the same bounded cadence. A missing texture
+    // may refresh immediately; the completion timer has already waited its gap.
+    if (!fromRefreshTimer &&
+        _lensSnapshot.value != null &&
         _lensGate.isRunning &&
         _lensGate.elapsed < debugOrbLensGateDuration) {
       return;
@@ -816,6 +929,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
       }
       return;
     }
+    _cancelLensRefresh();
     final int generation = ++_lensGeneration;
     final RenderRepaintBoundary? boundary = _repaintBoundaryKey.currentContext
         ?.findRenderObject() as RenderRepaintBoundary?;
@@ -831,10 +945,8 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
         boundary.size == size &&
         _dpr == dpr;
     _lensCaptureGeneration = generation;
-    _lensGate
-      ..reset()
-      ..start();
     ui.FragmentShader? shader;
+    bool captured = false;
     try {
       shader = await _lensShaderOrNull();
       if (!current()) return;
@@ -844,6 +956,11 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
       }
       debugOrbLensCaptureAttempts++;
       if (debugFailOrbLensCapture) throw StateError('debugFailOrbLensCapture');
+      final Future<void> Function()? barrier = debugOrbLensCaptureBarrier;
+      if (barrier != null) {
+        await barrier();
+        if (!current()) return;
+      }
       final _FrozenCapture? frozen = await _captureFrozen(isCurrent: current);
       if (frozen == null) {
         if (current()) _releaseLensSnapshot();
@@ -858,6 +975,10 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
       _lensSnapshot.value = _OrbLensSnapshot(
           image: frozen.image, pixelRatio: frozen.scale, shader: shader);
       shader = null; // the snapshot now owns its sampler and image handle
+      _lensGate
+        ..reset()
+        ..start();
+      captured = true;
       if (previous != null) _disposeLensAfterFrame(previous);
     } catch (error) {
       if (current()) {
@@ -875,6 +996,8 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
           !_disposed &&
           _lensVisible) {
         unawaited(_captureLensSnapshot());
+      } else if (captured && current()) {
+        _scheduleLensRefresh();
       }
     }
   }
@@ -925,6 +1048,12 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     if (oldWidget.config.captureMode != widget.config.captureMode) {
       _invalidateCaptureSession();
     }
+    if (oldWidget.orbIdleStyle != widget.orbIdleStyle) {
+      _applyOrbIdleStyleChange();
+    }
+    if (!setEquals(oldWidget.wakeGestures, widget.wakeGestures)) {
+      _syncWakeRecognizer();
+    }
     if (oldWidget.config.appId != widget.config.appId ||
         oldWidget.config.apiBase != widget.config.apiBase) {
       // 宿主身份变化时，面板的偏好读取可能仍在等待；先使截图会话失效，
@@ -954,11 +1083,12 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
       // 换入的控制器可能已打开：入口随即 hidden，抢占进行中的回弹。
       if (_controller.isOpen) _resetOrbReleaseState();
     }
-    if ((oldWidget.config.showLauncher && !widget.config.showLauncher) ||
+    if ((oldWidget.config.showLauncher && !_launcherVisible) ||
         (oldWidget.config.launcherMode == FeedbackLauncherMode.orb &&
             widget.config.launcherMode != FeedbackLauncherMode.orb)) {
-      // 入口变为 hidden（关闭入口或离开 orb 模式）：抢占进行中的回弹，
-      // 恢复可见后从静态起点开始。本次 didUpdateWidget 后必然重建。
+      // 入口变为 hidden（关闭入口或离开 orb 模式）：抢占进行中的回弹，恢复
+      // 可见后从静态起点开始。本次 didUpdateWidget 后必然重建（待机样式变化
+      // 另外由 _applyOrbIdleStyleChange 处理）。
       _resetOrbReleaseState();
     }
   }
@@ -1018,7 +1148,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
         final int seq = _captureSeq;
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!_captureSessionValid(seq) || _controller.isOpen) return;
-          if (!widget.config.showLauncher ||
+          if (!_launcherVisible ||
               widget.config.launcherMode != FeedbackLauncherMode.orb) {
             return;
           }
@@ -1040,6 +1170,9 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   /// （宿主布局回到常规状态后再等待 paint / 捕获）。
   void _startCaptureSession() {
     _invalidateCaptureSession();
+    // Formal capture owns rasterization/encoding until completion or cancel.
+    // Stop decoration synchronously, before the next refresh timer can run.
+    _releaseLensSnapshot(allowPrefetch: true);
     final RenderRepaintBoundary? boundary = _repaintBoundaryKey.currentContext
         ?.findRenderObject() as RenderRepaintBoundary?;
     _capturePendingSeq = _captureSeq;
@@ -1091,6 +1224,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     _wakeRecognizer?.cancel();
     _capturePendingSeq = null;
     ++_captureSeq;
+    _cancelLensRefresh();
     ++_lensGeneration;
     _lensPendingCaptureGeneration = null;
     _resetOrbReleaseState();
@@ -1123,6 +1257,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   void dispose() {
     _disposed = true;
     _lensThemeRefresh?.cancel();
+    _cancelLensRefresh();
     _cancelOrbIdle();
     _idlePreferences.dispose();
     _wakeRecognizer?.cancel();
@@ -1512,6 +1647,8 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   /// （最多 1 + [kFeedbackCaptureRetryLimit] 次）。返回字节与最终输出像素；
   /// 重试耗尽仍超限返回 null（调用方保留旧草稿旧图，可重试）。
   Future<(Uint8List, int, int)?> _encodeCapturePng(ui.Image image) async {
+    final Future<void> Function()? barrier = debugCaptureEncodeBarrier;
+    if (barrier != null) await barrier();
     double factor = 1.0;
     for (int attempt = 0; attempt <= kFeedbackCaptureRetryLimit; attempt++) {
       ui.Image? current;
@@ -1921,12 +2058,16 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     _lensPendingCaptureGeneration = null;
     _lensFirstCaptureScheduled = false;
     _lensPrefetchDone = true;
+    final int generation = _lensGeneration;
     final _OrbLensSnapshot? previous = _lensSnapshot.value;
     // Scroll only invalidates decoration; a frozen selection keeps its
-    // original pixels, geometry and capture metadata.
+    // original pixels, geometry and capture metadata. Clear after the host's
+    // new scroll position paints, then coalesce resampling at the bounded cadence.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && !_disposed && identical(previous, _lensSnapshot.value)) {
-        _clearLensImage();
+      if (!mounted || _disposed) return;
+      if (identical(previous, _lensSnapshot.value)) _clearLensImage();
+      if (generation == _lensGeneration) {
+        _scheduleLensRefresh(allowMissing: true, keepExisting: true);
       }
     });
     WidgetsBinding.instance.scheduleFrame();
@@ -1979,10 +2120,10 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   Widget build(BuildContext context) {
     final FeedbackConfig config = widget.config;
     final bool open = _controller.isOpen;
-    // hidden（面板打开或入口关闭）时清除焦点环锁存：入口不渲染时保留 true
-    // 会让下次显示在没有焦点的情况下画出环；指针关闭路径也依赖这里抑制环
-    //（T7i），不是纯防御。build 内不能 setState。
-    if (open || !config.showLauncher) _orbFocusVisible = false;
+    // hidden（面板打开、入口关闭或待机隐藏）时清除焦点环锁存：
+    // launcher slot 不渲染时保留 true 会让下次显示在没有焦点的情况下画出环；
+    // 指针关闭路径也依赖这里抑制环（T7i），不是纯防御。build 内不能 setState。
+    if (open || !_launcherVisible || _orbIdleHidden) _orbFocusVisible = false;
     _syncOrbFlow();
     _syncOrbIdle();
     _syncOrbLensCapture(open: open, config: config);
@@ -2042,7 +2183,21 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
         final _OrbMorphGeometry? orbMorph = _orbMorphVisible
             ? _OrbMorphGeometry(
                 left: isLeft,
-                handle: _idlePreferences.style == FeedbackOrbIdleStyle.handle,
+                handle: _orbIdleStyle == FeedbackOrbIdleStyle.handle,
+                dark: !(MediaQuery.maybeOf(context)?.highContrast ??
+                        View.of(context)
+                            .platformDispatcher
+                            .accessibilityFeatures
+                            .highContrast) &&
+                    (Theme.maybeBrightnessOf(context) ??
+                            switch (config.theme) {
+                              FeedbackThemeMode.light => Brightness.light,
+                              FeedbackThemeMode.dark => Brightness.dark,
+                              FeedbackThemeMode.system => View.of(context)
+                                  .platformDispatcher
+                                  .platformBrightness,
+                            }) ==
+                        Brightness.dark,
                 progress: _orbMorphProgress,
                 dockCenter: _orbIdleDockCenter,
                 safeInsets: dockInsets,
@@ -2083,7 +2238,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
                                 ..isAvailable = (() => _wakeAvailable)
                                 ..onReleaseHint = _setWakeReleaseHint
                                 ..onWake = _onWake
-                                ..enabled = _wakePreferences.enabled;
+                                ..enabled = _wakeGestures;
                             },
                           ),
                         },
@@ -2148,8 +2303,12 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
                     }),
                   ),
                 ),
+                // 待机隐藏（灵感球已收起且样式为「隐藏」）不渲染 launcher slot：
+                // 完整球初始、唤醒后与面板关闭后仍按 `_launcherVisible` 渲染；
+                // tab 模式的 FAB 与灵感球待机样式无关。
                 if (!open &&
-                    config.showLauncher &&
+                    _launcherVisible &&
+                    !_orbIdleHidden &&
                     !_temporarilyHideForCapture &&
                     _selectionCapture == null)
                   Positioned(
@@ -2277,11 +2436,8 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   }
 
   Widget _buildFab(BuildContext context, FeedbackConfig config) {
-    final int unread = _controller.unreadCount;
-    Widget icon = const Icon(Icons.feedback_outlined);
-    if (unread > 0) {
-      icon = Badge.count(count: unread, child: icon);
-    }
+    // F1：入口不再绘制未读数字角标；未读数仍通过 controller 与
+    // onUnreadCountChange 提供给宿主自绘。
     return Semantics(
       button: true,
       label: '反馈',
@@ -2290,7 +2446,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
         heroTag: 'feedback-widget-fab',
         tooltip: '反馈',
         onPressed: _handleLauncherTap,
-        child: icon,
+        child: const Icon(Icons.feedback_outlined),
       ),
     );
   }
@@ -2298,9 +2454,10 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   Widget _buildCollapsedOrb(
       BuildContext context, FeedbackConfig config, _OrbMorphGeometry geometry) {
     final bool left = config.side == FeedbackSide.left;
-    final bool handle = _idlePreferences.style == FeedbackOrbIdleStyle.handle;
+    final bool handle = _orbIdleStyle == FeedbackOrbIdleStyle.handle;
     final double t = geometry.progress;
     final double halfWidth = geometry.halfWidth;
+    final double halfHeight = geometry.halfHeight;
     Widget art = IgnorePointer(
         child: ClipRect(
             clipper: const _OrbDockClipper(),
@@ -2308,21 +2465,21 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
               Positioned(
                   left: left ? geometry.paintInset : null,
                   right: left ? null : geometry.paintInset,
-                  top: 0,
+                  top: 28 - halfHeight,
                   width: halfWidth * 2,
-                  height: 56,
+                  height: halfHeight * 2,
                   child: SizedBox(
                       key: Key(
                           'feedback-orb-idle-${handle ? 'handle' : 'edge'}'),
                       child: Stack(clipBehavior: Clip.none, children: <Widget>[
                         Positioned(
                             left: halfWidth - 44.8,
-                            top: -16.8,
+                            top: halfHeight - 44.8,
                             width: 89.6,
                             height: 89.6,
                             child: _buildOrbLensLayer(28,
                                 fixedCenter: geometry.center,
-                                halfSize: Size(halfWidth, 28),
+                                halfSize: Size(halfWidth, halfHeight),
                                 handleMix: handle ? t : 0,
                                 mist: .74,
                                 idleMix: 1)),
@@ -2389,13 +2546,14 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   }
 
   Widget _buildOrb(BuildContext context, FeedbackConfig config) {
-    final int unread = _controller.unreadCount;
+    // F1：灵感球不再绘制未读数字角标；未读数保留在 Semantics value 与
+    // controller 中，供宿主/读屏使用。
     final bool reduceMotion =
         _orbGlowReduced || MediaQuery.disableAnimationsOf(context);
     final double diameter =
         _isDragging ? kFeedbackOrbDraggingDiameter : kFeedbackOrbIdleDiameter;
     final double target = reduceMotion ? 1 : _orbTargetStateScale;
-    Widget orbBox = AnimatedContainer(
+    final Widget orbBox = AnimatedContainer(
       key: const Key('feedback-orb-body'),
       duration: reduceMotion ? Duration.zero : kFeedbackOrbSizeDuration,
       curve: kFeedbackOrbStateCurve,
@@ -2449,10 +2607,6 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
                         ]));
               })),
     );
-
-    if (unread > 0) {
-      orbBox = Badge.count(count: unread, child: orbBox);
-    }
 
     // 焦点环：等价 CSS outline 2px + offset 2px，描边覆盖 R+2…R+4。
     // Positioned + IgnorePointer 不改变布局尺寸与命中区；无过渡。
@@ -2725,12 +2879,18 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
           tokenStore: widget.tokenStore,
           tokenStoreFactory: widget.tokenStoreFactory,
           serverPrefStore: widget.serverPrefStore,
-          orbIdleStyle: _idlePreferences.style,
-          orbIdleSessionOnly: _idlePreferences.sessionOnly,
-          onOrbIdleStyleChanged: _idlePreferences.select,
-          wakeGestures: _wakePreferences.enabled,
-          wakeGesturesSessionOnly: _wakePreferences.sessionOnly,
-          onWakeGesturesChanged: _wakePreferences.select,
+          // 宿主托管（v0.8.4）：值以宿主为准，变更回调透传给宿主保存；
+          // 宿主只给值不给回调时隐藏面板内对应的设置区，避免无效操作。
+          orbIdleStyle: _orbIdleStyle,
+          orbIdleSessionOnly: _orbIdleSessionOnly,
+          onOrbIdleStyleChanged: widget.orbIdleStyle != null
+              ? widget.onOrbIdleStyleChanged
+              : _idlePreferences.select,
+          wakeGestures: _wakeGestures,
+          wakeGesturesSessionOnly: _wakeGesturesSessionOnly,
+          onWakeGesturesChanged: widget.wakeGestures != null
+              ? widget.onWakeGesturesChanged
+              : _wakePreferences.select,
           // T6/T7：向控制器上报实际使用地址；地址变化时使外层截图会话
           // 失效（旧会话的迟到交付不得写入新身份的草稿）。
           onEffectiveApiBaseChange: _onEffectiveApiBaseChange,
@@ -2750,6 +2910,7 @@ class _OrbMorphGeometry {
   factory _OrbMorphGeometry({
     required bool left,
     required bool handle,
+    required bool dark,
     required double progress,
     required Offset dockCenter,
     required EdgeInsets safeInsets,
@@ -2760,8 +2921,11 @@ class _OrbMorphGeometry {
     final double edge = left ? safeLeft : safeRight;
     final double dockGap =
         left ? dockCenter.dx - 28 - edge : edge - dockCenter.dx - 28;
-    final double halfWidth = 28 + ((handle ? 6 : 28) - 28) * progress;
-    final double inset = dockGap + ((handle ? 3 : -28) - dockGap) * progress;
+    final double halfWidth =
+        28 + ((handle ? (dark ? 5 : 6) : 28) - 28) * progress;
+    final double halfHeight = 28 + (handle && dark ? -4 : 0) * progress;
+    final double inset =
+        dockGap + ((handle ? (dark ? 10 : 3) : -28) - dockGap) * progress;
     final Offset center = Offset(
         left ? edge + inset + halfWidth : edge - inset - halfWidth,
         dockCenter.dy);
@@ -2782,6 +2946,7 @@ class _OrbMorphGeometry {
         progress,
         center,
         halfWidth,
+        halfHeight,
         inset,
         hit,
         left ? hit.left - edge : edge - hit.right,
@@ -2789,11 +2954,19 @@ class _OrbMorphGeometry {
             viewportWidth - safeInsets.horizontal, math.max(56, dockGap + 56)));
   }
 
-  const _OrbMorphGeometry._(this.progress, this.center, this.halfWidth,
-      this.paintInset, this.hit, this.hitInset, this.clipWidth);
+  const _OrbMorphGeometry._(
+      this.progress,
+      this.center,
+      this.halfWidth,
+      this.halfHeight,
+      this.paintInset,
+      this.hit,
+      this.hitInset,
+      this.clipWidth);
   final double progress;
   final Offset center;
   final double halfWidth;
+  final double halfHeight;
   final double paintInset;
   final Rect hit;
   final double hitInset;

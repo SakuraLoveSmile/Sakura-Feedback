@@ -282,12 +282,11 @@ export function Modal({
     <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
       <div
         ref={ref}
-        className="modal"
+        className={`modal${wide ? " wide" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby={labelId}
         tabIndex={-1}
-        style={wide ? { width: "min(720px, 100%)" } : undefined}
       >
         <h2 id={labelId}>{title}</h2>
         <div className="modal-body">{children}</div>
@@ -342,7 +341,7 @@ export function ConfirmDialog({
     >
       {body}
       {need !== null && (
-        <div style={{ marginTop: "var(--sp-3)" }}>
+        <div className="dialog-field">
           <Field id="confirm-text" label={<>输入「{need}」以确认</>}>
             {(control) => (
               <input
@@ -432,7 +431,7 @@ export function PromptDialog({
       }
     >
       {body}
-      <div style={{ marginTop: "var(--sp-3)" }}>
+      <div className="dialog-field">
         <Field id="prompt-input" label={label} error={error}>
           {(control) => (
             <input
@@ -579,17 +578,17 @@ export function EmptyState({ title, hint, action }: { title: string; hint?: stri
     <div className="empty">
       <div className="empty-title">{title}</div>
       {hint && <div className="empty-hint">{hint}</div>}
-      {action && <div style={{ marginTop: "var(--sp-3)" }}>{action}</div>}
+      {action && <div className="empty-action">{action}</div>}
     </div>
   );
 }
 
 export function SkeletonRows({ rows = 5 }: { rows?: number }) {
   return (
-    <div style={{ display: "grid", gap: "var(--sp-3)", padding: "var(--sp-4)" }}>
+    <div className="skeleton-rows">
       {Array.from({ length: rows }, (_, i) => (
         // biome-ignore lint/suspicious/noArrayIndexKey: 骨架行为静态占位，无顺序变化
-        <div key={i} className="skeleton" style={{ height: 44 }} />
+        <div key={i} className="skeleton skeleton-row" />
       ))}
     </div>
   );
@@ -600,7 +599,7 @@ export function InlineError({ message, onRetry }: { message: string; onRetry?: (
   return (
     <div className="inline-error" role="alert">
       <Icon name="alert" />
-      <span style={{ flex: 1, minWidth: 0 }}>{message}</span>
+      <span className="inline-error-message">{message}</span>
       {onRetry && (
         <button type="button" className="btn sm" onClick={onRetry}>
           重试

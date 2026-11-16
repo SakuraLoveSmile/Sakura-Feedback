@@ -241,7 +241,16 @@ def run() -> int:
         from playwright.sync_api import sync_playwright
 
         with sync_playwright() as p:
-            browser = p.chromium.launch()
+            browser = None
+            last_exc = None
+            for kwargs in ({}, {"channel": "chrome"}, {"channel": "chromium"}):
+                try:
+                    browser = p.chromium.launch(**kwargs)
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    last_exc = exc
+            if browser is None:
+                raise last_exc
 
             # —— 登录页（未登录上下文）——
             for theme in ("light", "dark"):

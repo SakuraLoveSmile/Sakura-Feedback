@@ -1,0 +1,235 @@
+.changelog-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--sp-4);
+}
+
+.changelog-toolbar .field {
+  flex: 1 1 320px;
+  max-width: 560px;
+  margin: 0;
+}
+
+.changelog-actions,
+.changelog-section-head,
+.changelog-search {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.changelog-section-head {
+  justify-content: space-between;
+  margin-bottom: var(--sp-4);
+}
+
+.changelog-section-head h2,
+.changelog-section-head h3 {
+  margin: 0;
+}
+
+.changelog-layout {
+  display: grid;
+  grid-template-columns: minmax(240px, 280px) minmax(0, 1fr);
+  align-items: start;
+  gap: var(--sp-6);
+}
+
+.changelog-editor,
+.changelog-versions,
+.changelog-page {
+  min-width: 0;
+}
+
+.changelog-version-list {
+  display: grid;
+  gap: var(--sp-2);
+}
+
+.changelog-version {
+  width: 100%;
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-ctl);
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  overflow-wrap: anywhere;
+}
+
+.changelog-version > span {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.changelog-version:hover {
+  background: var(--control-hover);
+}
+
+.changelog-version.selected {
+  border-color: var(--primary);
+  background: var(--selected);
+}
+
+.changelog-version:disabled {
+  cursor: default;
+}
+
+.changelog-template-hint {
+  margin-top: var(--sp-6);
+  border-top: 1px solid var(--border);
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.changelog-fields {
+  border: 0;
+  padding: 0;
+  margin: var(--sp-4) 0 0;
+  min-width: 0;
+}
+
+.changelog-entry {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-ctl);
+  padding: var(--sp-4);
+  margin-bottom: var(--sp-4);
+}
+
+.changelog-entry-heading {
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr);
+  gap: var(--sp-3);
+}
+
+.changelog-credit-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border);
+}
+
+.changelog-credit-row .field {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+
+.changelog-credit-row .field-hint {
+  overflow-wrap: anywhere;
+}
+
+.changelog-anonymous {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  white-space: nowrap;
+}
+
+.changelog-anonymous input {
+  width: 16px;
+  height: 16px;
+}
+
+.changelog-fields > .btn {
+  margin-bottom: var(--sp-6);
+}
+
+.changelog-save {
+  border-top: 1px solid var(--border);
+  padding-top: var(--sp-4);
+}
+
+.changelog-preview {
+  overflow-wrap: anywhere;
+}
+
+.changelog-preview p {
+  white-space: pre-wrap;
+}
+
+.changelog-preview ul {
+  padding-left: var(--sp-6);
+}
+
+.changelog-preview li {
+  margin-bottom: var(--sp-4);
+}
+
+.changelog-credits {
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.changelog-search {
+  flex-wrap: nowrap;
+  margin-bottom: var(--sp-4);
+}
+
+.changelog-search input {
+  min-width: 0;
+  flex: 1;
+}
+
+.changelog-feedback-list {
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.changelog-feedback-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  padding: var(--sp-3) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.changelog-feedback-row > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.changelog-feedback-row .btn {
+  flex-shrink: 0;
+}
+
+@media (max-width: 1023px) {
+  .changelog-layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--sp-4);
+  }
+
+  .changelog-version-list {
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  }
+}
+
+@media (max-width: 767px) {
+  .changelog-entry-heading {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
+
+  .changelog-entry,
+  .changelog-page .card {
+    padding: var(--sp-4);
+  }
+
+  .changelog-toolbar .changelog-actions {
+    width: 100%;
+  }
+
+  .changelog-anonymous {
+    min-height: 44px;
+  }
+}

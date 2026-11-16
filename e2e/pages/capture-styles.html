@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FB-CAP-001 · 真实截图回归</title>
+  <link rel="stylesheet" href="/styles/host.css">
+  <link rel="stylesheet" href="/styles/disabled.css" disabled>
+  <link rel="alternate stylesheet" title="unused" href="/styles/disabled.css?alternate=1">
+  <link id="cross-sheet" rel="stylesheet" href="__CROSS_STYLESHEET__">
+</head>
+<body>
+  <main>
+    <h1>截图必须与当前页面一致</h1>
+    <div class="desktop-only">桌面导航：手机导航应隐藏</div>
+    <div class="mobile-only">手机导航：桌面导航应隐藏</div>
+    <div class="secret-hidden"><div style="width:100px;height:70px;background:rgb(250,0,250)">CSS 隐藏的内容不可进入截图</div></div>
+    <div class="probes">
+      <div><div id="solid-probe" class="probe"></div><p class="probe-label">外链样式</p></div>
+      <div><div id="url-probe" class="probe"></div><p class="probe-label">相对背景图</p></div>
+      <div><div id="import-probe" class="probe"></div><p class="probe-label">导入样式背景图</p></div>
+      <div><div id="layer-probe" class="probe"></div><p class="probe-label">导入 layer / supports</p></div>
+      <div><div id="media-probe" class="probe"></div><p class="probe-label">响应式样式</p></div>
+      <div><div id="supports-probe" class="probe"></div><p class="probe-label">条件样式</p></div>
+      <div><div id="disabled-probe" class="probe"></div><p class="probe-label">禁用样式保持禁用</p></div>
+      <div><div id="cross-probe" class="probe"></div><p class="probe-label">不可读跨源样式</p></div>
+      <div><div id="masked-probe" class="probe" data-feedback-capture-mask>PRIVATE-MASK</div><p class="probe-label">敏感区必须遮挡</p></div>
+    </div>
+    <section data-html2canvas-ignore style="padding:16px;background:#fff;border:1px solid #ccc;border-radius:8px">
+      <button id="run" style="padding:10px 18px">运行截图回归</button>
+      <button id="preview" style="padding:10px 18px">查看最终截图</button>
+      <p>实际 UMD、实际 html2canvas，无 captureProvider 替身；仅使用本机固定夹具。</p>
+      <pre id="results" aria-live="polite" style="white-space:pre-wrap">未运行</pre>
+      <pre id="manifest" hidden></pre>
+    </section>
+  </main>
+  <script src="/sdk/feedback-web.umd.cjs"></script>
+  <feedback-widget app-id="capture-styles-regression" app-name="截图回归" capture-mode="off" show-launcher="false" theme="light"></feedback-widget>
+  <script>
+    const widget = document.querySelector('feedback-widget');
+    const results = document.querySelector('#results');
+    const records = [];
+    const importedCross = new URLSearchParams(location.search).has('imported-cross');
+    const alternateFailure = new URLSearchParams(location.search).has('alternate-fail');
+    const rgb = { solid: [18,140,90], url: [224,121,32], import: [55,85,200], layer: [90,65,170],
+      media: innerWidth <= 700 ? [220,150,20] : [12,120,180], supports: [161,57,205], disabled: [18,140,90], cross: [35,95,160], masked: [110,110,115] };
+    function check(name, passed, detail = '') {
+      records.push({ name, passed, detail });
+      results.textContent = records.map(r => `${r.passed ? 'PASS' : 'FAIL'} ${r.name}${r.detail ? ': ' + r.detail : ''}`).join('\n');
+    }
+    async function mode(value) {
+      const response = await fetch('/__control?mode=' + value);
+      if (!response.ok) throw new Error('fixture control failed');
+    }
+    const thumb = () => widget.shadowRoot.querySelector('.fb-screenshot-thumb');
+    async function pixels(label) {
+      const image = thumb();
+      if (!image?.getAttribute('src')) { check(label + ' 图片存在', false); return; }
+      await image.decode();
+      const canvas = document.createElement('canvas');
+      canvas.width = image.naturalWidth; canvas.height = image.naturalHeight;
+      const ctx = canvas.getContext('2d'); ctx.drawImage(image, 0, 0);
+      const scaleX = canvas.width / innerWidth, scaleY = canvas.height / innerHeight;
+      for (const [name, expected] of Object.entries(rgb)) {
+        const rect = document.querySelector('#' + name + '-probe').getBoundingClientRect();
+        const x = Math.floor((rect.x + rect.width / 2) * scaleX), y = Math.floor((rect.y + rect.height / 2) * scaleY);
+        const actual = [...ctx.getImageData(x, y, 1, 1).data];
+        check(label + ' ' + name, actual.slice(0,3).every((v,i) => Math.abs(v - expected[i]) <= 3) && actual[3] === 255, actual.join(','));
+      }
+      const data = ctx.getImageData(0,0,canvas.width,canvas.height).data;
+      let exposed = 0;
+      for (let i=0;i<data.length;i+=4) if (data[i] === 250 && data[i+1] === 0 && data[i+2] === 250) exposed++;
+      check(label + ' CSS隐藏内容未露出', exposed === 0, 'magenta pixels=' + exposed);
+    }
+    document.querySelector('#preview').onclick = () => {
+      widget.open();
+      widget.shadowRoot.querySelector('.fb-screenshot-thumb')?.click();
+    };
+    document.querySelector('#run').onclick = async event => {
+      const runButton = event.currentTarget;
+      runButton.disabled = true;
+      records.length = 0;
+      try {
+        await customElements.whenDefined('feedback-widget');
+        await mode('healthy');
+        try {
+          const sheet = document.querySelector('#cross-sheet').sheet;
+          const protectedSheet = importedCross ? sheet.cssRules[0].styleSheet : sheet;
+          protectedSheet.cssRules;
+          check('跨源样式确实不可读', false);
+        }
+        catch (error) { check('跨源样式确实不可读', error.name === 'SecurityError'); }
+        if (importedCross) {
+          // Standard CSSOM cannot distinguish an opaque imported sheet that
+          // loaded from one whose request failed. This boundary must fail
+          // explicitly, including when the parent link returned 200.
+          const link = document.querySelector('#cross-sheet');
+          link.disabled = true;
+          await widget.retakeScreenshot();
+          const oldImage = thumb()?.src;
+          check('先建立有效旧截图', !!oldImage);
+          const textarea = widget.shadowRoot.querySelector('.fb-textarea');
+          textarea.value = '跨源导入无法证明完整时保留此草稿';
+          textarea.dispatchEvent(new Event('input', {bubbles:true}));
+          link.disabled = false;
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          await widget.retakeScreenshot();
+          check('无法冻结的生效跨源导入明确失败', widget.shadowRoot.textContent.includes('截图未完成，可重试或继续文字反馈'));
+          check('不可冻结的导入保留旧图', thumb()?.src === oldImage);
+          await mode('cross-fail');
+          await widget.retakeScreenshot();
+          check('父表200子表503不接受错误截图', thumb()?.src === oldImage);
+          check('跨源导入失败保留文字', textarea.value === '跨源导入无法证明完整时保留此草稿');
+          check('跨源导入失败无残留iframe', document.querySelectorAll('iframe.html2canvas-container').length === 0);
+          return;
+        }
+        if (alternateFailure) {
+          await widget.retakeScreenshot();
+          const oldImage = thumb()?.src;
+          check('先建立有效旧截图', !!oldImage);
+          const textarea = widget.shadowRoot.querySelector('.fb-textarea');
+          textarea.value = '备用样式网络失败时保留此草稿';
+          textarea.dispatchEvent(new Event('input', {bubbles:true}));
+          check('备用样式当前未选中', getComputedStyle(document.querySelector('#disabled-probe')).backgroundColor === 'rgb(18, 140, 90)');
+          await mode('alternate-fail');
+          await widget.retakeScreenshot();
+          check('选择状态无法确定时保守保留旧图', thumb()?.src === oldImage);
+          check('备用样式网络失败明确提示', widget.shadowRoot.textContent.includes('截图未完成，可重试或继续文字反馈'));
+          check('备用样式网络失败保留文字', textarea.value === '备用样式网络失败时保留此草稿');
+          check('备用样式网络失败无残留iframe', document.querySelectorAll('iframe.html2canvas-container').length === 0);
+          return;
+        }
+        await widget.retakeScreenshot();
+        await pixels('正常');
+        const sourceStyle = document.querySelector('#solid-probe').getAttribute('style');
+        const textarea = widget.shadowRoot.querySelector('.fb-textarea');
+        textarea.value = '失败重拍必须保留这段文字和旧图片';
+        textarea.dispatchEvent(new Event('input', {bubbles:true}));
+        const before = thumb()?.src;
+        await mode('source-fail');
+        await widget.retakeScreenshot();
+        check('重拍得到新图片（画面另做像素断言）', !!thumb()?.src && thumb().src !== before);
+        await pixels('CSS二次请求失败');
+        check('不修改宿主DOM样式', document.querySelector('#solid-probe').getAttribute('style') === sourceStyle);
+        const preserved = thumb()?.src;
+        await mode('cross-fail');
+        await widget.retakeScreenshot();
+        check('不可恢复的跨源样式失败保留旧图片', thumb()?.src === preserved);
+        check('失败保留文字', textarea.value === '失败重拍必须保留这段文字和旧图片');
+        check('失败显示已有用户提示', widget.shadowRoot.textContent.includes('截图未完成，可重试或继续文字反馈'));
+        check('失败后无残留克隆iframe', document.querySelectorAll('iframe.html2canvas-container').length === 0);
+        await mode('healthy');
+        await widget.retakeScreenshot();
+        check('恢复后可以再次重拍', !!thumb()?.src && thumb().src !== preserved);
+        await pixels('资源恢复');
+        const beforeCancel = thumb()?.src;
+        await mode('cross-slow');
+        const pending = widget.retakeScreenshot();
+        setTimeout(() => widget.close(), 15);
+        await pending;
+        check('取消不替换已有截图', thumb()?.src === beforeCancel);
+        check('取消后不重新打开面板', !widget.shadowRoot.querySelector('.fb-panel').classList.contains('is-open'));
+        check('取消后无残留克隆iframe', document.querySelectorAll('iframe.html2canvas-container').length === 0);
+      } catch (error) {
+        check('完整流程执行', false, String(error));
+      } finally {
+        await mode('healthy');
+        widget.close();
+        const summary = { passed: records.filter(r=>r.passed).length, failed: records.filter(r=>!r.passed).length, records,
+          viewport: {width:innerWidth,height:innerHeight}, browser:navigator.userAgent };
+        document.querySelector('#manifest').textContent = JSON.stringify(summary);
+        document.body.dataset.testStatus = summary.failed ? 'failed' : 'passed';
+        results.textContent += `\n${summary.passed} passed / ${summary.failed} failed`;
+        runButton.disabled = false;
+      }
+    };
+  </script>
+</body>
+</html>

@@ -12,6 +12,7 @@ import {
   joinApi,
   listMyFeedbacks,
   login,
+  markAllRead,
   markFeedbackRead,
   parseCapabilities,
   sendFeedbackReply,
@@ -347,6 +348,7 @@ const POLL_BUDGET_MS = 120000; // ~2 分钟
  * 或忙碌结束后立即补发一次（见 consumeQuotaRefreshIntent）。
  */
 const QUOTA_RETRY_MS = 30_000;
+const ORB_LENS_REFRESH_MS = 250;
 
 /**
  * 额度定时查询的最大等待。服务端 `resetAt` 正常在 24 小时内（北京时间日切）；
@@ -675,13 +677,13 @@ export class FeedbackWidget extends HTMLElement {
   private logPreviewBody!: HTMLPreElement;
   private logPreviewCloseBtn!: HTMLButtonElement;
 
-  /** v11 对话与未读徽标 */
-  private launcherBadge!: HTMLSpanElement;
-  private orbBadge!: HTMLSpanElement;
+  /**
+   * v11 对话与未读提示。0.8.2 起入口不再渲染未读数字角标（launcher / orb / Tab 三处已移除），
+   * `unreadCount` 只用于灵感球 aria-label 的未读提示；列表行内的「未读」文本小标签保留。
+   */
   private navTabs!: HTMLDivElement;
   private tabComposeBtn!: HTMLButtonElement;
   private tabHistoryBtn!: HTMLButtonElement;
-  private tabHistoryBadge!: HTMLSpanElement;
   private activeTab: 'compose' | 'history' = 'compose';
   private unreadCount = 0;
   private summaryPollTimer: ReturnType<typeof setInterval> | null = null;
@@ -695,6 +697,13 @@ export class FeedbackWidget extends HTMLElement {
   /** v12 我的反馈列表：当前页码与状态筛选。 */
   private historyPage = 1;
   private historyIssueStatus: IssueStatus | '' = '';
+  /**
+   * v0.8.2「一键已读」列表态：服务端返回的未读总数（`unreadTotal`，无未读时按钮禁用）、
+   * 请求忙碌标记与过滤行下方的提示（成功 / 失败，由 `loadHistoryList` 渲染并消费）。
+   */
+  private historyUnreadTotal = 0;
+  private historyReadAllBusy = false;
+  private historyReadAllNotice: { kind: 'success' | 'error'; text: string } | null = null;
   /** 对话视图中已渲染到的最大消息 seq（增量追加用）。 */
   private dialogueRenderedSeq = 0;
   /** Bearer 附件转出的对象 URL（对话关闭/重建时统一回收）。 */
@@ -877,8 +886,8 @@ export class FeedbackWidget extends HTMLElement {
   private orbSurfaceActive = true;
   private lensContextLost = false;
   private lensController: AbortController | null = null;
-  private lensFresh = false;
-  private lensCapturedAt = -Infinity;
+  private lensCaptureReadyAt = -Infinity;
+  private lensRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private surfaceSignature = '';
   private surfaceCleanup: (() => void) | null = null;
   private flowFrame: number | null = null;
@@ -3037,6 +3046,8 @@ export class FeedbackWidget extends HTMLElement {
   }
 
   private canUseOrbLauncher(): boolean {
+    // 0.8.5：「隐藏」只隐藏待机（收起）态，入口本身仍可用——唤醒手势依赖这里返回 true。
+    // 待机显隐由 is-idle-hidden 单独处理，不再复用 is-unavailable 的「入口不可用」语义。
     if (!this.isConnected || !this.showLauncher || this.launcherMode !== 'orb' || !this.orbSurfaceActive || document.visibilityState === 'hidden' || this.closest('[hidden], [inert], [aria-disabled="true"]') || this.openState || this.regionSession || this.isCapturing || this.captureInFlight) return false;
     for (const node of this.orbHostElements()) {
       const style = window.getComputedStyle(node);
@@ -3066,9 +3077,10 @@ export class FeedbackWidget extends HTMLElement {
     const inset=parseFloat(this.side==='left'?safe.paddingLeft:safe.paddingRight)||0;
     const signed=(distance:number)=>this.side==='left'?distance:window.innerWidth-distance;
     const handle=collapsed && this.orbIdleStyle==='handle';
+    const clearDark=this.orbMaterialIsDark() && !(window.matchMedia?.('(forced-colors: active)').matches ?? false);
     return {
-      x:signed(collapsed?inset+(handle?9:0):Math.max(20,inset)+28),
-      halfX:handle?6:28,halfY:28,handleMix:handle?1:0,
+      x:signed(collapsed?inset+(handle?(clearDark?15:9):0):Math.max(20,inset)+28),
+      halfX:handle?(clearDark?5:6):28,halfY:handle && clearDark?24:28,handleMix:handle?1:0,
       hitX:signed(collapsed?inset+22:Math.max(20,inset)+28),hitWidth:collapsed?44:56,
       clipLeft:collapsed && !handle && this.side==='left'?.5:0,
       clipRight:collapsed && !handle && this.side!=='left'?.5:0,
@@ -3092,12 +3104,28 @@ export class FeedbackWidget extends HTMLElement {
     this.orb.setAttribute('aria-label',base+(this.unreadCount>0?`，${this.unreadCount}条未读`:''));
   }
 
+  /**
+   * 0.8.5：第三种待机样式「隐藏」只隐藏“待机（收起）状态”。
+   * 唤醒后完整球照常可见、可点击/拖动，再次闲置 5 秒才会收起并隐藏。
+   */
+  private orbIdleHidden(): boolean {
+    return this.orbCollapsed && this.orbIdleStyle === 'hidden';
+  }
+
+  /** `.fb-orb` 的 display:none 只能隐藏球本体；canvas/outline 是兄弟节点，由 drawLiquid() 一并收起。 */
+  private syncOrbIdleHidden(): void {
+    this.orb.classList.toggle('is-idle-hidden',this.orbIdleHidden());
+  }
+
   private setOrbCollapsed(collapsed: boolean, animate=true): void {
     const changed=this.orbCollapsed!==collapsed;
     const from=this.currentOrbIdleVisual();
     this.orbCollapsed=collapsed;
     this.orb.classList.toggle('is-collapsed',collapsed);
     this.orb.dataset.idleStyle=this.orbIdleStyle;
+    // 同一次收起里的 changed===false 早退也必须同步，避免样式切到 hidden 后 class 残留/缺失。
+    this.syncOrbIdleHidden();
+    if (this.orbIdleHidden()) this.releaseLens();
     this.syncOrbAriaLabel();
     if (!changed && animate) return;
     const target=this.orbIdleTarget(collapsed);
@@ -3166,8 +3194,7 @@ export class FeedbackWidget extends HTMLElement {
   private wakeOrb(): void {
     if (!this.canUseOrbLauncher()) return;
     this.syncOrbIdle(true);
-    if (!this.orbLens || !this.lensFresh) this.prepareLens();
-    else this.drawLiquid();
+    this.prepareLens();
   }
 
   private observeOrbAvailability(): void {
@@ -3228,7 +3255,10 @@ export class FeedbackWidget extends HTMLElement {
     const resume = () => { this.orbSurfaceActive = true; this.syncOrbIdle(true); this.prepareLens(); };
     resolution = window.matchMedia?.(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
     const color = window.matchMedia?.('(forced-colors: active)');
-    const colors = () => { this.releaseLens(); this.prepareLens(); };
+    const colors = () => {
+      this.clearOrbIdleMorph(); this.orbIdleVisual=this.orbIdleTarget(this.orbCollapsed);
+      this.releaseLens(); this.prepareLens();
+    };
     const theme = window.matchMedia?.('(prefers-color-scheme: dark)');
     const recolor = () => { if (this.theme === 'system') this.redrawOrbMaterial(); };
     const motion = window.matchMedia?.('(prefers-reduced-motion: reduce)');
@@ -3301,24 +3331,39 @@ export class FeedbackWidget extends HTMLElement {
   }
 
   private invalidateLensTexture(): void {
+    this.cancelLensRefresh();
     this.lensGeneration++;
     this.lensRefreshPending = null;
     this.lensController?.abort(); this.lensController = null;
-    this.lensFresh = false;
     this.orbLens?.clearImage();
     if (!this.isCapturing && !this.regionSession) this.drawLiquid();
+    this.queueLensRestore();
   }
 
   private releaseLens(): void {
+    this.cancelLensRefresh();
     this.lensGeneration++;
     this.lensRefreshPending = null;
     this.lensController?.abort(); this.lensController = null;
-    this.lensFresh = false;
     this.orbLens?.dispose(); this.orbLens = null;
     this.orb.classList.remove('has-lens');
     if (this.orbCanvas) this.orbCanvas.hidden = true;
     if (this.orbOutline) this.hideOrbOutline();
     this.queueLensRestore();
+  }
+
+  private cancelLensRefresh(): void {
+    if (this.lensRefreshTimer !== null) clearTimeout(this.lensRefreshTimer);
+    this.lensRefreshTimer = null;
+  }
+
+  private scheduleLensRefresh(delay = ORB_LENS_REFRESH_MS): void {
+    if (this.lensRefreshTimer !== null || !this.canShowOrbLens()) return;
+    const generation = this.lensGeneration;
+    this.lensRefreshTimer = setTimeout(() => {
+      this.lensRefreshTimer = null;
+      if (generation === this.lensGeneration) void this.refreshLensSnapshot();
+    }, delay);
   }
 
   private async refreshLensSnapshot(): Promise<void> {
@@ -3328,13 +3373,16 @@ export class FeedbackWidget extends HTMLElement {
       this.lensRefreshPending = this.lensGeneration;
       return;
     }
-    if (this.lensFresh && performance.now()-this.lensCapturedAt < 1000) return;
+    const wait = this.lensCaptureReadyAt-performance.now();
+    if (wait > 0) { this.scheduleLensRefresh(wait); return; }
+    this.cancelLensRefresh();
     this.lensRefreshPending = null;
     this.lensBusy = true;
     const generation = this.lensGeneration, epoch = this.identityEpoch;
     const signature = this.displaySignature();
     const controller = new AbortController(); this.lensController = controller;
     const active = () => this.canShowOrbLens() && this.orbLens === lens && generation === this.lensGeneration && epoch === this.identityEpoch && signature === this.displaySignature() && !controller.signal.aborted;
+    let uploaded = false;
     try {
       const viewport = logicalViewport(window);
       // Only the built-in clone + opaque pixel-mask pipeline may feed this decorative texture.
@@ -3345,18 +3393,24 @@ export class FeedbackWidget extends HTMLElement {
       try {
         if (!active()) return;
         lens.setImage(decoded.source as TexImageSource,result.outputWidth,result.outputHeight,result.viewportWidth);
-        this.lensFresh = true; this.lensCapturedAt = performance.now();
+        uploaded = true;
         this.drawLiquid();
       } finally { decoded.close?.(); }
-    } catch { if (active()) { lens.clearImage(); this.lensFresh = false; this.drawLiquid(); } }
+    } catch { if (active()) { lens.clearImage(); this.drawLiquid(); } }
     finally {
       this.lensBusy = false;
+      // Clearing a texture must not reset the work budget. This also spaces
+      // canceled captures, so scroll events cannot start one render per event.
+      this.lensCaptureReadyAt = performance.now()+ORB_LENS_REFRESH_MS;
       if (this.lensController === controller) this.lensController = null;
       const replay = this.lensRefreshPending === this.lensGeneration && generation !== this.lensGeneration;
       this.lensRefreshPending = null;
       // An old capture may ignore abort until rendering/decoding finishes. Its successor
       // starts only now, and only for the latest explicit visible-generation request.
       if (replay) void this.refreshLensSnapshot();
+      // Refresh only after a successful frame. A blocked/unsupported capture
+      // keeps the safe outline until an explicit restore or refresh trigger.
+      else if (uploaded && active()) this.scheduleLensRefresh();
     }
   }
 
@@ -3366,6 +3420,8 @@ export class FeedbackWidget extends HTMLElement {
 
   private redrawOrbMaterial(): void {
     if (!this.isConnected || !this.orbSurfaceActive || document.visibilityState === 'hidden') return;
+    // Theme-specific capsule geometry changes without waking it or resetting its timer.
+    this.clearOrbIdleMorph(); this.orbIdleVisual=this.orbIdleTarget(this.orbCollapsed);
     const session = this.regionSession;
     if (session?.phase === 'selection') {
       this.renderRegion(this.prefersReducedMotion() ? 550 : performance.now()-session.startedAt);
@@ -3374,7 +3430,7 @@ export class FeedbackWidget extends HTMLElement {
       // texture before requesting the new generation through the same masked pipeline.
       this.invalidateLensTexture();
       this.prepareLens();
-    }
+    } else if (this.canUseOrbLauncher()) this.drawLiquid();
   }
 
   private dragLiquidRadius(): number {
@@ -3389,6 +3445,9 @@ export class FeedbackWidget extends HTMLElement {
 
   private drawLiquid(): void {
     if (!this.canUseOrbLauncher()) { this.orbCanvas.hidden = true; this.hideOrbOutline(); return; }
+    // 0.8.5 待机隐藏：球本体由 is-idle-hidden 收起，独立 canvas/outline 兄弟层也必须清空，
+    // 否则会留下不可见的采样/描边层（也可能被误当成命中面）。
+    if (this.orbIdleHidden()) { this.orbCanvas.hidden = true; this.hideOrbOutline(); return; }
     if (this.isCapturing || this.regionSession || this.openState) { this.orbCanvas.hidden = true; this.hideOrbOutline(); return; }
     if (this.isDragging) this.orb.style.transform = `translate3d(${this.liquid.x}px, ${this.liquid.y}px, 0)`;
     const dock = this.isDragging ? this.orbDock : (() => { const r=this.orb.getBoundingClientRect(); return { x:r.left+r.width/2,y:r.top+r.height/2 }; })();
@@ -3408,11 +3467,17 @@ export class FeedbackWidget extends HTMLElement {
       const forced=window.matchMedia?.('(forced-colors: active)').matches ?? false;
       const softIdle = !forced && !this.isDragging;
       const lightIdle = softIdle && !this.orbMaterialIsDark();
-      this.orbOutlinePath.setAttribute('stroke',forced?'ButtonText':lightIdle?'rgba(89,110,143,.32)':softIdle?'rgba(235,237,246,.45)':'rgba(255,255,255,.75)');
-      this.orbOutlinePath.setAttribute('stroke-width',softIdle?'4':'1');
-      this.orbOutline.style.filter=softIdle && !lightIdle?'blur(3px)':'none';
+      const darkIdle = softIdle && !lightIdle;
+      this.orbOutlinePath.setAttribute('fill',darkIdle?'rgb(132,137,153)':'none');
+      this.orbOutlinePath.setAttribute('fill-opacity',darkIdle?String(.016+.026*visual.handleMix):'1');
+      this.orbOutlinePath.setAttribute('stroke',forced?'ButtonText':darkIdle?`url(#${this.orbOutlineExteriorId}-glass)`:lightIdle?'rgba(89,110,143,.32)':'rgba(255,255,255,.75)');
+      this.orbOutlinePath.setAttribute('stroke-width',darkIdle?'1':softIdle?'4':'1');
+      this.orbOutline.style.filter='none';
       this.orbOutlinePath.style.filter=lightIdle?'blur(3px)':'none';
-      this.orbOutlineHalo.style.display=lightIdle?'':'none';
+      this.orbOutlineHalo.style.display=softIdle?'':'none';
+      this.orbOutlineHalo.setAttribute('stroke',darkIdle?'rgba(0,0,0,.11)':'rgba(89,110,143,.10)');
+      this.orbOutlineHalo.setAttribute('stroke-width',darkIdle?'3':'4');
+      this.orbOutlineHalo.style.filter=darkIdle?'blur(4.5px)':'blur(5px)';
       if (lightIdle) this.orbOutlineArt.setAttribute('clip-path',`url(#${this.orbOutlineExteriorId})`);
       else this.orbOutlineArt.removeAttribute('clip-path');
       const size=radius*3.2, points:string[]=[];
@@ -3591,9 +3656,7 @@ export class FeedbackWidget extends HTMLElement {
 
     const launcherIcon = svgFeedbackIcon('fb-launcher-icon');
     const launcherText = el('span', undefined, '反馈');
-    this.launcherBadge = el('span', 'fb-badge fb-launcher-badge');
-    this.launcherBadge.hidden = true;
-    this.launcher.append(launcherIcon, launcherText, this.launcherBadge);
+    this.launcher.append(launcherIcon, launcherText);
 
     // 灵感球 (Inspiration Orb)
     this.orb = el('button', 'fb-launcher fb-orb');
@@ -3626,6 +3689,17 @@ export class FeedbackWidget extends HTMLElement {
     this.orbOutlineExterior.setAttribute('clip-rule','evenodd');
     exteriorClip.append(this.orbOutlineExterior);
     exteriorDefs.append(exteriorClip);
+    // Texture-free dark standby keeps only a restrained NW reflection.
+    const darkGlass = document.createElementNS('http://www.w3.org/2000/svg','linearGradient');
+    darkGlass.id = `${this.orbOutlineExteriorId}-glass`;
+    darkGlass.setAttribute('x2','1'); darkGlass.setAttribute('y2','1');
+    for (const [offset,opacity] of [['0%','.175'],['45%','.025'],['100%','.015']]) {
+      const stop = document.createElementNS('http://www.w3.org/2000/svg','stop');
+      stop.setAttribute('offset',offset!); stop.setAttribute('stop-color','rgb(217,222,234)');
+      stop.setAttribute('stop-opacity',opacity!);
+      darkGlass.append(stop);
+    }
+    exteriorDefs.append(darkGlass);
     this.orbOutline.append(exteriorDefs);
     this.orbCanvas = el('canvas', 'fb-orb-lens');
     this.orbCanvas.hidden = true;
@@ -3636,8 +3710,6 @@ export class FeedbackWidget extends HTMLElement {
     this.orb.setAttribute('aria-label', '灵感球：拖动指出问题或点击反馈');
     this.orb.setAttribute('aria-expanded', 'false');
     this.orb.setAttribute('aria-controls', 'fb-panel');
-    this.orbBadge = el('span', 'fb-badge fb-launcher-badge');
-    this.orbBadge.hidden = true;
     const orbLayersEl = orbLayers();
     const idleMark = el('span','fb-orb-idle-mark');
     idleMark.setAttribute('aria-hidden','true');
@@ -3656,7 +3728,6 @@ export class FeedbackWidget extends HTMLElement {
       idleMark,
       idleHandle,
       orbHit,
-      this.orbBadge,
     );
 
     // 面板：桌面为 400px 贴边圆角浮层（无遮罩），移动端全屏
@@ -3703,10 +3774,7 @@ export class FeedbackWidget extends HTMLElement {
     this.tabHistoryBtn = el('button', 'fb-nav-btn');
     this.tabHistoryBtn.type = 'button';
     const historyBtnText = el('span', undefined, '我的反馈');
-    this.tabHistoryBadge = el('span', 'fb-badge');
-    this.tabHistoryBadge.hidden = true;
-    this.tabHistoryBadge.style.marginLeft = '4px';
-    this.tabHistoryBtn.append(historyBtnText, this.tabHistoryBadge);
+    this.tabHistoryBtn.append(historyBtnText);
     this.tabHistoryBtn.addEventListener('click', () => this.switchTab('history'));
 
     navTabs.append(this.tabComposeBtn, this.tabHistoryBtn);
@@ -4140,6 +4208,8 @@ export class FeedbackWidget extends HTMLElement {
    * 地址变化且有草稿 / 未确认提交时先展开内联确认块。
    */
   private canWakeOrb(): boolean {
+    // 0.8.5：待机隐藏不等于入口不可用——canUseOrbLauncher() 仍为 true，手势可继续唤醒完整球。
+    // 仍需 capture-mode=viewport（surfaceSignature 一致）且用户已启用至少一个手势。
     return this.canUseOrbLauncher() && this.surfaceSignature === this.displaySignature() && this.captureMode === 'viewport' && this.orbPointerId === null && !this.isDragging && this.phase !== 'submitting' && !this.polling;
   }
 
@@ -4153,13 +4223,17 @@ export class FeedbackWidget extends HTMLElement {
     catch { this.orbIdleStyle = 'handle'; this.orbIdleSessionOnly = true; }
     this.orb.dataset.idleStyle = this.orbIdleStyle;
     this.syncOrbIdleSettings();
+    // 立即按新偏好同步待机外观：启动恢复 / appId 切换后「隐藏」的待机显隐必须马上对齐，
+    // 改回 handle / edge 也要马上恢复显示（重复调用是幂等的）。
+    this.syncOrbIdle(true);
   }
 
   private buildOrbIdleSettings(): HTMLElement {
     const group = el('fieldset','fb-orb-idle-settings');
     group.append(el('legend','fb-settings-title','灵感球'));
     const cards = el('div','fb-orb-idle-options');
-    for (const [style,title] of [['handle','小把手'],['edge','球体贴边']] as const) {
+    // 0.8.2：第三种待机样式「隐藏」——0.8.5 起只隐藏待机（收起）状态，唤醒后完整球照常可用。
+    for (const [style,title] of [['handle','小把手'],['edge','球体贴边'],['hidden','隐藏']] as const) {
       const label = el('label','fb-orb-idle-option');
       const input = el('input'); input.type='radio'; input.name='orb-idle-style'; input.value=style;
       input.dataset.orbIdle=style;
@@ -4176,7 +4250,7 @@ export class FeedbackWidget extends HTMLElement {
     }
     this.orbIdlePreferenceHint = el('p','fb-orb-idle-pref-hint','仅本次生效');
     this.orbIdlePreferenceHint.setAttribute('role','status');
-    group.append(cards,el('p','fb-footnote','闲置5秒后收起，轻点或使用手势唤醒'),this.orbIdlePreferenceHint);
+    group.append(cards,el('p','fb-footnote','闲置5秒后收起；选择「隐藏」后待机不显示灵感球，可用已开启的唤醒手势唤醒，或从宿主入口打开反馈面板改回'),this.orbIdlePreferenceHint);
     return group;
   }
 
@@ -4367,28 +4441,18 @@ export class FeedbackWidget extends HTMLElement {
     }
   }
 
-  private syncUnreadBadge(): void {
+  /**
+   * 同步未读提示：0.8.2 起不再渲染任何数字角标（launcher / orb / 历史 Tab 的角标节点已移除），
+   * 只把最新未读数写进灵感球 aria-label（读屏可用、不产生视觉噪音）。
+   * 历史列表行内的「未读」文本小标签由 `renderHistoryIssueRow` 独立渲染。
+   */
+  private syncUnreadIndicator(): void {
     this.syncOrbAriaLabel();
-    const show = this.unreadCount > 0;
-    const text = this.unreadCount > 99 ? '99+' : String(this.unreadCount);
-
-    if (this.launcherBadge) {
-      this.launcherBadge.hidden = !show;
-      this.launcherBadge.textContent = text;
-    }
-    if (this.orbBadge) {
-      this.orbBadge.hidden = !show;
-      this.orbBadge.textContent = text;
-    }
-    if (this.tabHistoryBadge) {
-      this.tabHistoryBadge.hidden = !show;
-      this.tabHistoryBadge.textContent = text;
-    }
   }
 
   /**
    * 未读摘要轮询（v12 口径）：**不再以面板打开为前提**——已登录且页面可见时
-   * 每 30 秒查一次 unread-summary（面板关闭也要给入口徽标供数）。
+   * 每 30 秒查一次 unread-summary（面板关闭时也维护灵感球 aria-label 的未读提示）。
    * 面板销毁 / 页面隐藏 / 退出登录时停止；提交跟踪进行中时跳过（提交轮询优先）。
    */
   private startSummaryPolling(): void {
@@ -4422,7 +4486,7 @@ export class FeedbackWidget extends HTMLElement {
       const summary = await getUnreadSummary(this.effectiveApiBase, this.accessToken!, this.appId ?? undefined, { fetchFn: this.apiFetch });
       if (epoch !== this.identityEpoch || token !== this.accessToken || seq !== this.summaryRequestSeq || !this.isConnected) return;
       this.unreadCount = summary.totalUnreadMessages;
-      this.syncUnreadBadge();
+      this.syncUnreadIndicator();
     } catch {
       // 忽略静默摘要拉取失败
     }
@@ -4498,7 +4562,30 @@ export class FeedbackWidget extends HTMLElement {
     refreshBtn.type = 'button';
     refreshBtn.setAttribute('aria-label', '刷新我的反馈');
     refreshBtn.addEventListener('click', () => void this.loadHistoryList());
-    filterRow.append(filterSelect, refreshBtn);
+    // v0.8.2：过滤行末尾的「一键已读」。既有 `.fb-history-filter` / `.fb-history-refresh`
+    // 的类名与顺序保持不变（e2e 硬绑定），新按钮只追加在其后。
+    const readAllBtn = el(
+      'button',
+      'fb-btn-secondary fb-history-read-all',
+      this.historyReadAllBusy ? '标记中…' : '一键已读',
+    );
+    readAllBtn.type = 'button';
+    readAllBtn.setAttribute('aria-label', '将全部未读反馈标记为已读');
+    readAllBtn.disabled = this.historyReadAllBusy || this.historyUnreadTotal === 0;
+    readAllBtn.addEventListener('click', () => void this.markAllHistoryRead());
+    filterRow.append(filterSelect, refreshBtn, readAllBtn);
+
+    // 过滤行下方的一键已读提示（role=status；默认隐藏，成功 / 失败时显示）。
+    const readHint = el('p', 'fb-history-read-hint');
+    readHint.setAttribute('role', 'status');
+    readHint.hidden = true;
+    if (this.historyReadAllNotice) {
+      const notice = this.historyReadAllNotice;
+      this.historyReadAllNotice = null;
+      readHint.hidden = false;
+      readHint.textContent = notice.text;
+      readHint.classList.toggle('is-error', notice.kind === 'error');
+    }
 
     const itemsBox = el('div', 'fb-history-items');
     const loading = el('div', undefined, '加载反馈列表中…');
@@ -4508,7 +4595,7 @@ export class FeedbackWidget extends HTMLElement {
     itemsBox.append(loading);
 
     const pagerRow = el('div', 'fb-history-pager');
-    this.historyListView.append(filterRow, itemsBox, pagerRow);
+    this.historyListView.append(filterRow, readHint, itemsBox, pagerRow);
 
     try {
       const res = await listMyFeedbacks(this.effectiveApiBase, this.accessToken!, {
@@ -4519,6 +4606,15 @@ export class FeedbackWidget extends HTMLElement {
         fetchFn: this.apiFetch,
       });
       if (!current()) return;
+      this.historyUnreadTotal =
+        typeof res.unreadTotal === 'number' && Number.isFinite(res.unreadTotal)
+          ? Math.max(0, Math.floor(res.unreadTotal))
+          : 0;
+      const currentReadAllBtn = this.historyListView.querySelector<HTMLButtonElement>('.fb-history-read-all');
+      if (currentReadAllBtn) {
+        currentReadAllBtn.textContent = this.historyReadAllBusy ? '标记中…' : '一键已读';
+        currentReadAllBtn.disabled = this.historyReadAllBusy || this.historyUnreadTotal === 0;
+      }
       itemsBox.innerHTML = '';
       pagerRow.innerHTML = '';
 
@@ -4610,6 +4706,56 @@ export class FeedbackWidget extends HTMLElement {
       retryBtn.addEventListener('click', () => void this.loadHistoryList());
       errEl.append(document.createElement('br'), retryBtn);
       itemsBox.append(errEl);
+    }
+  }
+
+  /**
+   * v0.8.2「一键已读」：`POST /api/feedback/read-all`（携带当前 appId）把本账号范围内
+   * 全部未读反馈的读游标推进到最新。
+   *
+   * - 可点依据只有列表返回的 `unreadTotal`（为 0 时按钮禁用，这里再兜一层）。
+   * - 请求中用 `identityEpoch` + 令牌守卫丢弃过期响应（身份切换 / 退出登录后不得回写）；
+   * - 成功：未读数归零并同步灵感球 aria-label，过滤行下方给出 role=status 提示，随后刷新
+   *   列表（未读标签与 `unreadTotal` 一并更新）和未读摘要；
+   * - 失败：就地提示「标记失败：<原因>，请重试」并恢复按钮，保留已有列表内容，可再次点击重试。
+   */
+  private async markAllHistoryRead(): Promise<void> {
+    if (this.historyReadAllBusy) return;
+    const apiBase = this.effectiveApiBase;
+    const token = this.accessToken;
+    if (!this.tokenValid() || !apiBase || token === null) return;
+    const epoch = this.identityEpoch;
+    const current = (): boolean => epoch === this.identityEpoch && token === this.accessToken && this.isConnected;
+    const btn = this.historyListView.querySelector<HTMLButtonElement>('.fb-history-read-all');
+    if (!btn) return;
+
+    this.historyReadAllBusy = true;
+    btn.disabled = true;
+    btn.textContent = '标记中…';
+    try {
+      await markAllRead(apiBase, token, { appId: this.appId ?? undefined, fetchFn: this.apiFetch });
+      if (!current()) return;
+      this.historyReadAllBusy = false;
+      this.historyUnreadTotal = 0;
+      // 先按服务端语义归零并同步 aria-label；真值仍由摘要查询校准（失败静默，不阻塞列表）。
+      this.unreadCount = 0;
+      this.syncUnreadIndicator();
+      this.historyReadAllNotice = { kind: 'success', text: '已全部标记为已读' };
+      void this.pollSummary();
+      if (this.activeTab === 'history' && !this.activeDialogueId) await this.loadHistoryList();
+    } catch (err) {
+      if (!current()) return;
+      this.historyReadAllBusy = false;
+      const hint = this.historyListView.querySelector<HTMLElement>('.fb-history-read-hint');
+      if (hint) {
+        hint.hidden = false;
+        hint.classList.add('is-error');
+        hint.textContent = `标记失败：${trackingErrorText(err, '未知错误')}，请重试`;
+      }
+      if (this.historyListView.contains(btn)) {
+        btn.textContent = '一键已读';
+        btn.disabled = this.historyUnreadTotal === 0;
+      }
     }
   }
 
@@ -4768,6 +4914,10 @@ export class FeedbackWidget extends HTMLElement {
     this.dialogueRequestInFlight = 0;
     this.revokeAttachmentUrls();
     this.unreadCount = 0;
+    // 旧身份的一键已读状态不得沿用：忙碌标记与提示一并作废（迟到响应由 epoch 丢弃）。
+    this.historyUnreadTotal = 0;
+    this.historyReadAllBusy = false;
+    this.historyReadAllNotice = null;
     if (this.dialogueView) {
       this.dialogueView.innerHTML = '';
       this.dialogueView.hidden = true;
@@ -6324,6 +6474,14 @@ export class FeedbackWidget extends HTMLElement {
    * 不同且有草稿 / 未确认提交时先展开确认块 → 确认后切换。
    */
   private saveServerSettings(): void {
+    // 未填写地址 = 不更改：沿用当前实际使用的服务器（上次生效的地址），
+    // 不报错、不要求用户重新输入；清除覆盖仍走「恢复默认」。
+    if (this.settingsInput.value.trim() === '' && this.effectiveApiBase !== null) {
+      this.settingsErrorEl.hidden = true;
+      this.settingsErrorEl.textContent = '';
+      this.setSettingsHint('未填写服务器地址，保持当前服务器不变。');
+      return;
+    }
     const res = normalizeServerBase(this.settingsInput.value, { pageIsHttps: this.pageIsHttps() });
     if (!res.ok) {
       this.settingsErrorEl.textContent = res.reason;
@@ -6810,7 +6968,7 @@ export class FeedbackWidget extends HTMLElement {
     this.stopSummaryPolling();
     this.stopDialoguePolling();
     this.unreadCount = 0;
-    this.syncUnreadBadge();
+    this.syncUnreadIndicator();
     this.authRequired = true;
     this.renderStatus('需要登录');
     this.syncUi();
@@ -6915,7 +7073,7 @@ export class FeedbackWidget extends HTMLElement {
     if (this.tabHistoryBtn) {
       this.tabHistoryBtn.classList.toggle('active', this.activeTab === 'history');
     }
-    this.syncUnreadBadge();
+    this.syncUnreadIndicator();
 
     // 禁用态
     this.textarea.disabled = this.phase === 'submitting';

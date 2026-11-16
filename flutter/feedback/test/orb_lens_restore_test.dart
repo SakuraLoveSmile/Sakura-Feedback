@@ -25,7 +25,8 @@ Future<void> _expectQuiet(WidgetTester tester, int attempts) async {
     await tester.pump(const Duration(milliseconds: 200));
   }
   expect(debugOrbLensCaptureAttempts, attempts,
-      reason: 'restoration is one capture, with no periodic retry');
+      reason:
+          'the explicit one-day test interval prevents unrelated refreshes');
   expect(tester.takeException(), isNull);
 }
 
@@ -283,8 +284,8 @@ void main() {
           fallback.color, Theme.of(tester.element(face)).colorScheme.onSurface);
       tester.platformDispatcher.clearAccessibilityFeaturesTestValue();
       await tester.pump();
-      expect(painted().image, same(original.image));
-      expect(debugOrbLensCaptureAttempts, 1);
+      expect((await _waitLens(tester)).image, isNot(same(original.image)));
+      expect(debugOrbLensCaptureAttempts, 2);
       // No perpetual material/morph ticker is left at rest.
       await tester.pump(const Duration(milliseconds: 1));
       expect(tester.binding.transientCallbackCount, 0);
@@ -309,7 +310,7 @@ void main() {
       await tester.pump();
       expect(liquidOrb, findsOneWidget);
       expect((await _waitLens(tester)).image, isNot(same(original.image)));
-      expect(debugOrbLensCaptureAttempts, 2);
+      expect(debugOrbLensCaptureAttempts, 3);
       expect(tester.takeException(), isNull);
     });
   }
@@ -327,6 +328,34 @@ void main() {
     await tester.pump();
     expect((await _waitLens(tester)).image, same(original.image));
     await _expectQuiet(tester, 1);
+  });
+
+  testWidgets(
+      'hidden idle releases the lens snapshot; the returning full orb captures a fresh one',
+      (tester) async {
+    await host.preferences.write(orbIdleStorageKey(host.appId),
+        encodeOrbIdleStyle(FeedbackOrbIdleStyle.hidden));
+    await host.mount(tester);
+    final OrbLiquidLensPainter original = await _waitLens(tester);
+    expect(debugOrbLensCaptureAttempts, 1);
+    // 待机隐藏后入口不在屏幕上，透镜快照随之释放（_lensVisible 为 false）。
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pump(const Duration(milliseconds: 420));
+    expect(liquidOrb, findsNothing);
+    expect(_shader, findsNothing);
+    // 完整球恢复（面板打开后关闭，与唤醒同一条「重新可见」路径）时按既有
+    // 规则重新捕获，而不是复用隐藏前的安全纹理。
+    host.controller.open();
+    await tester.pump();
+    await tester.pump();
+    host.controller.close();
+    await tester.pump();
+    await tester.pump();
+    expect(liquidOrb, findsOneWidget);
+    final OrbLiquidLensPainter restored = await _waitLens(tester);
+    expect(restored.image, isNot(same(original.image)));
+    expect(debugOrbLensCaptureAttempts, 2);
+    await _expectQuiet(tester, 2);
   });
 
   testWidgets(
@@ -578,7 +607,11 @@ void main() {
     });
   }
 
-  for (final FeedbackOrbIdleStyle style in FeedbackOrbIdleStyle.values) {
+  // hidden 不渲染收起形状，主题刷新连续性只对 handle / edge 有意义。
+  for (final FeedbackOrbIdleStyle style in <FeedbackOrbIdleStyle>[
+    FeedbackOrbIdleStyle.handle,
+    FeedbackOrbIdleStyle.edge,
+  ]) {
     testWidgets(
         'theme refresh keeps the ${style.name} morph geometry continuous',
         (tester) async {
@@ -618,7 +651,7 @@ void main() {
 
   for (final Brightness brightness in Brightness.values) {
     testWidgets(
-        '${brightness.name} high contrast uses the safe system outline and retains badge/focus',
+        '${brightness.name} high contrast uses the safe system outline and retains focus',
         (tester) async {
       final FocusHighlightStrategy highlight =
           FocusManager.instance.highlightStrategy;
@@ -645,15 +678,19 @@ void main() {
       expect(outline.color,
           Theme.of(tester.element(liquidLens)).colorScheme.onSurface);
       liquidPaintState(tester);
-      expect(find.text('3'), findsOneWidget);
+      // v0.8.2：未读数不再绘制数字角标（F1），高对比度下也不出现。
+      expect(find.byType(Badge), findsNothing);
+      expect(find.text('3'), findsNothing);
       expect(find.byType(BackdropFilter), findsNothing);
       await tester.sendKeyEvent(LogicalKeyboardKey.tab);
       await tester.pump();
       expect(find.byKey(const Key('feedback-orb-focus-ring')), findsOneWidget);
       tester.platformDispatcher.clearAccessibilityFeaturesTestValue();
       await tester.pump();
-      expect((await _waitLens(tester)).image, same(live.image));
-      expect(debugOrbLensCaptureAttempts, 1);
+      expect((await _waitLens(tester)).image, isNot(same(live.image)));
+      expect(debugOrbLensCaptureAttempts, 2,
+          reason:
+              'high contrast suspends invisible sampling and restores fresh glass');
       expect(tester.takeException(), isNull);
     });
 
@@ -793,7 +830,8 @@ void main() {
     });
   }
 
-  testWidgets('scroll invalidates a queued return without automatic recapture',
+  testWidgets(
+      'scroll invalidates a queued return and captures the painted scroll scene',
       (tester) async {
     host.content =
         Builder(builder: (_) => const ColoredBox(color: Colors.blue));
@@ -819,13 +857,20 @@ void main() {
                 context: context)
             .dispatch(context);
       });
-      return const ColoredBox(color: Colors.blue);
+      return const ColoredBox(color: Color(0xFF00FF00));
     });
+    // The held old request uses a one-day gate for isolation. This scroll
+    // scenario now exercises the actual bounded refresh deadline instead.
+    debugOrbLensGateDuration = const Duration(milliseconds: 250);
     host.rebuild();
     await tester.pump();
     await tester.idle();
-    expect(_shader, findsNothing);
-    await _expectQuiet(tester, 2);
+    final OrbLiquidLensPainter refreshed = await _waitLens(tester);
+    final Uint8List? pixels = await tester.runAsync<Uint8List?>(
+        () async => (await refreshed.image.toByteData())?.buffer.asUint8List());
+    expect(pixels!.sublist(0, 4), <int>[0, 255, 0, 255]);
+    expect(debugOrbLensCaptureAttempts, 3);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('a failed replay does not automatically retry its generation',

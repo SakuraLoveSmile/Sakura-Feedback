@@ -122,7 +122,16 @@ def run() -> int:
     print(f"[INFO] SDK={SDK_DIST}\n[INFO] 宿主页=http://localhost:{PAGES_PORT}/orb.html\n[INFO] SHOTS={SHOTS}", flush=True)
 
     with sync_playwright() as p:
-        browser = p.chromium.launch()
+        browser = None
+        last_exc = None
+        for kwargs in ({}, {"channel": "chrome"}, {"channel": "chromium"}):
+            try:
+                browser = p.chromium.launch(**kwargs)
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+        if browser is None:
+            raise last_exc
         for theme in THEMES:
             ctx = browser.new_context(color_scheme=theme)
             for w, h in VIEWPORTS:

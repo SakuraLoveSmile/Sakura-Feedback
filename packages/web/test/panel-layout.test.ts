@@ -239,14 +239,15 @@ describe('冻结视觉规格（styles.ts 字符串断言）', () => {
     expect(STYLES).toMatch(/\.fb-orb \{[^}]*min-height: 56px/);
     expect(STYLES).toMatch(/\.fb-orb\.is-dragging \{[^}]*--fb-orb-state-scale: 1\.8571428571/);
 
-    // 四层视觉组共用 R(angle) × Scale(stretchAlong, 1) × R(-angle)，badge 不在组内。
+    // 四层视觉组共用 R(angle) × Scale(stretchAlong, 1) × R(-angle)，命中层不在组内。
     expect(STYLES).toMatch(
       /\.fb-orb-bloom,\s*\.fb-orb-glow,\s*\.fb-orb-sweep,\s*\.fb-orb-core \{[^}]*scale: calc\([\s\S]*?--fb-orb-state-scale[\s\S]*?transform: rotate\(var\(--fb-orb-drag-angle\)\)[\s\S]*?scaleX\(var\(--fb-orb-stretch-along\)\)[\s\S]*?rotate\(calc\(0rad - var\(--fb-orb-drag-angle\)\)\)/,
     );
     expect(STYLES).toMatch(
       /\.fb-orb-glow \{[^}]*translate: var\(--fb-orb-glow-x\) var\(--fb-orb-glow-y\)/,
     );
-    expect(STYLES).toMatch(/\.fb-orb \.fb-launcher-badge \{[^}]*transform: none[^}]*scale: 1/);
+    // 0.8.2：入口未读数字角标整体移除，样式表里不再有 .fb-launcher-badge 规则。
+    expect(STYLES).not.toContain('fb-launcher-badge');
   });
 
   it('七个 @property 声明完整自描述灵感球插值语义', () => {

@@ -126,7 +126,12 @@ void main() {
         reason: 'moving hit layout must not move the actual sampler center');
   }
 
-  for (final FeedbackOrbIdleStyle style in FeedbackOrbIdleStyle.values) {
+  // 「隐藏」样式没有收起几何形状（入口整体不渲染），几何断言只覆盖两种
+  // 仍会收起的样式；hidden 的编解码与入口显隐在 orb_idle_test.dart 覆盖。
+  for (final FeedbackOrbIdleStyle style in <FeedbackOrbIdleStyle>[
+    FeedbackOrbIdleStyle.handle,
+    FeedbackOrbIdleStyle.edge,
+  ]) {
     for (final FeedbackSide side in FeedbackSide.values) {
       for (final bool inset in <bool>[false, true]) {
         for (final bool expanding in <bool>[false, true]) {

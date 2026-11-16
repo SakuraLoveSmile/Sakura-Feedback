@@ -227,11 +227,36 @@
           const v = this.shadow().querySelector('.fb-dialogue-view');
           return v ? v.innerText : '';
         },
-        launcherBadge() {
-          const orb = this.shadow().querySelector('.fb-orb .fb-launcher-badge');
-          const tab = this.shadow().querySelector('.fb-fab .fb-launcher-badge');
-          const pick = (n) => (n && !n.hidden ? n.textContent : '');
-          return { orb: pick(orb), tab: pick(tab), any: pick(orb) || pick(tab) };
+        cornerBadges() {
+          // 0.8.2：入口不再显示未读数字角标，这里返回数量用于反向断言。
+          return this.shadow().querySelectorAll('.fb-launcher-badge').length;
+        },
+        historyActions() {
+          const btn = this.shadow().querySelector('.fb-history-read-all');
+          const hint = this.shadow().querySelector('.fb-history-read-hint');
+          return {
+            readAllText: btn ? btn.textContent : null,
+            readAllDisabled: btn ? btn.disabled : null,
+            hint: hint && !hint.hidden ? hint.textContent : '',
+          };
+        },
+        statusColors() {
+          // 0.8.2：四种问题状态的 chip 必须色相不同（已解决=绿色）。
+          const out = {};
+          const statuses = ['open', 'waiting-user', 'waiting-admin', 'resolved'];
+          for (const tag of this.shadow().querySelectorAll('.fb-history-item .fb-tag')) {
+            for (const status of statuses) {
+              if (!tag.classList.contains(status)) continue;
+              const style = getComputedStyle(tag);
+              const rgb = (style.color.match(/\d+/g) || []).map(Number);
+              out[status] = {
+                color: style.color,
+                background: style.backgroundColor,
+                greenish: rgb.length >= 3 && rgb[1] >= rgb[0] + 24 && rgb[1] >= rgb[2] + 24,
+              };
+            }
+          }
+          return out;
         },
       };
     </script>
