@@ -7,6 +7,17 @@
 [`docs/integration.md`](docs/integration.md) §1.7。标注 **破坏性** 的条目表示
 宿主升级时需要处理；未标注的均为兼容变更（新增可选字段 / 属性 / 端点）或内部变更。
 
+## [0.9.2] — 2026-11-17
+
+### 修复
+
+- **AI 连接与整理在 OpenCode Go 网关被拒（400 `MissingSessionID`）**：服务端 AI 客户端现在为每次请求携带稳定的 `x-opencode-session` 会话标识（按「模型 + 请求体」派生，同一次会话的重试复用同一 ID），并把 User-Agent 标明为 `feedback-ai/1.0`。此前缺失该头时，OpenCode Console/Go 会直接返回 `400 MissingSessionID`（"Request is missing x-opencode-session …"），使用该网关的 DeepSeek 等模型全部命中；其它 OpenAI 兼容端点忽略该头，配置与既有接口不变。
+
+### 升级说明
+
+- root、server、admin、Web 与 Flutter 统一为 **0.9.2**；数据库 schema 保持 **15**，无迁移、无新增公共接口或配置。
+- Web 使用本 Release 的 `feedback-web-0.9.2.tgz`，Flutter 固定 Git 标签 `v0.9.2` 与 `flutter/feedback` 子目录；不发布到 pub.dev。把 AI 上游指向 OpenCode Go 的部署升级服务端后即恢复连接。
+
 ## [0.9.1] — 2026-11-16
 
 ### 新增
