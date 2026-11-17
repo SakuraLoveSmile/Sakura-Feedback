@@ -1,4 +1,4 @@
-import { randomInt } from "node:crypto";
+import { createHash, randomInt } from "node:crypto";
 import sharp from "sharp";
 import { decryptSecret } from "../crypto/secret.ts";
 import type { Db } from "../db/db.ts";
@@ -115,6 +115,25 @@ export interface AiConfig {
   baseUrl: string;
   model: string;
   apiKey: string;
+}
+
+/**
+ * 请求方标识：OpenCode 控制台要求客户端用自己的产品名，而不是默认的通用 HTTP 库名（Node 下是 `node`），
+ * 见 https://opencode.ai/docs/console/harnesses 的「Where can I use it?」客户端要求。
+ */
+const AI_USER_AGENT = "feedback-ai/1.0";
+
+/**
+ * OpenCode Console 网关要求每个会话在 `x-opencode-session` 里带稳定会话标识，缺失时直接
+ * 400 `MissingSessionID`（"Request is missing x-opencode-session ..."）；Go 套餐的 DeepSeek
+ * 等模型都走这条路由，普通 OpenAI 兼容端点会忽略该头，所以统一携带、不按域名分支。
+ *
+ * 本服务一次请求（一次整理 / 一次连接测试）就是一次完整会话，因此按「模型 + 请求体」派生：
+ * 同一会话的重试得到同一 ID（利于上游路由与提示缓存），不同会话互不相同；只发摘要，不外泄原文。
+ */
+function sessionIdFor(model: string, body: string): string {
+  const digest = createHash("sha256").update(model).update("\n").update(body).digest("hex");
+  return `ses_${digest.slice(0, 32)}`;
 }
 
 const SYSTEM_PROMPT = [
@@ -311,6 +330,11 @@ export function createAiClient(db: Db, masterKey: Buffer, fetchImpl: typeof fetc
 
   async function chat(messages: { role: string; content: ChatMessageContent }[], timeoutMs: number): Promise<string> {
     const cfg = loadConfig();
+    const payload = JSON.stringify({
+      model: cfg.model,
+      temperature: 0.2,
+      messages,
+    });
     let res: Response;
     try {
       res = await fetchImpl(`${cfg.baseUrl}/chat/completions`, {
@@ -318,12 +342,10 @@ export function createAiClient(db: Db, masterKey: Buffer, fetchImpl: typeof fetc
         headers: {
           "content-type": "application/json",
           authorization: `Bearer ${cfg.apiKey}`,
+          "user-agent": AI_USER_AGENT,
+          "x-opencode-session": sessionIdFor(cfg.model, payload),
         },
-        body: JSON.stringify({
-          model: cfg.model,
-          temperature: 0.2,
-          messages,
-        }),
+        body: payload,
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (err) {

@@ -366,6 +366,33 @@ describe("AI HTTP 客户端契约", () => {
     expect(JSON.parse(f.calls[0]?.body ?? "{}").model).toBe("m-1");
   });
 
+  it("携带 OpenCode 会话标识与自有 UA：同一会话重试同一 ID，不同会话不同 ID", async () => {
+    const organized = (title: string) =>
+      JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                title,
+                sections: { experience: "", problems: "", suggestions: "", questions: "" },
+              }),
+            },
+          },
+        ],
+      });
+    const f = fakeFetch(() => ({ status: 200, body: organized("t") }));
+    const ai = createAiClient(aiDb(), masterKey, f.impl);
+    // 同一段输入的两次调用等同于 worker 的重试：必须复用同一会话 ID
+    await ai.organize("导出 CSV 卡住了");
+    await ai.organize("导出 CSV 卡住了");
+    await ai.organize("另一段反馈");
+    const ids = f.calls.map((c) => c.headers["x-opencode-session"]);
+    expect(ids[0]).toMatch(/^ses_[0-9a-f]{32}$/);
+    expect(ids[1]).toBe(ids[0]);
+    expect(ids[2]).not.toBe(ids[0]);
+    expect(f.calls.every((c) => c.headers["user-agent"] === "feedback-ai/1.0")).toBe(true);
+  });
+
   it("围栏包裹的 JSON 可解析；结构非法 → invalid_output 可重试", async () => {
     let n = 0;
     const f = fakeFetch(() => {
