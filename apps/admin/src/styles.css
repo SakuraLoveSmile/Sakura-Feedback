@@ -7,15 +7,15 @@
   color-scheme: light;
 
   /* 色彩：冷灰画布 + 白色表面；主色只用于导航选中、主按钮与焦点 */
-  --bg: #f3f4f7;
+  --bg: #f4f6f9;
   --panel: #ffffff;
-  --subtle: #f2f4f8;
+  --subtle: #f3f5f9;
   --text: #101828;
   --text-2: #475467;
   --muted: #667085;
-  --border: #e8eaf0;
+  --border: #e3e7ee;
   /* 装饰性分隔线/容器边框专用令牌；控件边界仍用 --control-border（≥3:1 对比） */
-  --border-subtle: #e8eaf0;
+  --border-subtle: #e7ebf1;
   --control-border: #75829b;
   --control-border-hover: #64748b;
   --control-hover: #f7f9fc;
@@ -59,13 +59,13 @@
   --sp-6: 24px;
   --sp-8: 32px;
 
-  --radius-ctl: 9px;
-  --radius-panel: 14px;
+  --radius-ctl: 10px;
+  --radius-panel: 16px;
   --ctl-h: 36px;
   --nav-w: 236px;
   --content-max: 1440px;
-  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.04);
-  --shadow-pop: 0 12px 32px -8px rgba(16, 24, 40, 0.18), 0 2px 8px -2px rgba(16, 24, 40, 0.08);
+  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.05), 0 1px 1px rgba(16, 24, 40, 0.03);
+  --shadow-pop: 0 18px 40px -16px rgba(16, 24, 40, 0.22), 0 2px 8px -2px rgba(16, 24, 40, 0.08);
   --font: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
   /* 动效时长：冻结规格 160–220ms（prefers-reduced-motion 时全局归零） */
   --dur: 180ms;
@@ -3252,24 +3252,24 @@ html[data-theme="dark"] {
   color-scheme: dark;
 
   /* 色彩：背景/卡片/控件用中性深灰层级，蓝色仅作主次操作与选中态点缀 */
-  --bg: #121213;
-  --panel: #1b1b1d;
-  --subtle: #262629;
-  --text: #e8eaed;
-  --text-2: #9aa0a7;
-  --muted: #868b92;
-  --border: #5b5f65;
-  /* 装饰线显著减淡（#5b5f65 → #343438），弱化深色下粗分隔线观感 */
-  --border-subtle: #343438;
-  --control-border: #6e7277;
-  --control-border-hover: #8b9097;
-  --control-hover: #232326;
-  --control-active: #2b2b2f;
-  --primary: #6ea8fe;
-  --primary-hover: #9ec2fd;
-  --on-primary: #101214;
+  --bg: #131519;
+  --panel: #1a1d22;
+  --subtle: #242830;
+  --text: #e9ecf2;
+  --text-2: #a2a9b4;
+  --muted: #8b929e;
+  --border: #5b616b;
+  /* 装饰线显著减淡，弱化深色下粗分隔线观感 */
+  --border-subtle: #2b3038;
+  --control-border: #717884;
+  --control-border-hover: #8d94a0;
+  --control-hover: #21252c;
+  --control-active: #292e36;
+  --primary: #7aa2ff;
+  --primary-hover: #a6c0ff;
+  --on-primary: #0e1116;
   --selected: #22314e;
-  --focus-ring: rgba(110, 168, 254, 0.22);
+  --focus-ring: rgba(122, 162, 255, 0.24);
   --ok-text: #86efac;
   --ok-bg: #0e2b1c;
   --warn-text: #fcd34d;
@@ -3294,6 +3294,259 @@ html[data-theme="dark"] {
   --pin-border: #ffffff;
   --pin-bg: rgba(239, 68, 68, 0.85);
   --pin-glow: rgba(239, 68, 68, 0.9);
-  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.35);
-  --shadow-pop: 0 8px 30px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.4);
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-pop: 0 18px 44px rgba(0, 0, 0, 0.6), 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+/* ============================================================
+ * v2 视觉精修（2026-11）：沿用既有令牌与组件，只收紧层级、密度与质感。
+ * 交互、语义、选择器与无障碍约束（焦点环、44px 触达、reduced-motion）不变。
+ * ============================================================ */
+
+/* 侧栏：与画布分层，品牌块与账号卡更像一个完整工作台。 */
+.shell-nav {
+  background: #fbfcfe;
+  padding: 24px 12px 16px;
+}
+html[data-theme="dark"] .shell-nav {
+  background: #17191e;
+}
+.shell-brand {
+  padding: 0 12px 24px;
+  gap: 12px;
+}
+.brand-mark {
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+}
+.brand-mark svg {
+  width: 22px;
+  height: 22px;
+}
+.brand-caption {
+  margin-top: 3px;
+}
+.shell-nav-links {
+  padding-bottom: 24px;
+}
+.nav-group-label {
+  padding: 18px 12px 6px;
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+}
+.nav-item {
+  min-height: 40px;
+  padding: 0 12px;
+  border-radius: 10px;
+  font-size: 13.5px;
+}
+.shell-nav-footer {
+  padding: 16px 12px 0;
+}
+.session-identity {
+  padding: 8px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--panel);
+}
+.session-avatar {
+  width: 30px;
+  height: 30px;
+  background: var(--selected);
+  color: var(--primary);
+}
+.session-role {
+  margin-top: 1px;
+}
+
+/* 页头：标题略大，副文案更轻，操作与标题顶端对齐。 */
+.page-header {
+  align-items: flex-start;
+  margin-bottom: 28px;
+}
+.page-header h1 {
+  font-size: 28px;
+  line-height: 36px;
+  letter-spacing: -0.025em;
+}
+.page-header .sub {
+  margin-top: 6px;
+  font-size: 13.5px;
+  line-height: 21px;
+  color: var(--muted);
+}
+.crumbs {
+  margin-bottom: 10px;
+}
+
+/* 卡片与表格：表头更安静，行悬停更轻。 */
+.card h2 {
+  font-size: 17px;
+  letter-spacing: -0.01em;
+}
+.table-wrap th {
+  padding: 10px 12px;
+  font-size: 11.5px;
+  letter-spacing: 0.03em;
+}
+.table-wrap td {
+  padding: 12px;
+}
+.table-wrap tbody tr.clickable:hover {
+  background: color-mix(in srgb, var(--primary) 3%, var(--panel));
+}
+
+/* 区域页签：略高的分段控件。 */
+.view-tabs {
+  gap: 4px;
+  padding: 4px;
+  border-radius: 13px;
+}
+.view-tab {
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 9px;
+}
+
+/* 反馈筛选卡：更松的内边距与更小的标签。 */
+.feedback-page #fb-filter-area {
+  padding: 18px 20px;
+}
+.feedback-page .feedback-filter-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+}
+
+/* 宽屏右栏空态：从虚线占位改为真正的空卡片。 */
+.feedback-detail-empty {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-panel);
+  background: var(--panel);
+  box-shadow: var(--shadow-card);
+}
+.feedback-detail-empty .empty-art {
+  width: 54px;
+  height: 54px;
+  border-radius: 16px;
+  background: var(--selected);
+  border: 0;
+  color: var(--primary);
+  box-shadow: none;
+}
+.feedback-detail-empty h3 {
+  font-size: 16px;
+}
+.feedback-detail-empty p {
+  max-width: 280px;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+/* 宽屏表格：给状态列更多余量，让标签少折一行。 */
+@media (min-width: 1280px) {
+  .feedback-page[data-split="true"] .fb-table th:nth-child(5),
+  .feedback-page[data-split="true"] .fb-table td:nth-child(5) {
+    width: 158px;
+  }
+}
+@media (min-width: 1440px) {
+  .feedback-page[data-split="true"] .fb-table th:nth-child(5),
+  .feedback-page[data-split="true"] .fb-table td:nth-child(5) {
+    width: 168px;
+  }
+}
+.feedback-page[data-split="true"] .fb-table .tag {
+  min-height: 20px;
+  padding: 0 7px;
+  font-size: 11px;
+}
+.feedback-page[data-split="true"] .fb-table .row.row-wrap {
+  gap: 4px;
+}
+
+/* 登录：品牌块与侧栏同源；标题与卡片更松。 */
+.login-brand > svg {
+  color: #fff;
+  background: linear-gradient(145deg, #6d8bff, var(--primary) 62%, #2449c9);
+  box-shadow: 0 8px 18px -8px rgba(47, 91, 234, 0.8);
+}
+.login-headline {
+  font-size: 32px;
+  line-height: 42px;
+}
+.login-form {
+  border-radius: 18px;
+}
+
+/* 主按钮与浮层：只加一层很轻的投影，不改变任何交互。 */
+.btn.primary {
+  box-shadow: 0 1px 2px rgba(47, 91, 234, 0.22);
+}
+.btn.primary:hover:not(:disabled) {
+  box-shadow: 0 4px 12px -6px rgba(47, 91, 234, 0.5);
+}
+.toast {
+  border-radius: 13px;
+}
+.overlay {
+  backdrop-filter: blur(3px);
+}
+.drawer-overlay {
+  backdrop-filter: blur(2px);
+}
+
+/* 管理后台的反馈入口由 App 的 launcher-bottom 固定在右下角，页面底部留出滚动余量。 */
+@media (max-width: 767px) {
+  .shell-body {
+    padding-bottom: 88px;
+  }
+  /* 页头直系按钮保持内容宽度（窄屏只把按钮换到标题下方，不拉成通栏）。 */
+  .page-header > .btn {
+    align-self: flex-start;
+  }
+  /* 移动端表格保留横向滑动；长 appId 不再逐字换行把行撑高。 */
+  .apps-page .apps-appid-inline {
+    display: none;
+  }
+  .apps-page .table-wrap .col-appid code {
+    white-space: nowrap;
+    word-break: normal;
+    overflow-wrap: normal;
+  }
+}
+
+/* 深色：宽屏列表滚动条跟随暗色表面（原先写死浅色）。 */
+html[data-theme="dark"] .feedback-page[data-split="true"] .feedback-list-pane {
+  scrollbar-color: #3a404a transparent;
+}
+html[data-theme="dark"] .feedback-page[data-split="true"] .feedback-list-pane::-webkit-scrollbar-thumb {
+  background: #3a404a;
+  border-color: var(--bg);
+}
+
+@media (max-width: 767px) {
+  .page-header h1 {
+    font-size: 24px;
+    line-height: 32px;
+  }
+  .login-headline {
+    font-size: 28px;
+    line-height: 38px;
+  }
+  /* 窄屏页头改为上下结构：说明不被右侧操作挤成窄列。 */
+  .page-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--sp-3);
+  }
+  .page-header > .btn-row {
+    width: 100%;
+  }
+  .page-header > .btn-row .btn {
+    flex: 0 0 auto;
+  }
 }

@@ -80,7 +80,10 @@ async function req<T>(method: string, url: string, body?: unknown): Promise<T> {
   }
   if (!res.ok) {
     const e = (data as { error?: { code?: string; message?: string } })?.error;
-    const err = new ApiError(e?.code ?? `http_${res.status}`, e?.message ?? text.slice(0, 200), res.status);
+    // 部分连接类接口直接返回 { ok:false, reason }；优先展示 reason，避免把原始 JSON 当错误文案。
+    const reason = (data as { reason?: unknown } | null)?.reason;
+    const fallback = typeof reason === "string" && reason.trim() ? reason.trim() : text.slice(0, 200);
+    const err = new ApiError(e?.code ?? `http_${res.status}`, e?.message ?? fallback, res.status);
     recordDiagnostic({ level: "warn", event: "api_request", code: diagCodeFor(err), status: res.status }, epoch);
     throw err;
   }

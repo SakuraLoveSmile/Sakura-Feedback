@@ -448,6 +448,7 @@ export default function App() {
           side="right"
           theme={themePref}
           launcher-mode="orb"
+          launcher-bottom="24px"
           capture-mode="viewport"
         />,
         document.body,
