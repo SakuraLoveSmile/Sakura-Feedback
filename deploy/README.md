@@ -57,16 +57,39 @@ bash deploy/bootstrap.sh --dry-run                # 只展示将做的事
 ## 更新与回退
 
 ```bash
-bash deploy/update.sh                    # 备份数据卷 → pull → 重建 → 等健康（默认部署目录）
+bash deploy/update.sh                    # 备份数据卷 → 取镜像（先下载并校验 digest）→ 重建 → 等健康
 bash deploy/update.sh --deploy-dir /opt/feedback
-bash deploy/update.sh --to v0.5.0        # 切到指定版本标签（回退；跨 schema 版本先恢复备份）
+bash deploy/update.sh --to v0.9.2        # 切到指定版本标签（回退；跨 schema 版本先恢复备份）
+bash deploy/update.sh --digest sha256:…  # 离线/自建渠道：直接指定期望 digest，不拉发布清单
+bash deploy/update.sh --no-verify        # 退回旧行为：直接 compose pull，不校验 digest
 ```
 
+- 镜像更新是「先下载 → 校验 → 再覆盖」：先按 digest 拉取（不改动现有标签），确认本地镜像 ID 与
+  发布清单的 `services.feedback.digest` 一致后才写标签、备份 `.env.prod` 并切到 `<tag>@<digest>`，
+  任何一步不一致都会停下，容器与 `.env.prod` 保持原样。清单不可达时用 `--digest` 指定期望值。
 - `update.sh` 自动探测 `docker-compose.yml` / `docker-compose.yaml` / `compose.yml` / `compose.yaml`
   （按此顺序取第一个），并自动对准 `FEEDBACK_DATA_PATH`（目录）或 `FEEDBACK_DATA_VOLUME`（卷）。
 - 备份落在 `<deploy-dir>/backups/feedback-data-<时间戳>.tgz`（保留最近 10 份）。
 - 恢复备份：`docker run --rm -v <卷名或目录绝对路径>:/data -v <备份目录>:/backup <镜像> sh -c 'tar xzf /backup/<包>.tgz -C /data'`。
 - 数据库迁移是**单向**的——跨 schema 版本回退必须先恢复 `update.sh` 留下的备份包。
+
+### geo 文件（可选，独立于服务更新）
+
+mihomo 的 `GeoSite.dat` 同样走「先下载 → 校验 → 再覆盖」，避免下载中断留下半个文件把容器打崩：
+
+```bash
+bash deploy/update.sh --geosite           # 服务更新后顺带更新 geo 文件
+bash deploy/update.sh --geosite-only      # 只更新 geo 文件（不需要 .env.prod）
+bash deploy/update.sh --geosite-only --geosite-url https://…/geosite.dat \
+  --geosite-path /opt/1panel/docker/compose/clash/mihomo/GeoSite.dat --geosite-container mihomo
+```
+
+- 下载到目标目录下的临时文件（同目录 rename = 原子替换），先对照 `Content-Length` 查截断，
+  再按 protobuf 线格式逐条解析（末条长度越界即判截断），最后确认 `--geosite-require`（默认 `gfw`）分类存在；
+  任一校验失败都**不触碰**现有文件。
+- 通过校验且内容有变化才备份（`GeoSite.dat.bak.<时间戳>`，保留最近 3 份）、原子覆盖并重启容器；
+  重启后若容器没 running 或日志出现 `level=fatal`，自动把备份换回去并报错。
+- 内容没变化时直接跳过，不会重启容器。
 
 ## 版本检查（后台「系统更新」页）
 

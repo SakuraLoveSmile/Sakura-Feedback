@@ -61,6 +61,8 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Release 更新日志提取回归
         run: python3 e2e/check-release-notes.py
+      - name: update.sh 安全更新回归
+        run: python3 e2e/check-update-sh.py
       # 必须先 build：examples/* 依赖 workspace 包 @feedback/web，其类型入口是 dist/index.d.ts，
       # 全新检出时 dist 不存在，直接 typecheck 会报 TS2307 "Cannot find module '@feedback/web'"。
       # 本地能过只是因为恰好留有上次构建产物。顺序固定为 build → typecheck → lint → test。

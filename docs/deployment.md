@@ -77,13 +77,23 @@ bash deploy/update.sh        # 之后每次更新：卷备份 → compose pull �
 
 ```bash
 cd <部署目录>
-bash <仓库>/deploy/update.sh          # 卷备份 → compose pull → 重建 → 等健康（自动识别 compose 文件名）
+bash <仓库>/deploy/update.sh          # 卷备份 → 按 digest 取镜像并校验 → 重建 → 等健康
+bash <仓库>/deploy/update.sh --digest sha256:…   # 不查发布清单，直接指定期望 digest
+bash <仓库>/deploy/update.sh --no-verify          # 退回旧行为（compose pull，不校验）
 # 或手动：docker compose --env-file .env.prod pull && docker compose --env-file .env.prod up -d
 ```
 
-`update.sh` 先把数据卷打成 tar 备份（`<deploy-dir>/backups/`，保留最近 10 份），再拉取重建；
-这就是唯一的回退凭据。数据库迁移是**单向**的：跨 schema 版本回退（如 0.5.x → 0.4.x）
+`update.sh` 先把数据卷打成 tar 备份（`<deploy-dir>/backups/`，保留最近 10 份），随后按
+「先下载 → 校验 → 再覆盖」取镜像：按发布清单的 digest 暂存拉取（不改动现有标签），本地镜像 ID
+与清单一致才写 `<tag>@<digest>`、备份 `.env.prod` 并重建。清单与镜像不一致、拉取失败或清单不可达
+（且未用 `--digest`）时停下，容器与 `.env.prod` 保持原样。
+
+数据卷备份是唯一的回退凭据。数据库迁移是**单向**的：跨 schema 版本回退（如 0.5.x → 0.4.x）
 必须先恢复备份包，不能只改镜像标签。
+
+可选地，同一脚本可维护 mihomo 的 geo 文件（`--geosite` / `--geosite-only`）：下载到同目录临时文件
+→ 校验 `Content-Length` 与 protobuf 线格式（含必需分类）→ 备份 → 原子替换 → 重启并复查，起不来自动回滚。
+详见 [`../deploy/README.md`](../deploy/README.md) 的「geo 文件」一节。
 
 更新期间服务有短暂停机（`stop` → `up -d`，compose 的 `stop_grace_period: 30s` 负责优雅退出）；
 与旧完整模式不同，**更新期间不再暂停业务写入**——停机窗口内的提交会随容器一起不可用，
