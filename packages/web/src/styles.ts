@@ -2634,4 +2634,321 @@ export const STYLES = /* css */ `
   .fb-orb .fb-orb-core { display:none !important; }
   .fb-region-tools { background:Canvas; color:ButtonText; border-color:ButtonText; }
 }
+
+/* ---- v14 面板视觉精修 ----
+   参考管理后台现有的卡片 / 控件层级：发丝分隔、白色输入面、12–14px 圆角、
+   安静的次要操作，以及统一的 4/8/12/16 间距。只改样式，不改 DOM、文案与行为。 */
+:host {
+  --fb-input-bg: #ffffff;
+  --fb-card-bg: #f6f7f9;
+  --fb-segment-bg: #ffffff;
+  --fb-segment-text: #0062c4;
+  --fb-shadow-card: 0 1px 2px rgba(16, 24, 40, 0.05);
+  --fb-shadow-raised: 0 10px 28px -18px rgba(16, 24, 40, 0.35);
+  --fb-shadow: 0 24px 64px -28px rgba(16, 24, 40, 0.45), 0 2px 8px rgba(16, 24, 40, 0.06);
+}
+
+:host([theme="dark"]) {
+  --fb-input-bg: #242426;
+  --fb-card-bg: #242426;
+  --fb-segment-bg: #3a3a3c;
+  --fb-segment-text: #6cb2ff;
+  --fb-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --fb-shadow-raised: 0 12px 32px -18px rgba(0, 0, 0, 0.8);
+  --fb-shadow: 0 28px 72px -28px rgba(0, 0, 0, 0.85), 0 2px 10px rgba(0, 0, 0, 0.45);
+}
+
+@media (prefers-color-scheme: dark) {
+  :host(:not([theme="light"]):not([theme="dark"])) {
+    --fb-input-bg: #242426;
+    --fb-card-bg: #242426;
+    --fb-segment-bg: #3a3a3c;
+    --fb-segment-text: #6cb2ff;
+    --fb-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --fb-shadow-raised: 0 12px 32px -18px rgba(0, 0, 0, 0.8);
+    --fb-shadow: 0 28px 72px -28px rgba(0, 0, 0, 0.85), 0 2px 10px rgba(0, 0, 0, 0.45);
+  }
+}
+
+/* 头部：品牌块 + 单行标题 / 元信息；设置与关闭共用一套圆形控件。 */
+.fb-header { padding: 12px 16px 10px; gap: 10px; }
+.fb-title-group { flex-wrap: nowrap; align-items: baseline; gap: 8px; }
+.fb-header-icon {
+  align-self: center;
+  width: 30px;
+  height: 30px;
+  padding: 6px;
+  box-sizing: border-box;
+  border-radius: 9px;
+  background: var(--fb-accent);
+  color: #fff;
+  fill: currentColor;
+}
+.fb-title-group h2 { font-size: 18px; line-height: 26px; letter-spacing: -0.02em; white-space: nowrap; }
+.fb-title-group .fb-header-meta {
+  width: auto;
+  margin-left: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--fb-text-secondary);
+}
+.fb-header-actions { gap: 6px; }
+.fb-icon-btn { background: var(--fb-bg-subtle); }
+.fb-close:hover,
+.fb-icon-btn:hover { background: var(--fb-bg-subtle-hover); color: var(--fb-text); }
+
+/* 分段页签：容器发丝描边，选中项为抬起的白色胶囊。 */
+.fb-nav-tabs {
+  margin: 2px 16px 10px;
+  border-radius: 12px;
+  background: var(--fb-bg-subtle);
+  box-shadow: inset 0 0 0 1px var(--fb-border);
+}
+.fb-nav-btn {
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: 10px;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.fb-nav-btn:hover { background: var(--fb-bg-subtle-hover); }
+.fb-nav-btn.active {
+  background: var(--fb-segment-bg);
+  color: var(--fb-segment-text);
+  font-weight: 600;
+  box-shadow: var(--fb-shadow-card), inset 0 0 0 1px var(--fb-border);
+}
+
+/* 主体：略松的节奏与更轻的滚动条。 */
+.fb-body {
+  padding: 12px 16px 0;
+  gap: 12px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--fb-border-strong) transparent;
+}
+.fb-body::-webkit-scrollbar { width: 8px; }
+.fb-body::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: var(--fb-border-strong);
+  background-clip: padding-box;
+}
+.fb-body::-webkit-scrollbar-track { background: transparent; }
+
+.fb-prompt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fb-text);
+}
+.fb-prompt::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 3px;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--fb-accent);
+}
+.fb-textarea {
+  padding: 12px 14px;
+  background: var(--fb-input-bg);
+  border-color: var(--fb-border);
+  box-shadow: inset 0 1px 2px rgba(16, 24, 40, 0.03);
+}
+.fb-textarea::placeholder { color: var(--fb-text-tertiary); opacity: 1; }
+.fb-textarea:hover:not(:disabled) { border-color: var(--fb-border-strong); }
+.fb-textarea:focus {
+  background: var(--fb-input-bg);
+  border-width: 1px;
+  border-color: var(--fb-accent);
+  box-shadow: 0 0 0 3px var(--fb-focus-ring);
+}
+.fb-counter-row { padding: 0 2px; }
+
+/* 图片证据：附件卡承载缩略图与轻量操作，悬停时抬起。 */
+.fb-shot-area { gap: 10px; }
+.fb-screenshot-thumb-box {
+  background: var(--fb-card-bg);
+  border-color: var(--fb-border);
+  box-shadow: var(--fb-shadow-card);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.fb-screenshot-thumb-box:hover {
+  border-color: var(--fb-border-strong);
+  box-shadow: var(--fb-shadow-raised);
+}
+.fb-thumb-frame {
+  box-sizing: border-box;
+  border: 1px solid var(--fb-border);
+  border-radius: 10px;
+  background: var(--fb-bg);
+}
+.fb-thumb-info { gap: 6px; }
+.fb-thumb-meta { gap: 2px 8px; }
+.fb-screenshot-badge {
+  padding: 2px 8px;
+  border: 1px solid var(--fb-border);
+  border-radius: 999px;
+  background: var(--fb-bg);
+  color: var(--fb-text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+}
+.fb-screenshot-size { font-size: 11px; color: var(--fb-text-tertiary); }
+.fb-thumb-actions { gap: 4px; margin-top: 2px; }
+.fb-thumb-edit,
+.fb-thumb-remove {
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  font-size: 12px;
+  font-weight: 600;
+}
+.fb-thumb-edit { color: var(--fb-segment-text); }
+.fb-thumb-edit:hover:not(:disabled) { background: rgba(0, 113, 227, 0.08); }
+.fb-thumb-remove { color: var(--fb-status-error-text); }
+.fb-thumb-remove:hover:not(:disabled) { background: var(--fb-status-error-bg); }
+
+/* 截图操作：主操作用实心强调色，移除与添加退到安静层级。 */
+.fb-screenshot-actions { gap: 6px; }
+.fb-btn-capture,
+.fb-btn-retake,
+.fb-btn-remove,
+.fb-btn-add-image {
+  flex: 1 1 96px;
+  min-width: 0;
+  padding: 0 10px;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.fb-btn-capture:not(:disabled),
+.fb-btn-retake:not(:disabled) {
+  background: var(--fb-accent);
+  border-color: var(--fb-accent);
+  color: #fff;
+}
+.fb-btn-capture:hover:not(:disabled),
+.fb-btn-retake:hover:not(:disabled) {
+  background: var(--fb-accent-hover);
+  border-color: var(--fb-accent-hover);
+}
+.fb-btn-remove {
+  background: transparent;
+  border-color: transparent;
+  color: var(--fb-status-error-text);
+}
+.fb-btn-remove:hover:not(:disabled) { background: var(--fb-status-error-bg); }
+.fb-btn-add-image {
+  background: var(--fb-bg);
+  border-color: var(--fb-border-strong);
+  color: var(--fb-text);
+}
+.fb-btn-add-image:hover:not(:disabled) {
+  background: var(--fb-bg-subtle);
+  color: var(--fb-text);
+}
+
+/* 诊断日志：默认是一条安静的可展开卡片，展开后为独立内容卡。 */
+.fb-logs-area { gap: 6px; }
+.fb-logs-toggle {
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: var(--fb-card-bg);
+  box-shadow: var(--fb-shadow-card);
+  font-size: 12px;
+}
+.fb-logs-toggle:hover { background: var(--fb-bg-subtle); }
+.fb-logs-toggle[aria-expanded="true"] {
+  background: var(--fb-bg-subtle);
+  border-color: var(--fb-border-strong);
+  box-shadow: none;
+}
+.fb-logs-summary { font-weight: 500; }
+.fb-logs-chevron { color: var(--fb-text-tertiary); }
+.fb-logs-body {
+  padding: 10px;
+  border: 1px solid var(--fb-border);
+  border-radius: 12px;
+  background: var(--fb-bg-subtle);
+}
+.fb-log-item { background: var(--fb-bg); border-color: var(--fb-border); }
+.fb-btn-add-log { border-radius: 8px; }
+
+/* 状态卡：左侧色条固定语义，圆角与信息卡一致。 */
+.fb-status-region { min-height: 0; }
+.fb-status-card { border-radius: 12px; border-left-width: 3px; }
+
+/* 固定提交区：通栏发丝分隔，内容滚动时不露出侧边。 */
+.fb-footer {
+  margin: auto -16px 0;
+  padding: 12px 16px 14px;
+  border-top: 1px solid var(--fb-border);
+  background: var(--fb-bg);
+}
+.fb-submit {
+  border-radius: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.fb-submit:not(:disabled) {
+  box-shadow: 0 1px 2px rgba(0, 113, 227, 0.28), 0 8px 20px -14px rgba(0, 113, 227, 0.6);
+}
+.fb-submit:disabled {
+  background: var(--fb-bg-subtle);
+  color: var(--fb-text-secondary);
+  box-shadow: none;
+}
+.fb-footnote { color: var(--fb-text-tertiary); }
+.fb-quota {
+  align-self: center;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--fb-bg-subtle);
+  color: var(--fb-text-secondary);
+}
+.fb-login-panel {
+  padding: 12px;
+  border-color: var(--fb-border);
+  border-radius: 12px;
+}
+.fb-login-input {
+  min-height: 40px;
+  border-color: var(--fb-border-strong);
+  border-radius: 9px;
+  background: var(--fb-input-bg);
+}
+.fb-login-confirm,
+.fb-login-cancel { border-radius: 10px; }
+
+/* 服务器设置：保存是唯一主操作，其余保持次要层级。 */
+.fb-settings-save {
+  background: var(--fb-accent);
+  border-color: var(--fb-accent);
+  color: #fff;
+}
+.fb-settings-save:hover:not(:disabled) {
+  background: var(--fb-accent-hover);
+  border-color: var(--fb-accent-hover);
+}
+.fb-settings-save:disabled { opacity: 0.55; cursor: not-allowed; }
+
+/* 历史列表沿用同一层级：卡片轻投影，悬停抬起。 */
+.fb-history-item.fb-issue-row { box-shadow: var(--fb-shadow-card); }
+.fb-history-item.fb-issue-row:hover {
+  border-color: var(--fb-border-strong);
+  box-shadow: var(--fb-shadow-raised);
+}
+
+/* 设置视图与主体同一内边距节奏。 */
+.fb-settings { padding: 12px 16px 16px; gap: 12px; }
+
 `;
