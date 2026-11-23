@@ -1424,7 +1424,8 @@ export class FeedbackWidget extends HTMLElement {
   close(): void {
     this.stopDialoguePolling();
     // 关闭面板：使尚未完成的登录接续与额度查询失效（已建立的登录态、
-    // 草稿与截图不受影响），并取消额度定时查询；同时清除补发意图，
+    // 额度与偏好不受影响；草稿与任务态按「关闭即放弃」清空，见下方
+    // discardUnsubmittedDraft），并取消额度定时查询；同时清除补发意图，
     // 重新打开时按当前状态重新登记（T1-B）。设置视图一并收起。
     this.settingsOpen = false;
     this.settingsConfirmOpen = false;
@@ -1445,6 +1446,9 @@ export class FeedbackWidget extends HTMLElement {
     // 编辑器随面板关闭（不改动草稿字节；取消语义）
     this.editorHandle?.close();
     this.editorHandle = null;
+    // 关闭即放弃本次未提交的反馈（2026-11-23 裁决）：下一次呼出重新截图、
+    // 从空白开始，而不是恢复关闭时留着的那张旧图和那段话。
+    this.discardUnsubmittedDraft();
     this.panel.classList.remove('is-open');
     window.setTimeout(() => {
       if (!this.openState) this.panel.hidden = true;
@@ -1486,6 +1490,53 @@ export class FeedbackWidget extends HTMLElement {
     } else {
       this.launcher.focus();
     }
+  }
+
+  /**
+   * 关闭面板即放弃本次未提交的反馈（2026-11-23 裁决）：
+   * - 清空撰写正文、截图（origin=capture）、手动添加的图片与日志附件；
+   * - 清掉上一次提交留下的任务态（反馈标识 / 幂等键 / 冻结快照 / 结果未知的
+   *   保留请求 / 错误与等待提示 / 轮询），phase 回到 idle；
+   * - 视图回到「新建反馈」撰写页，不停在旧工单追踪页或历史对话页。
+   *
+   * 保留：访问令牌与登录态、额度、我的反馈历史数据、服务器覆盖与设置偏好；
+   * 已经发出的提交请求不取消——关闭面板不等于撤回，只清本地草稿。
+   * 非关闭的中断（截图失败 / 重拍取消 / 提交失败 / 401 回登录态）不走这里，
+   * 面板内的历史回复草稿（replyDrafts）也不属于本次放弃范围。
+   */
+  private discardUnsubmittedDraft(): void {
+    // 任务态：上一次提交留下的标识、幂等键、冻结快照与结果未确认的原请求
+    this.stopPolling();
+    this.pollDelay = POLL_START_MS;
+    this.pollStartedAt = 0;
+    this.refreshing = false;
+    this.phase = 'idle';
+    this.lastFeedbackId = null;
+    this.submittedFeedbackEpoch = null;
+    this.lastRecord = null;
+    this.lastErrorSummary = null;
+    this.lastSubmittedText = '';
+    this.waitingNotice = null;
+    this.idempotencyKey = null;
+    this.submitSnapshot = null;
+    this.unconfirmedRequest = null;
+    // 草稿本体：textarea 的可见值与 draft.text 必须一起清（只清 draft 会留下旧正文）
+    this.textarea.value = '';
+    this.clearDraft();
+    // 提示类残留：图片 / 日志区的错误与采集状态、只针对旧草稿的登录表单
+    this.showImageError('');
+    this.logErrorEl.hidden = true;
+    this.logErrorEl.textContent = '';
+    this.logStatusEl.hidden = true;
+    this.logStatusEl.textContent = '';
+    this.loginVisible = false;
+    this.loginError = '';
+    this.renderStatus('');
+    // 视图回到撰写页：switchTab 同时收起对话视图并让旧请求的结果失效
+    if (this.activeTab !== 'compose' || this.activeDialogueId !== null) {
+      this.switchTab('compose');
+    }
+    this.syncUi();
   }
 
   cancelCapture(): void {
@@ -7975,21 +8026,9 @@ export class FeedbackWidget extends HTMLElement {
     this.syncUi();
   }
 
+  /** 「再记一条」：与关闭面板同一条「放弃本次未提交反馈」的重置路径。 */
   private resetToCompose(): void {
-    this.stopPolling();
-    this.phase = 'idle';
-    this.lastFeedbackId = null;
-    this.submittedFeedbackEpoch = null;
-    this.lastRecord = null;
-    this.lastErrorSummary = null;
-    this.waitingNotice = null;
-    this.idempotencyKey = null;
-    this.submitSnapshot = null;
-    this.unconfirmedRequest = null;
-    this.textarea.value = '';
-    this.clearDraft();
-    this.renderStatus('');
-    this.syncUi();
+    this.discardUnsubmittedDraft();
     this.textarea.focus();
   }
 

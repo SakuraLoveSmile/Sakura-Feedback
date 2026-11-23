@@ -35,13 +35,18 @@ web、android、ios、windows、macos、linux（平台差异经条件导入隔�
 📄 完整的版本矩阵、平台要求、迁移步骤与边界、验证范围与证据追溯：
 [`docs/flutter-storage-compat.md`](../../docs/flutter-storage-compat.md)（权威记录见 `VERIFICATION.md`）。
 
-## 从 0.10.0 升级与宿主托管
+## 从 0.10.0 升级与宿主托管（0.14.0 起为接入要求）
 
-在宿主 `pubspec.yaml` 的 `feedback_widget.git` 下使用 `ref: v0.12.0` 和
+在宿主 `pubspec.yaml` 的 `feedback_widget.git` 下使用 `ref: v0.14.0` 和
 `path: flutter/feedback`，执行 `flutter pub get`。省略新参数时，默认入口、动效与按应用保存的偏好沿用 0.10.0。
 
-宿主可从包入口导入 `FeedbackLauncherStyle`、`FeedbackWakeVisual`、`FeedbackOrbEntrance`，
-以及配置快捷键用的 `FeedbackWakeShortcut`。要让用户在宿主设置页选择入口、光束动效和灵感球入场动画，可这样挂载：
+**0.14.0 起，宿主必须自己接管反馈外观设置**：入口样式（贴边标签 / 灵感球）、灵感球待机样式、
+唤醒方式（手势）、唤醒效果（灵感球入场），光束形态另含唤醒动效。由宿主设置页提供、保存，并在启动 /
+改选后回传组件；面板里对应项会隐藏。只依赖组件面板自带设置不再算接入完成，判定见
+[接入指南 §4.2.1](../../docs/integration.md#421-flutter-宿主托管反馈设置接入要求) 与 §9.2 验收清单。
+
+宿主可从包入口导入 `FeedbackLauncherStyle`、`FeedbackWakeVisual`、`FeedbackOrbEntrance`、
+`FeedbackOrbIdleStyle`、`FeedbackWakeGesture`，以及配置快捷键用的 `FeedbackWakeShortcut`。示意：
 
 ```dart
 FeedbackWidget(
@@ -49,12 +54,14 @@ FeedbackWidget(
   launcherStyle: settings.launcherStyle,
   wakeVisual: settings.wakeVisual,
   orbEntrance: settings.orbEntrance,
+  orbIdleStyle: settings.orbIdleStyle,
+  wakeGestures: settings.wakeGestures,
   hideSettings: true,
   child: child,
 )
 ```
 
-宿主保存这三个值后重建组件。只传值会隐藏对应设置项；`hideSettings: true` 还会隐藏其余反馈设置，面板只保留服务器设置。开关默认 `false`。如果也要让用户在面板改选，可给相应的值配上 `onLauncherStyleChanged`、`onWakeVisualChanged` 或 `onOrbEntranceChanged`，由宿主保存并回传新值。待机样式与唤醒手势遵循同一规则。各项适用的入口见[接入指南 §4.2.1](../../docs/integration.md#421-flutter-宿主托管反馈设置可选)。
+宿主保存这些值后重建组件。只传值会隐藏对应设置项；`hideSettings: true` 还会隐藏其余反馈设置，面板只保留服务器设置（默认 `false`）。过渡期内如果也要让用户在面板改选，可给相应的值配上 `onLauncherStyleChanged`、`onWakeVisualChanged`、`onOrbEntranceChanged`、`onOrbIdleStyleChanged` 或 `onWakeGesturesChanged`，由宿主保存并回传新值。各项适用的入口见[接入指南 §4.2.1](../../docs/integration.md#421-flutter-宿主托管反馈设置接入要求)。
 
 ## 使用
 
@@ -211,6 +218,9 @@ FeedbackWidget(
   - 都没有 → 普通点击 / 控制器入口照常「先截图后开面板」（整窗截图），
     拖动释放进入上述局部选区流程，确认后才挂载面板交付截图。
   面板只在首次呼出后挂载，未挂载即无草稿可言，照常捕获。
+  **关闭面板即放弃本次未提交的草稿**（见下节），所以这条守卫只对「面板仍
+  打开时宿主再次要截图」生效；关掉之后没有旧草稿可恢复，下一次呼出照常
+  重新截图。
 - **先截图后开面板**（普通点击与 `controller.captureAndOpen()` 路径）：
   呼出时保持宿主当前布局等待 paint 完成 → 捕获宿主边界（遮挡 + 编码）→
   校验捕获会话 → 挂载面板并交付截图 → 最后聚焦输入框。**灵感球拖拽路径
@@ -239,9 +249,9 @@ FeedbackWidget(
   （含 post-frame 交付前的序号校验）；用户取消静默不报错；
   普通呼出（`open()`）与进行中的捕获合并。
 - **重拍**：面板内「重新截图」走内部明确入口，复用同一会话化流程；
-  只有重拍成功才替换旧图。重拍**失败 / 取消 / 中途关闭面板**都保持草稿
-  文本与旧截图字节不变（`setScreenshot` 仅在成功时调用），重拍中途关闭后
-  再次呼出面板恢复可见。
+  只有重拍成功才替换旧图。重拍**失败 / 取消**保持草稿文本与旧截图字节
+  不变（`setScreenshot` 仅在成功时调用）；重拍中途**关闭面板**则是放弃本次
+  反馈（草稿随关闭清空），再次呼出面板恢复可见并按 `captureMode` 重新截图。
 - **不可绘制区域检测**：宿主包含 PlatformView / Texture（相机、地图、
   WebView、视频等渲染器）时截图**照常产出**，预览旁提示「部分内容可能
   未入图（系统级画面），可手动添加图片补充」——不把缺失内容当作完整截图。
@@ -282,8 +292,14 @@ FeedbackWidget(
 
 - `FeedbackPanelState` 是草稿的单一所有者（长期常驻）；父组件只暂存
   捕获结果，通过只读 `hasDraft` / `hasScreenshot` / `captureInfo`
-  判断行为（呼出守卫即依赖它们）。草稿恢复（重开面板）不重拍；移除截图
-  会同时移除落点与捕获时间。
+  判断行为（呼出守卫即依赖它们）。移除截图会同时移除落点与捕获时间。
+- **关闭面板 = 放弃本次未提交的反馈**（2026-11-23 裁决）：`visible` 由 true
+  变 false（用户点关闭 / Esc / 窄屏返回 / 宿主 `controller.close()`）时清空
+  正文、截图、图片、日志与上一次提交的任务态，面板回到「新建反馈」撰写页；
+  下次呼出不恢复旧草稿，按 `captureMode` 重新截图。保留登录态与令牌、额度、
+  我的反馈数据与各家设置；已经发出的提交请求不撤回（关闭不清屏外状态）。
+  非关闭的中断（截图失败、重拍取消、提交失败、401 回登录态、额度用尽）
+  仍保留草稿。
 - 正文 10000 码点（runes）上限；提交体携带自制 uuid 幂等键、
   `appId`、`text` 与显式 `context`。
 - **两条失败路径严格区分，服务端已接收的反馈绝不重发**：
@@ -350,14 +366,16 @@ flutter analyze
 flutter test
 ```
 
-当前实测：`flutter analyze` 无问题、`flutter test` **220/220 通过**。
+当前实测（2026-11-23，本机 Flutter 3.41.3）：`flutter analyze` 无问题、
+`flutter test` **704/704 通过**。
 依赖三档（9.2.2 / 10.3.1 / 11.0.0）在上面的隔离矩阵里各跑一遍同一批用例
 （`bash tools/flutter-storage-matrix/run.sh`）。
 
 回归测试覆盖：像素级遮挡（敏感区不透明覆盖、周围布局、变换 AABB 多遮、
 透明遮挡色、obscureText、双实例隔离、几何失效中止、统一图片限制边界）与
 异步生命周期（先截图后开面板、A/B 交错、取消/关闭/销毁/控制器替换、
-过期交付丢弃、草稿恢复不重拍、临时 ui.Image/ui.Picture 全路径释放），
+过期交付丢弃、关闭即放弃草稿、面板仍打开时守卫不重拍、
+临时 ui.Image/ui.Picture 全路径释放），
 见 `test/capture_mask_pixel_test.dart`、`test/capture_lifecycle_test.dart`。
 
 T1/T2 本轮新增：拖动灵感球的局部选区流程与 `capture.region`
@@ -373,9 +391,10 @@ T1/T2 本轮新增：拖动灵感球的局部选区流程与 `capture.region`
 后重开、拖拽选区覆盖层重建与确认交付，以及测试环境探测（`FLUTTER_TEST`
 下扫光与呼吸不启动常驻 Ticker、`pumpAndSettle` 不挂起）。
 
-另有两类新增回归：统一草稿守卫与重拍保留
-（`test/draft_capture_guard_test.dart`：三个入口都不重拍、重拍失败/取消/
-中途关闭保留文案与旧图）与两类失败路径 + 服务隔离存储键
+另有两类新增回归：统一草稿守卫与「关闭即放弃」
+（`test/draft_capture_guard_test.dart`：关闭后重新截图且正文清空、面板仍打开
+时 captureAndOpen 不重拍、关闭后拖灵感球进入选区、重拍失败/取消保留文案与
+旧图）与两类失败路径 + 服务隔离存储键
 （`test/submit_failure_class_test.dart`：Class A 同 key 同字节 / 换图换 key、
 Class B 零重发 + 刷新 + 复制 ID；`test/token_store_scope_test.dart`：
 不同服务 / 不同 appId 键不同、读不到别家令牌）。

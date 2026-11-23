@@ -748,14 +748,14 @@ void main() {
   });
 
   testWidgets(
-      'handoff, edit and close restores shader and keeps the real draft',
+      'handoff, edit and close restores shader and clears the abandoned draft',
       (tester) async {
     await host.mount(tester);
     await _waitLens(tester);
     await host.select(tester);
     await tester.tap(find.byKey(const Key('feedback-capture-use-region')));
     await host.waitScreenshot(tester);
-    final String id = host.panel(tester).captureImageId!;
+    expect(host.panel(tester).hasScreenshot, isTrue);
     await tester.enterText(find.byKey(const Key('feedback-input')), '保留交接草稿');
     host.controller.close();
     await tester.pump();
@@ -763,13 +763,15 @@ void main() {
     expect(debugOrbLensCaptureAttempts, 2);
     host.controller.open();
     await tester.pump();
-    expect(host.panel(tester).captureImageId, id);
+    expect(host.panel(tester).captureImageId, isNull,
+        reason: '关闭面板即放弃本次截图');
     expect(
         tester
             .widget<TextField>(find.byKey(const Key('feedback-input')))
             .controller!
             .text,
-        '保留交接草稿');
+        isEmpty,
+        reason: '关闭面板即放弃本次草稿');
     expect(tester.takeException(), isNull);
   });
 

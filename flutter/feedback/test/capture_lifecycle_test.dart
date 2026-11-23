@@ -176,7 +176,7 @@ void main() {
     expect(find.byKey(const Key('feedback-input')), findsOneWidget);
   });
 
-  testWidgets('普通呼出恢复草稿、不重拍（hasScreenshot 保持 false）', (tester) async {
+  testWidgets('关闭即放弃草稿：再次 open() 只开面板、不重拍也不恢复旧草稿', (tester) async {
     final controller = FeedbackController();
     addTearDown(controller.dispose);
     await pumpViewportHost(tester, controller);
@@ -193,19 +193,20 @@ void main() {
 
     controller.close();
     await tester.pump();
+    expect(panel.hasDraft, isFalse, reason: '关闭面板即放弃本次未提交的反馈');
     controller.open();
     await pumpUntil(tester, () => controller.isOpen);
     await tester.pump();
     await tester.pump();
-    // 草稿恢复，且不触发重拍：无截图交付。
+    // 重开是空白撰写页，open() 本身也不截图。
     expect(
       tester
           .widget<TextField>(find.byKey(const Key('feedback-input')))
           .controller!
           .text,
-      '未写完的草稿',
+      isEmpty,
     );
-    expect(panel.hasScreenshot, isFalse, reason: '草稿恢复不得触发重拍');
+    expect(panel.hasScreenshot, isFalse, reason: 'open() 不截图，也不恢复已放弃的旧草稿');
     expect(find.byKey(const Key('feedback-screenshot-wrap')), findsNothing);
   });
 

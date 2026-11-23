@@ -99,13 +99,13 @@ void main() {
         reason: '关闭后重开仍能挂载');
     final FeedbackPanelState panel =
         tester.state<FeedbackPanelState>(find.byType(FeedbackPanel));
-    expect(panel.hasDraft, isTrue, reason: '重开后草稿仍在（子树状态未被重建破坏）');
-    expect(
-        tester
-            .widget<TextField>(find.byKey(const Key('feedback-input')))
-            .controller!
-            .text,
-        '无 Overlay 宿主的草稿');
+    // 关闭即放弃本次未提交的反馈：重开是空白撰写页，旧草稿与旧截图都不回来。
+    expect(panel.hasDraft, isFalse, reason: '关闭面板即放弃本次草稿');
+    expect(panel.hasImages, isFalse, reason: '旧截图同样不保留');
+    await tester.enterText(
+        find.byKey(const Key('feedback-input')), '重开后重新输入');
+    await tester.pump();
+    expect(panel.hasDraft, isTrue, reason: '重开后的输入框仍能正常编辑');
 
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump(const Duration(seconds: 2));
@@ -142,8 +142,8 @@ void main() {
     expect(controller.isOpen, isFalse);
     controller.open();
     await pumpUntil(tester, () => input.evaluate().isNotEmpty);
-    expect(tester.widget<TextField>(input).controller!.text, '测试',
-        reason: '编辑后的草稿在关闭再打开后仍保留');
+    expect(tester.widget<TextField>(input).controller!.text, isEmpty,
+        reason: '关闭面板即放弃本次草稿：重开后从空白开始');
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump(const Duration(seconds: 2));
   },

@@ -338,7 +338,10 @@ describe('R7 safe-texture ownership',()=>{
     if(gate==='background') {vi.spyOn(document,'visibilityState','get').mockReturnValue('visible');document.dispatchEvent(new Event('visibilitychange'));}
     await nextCapture();
     expect(renders).toHaveBeenCalledTimes(count+1); expect(uploads).toHaveLength(uploaded+1);
-    expect(draws.at(-1)![4]).toBe(true); expect(m.textarea.value).toBe('keep the existing draft');
+    expect(draws.at(-1)![4]).toBe(true);
+    // 关闭面板即放弃本次未提交的反馈：panel 分支的文字随关闭清空；
+    // host / background 只是隐藏入口，面板未关闭，草稿保留。
+    expect(m.textarea.value).toBe(gate==='panel'?'':'keep the existing draft');
     expect(m.provider).not.toHaveBeenCalled();
   });
   it('collapse and wake retain sampler ownership while continuing masked refreshes without calling the formal provider',async()=>{
@@ -553,19 +556,12 @@ describe('R3 neutral glass and component theme',()=>{
     m.widget.remove(); const count=draws.length; change(false); await settle();
     expect(draws).toHaveLength(count); expect(renders).toHaveBeenCalledTimes(captures+3);
   });
-  it('the selection recolors without recapture, entrance restart or changing its frozen image and existing attachment/draft',async()=>{
+  it('the selection recolors without recapture or entrance restart and keeps its frozen image',async()=>{
     let now=0; vi.spyOn(performance,'now').mockImplementation(()=>now);
     const {change}=colorScheme(true);
     const m=mount({'launcher-mode':'orb'}); await settle();
     const blob=new Blob([encodePng(40,40,new Uint8ClampedArray(40*40*4))],{type:'image/png'});
     const provider=vi.fn(async()=>({blob,width:40,height:40})); m.widget.captureProvider=provider;
-    m.widget.open(); setTextarea(m,'keep the old description');
-    const file=new File([encodePng(4,4,new Uint8ClampedArray(4*4*4).fill(255))],'old-attachment.png',{type:'image/png'});
-    const input=m.root.querySelector<HTMLInputElement>('.fb-image-input')!;
-    Object.defineProperty(input,'files',{value:[file],configurable:true}); input.dispatchEvent(new Event('change'));
-    await settle(); m.widget.close(); await settle();
-    expect(m.root.querySelector('.fb-screenshot-size')!.textContent).toBe('4×4');
-    const attachment=m.screenshotThumb.src;
     pointer(m.orb,'pointerdown'); pointer(m.orb,'pointermove',180,140); pointer(m.orb,'pointerup',180,140); await settle();
     expect(m.root.querySelector<HTMLElement>('.fb-region-overlay')!.hidden).toBe(false);
     expect(draws.at(-1)![4]).toBe(true);
@@ -583,11 +579,11 @@ describe('R3 neutral glass and component theme',()=>{
     expect(renders).toHaveBeenCalledTimes(captures); expect(clear).toHaveBeenCalledTimes(clears);
     expect(URL.createObjectURL).toHaveBeenCalledTimes(urls);
     expect(m.root.querySelector<HTMLImageElement>('.fb-region-bg')!.src).toBe(frozen);
-    expect(m.screenshotThumb.src).toBe(attachment); expect(m.textarea.value).toBe('keep the old description');
-    expect(m.root.querySelector('.fb-screenshot-size')!.textContent).toBe('4×4');
+    // 选区不产生附件，也不恢复关闭面板时放弃的旧草稿
+    expect(m.screenshotWrap.hidden).toBe(true); expect(m.textarea.value).toBe('');
     m.root.querySelector<HTMLButtonElement>('.fb-region-cancel')!.click(); await settle();
-    expect(m.screenshotThumb.src).toBe(attachment); expect(m.textarea.value).toBe('keep the old description');
-    expect(m.root.querySelector('.fb-screenshot-size')!.textContent).toBe('4×4'); expect(provider).toHaveBeenCalledTimes(1);
+    expect(m.screenshotWrap.hidden).toBe(true); expect(m.textarea.value).toBe('');
+    expect(provider).toHaveBeenCalledTimes(1);
   });
   it('stationary material hides the old blue/orange halo, sweep and breathing while preserving the focus node and removing the unread badge',async()=>{
     const m=mount({'launcher-mode':'orb'}); await settle();

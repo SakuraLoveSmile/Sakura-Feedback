@@ -174,7 +174,7 @@ void main() {
             tester.state<FeedbackPanelState>(
                 find.byType(FeedbackPanel, skipOffstage: false))),
         isTrue,
-        reason: '面板状态随组件保留（草稿/截图不会因导航丢失）');
+        reason: '面板状态随组件保留（登录态与面板状态不会因导航重建）');
 
     // 返回第一页后入口也还在。
     await tester.tap(find.text('返回第一页'));

@@ -189,18 +189,25 @@ describe('wake lifecycle, exclusions and real draft boundary',()=>{
     const ps=points(); touch('touchstart',ps,ps,node); vi.advanceTimersByTime(700); touch('touchend',[],ps,node); await settle();
     expect(capture).not.toHaveBeenCalled(); expect(m.orb.classList.contains('is-collapsed')).toBe(true);
   });
-  it('cancel preserves original text, capture attachment ID and bytes; confirm alone replaces it and opens the real panel',async()=>{
+  it('closing the panel abandons the old screenshot and text: the next wake or drag captures again',async()=>{
     enabled(); const m=mount({'capture-mode':'viewport'}),capture=provider(m);
-    await m.widget.retakeScreenshot(); setTextarea(m,'原有草稿'); m.widget.close();
-    const cell=m.root.querySelector<HTMLElement>('.fb-screenshot-thumb-box')!, id=cell.dataset.imageId, src=m.screenshotThumb.src;
-    hold(); await settle(); expect(capture).toHaveBeenCalledTimes(1);
-    expect(cell.dataset.imageId).toBe(id); expect(m.screenshotThumb.src).toBe(src); expect(m.textarea.value).toBe('原有草稿');
-    drag(m); await settle(); expect(capture).toHaveBeenCalledTimes(2);
+    await m.widget.retakeScreenshot(); setTextarea(m,'原有草稿');
+    const id=m.root.querySelector<HTMLElement>('.fb-screenshot-thumb-box')!.dataset.imageId;
+    // 关闭即放弃本次未提交的反馈：旧截图与正文一起清空，面板不再显示附件
+    m.widget.close();
+    expect(m.screenshotWrap.hidden).toBe(true); expect(m.textarea.value).toBe('');
+    hold(); await settle(); expect(capture).toHaveBeenCalledTimes(1); // 唤醒只浮现灵感球
+    drag(m); await settle(); expect(capture).toHaveBeenCalledTimes(2); // 拖球 → 重新截图（不沿用旧图）
+    expect(m.root.querySelector<HTMLElement>('.fb-region-overlay')!.hidden).toBe(false);
+    expect(m.screenshotWrap.hidden).toBe(true);
     m.root.querySelector<HTMLButtonElement>('.fb-region-cancel')!.click();
-    expect(cell.dataset.imageId).toBe(id); expect(m.screenshotThumb.src).toBe(src); expect(m.textarea.value).toBe('原有草稿');
+    expect(m.screenshotWrap.hidden).toBe(true); expect(m.textarea.value).toBe(''); // 取消不写入、不回写旧草稿
     drag(m); await settle(); m.root.querySelector<HTMLButtonElement>('.fb-region-all')!.click(); await settle();
-    expect(capture).toHaveBeenCalledTimes(3); expect(m.root.querySelectorAll('.fb-screenshot-thumb-box')).toHaveLength(1);
-    expect(cell.dataset.imageId).toBe(id); expect(m.panel.classList.contains('is-open')).toBe(true); expect(m.textarea.value).toBe('原有草稿');
+    expect(capture).toHaveBeenCalledTimes(3);
+    expect(m.root.querySelectorAll('.fb-screenshot-thumb-box')).toHaveLength(1);
+    const next=m.root.querySelector<HTMLElement>('.fb-screenshot-thumb-box')!.dataset.imageId;
+    expect(next).not.toBe(id); // 新截图的附件 ID 不同：旧草稿已放弃
+    expect(m.panel.classList.contains('is-open')).toBe(true); expect(m.textarea.value).toBe('');
   });
   it('cancelling pending capture ignores late provider completion and cannot reopen selection',async()=>{
     enabled(); const m=mount({'capture-mode':'viewport'});

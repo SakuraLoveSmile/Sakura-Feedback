@@ -13,7 +13,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import '../src/index';
-import { cleanup, completeLogin, httpResponse, mount, setTextarea } from './helpers';
+import { cleanup, completeLogin, httpResponse, mount, recordFetch, setTextarea } from './helpers';
 
 const PNG = (tag: string) => new Blob([tag], { type: 'image/png' });
 const tick = (ms = 10) => new Promise((r) => setTimeout(r, ms));
@@ -265,7 +265,9 @@ describe('面板内手动截图入口', () => {
 
     expect(m.panel.classList.contains('is-open')).toBe(false);
     expect(shown(m.screenshotWrap)).toBe(false);
-    expect(m.textarea.value).toBe('关面板前的文字'); // 迟到结果不污染草稿
+    // 关闭即放弃本次未提交的反馈：面板里那段文字随关闭清空；
+    // 迟到结果同样只丢弃，不得借机写回草稿或开面板。
+    expect(m.textarea.value).toBe('');
     expect(m.captureBtn.disabled).toBe(false);
     expect(warnSpy).not.toHaveBeenCalled();
 
@@ -434,5 +436,84 @@ describe('面板内手动截图入口', () => {
 
     m.widget.close();
     await tick();
+  });
+});
+
+describe('关闭面板即放弃未提交的草稿（2026-11-23 裁决）', () => {
+  it('截图与正文入草稿后关闭：再次 captureAndOpen 重新截图，正文 / 图片 / 日志都从空白开始', async () => {
+    const m = mount({ 'capture-mode': 'viewport' });
+    let n = 0;
+    const provider = vi.fn(
+      async (): Promise<Shot> => ({
+        blob: PNG(++n === 1 ? 'old-shot!' : 'fresh'),
+        width: 800,
+        height: 600,
+      }),
+    );
+    m.widget.captureProvider = provider;
+
+    // 1) 呼出即截图 → 写入正文与一份手动日志
+    await m.widget.captureAndOpen();
+    await tick();
+    expect(provider).toHaveBeenCalledTimes(1);
+    expect(shown(m.screenshotWrap)).toBe(true);
+    const oldId = m.root.querySelector<HTMLElement>('.fb-screenshot-thumb-box')!.dataset.imageId;
+    const oldSrc = m.screenshotThumb.src;
+    setTextarea(m, '未提交的旧正文');
+    const logInput = m.root.querySelector<HTMLInputElement>('.fb-log-input')!;
+    Object.defineProperty(logInput, 'files', {
+      value: [new File(['old log line'], 'old.log', { type: 'text/plain' })],
+      configurable: true,
+    });
+    logInput.dispatchEvent(new Event('change'));
+    await tick();
+    expect(m.root.querySelectorAll('.fb-log-item').length).toBe(1);
+
+    // 2) 用户手动关闭面板 = 放弃本次未提交的反馈
+    m.widget.close();
+    await tick();
+    expect(m.panel.classList.contains('is-open')).toBe(false);
+    expect(m.textarea.value).toBe(''); // textarea 的可见值同步清空，不只是 draft.text
+    expect(m.screenshotWrap.hidden).toBe(true);
+    expect(m.root.querySelectorAll('.fb-log-item').length).toBe(0);
+
+    // 3) 再次呼出：不恢复旧草稿，重新截图
+    await m.widget.captureAndOpen();
+    await tick();
+    expect(provider).toHaveBeenCalledTimes(2); // 重新截图，而不是复用旧截图
+    expect(m.textarea.value).toBe('');
+    expect(m.root.querySelectorAll('.fb-screenshot-thumb-box')).toHaveLength(1);
+    expect(m.screenshotThumb.src).not.toBe(oldSrc);
+    expect(m.root.querySelector<HTMLElement>('.fb-screenshot-thumb-box')!.dataset.imageId).not.toBe(oldId);
+    expect(m.root.querySelectorAll('.fb-log-item').length).toBe(0);
+    expect(shown(m.retakeBtn)).toBe(true);
+  });
+
+  it('关闭清掉上一次提交的任务态、保留登录态与额度：重开回到空白撰写页而非旧追踪页', async () => {
+    const m = mount();
+    const { calls } = recordFetch(async () => httpResponse(201, { feedbackId: 'fb-close', status: 'received' }));
+    await completeLogin(m, undefined, { dialogue: true, images: 5 });
+    setTextarea(m, '已提交的反馈');
+    m.fab.click();
+    await tick();
+    m.submitBtn.click();
+    await tick(30);
+    expect(m.root.querySelector('.fb-submission-receipt')).not.toBeNull();
+
+    m.widget.close();
+    await tick();
+    m.fab.click();
+    await tick();
+
+    expect(m.textarea.value).toBe('');
+    expect(m.root.querySelector('.fb-submission-receipt')).toBeNull(); // 旧回执不再显示
+    expect(m.root.querySelector('.fb-body')?.classList.contains('has-submitted-feedback')).toBe(false);
+    expect(m.root.querySelector('.fb-nav-btn.active')?.textContent).toBe('新建反馈');
+    expect(m.submitBtn.textContent).toBe('提交');
+    expect(m.submitBtn.disabled).toBe(true); // 空草稿
+    // 保留：登录态与额度（关闭不等于退出登录）
+    expect(m.root.querySelector('.fb-quota')?.textContent).toContain('今日剩余');
+    // 已经发出的提交请求不撤回、也不因关闭而重发
+    expect(calls.filter((c) => c.method === 'POST')).toHaveLength(1);
   });
 });

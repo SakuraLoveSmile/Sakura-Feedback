@@ -305,56 +305,49 @@ void main() {
     }
   }
 
-  testWidgets(
-      'retake selection cancel preserves text, screenshot bytes and attachment id',
+  testWidgets('close drops the draft; a new drag+confirm starts a fresh capture',
       (tester) async {
     await host.mount(tester);
     await host.select(tester);
     await tester.tap(find.byKey(const Key('feedback-capture-use-region')));
     await host.waitScreenshot(tester);
-    final FeedbackPanelState original = host.panel(tester);
-    final String id = original.captureImageId!;
-    final Object bytes = original.screenshotBytes!;
+    final FeedbackPanelState panel = host.panel(tester);
+    expect(panel.captureImageId, isNotNull);
     await tester.enterText(find.byKey(const Key('feedback-input')), '保留草稿');
     host.controller.close();
     await tester.pump();
+    // 关闭面板即放弃本次未提交的反馈：草稿与截图都不再保留。
+    expect(panel.hasScreenshot, isFalse);
+    expect(panel.hasDraft, isFalse);
+
+    // 取消新的选区：不产出截图，也不会把刚放弃的草稿带回来。
     await host.select(tester);
-    expect(host.panel(tester), same(original));
-    expect(original.screenshotBytes, same(bytes));
+    expect(host.panel(tester), same(panel));
     await tester.tap(find.byKey(const Key('feedback-capture-cancel')));
     await tester.pump();
-    host.controller.open();
-    await tester.pump();
-    await tester.pump();
-    expect(original.captureImageId!, id);
-    expect(original.screenshotBytes, same(bytes));
-    expect(
-        tester
-            .widget<TextField>(find.byKey(const Key('feedback-input')))
-            .controller!
-            .text,
-        '保留草稿');
-    host.controller.close();
-    await tester.pump();
+    expect(panel.hasScreenshot, isFalse);
+    expect(panel.hasDraft, isFalse);
+
+    // 再次拖动并确认：从空白开始写入新的 capture 槽位。
     await host.select(tester, delta: const Offset(-160, -100));
     await tester.tap(find.byKey(const Key('feedback-capture-use-region')));
     await host.waitScreenshot(tester);
-    expect(original.imageCount, 1);
-    expect(original.captureImageId!, id,
-        reason: 'replace the actual stable capture slot');
+    expect(panel.hasScreenshot, isTrue);
+    expect(panel.imageCount, 1);
+    expect(panel.captureImageId, isNotNull);
   });
 
-  testWidgets('failed crop preserves frozen selection and old draft for retry',
+  testWidgets('failed crop keeps the frozen selection for retry after a fresh drag',
       (tester) async {
     await host.mount(tester);
     await host.select(tester);
     await tester.tap(find.byKey(const Key('feedback-capture-use-region')));
     await host.waitScreenshot(tester);
-    final FeedbackPanelState original = host.panel(tester);
-    final Object bytes = original.screenshotBytes!;
-    final String id = original.captureImageId!;
+    final FeedbackPanelState panel = host.panel(tester);
     host.controller.close();
     await tester.pump();
+    expect(panel.hasScreenshot, isFalse, reason: '关闭面板即放弃本次截图');
+
     await host.select(tester);
     final CaptureSelectionOverlayState selection =
         tester.state(find.byType(CaptureSelectionOverlay));
@@ -366,13 +359,12 @@ void main() {
     expect(find.byType(CaptureSelectionOverlay), findsOneWidget);
     expect(selection.selection, before);
     expect(find.byKey(const Key('feedback-capture-error')), findsOneWidget);
-    expect(original.screenshotBytes, same(bytes));
+    expect(panel.hasScreenshot, isFalse);
     expect(host.controller.isOpen, isFalse);
     await tester.tap(find.byKey(const Key('feedback-capture-use-region')));
     await host.waitScreenshot(tester);
-    expect(original.imageCount, 1);
-    expect(original.captureImageId, id);
-    expect(original.screenshotBytes, isNot(same(bytes)));
+    expect(panel.imageCount, 1);
+    expect(panel.captureImageId, isNotNull);
     expect(tester.takeException(), isNull);
   });
 
@@ -507,7 +499,7 @@ void main() {
   }
 
   testWidgets(
-      'close after commit keeps the adopted attachment but cancels animation and late focus',
+      'close after commit drops the attachment and cancels animation and late focus',
       (tester) async {
     await host.mount(tester);
     await host.select(tester);
@@ -519,7 +511,7 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(seconds: 2));
     expect(host.controller.isOpen, isFalse);
-    expect(panel.hasScreenshot, isTrue);
+    expect(panel.hasScreenshot, isFalse, reason: '关闭面板即放弃本次截图');
     expect(panel.draftFocused, isFalse);
     expect(find.byKey(const Key('feedback-handoff-flight-slot')), findsNothing);
     expect(tester.takeException(), isNull);

@@ -415,7 +415,7 @@ describe('L1-Web: 日志附件（自动采集、手动选择、预览、移除�
     expect(logsMeta[0]?.source).toBe('auto');
   });
 
-  it('删除自动附加的日志后不静默重新附加（重新打开面板也不再采集）', async () => {
+  it('删除自动附加的日志后同一次草稿内不静默重新附加；关闭重开按新草稿重新采集', async () => {
     const { m } = await ready();
     let providerCalls = 0;
     m.widget.logProvider = async () => {
@@ -433,12 +433,15 @@ describe('L1-Web: 日志附件（自动采集、手动选择、预览、移除�
     await settled();
     expect(m.root.querySelectorAll('.fb-log-item').length).toBe(0);
 
-    // 关闭再打开：不得静默重新调用 provider 附加
+    await settled(10);
+    expect(providerCalls).toBe(1); // 同一次草稿内删除后不静默重新附加
+
+    // 关闭即放弃本次未提交的反馈：重开是新的草稿，重新采集一次诊断日志
     m.widget.close();
     await settled();
     m.widget.open();
     await settled(10);
-    expect(providerCalls).toBe(1);
-    expect(m.root.querySelectorAll('.fb-log-item').length).toBe(0);
+    expect(providerCalls).toBe(2);
+    expect(m.root.querySelectorAll('.fb-log-item').length).toBe(1);
   });
 });

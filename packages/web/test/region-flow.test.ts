@@ -339,7 +339,7 @@ describe('T1 拖球 → 冻结 → 选区 → 确认', () => {
     expect(sentPng.height).toBe(300);
   });
 
-  it('取消：丢弃冻结画面、不覆盖原草稿、不报失败', async () => {
+  it('取消：丢弃冻结画面、不写入草稿、不报失败', async () => {
     const m = mount({ 'launcher-mode': 'orb' });
     const provider = vi.fn(async () => ({
       blob: patternPng(),
@@ -351,8 +351,10 @@ describe('T1 拖球 → 冻结 → 选区 → 确认', () => {
 
     m.widget.open();
     setTextarea(m, '原有草稿文字');
+    // 关闭面板即放弃本次未提交的反馈：正文随关闭清空，之后从空白草稿重新截图
     m.widget.close();
     await settled(2);
+    expect(m.textarea.value).toBe('');
 
     dragOrb(m);
     await settled();
@@ -366,10 +368,10 @@ describe('T1 拖球 → 冻结 → 选区 → 确认', () => {
     expect(m.screenshotWrap.hidden).toBe(true); // 不写入任何图片
     expect(provider).toHaveBeenCalledTimes(1);
     expect(m.root.activeElement).toBe(m.orb); // 焦点回灵感球
-    // 原草稿完好、没有失败提示
+    // 取消不改草稿：仍是关闭后的空草稿，也没有失败提示
     m.widget.open();
     await settled(2);
-    expect(m.textarea.value).toBe('原有草稿文字');
+    expect(m.textarea.value).toBe('');
     expect(m.statusRegion.textContent).not.toContain('截图未完成');
   });
 
@@ -382,11 +384,6 @@ describe('T1 拖球 → 冻结 → 选区 → 确认', () => {
       if (n === 1) throw new Error('boom');
       return { blob: patternPng(), width: CAP_VP.width, height: CAP_VP.height, viewport: CAP_VP };
     });
-
-    m.widget.open();
-    setTextarea(m, '失败也要留住文字');
-    m.widget.close();
-    await settled(2);
 
     dragOrb(m);
     await settled();
@@ -405,7 +402,7 @@ describe('T1 拖球 → 冻结 → 选区 → 确认', () => {
     warnSpy.mockRestore();
   });
 
-  it('5 张上限：先提示整理附件，不发起捕获', async () => {
+  it('关闭面板清空附件后，拖球重新截图不再被旧图片上限挡住', async () => {
     const m = mount({ 'launcher-mode': 'orb' });
     const provider = vi.fn(async () => ({
       blob: patternPng(),
@@ -424,17 +421,18 @@ describe('T1 拖球 → 冻结 → 选区 → 确认', () => {
     input.dispatchEvent(new Event('change'));
     await settled();
     expect(m.root.querySelectorAll('.fb-screenshot-thumb-box').length).toBe(5);
+    // 关闭面板即放弃本次未提交的反馈：手动添加的图片随关闭一起清空
     m.widget.close();
     await settled(2);
+    expect(m.screenshotWrap.hidden).toBe(true);
 
     dragOrb(m);
     await settled();
 
-    expect(provider).not.toHaveBeenCalled(); // 不发起捕获
-    expect(shown(regionOverlay(m))).toBe(false);
-    expect(m.panel.classList.contains('is-open')).toBe(true); // 提示可见
-    expect(m.root.querySelector('.fb-shot-error')?.textContent).toContain('已达图片上限 5 张');
-    expect(m.root.querySelectorAll('.fb-screenshot-thumb-box').length).toBe(5); // 草稿不变
+    // 草稿已空：照常发起截图并进入选区（旧草稿的「已达图片上限」不再成立）
+    expect(provider).toHaveBeenCalledTimes(1);
+    expect(shown(regionOverlay(m))).toBe(true);
+    expect(m.root.querySelector('.fb-shot-error')?.textContent ?? '').toBe('');
   });
 
   it('身份切换（app-id）：进行中的选区流程作废，不写入新身份草稿', async () => {
@@ -502,16 +500,13 @@ function attachmentGeometry(overrides:Partial<AttachmentGeometry>={}) {
 }
 
 describe('液态选区与真实附件的完整时间线', () => {
-  it('400ms球转框，1500ms飞入新增的实际附件格、1350ms解锁并最终聚焦', async () => {
+  it('400ms球转框，1500ms飞入实际附件格、1350ms解锁并最终聚焦', async () => {
     const clock=animationClock();
     vi.spyOn(window,'innerWidth','get').mockReturnValue(400);
     vi.spyOn(window,'innerHeight','get').mockReturnValue(300);
     attachmentGeometry({firstFrame:{x:15,y:170,width:72,height:72}});
     const m=mount({'launcher-mode':'orb'}); installProvider(m);
-    m.widget.open();
-    const input=m.root.querySelector<HTMLInputElement>('.fb-image-input')!;
-    Object.defineProperty(input,'files',{value:[pngFile()],configurable:true});
-    input.dispatchEvent(new Event('change')); await settled(); m.widget.close();
+    // 关闭面板会放弃未提交的草稿，因此不再预置手动附件：本次选区截图就是新增的附件格
     dragOrb(m,{x:200,y:150}); await settled();
     const frame=m.root.querySelector<HTMLElement>('.fb-region-frame')!;
     // No animation frame elapsed during this immediate drag: use the visible 56px ball, not a fabricated 104px snapshot.
@@ -523,10 +518,9 @@ describe('液态选区与真实附件的完整时间线', () => {
     expect(m.root.querySelector<HTMLElement>('.fb-region-tools')!.style.opacity).toBe('1');
     m.root.querySelector<HTMLButtonElement>('.fb-region-use')!.click(); await settled();
     expect(m.panel.inert).toBe(true);
-    expect(m.root.querySelectorAll('.fb-screenshot-thumb-box')).toHaveLength(2);
-    const target=m.root.querySelector<HTMLElement>('.fb-image-cell')!;
+    expect(m.root.querySelectorAll('.fb-screenshot-thumb-box')).toHaveLength(1);
+    const target=m.root.querySelector<HTMLElement>('.fb-screenshot-thumb-box')!;
     expect(target.classList.contains('is-entering')).toBe(true);
-    expect(m.root.querySelector<HTMLElement>('.fb-screenshot-thumb-box')!.classList.contains('is-entering')).toBe(false);
     expect(m.root.activeElement).not.toBe(m.textarea);
     const fly=m.root.querySelector<HTMLImageElement>('.fb-flying-shot')!;
     const flyingUrl=fly.getAttribute('src');
@@ -535,7 +529,7 @@ describe('液态选区与真实附件的完整时间线', () => {
     clock.tick(550+1050); expect(m.panel.style.transform).toBe('translateY(0%)');
     clock.tick(550+1330);
     // R5's horizontal card is much wider: only the real72×72 thumbnail is the flight target.
-    expect(parseFloat(fly.style.left)).toBe(205); expect(parseFloat(fly.style.top)).toBe(170);
+    expect(parseFloat(fly.style.left)).toBe(15); expect(parseFloat(fly.style.top)).toBe(170);
     expect(parseFloat(fly.style.width)).toBe(72); expect(parseFloat(fly.style.height)).toBe(72);
     expect(m.panel.inert).toBe(true);
     clock.tick(550+1350); expect(m.panel.inert).toBe(false);
@@ -633,14 +627,18 @@ describe('液态选区与真实附件的完整时间线', () => {
     expect(m.root.querySelector('.fb-flying-shot')!.hasAttribute('src')).toBe(false);
     expect(regionOverlay(m).hidden).toBe(true);
     expect(clock.frames.size).toBe(0);
-    if (action==='identity') expect(m.screenshotWrap.hidden).toBe(true);
+    // 关闭面板即放弃本次未提交的反馈：交接中的这张图随关闭一起丢弃；
+    // 身份切换同样不写入新身份；detach / resize 只是中断交接，草稿保留。
+    if (action==='identity' || action==='close') expect(m.screenshotWrap.hidden).toBe(true);
     else expect(m.screenshotWrap.hidden).toBe(false);
     if (action==='close' || action==='detach') expect(m.root.activeElement).not.toBe(m.textarea);
   });
 
-  it('resize/DPR变化取消旧选区，滚动保持冻结证据与原草稿', async () => {
+  it('resize/DPR变化取消旧选区，滚动保持冻结证据（关闭已清空草稿）', async () => {
     const m=mount({'launcher-mode':'orb'}); installProvider(m);
-    m.widget.open(); setTextarea(m,'已有草稿'); m.widget.close();
+    m.widget.open(); setTextarea(m,'已有草稿');
+    m.widget.close(); // 关闭即放弃：正文清空，截图从空白草稿开始
+    expect(m.textarea.value).toBe('');
     dragOrb(m); await settled();
     const src=m.root.querySelector('.fb-region-bg')!.getAttribute('src');
     window.dispatchEvent(new Event('scroll'));
@@ -651,7 +649,7 @@ describe('液态选区与真实附件的完整时间线', () => {
     expect(regionOverlay(m).hidden).toBe(true);
     m.root.querySelector<HTMLButtonElement>('.fb-region-all')!.click();
     expect(m.screenshotWrap.hidden).toBe(true);
-    expect(m.textarea.value).toBe('已有草稿');
+    expect(m.textarea.value).toBe(''); // 取消不回写已放弃的旧草稿
     expect(m.statusRegion.textContent).toContain('重新截图');
   });
 
@@ -676,18 +674,22 @@ describe('液态选区与真实附件的完整时间线', () => {
 });
 
 describe('草稿保全与重复开关',()=>{
-  it('已有截图重新拖选后取消保留同一附件；确认重拍原位替换ID',async()=>{
+  it('关闭清空截图后重新拖选：取消不写入，确认只新增一张',async()=>{
     const m=mount({'launcher-mode':'orb'}); installProvider(m);
     await m.widget.retakeScreenshot(); await settled();
-    const cell=m.root.querySelector<HTMLElement>('.fb-screenshot-thumb-box')!;
-    const id=cell.dataset.imageId, src=m.screenshotThumb.src;
-    m.widget.close(); dragOrb(m); await settled();
+    expect(m.root.querySelectorAll('.fb-screenshot-thumb-box')).toHaveLength(1);
+    const id=m.root.querySelector<HTMLElement>('.fb-screenshot-thumb-box')!.dataset.imageId;
+    // 关闭面板即放弃本次未提交的反馈：旧截图与预览一并清空
+    m.widget.close();
+    expect(m.screenshotWrap.hidden).toBe(true);
+    dragOrb(m); await settled();
     m.root.querySelector<HTMLButtonElement>('.fb-region-cancel')!.click();
-    expect(cell.dataset.imageId).toBe(id); expect(m.screenshotThumb.src).toBe(src);
+    expect(m.screenshotWrap.hidden).toBe(true); // 取消不写入
     dragOrb(m); await settled();
     m.root.querySelector<HTMLButtonElement>('.fb-region-all')!.click();
-    expect(cell.dataset.imageId).toBe(id);
     expect(m.root.querySelectorAll('.fb-screenshot-thumb-box')).toHaveLength(1);
+    // 不是旧图：新截图的附件 ID 不同（旧草稿已放弃，不可能原位复用）
+    expect(m.root.querySelector<HTMLElement>('.fb-screenshot-thumb-box')!.dataset.imageId).not.toBe(id);
   });
 
   it('连续10次进入/取消不累计RAF，冻结URL全部回收，旧回调不干扰新会话',async()=>{

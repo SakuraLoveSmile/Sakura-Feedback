@@ -40,7 +40,7 @@ void main() {
   }
 
   group('T1-A 登录操作失效', () {
-    testWidgets('登录期间关闭面板：迟到的登录结果不写令牌、不自动提交，草稿保留', (tester) async {
+    testWidgets('登录期间关闭面板：迟到的登录结果不写令牌、不自动提交，草稿放弃', (tester) async {
       final store = RecordingTokenStore();
       final login = Completer<http.Response>();
       server.on('POST /api/auth/login', (request) => login.future);
@@ -71,7 +71,8 @@ void main() {
       expect(server.count('POST /api/feedback'), 0); // 不得自动提交
       expect(
         tester.widget<TextField>(find.byKey(input)).controller!.text,
-        '登录期间离开',
+        isEmpty,
+        reason: '关闭面板即放弃本次未提交的反馈，草稿不再恢复',
       );
       await teardownPanel(tester);
     });
@@ -110,14 +111,17 @@ void main() {
       await tester.pump();
       expect(store.writes, 0);
 
-      // 重新打开：草稿仍在，可重新发起登录。
+      // 重新打开：草稿已放弃，重新写一条再发起登录。
       await pumpPanel(tester, server: server, tokenStore: store, visible: true);
       await tester.pump();
       expect(
         tester.widget<TextField>(find.byKey(input)).controller!.text,
-        '重新打开继续',
+        isEmpty,
+        reason: '关闭面板即放弃本次未提交的反馈',
       );
 
+      await tester.enterText(find.byKey(input), '重新打开继续');
+      await tester.pump();
       await tester.tap(find.byKey(submit));
       await tester.pump();
       await fillCredentials(tester);

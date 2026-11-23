@@ -971,7 +971,7 @@ void main() {
     await tester.pump(const Duration(seconds: 2));
   });
 
-  testWidgets('图片已达 5 张且无可替换截图：先提示整理附件，不发起捕获', (tester) async {
+  testWidgets('关闭面板会释放图片上限：关闭后拖动灵感球重新发起选区捕获', (tester) async {
     final controller = FeedbackController();
     addTearDown(controller.dispose);
     final PanelServer server = PanelServer();
@@ -1024,25 +1024,24 @@ void main() {
     controller.close();
     await tester.pump();
 
-    // 拖动灵感球：不发起捕获（覆盖层不出现），打开面板并提示整理附件。
+    // 关闭即放弃本次未提交的反馈：5 张图片随关闭清空，上限与提示随之解除。
+    expect(panel.imageCount, 0, reason: '关闭面板即放弃本次附件');
+    expect(panel.canAcceptCapture, isTrue);
+
+    // 再拖动灵感球：从空白开始，正常发起选区捕获。
     await dragOrbAndRelease(tester);
-    for (int i = 0; i < 10; i++) {
-      await tester.pump(const Duration(milliseconds: 16));
-    }
+    await pumpUntilOverlay(tester);
     expect(find.byKey(const Key('feedback-capture-selection-overlay')),
-        findsNothing,
-        reason: '达到上限不得发起捕获');
-    expect(controller.isOpen, isTrue);
-    expect(find.textContaining('图片附件已达 5 张上限'), findsOneWidget,
-        reason: '先提示整理附件');
+        findsOneWidget,
+        reason: '关闭后从空白开始，重新拖动可发起选区捕获');
     expect(panel.hasScreenshot, isFalse);
-    expect(panel.imageCount, 5, reason: '已有图片不受影响');
+    expect(panel.imageCount, 0);
 
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump(const Duration(seconds: 2));
   });
 
-  testWidgets('捕获失败：提示可重试、绝不静默回退整屏截图；修复后重试成功且草稿不丢', (tester) async {
+  testWidgets('捕获失败：提示可重试、绝不静默回退整屏截图；修复后重试成功', (tester) async {
     final controller = FeedbackController();
     addTearDown(controller.dispose);
     await tester.binding.setSurfaceSize(const Size(800, 600));
@@ -1109,7 +1108,7 @@ void main() {
     await _waitScreenshot(tester);
     expect(panel.hasScreenshot, isTrue, reason: '修复后重试成功');
 
-    // 草稿在失败与重试之后仍可写、可保留。
+    // 重试成功后照常可写；关闭面板则放弃本次未提交的反馈。
     await tester.enterText(find.byKey(const Key('feedback-input')), '失败重试后的草稿');
     await tester.pump();
     expect(panel.hasDraft, isTrue);
@@ -1124,8 +1123,8 @@ void main() {
             .widget<TextField>(find.byKey(const Key('feedback-input')))
             .controller!
             .text,
-        '失败重试后的草稿',
-        reason: '已有草稿不丢失');
+        isEmpty,
+        reason: '关闭面板即放弃本次未提交的草稿');
 
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump(const Duration(seconds: 2));

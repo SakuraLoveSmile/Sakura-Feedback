@@ -471,7 +471,7 @@ void main() {
   });
 
   for (final FeedbackWakeGesture type in FeedbackWakeGesture.values) {
-    testWidgets('${type.id} wakes at the release centroid, retaining draft and attachment',
+    testWidgets('${type.id} wakes at the release centroid (closed panel drops the draft)',
         (tester) async {
       host.reduced = true;
       host.captureMode = FeedbackCaptureMode.viewport;
@@ -481,8 +481,7 @@ void main() {
       final FeedbackPanelState panel =
           await captureAndWait(tester, host.controller);
       await tester.enterText(find.byKey(const Key('feedback-input')), '保留草稿');
-      final Object bytes = panel.screenshotBytes!;
-      final String id = panel.captureImageId!;
+      expect(panel.hasScreenshot, isTrue);
       host.controller.close();
       await tester.pump();
       await tester.pump();
@@ -533,8 +532,9 @@ void main() {
       expect(tester.getSize(liquidOrb), const Size.square(160));
       expect(host.controller.isOpen, isFalse);
       expect(find.byType(CaptureSelectionOverlay), findsNothing);
-      expect(panel.screenshotBytes, same(bytes));
-      expect(panel.captureImageId, id);
+      // 关闭面板即放弃本次未提交的反馈：截图与草稿都不再挂在面板上。
+      expect(panel.screenshotBytes, isNull, reason: '关闭面板即放弃本次截图');
+      expect(panel.captureImageId, isNull);
       host.controller.open();
       await tester.pump();
       await tester.pump();
@@ -543,7 +543,8 @@ void main() {
               .widget<TextField>(find.byKey(const Key('feedback-input')))
               .controller!
               .text,
-          '保留草稿');
+          isEmpty,
+          reason: '关闭面板即放弃本次草稿');
       await tester.pumpWidget(const SizedBox.shrink());
     });
   }

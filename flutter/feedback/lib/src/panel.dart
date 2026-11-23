@@ -1008,7 +1008,7 @@ class FeedbackPanelState extends State<FeedbackPanel>
     final bool nowVisible = widget.visible ?? true;
     if (wasVisible && !nowVisible) {
       // 用户关闭面板：取消尚未完成的登录接续与额度定时查询，
-      // 使在途额度查询失效；不撤销已建立的登录态，不动草稿与截图。
+      // 使在途额度查询失效；不撤销已建立的登录态。
       // 同时清除「待立即刷新」意图（重新打开时按当前状态重新登记）。
       _invalidateLogin();
       _invalidateQuotaRefresh();
@@ -1017,6 +1017,9 @@ class FeedbackPanelState extends State<FeedbackPanel>
       _quotaRefreshPending = false;
       ++_logsSeq;
       _logsCollecting = false;
+      // 关闭即放弃本次未提交的反馈：清空草稿与上一次提交的任务态，
+      // 使下一次呼出重新截图、从空白开始（见 [_discardUnsubmittedDraft]）。
+      _discardUnsubmittedDraft();
     } else if (!wasVisible && nowVisible) {
       // 重新打开：必须实际调用刷新（不能只请求输入焦点）。
       _onPanelOpened();
@@ -1034,6 +1037,56 @@ class FeedbackPanelState extends State<FeedbackPanel>
     if (!_logsCollected && !_logsCollecting) {
       unawaited(_collectLogs());
     }
+  }
+
+  /// 关闭面板即放弃本次未提交的反馈（2026-11-23 裁决）。
+  ///
+  /// 清空撰写草稿（正文 / 截图 / 图片 / 日志）与上一次提交留下的任务态，
+  /// 回到「新建反馈」撰写页：下一次呼出按 captureMode **重新截图**，而不是
+  /// 恢复关闭时留着的那张旧图和那段话。
+  ///
+  /// 保留：访问令牌与登录态、额度、我的反馈数据、服务器覆盖与各家设置。
+  /// 已经发出的提交请求不取消——关闭面板不等于撤回，结果仍按原逻辑落库。
+  /// 非关闭的中断（截图失败、重拍取消、提交失败、401 回登录态）不走这里，
+  /// 草稿照旧保留。
+  void _discardUnsubmittedDraft() {
+    if (!mounted) return;
+    _pollTimer?.cancel();
+    _pollTimer = null;
+    _pollInFlight = false;
+    _cancelSummaryTimer();
+    _cancelDialogueTimer();
+    ++_logsSeq;
+    _logs = <FeedbackLogFile>[];
+    _logsCollected = false;
+    _logsCollecting = false;
+    _logError = null;
+    _draft.clear();
+    _images.clear();
+    _captureInfo = null;
+    _undrawableNotice = false;
+    _lastCaptureSeq = null;
+    _ticketId = null;
+    _idempotencyKey = null;
+    _pendingSubmit = null;
+    _lastSubmittedText = null;
+    _kaneoUrl = null;
+    _errorSummary = null;
+    _composeError = null;
+    _failedNotice = null;
+    _waitingNotice = null;
+    _showLoginForm = false;
+    _submitAfterLogin = false;
+    _loginError = null;
+    _captureHandoffActive = false;
+    _captureHandoffOpacity = 1;
+    // 离开历史 / 对话视图前先保存正在写的回复草稿（不属于本次放弃范围）。
+    if (_panelTab != _PanelTab.compose || _selectedDialogueId != null) {
+      _switchTab(_PanelTab.compose);
+    }
+    setState(() {
+      _stage = FeedbackStage.compose;
+    });
   }
 
   /// T9：字段获得焦点或键盘尺寸变化后，在布局完成时把聚焦字段

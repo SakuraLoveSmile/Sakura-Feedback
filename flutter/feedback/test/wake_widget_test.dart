@@ -331,13 +331,13 @@ void main() {
 
   for (final bool fullWindow in <bool>[false, true]) {
     testWidgets(
-        'confirmed drag after wake ${fullWindow ? 'window' : 'region'} leaves closed settings for compose and preserves the draft',
+        'confirmed drag after wake ${fullWindow ? 'window' : 'region'} leaves closed settings for compose and starts a fresh capture',
         (tester) async {
       await host.enable(<FeedbackWakeGesture>{});
       await host.mount(tester);
       final FeedbackPanelState panel =
           await captureAndWait(tester, host.controller);
-      final Object original = panel.screenshotBytes!;
+      expect(panel.hasScreenshot, isTrue);
       final String captureId = panel.captureImageId!;
       await tester.enterText(find.byKey(const Key('feedback-input')), '设置前的草稿');
       await host.settings(tester);
@@ -358,12 +358,13 @@ void main() {
       await tester.pump(const Duration(milliseconds: 566));
       expect(panel.settingsOpen, isTrue,
           reason: 'capture and an unconfirmed selection must not navigate');
-      expect(panel.screenshotBytes, same(original));
+      expect(panel.screenshotBytes, isNull,
+          reason: '关闭面板即放弃本次截图');
       await tester.tap(find.byKey(Key(fullWindow
           ? 'feedback-capture-whole-window'
           : 'feedback-capture-use-region')));
-      await pumpUntil(tester,
-          () => host.controller.isOpen && panel.screenshotBytes != original);
+      await pumpUntil(
+          tester, () => host.controller.isOpen && panel.hasScreenshot);
       await tester.pump();
       await tester.pump();
       expect(panel.settingsOpen, isFalse);
@@ -374,7 +375,8 @@ void main() {
           find.byKey(const Key('feedback-screenshot-thumb')), findsOneWidget);
       expect(panel.captureThumbnailRect, isNotNull);
       expect(panel.captureInfo!.region, fullWindow ? isNull : isNotNull);
-      expect(panel.captureImageId, captureId);
+      expect(panel.captureImageId, isNot(captureId),
+          reason: '关闭后是新截图，不再复用被放弃的旧槽位');
       expect(panel.imageCount, 1);
       await tester.pump(const Duration(milliseconds: 1500));
       await tester.pump();
@@ -382,7 +384,8 @@ void main() {
       expect(input.hitTestable(), findsOneWidget);
       expect(find.byKey(const Key('feedback-screenshot-thumb')).hitTestable(),
           findsOneWidget);
-      expect(tester.widget<TextField>(input).controller!.text, '设置前的草稿');
+      expect(tester.widget<TextField>(input).controller!.text, isEmpty,
+          reason: '关闭面板即放弃本次草稿');
       expect(panel.draftFocused, isTrue);
       final TextButton compose =
           tester.widget(find.byKey(const Key('tab-compose')));
@@ -394,7 +397,7 @@ void main() {
 
   for (final bool detail in <bool>[false, true]) {
     testWidgets(
-        'confirmed drag after wake from ${detail ? 'dialogue' : 'history'} composes while cancellation preserves the page and reply draft',
+        'confirmed drag after wake from ${detail ? 'dialogue' : 'history'} resets to compose while the reply draft survives',
         (tester) async {
       final PanelServer server = PanelServer();
       final Map<String, Object?> item = <String, Object?>{
@@ -440,7 +443,7 @@ void main() {
       await host.mount(tester);
       final FeedbackPanelState panel =
           await captureAndWait(tester, host.controller);
-      final Object original = panel.screenshotBytes!;
+      expect(panel.hasScreenshot, isTrue);
       final String captureId = panel.captureImageId!;
       await tester.pumpAndSettle();
       await tester.enterText(find.byKey(const Key('feedback-input')), '保留新建草稿');
@@ -459,14 +462,19 @@ void main() {
       await _hold(tester);
       await tester.pump();
       final CaptureSelectionOverlay overlay = await host.selection(tester);
-      expect(panel.screenshotBytes, same(original));
+      expect(panel.screenshotBytes, isNull, reason: '关闭面板即放弃本次截图');
       overlay.onCancel();
       await tester.pump();
       host.controller.open();
       await tester.pumpAndSettle();
-      expect(find.byKey(const Key('feedback-input')), findsNothing);
-      expect(panel.screenshotBytes, same(original));
+      // 关闭面板即放弃本次新建反馈：重开回到撰写页，回复草稿仍保存在该问题下。
+      expect(find.byKey(const Key('feedback-input')), findsOneWidget);
+      expect(panel.screenshotBytes, isNull);
+      await tester.tap(find.byKey(const Key('tab-history')));
+      await tester.pumpAndSettle();
       if (detail) {
+        await tester.tap(find.byKey(const Key('feedback-item-previous')));
+        await tester.pumpAndSettle();
         expect(
             tester
                 .widget<TextField>(
@@ -484,20 +492,21 @@ void main() {
       await host.selection(tester);
       await tester.pump(const Duration(milliseconds: 566));
       await tester.tap(find.byKey(const Key('feedback-capture-use-region')));
-      await pumpUntil(tester,
-          () => host.controller.isOpen && panel.screenshotBytes != original);
+      await pumpUntil(
+          tester, () => host.controller.isOpen && panel.hasScreenshot);
       await tester.pump();
       await tester.pump();
       expect(find.byKey(const Key('feedback-input')), findsOneWidget);
       expect(panel.settingsOpen, isFalse);
       expect(panel.captureThumbnailRect, isNotNull);
-      expect(panel.captureImageId, captureId);
+      expect(panel.captureImageId, isNot(captureId));
       expect(panel.imageCount, 1);
       await tester.pump(const Duration(milliseconds: 1500));
       await tester.pump();
       final Finder input = find.byKey(const Key('feedback-input'));
       expect(input.hitTestable(), findsOneWidget);
-      expect(tester.widget<TextField>(input).controller!.text, '保留新建草稿');
+      expect(tester.widget<TextField>(input).controller!.text, isEmpty,
+          reason: '关闭面板即放弃本次草稿');
       expect(find.byKey(const Key('feedback-screenshot-thumb')).hitTestable(),
           findsOneWidget);
       expect(panel.draftFocused, isTrue);
@@ -697,14 +706,14 @@ void main() {
 
   for (final bool settings in <bool>[false, true]) {
     testWidgets(
-        'cancel drag after wake preserves ${settings ? 'settings' : 'compose'}, existing draft and attachment',
+        'cancel drag after wake keeps ${settings ? 'settings' : 'compose'} but close drops the draft',
         (tester) async {
       await host
           .enable(<FeedbackWakeGesture>{FeedbackWakeGesture.twoFingerHold});
       await host.mount(tester);
       await captureAndWait(tester, host.controller);
       final FeedbackPanelState panel = host.panel(tester);
-      final List<int> original = List<int>.of(panel.screenshotBytes!);
+      expect(panel.hasScreenshot, isTrue);
       await tester.enterText(find.byKey(const Key('feedback-input')), '保留草稿');
       if (settings) await host.settings(tester);
       host.controller.close();
@@ -718,8 +727,8 @@ void main() {
       await tester.pump();
       await tester.pump();
       expect(panel.settingsOpen, settings);
-      expect(panel.screenshotBytes, original);
-      expect(panel.imageCount, 1);
+      expect(panel.hasScreenshot, isFalse, reason: '关闭面板即放弃本次截图');
+      expect(panel.imageCount, 0);
       if (settings) {
         expect(find.byKey(const Key('feedback-input')), findsNothing);
         final Finder back = find.byKey(const Key('feedback-settings-back'));
@@ -732,9 +741,9 @@ void main() {
               .widget<TextField>(find.byKey(const Key('feedback-input')))
               .controller!
               .text,
-          '保留草稿');
-      expect(panel.screenshotBytes, original);
-      expect(panel.imageCount, 1);
+          isEmpty,
+          reason: '关闭面板即放弃本次草稿');
+      expect(panel.hasImages, isFalse);
     });
   }
 }

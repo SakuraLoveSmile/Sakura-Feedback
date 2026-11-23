@@ -208,25 +208,34 @@ void main() {
     await tester.pump(const Duration(seconds: 10));
   });
 
-  testWidgets('关闭后重开保留草稿（面板状态常驻）', (tester) async {
+  testWidgets('关闭后重开：面板状态常驻，未提交草稿已放弃', (tester) async {
     final controller = await pumpHost(tester, surface: const Size(1000, 800));
     controller.open();
     await tester.pump();
     await tester.pump();
 
     await tester.enterText(find.byKey(const Key('feedback-input')), '未写完的草稿');
+    final FeedbackPanelState panel =
+        tester.state<FeedbackPanelState>(find.byType(FeedbackPanel));
     await tester.tap(find.byKey(const Key('feedback-close')));
     await tester.pump();
     expect(controller.isOpen, isFalse);
+    expect(panel.hasDraft, isFalse, reason: '关闭面板即放弃本次未提交的反馈');
 
     controller.open();
     await tester.pump();
+    expect(
+        identical(
+            tester.state<FeedbackPanelState>(find.byType(FeedbackPanel)), panel),
+        isTrue,
+        reason: '面板状态常驻：重开不重建面板子树');
     expect(
         tester
             .widget<TextField>(find.byKey(const Key('feedback-input')))
             .controller!
             .text,
-        '未写完的草稿');
+        isEmpty,
+        reason: '重开是空白撰写页，不再恢复被放弃的旧草稿');
 
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump(const Duration(seconds: 10));
