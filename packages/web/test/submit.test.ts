@@ -159,8 +159,16 @@ describe('提交流程', () => {
     expect((w2.shadowRoot?.querySelector('.fb-textarea') as HTMLTextAreaElement | null)?.value).toBe('');
     w2.remove();
 
-    // 确认未写 localStorage（环境无 localStorage 时同样通过）
+    // 确认草稿不落 localStorage（环境无 localStorage 时同样通过）。
+    // 0.13 起组件会写入本机偏好（入口样式 / 唤醒方式 / 首用提示已读），
+    // 因此断言收窄为两条仍然成立的不变量：不出现草稿内容，且写入的键都在组件命名空间内。
     const store = (globalThis as { localStorage?: Storage }).localStorage;
-    if (store) expect(store.length).toBe(0);
+    if (store) {
+      const keys: string[] = [];
+      for (let i = 0; i < store.length; i++) keys.push(store.key(i) ?? '');
+      const dump = keys.map((k) => k + '=' + (store.getItem(k) ?? '')).join('\n');
+      expect(dump).not.toContain('会话草稿');
+      expect(keys.every((k) => k.startsWith('feedback:'))).toBe(true);
+    }
   });
 });

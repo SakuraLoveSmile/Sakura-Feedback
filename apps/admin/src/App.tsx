@@ -516,8 +516,9 @@ export default function App() {
           page-label={authed ? `admin:${page}` : "admin:login"}
           side="right"
           theme={themePref}
-          // 管理页刻意固定灵感球 + 视口截图，不跟随 0.10 的 beam 默认值：
-          // 桌面管理端需要常驻入口，且工作台内的圈选会与表格交互冲突。
+          // 管理页刻意固定灵感球 + 视口截图：桌面管理端需要常驻入口，因此不走 0.10 的
+          // beam 默认，也不使用 0.13 auto 在桌面解析出的贴边标签；工作台的圈选只在
+          // ⌥/Alt + 拖拽时发生，不与表格的普通点击 / 拖选冲突。
           launcher-mode="orb"
           launcher-bottom="24px"
           capture-mode="viewport"

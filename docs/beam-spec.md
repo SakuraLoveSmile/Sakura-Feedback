@@ -1,23 +1,27 @@
 # 光束唤醒与圈选规格（Beam Wake）
 
-0.10 起的默认入口形态。本文记录 Web（`packages/web`）与 Flutter（`flutter/feedback`）
-两端共同遵守的动效时序、颜色、圈选几何、降级与无障碍契约。灵感球自身的视觉规格见
-[orb-spec.md](orb-spec.md)。
+0.10 起的入口形态。Web 的最新默认改为 `launcher-mode=auto`（见
+[CHANGELOG](../CHANGELOG.md)「未发布」段）：精细指针用贴边标签，只有触屏、或探测不到
+`matchMedia` 的环境才解析成 `beam`；要固定无入口形态需显式写 `launcher-mode="beam"`。
+Flutter 端默认仍是 `FeedbackLauncherMode.beam`。本文记录 Web（`packages/web`）与
+Flutter（`flutter/feedback`）两端共同遵守的动效时序、颜色、圈选几何、降级与无障碍契约。
+灵感球自身的视觉规格见 [orb-spec.md](orb-spec.md)。
 
 ## 1. 触发与落点
 
 | 触发 | 行为 |
 |---|---|
 | 双指长按 700ms（默认开启） | 冻结当前视口 → 光束 → 压暗 → 圈选待命 |
-| `wake-shortcut`（默认 `primary+shift+f`，macOS ⌘ / 其他 Ctrl） | 同上；输入框聚焦、面板打开、选区进行中不触发 |
+| `wake-shortcut`（默认 `primary+shift+f`，macOS ⌘ / 其他 Ctrl） | 同上；输入框聚焦、面板打开、选区进行中不触发，宿主已 `preventDefault` 时让路。Web 的 `auto` 解析为贴边标签时同样可用 |
+| Web 桌面 `⌥/Alt + 拖拽`（仅精细指针，`wake-shortcut` 不为 `off`） | 不播光束：松手后冻结视口，拖拽矩形直接成为初始选区（见 §3） |
 | 宿主控制器 `open()` / `captureAndOpen()` | 不经过光束，按 API 语义直接打开 |
 
 - 唤醒与截图解耦：`capture-mode=off`（Flutter `FeedbackCaptureMode.off`）时，
   手势/快捷键只打开纯表单面板，不冻结、不压暗、不圈选。
-- 手势仅在生效入口为 `beam`（或灵感球模式的手势唤醒）时生效；宿主显式
-  `launcher-mode="tab"` 时手势不可用。
-- 唤醒后不展开球体，也不渲染任何常驻入口；关闭覆盖层后焦点回到视觉隐藏的
-  无障碍按钮（`beam` 模式），而不是已隐藏的球。
+- 手势在生效入口为 `beam`（或灵感球模式的手势唤醒）时生效。Web 的 `auto` 解析成
+  贴边标签时（触屏笔记本）手势同样可用；宿主显式 `launcher-mode="tab"` 时手势不可用。
+- `beam` 形态下唤醒后不展开球体，也不渲染任何常驻入口；关闭覆盖层后焦点回到视觉隐藏的
+  无障碍按钮，而不是已隐藏的球。
 
 ## 2. 唤醒动效时序与颜色
 
@@ -55,6 +59,10 @@
 5. 轨迹淡出，包围盒动画成既有圆角选区框；之后沿用既有拖拽移动 / 四角缩放 /
    方向键微调 / Enter 确认 / Esc 取消与「使用此区域 / 整个窗口」工具条。
 
+桌面 `⌥/Alt + 拖拽`（Web）走 `regionFromDrag`：由拖拽矩形直接得到选区，
+**不套用**这里的 8px 外扩与 64px 最小边，只夹回视口并保证 48×48 最小
+（`MIN_REGION_SIZE`）；拖动不足 8px 视为 `⌥/Alt+点击`，按普通唤醒在该点进入圈选。
+
 实现位置：
 
 - Web：`packages/web/src/region.ts`（`simplifyPath` / `lassoBoundingRect`）+
@@ -72,9 +80,10 @@
 ## 5. 无障碍
 
 - Web：Shadow DOM 内新增 `tabindex=0` 的视觉隐藏按钮
-  `.fb-beam-a11y`（1×1，`clip-path: inset(50%)`），aria-label
-  「打开反馈（双指长按屏幕或按 Ctrl+Shift+F）」；Enter/Space 触发同一唤醒，
-  覆盖层取消/面板关闭后焦点回到该按钮。
+  `.fb-beam-a11y`（1×1，`clip-path: inset(50%)`），Enter/Space 触发同一唤醒，
+  覆盖层取消/面板关闭后焦点回到该按钮。aria-label 按输入能力生成：触屏仍念
+  「打开反馈（双指长按屏幕或按 Ctrl+Shift+F）」，精细指针且无触摸时念
+  「打开反馈（⌥ 拖拽圈选，按 ⌘+Shift+F）」——桌面不再出现双指语言。
 - Flutter：`feedback-beam-a11y-slot` 内的 `Semantics(button)` +
   `Focus`（Enter/Space 触发 `_startBeam(null)`）；无可见入口。
 - 圈选提示文案：Web 「画个圈，只需圈出问题位置」；Flutter
@@ -84,5 +93,7 @@
 
 - 安全区只在 Flutter 生效（`MediaQuery.padding`）；Web 以视口为界。
 - PKG110 的 Android arm64 release 示例已用系统注入的双指双击验证。该机双指长按会唤起系统识屏。iOS、其他 Android 机型、Safari/Firefox 的 reduced-motion 及 Windows forced-colors 尚待验证。
+- Web 默认入口按输入能力解析（`auto`），Flutter 仍是 `beam`：两端默认形态从此不一致，
+  Web 宿主想保持无入口形态须显式 `launcher-mode="beam"`。
 - 宿主侧迁移（旧宿主改为显式 tab/off 或接受新默认）由各宿主自行决定，
   见 CHANGELOG 0.10.0 的迁移片段。

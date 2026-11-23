@@ -88,15 +88,16 @@ effect（mount → unmount → mount），本示例是安全的：
 
 ## 属性默认值与显式覆盖
 
-组件默认是 `launcher-mode="beam"`、`capture-mode="viewport"`（0.10 起；光束唤醒 =
-双指长按或 ⌘/Ctrl+Shift+F → 圈选，无常驻入口）。本示例要演示可选的灵感球，所以
-**显式**写了这两项：
+组件默认是 `launcher-mode="auto"`、`capture-mode="viewport"`：有鼠标 / 触控板的桌面
+显示贴边入口（点一下先截图再开面板，也可按住 `⌥`/`Alt` 拖出矩形直接框选区），只有触屏时
+才走光束唤醒（双指长按或 ⌘/Ctrl+Shift+F → 圈选，无常驻入口）。本示例要演示可选的灵感球，
+所以**显式**写了这两项：
 
 ```tsx
 <feedback-widget
   api-base="http://localhost:8787"
   app-id="com.example.demo-react"
-  launcher-mode="orb"        {/* 默认 beam */}
+  launcher-mode="orb"        {/* 默认 auto */}
   capture-mode="viewport"    {/* 默认 viewport */}
 />
 ```

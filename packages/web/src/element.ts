@@ -56,6 +56,7 @@ import { OrbLiquid, liquidBoundary, progress, type LiquidSnapshot } from './orb-
 import { orbEntrances, type OrbEntrance, decodeEntrance, entranceAxis, beadGrowth, orbEntranceKey, entranceOutline } from './orb-entrance';
 import { WAKE_GESTURES, WakeGestures, parseWakePreference, wakePreferenceKey, type WakeGestureId, type WakePoint } from './wake-gestures';
 import { createWakePaint } from './wake-paint';
+import { autoLauncherMode, detectInputProfile, formatWakeShortcut, primaryModifierLabel, type InputProfile } from './input-profile';
 import { OrbLens } from './orb-lens';
 import { constrainOrbIdleHit, interpolateOrbIdle, orbIdleBoundary, orbIdlePreferenceKey, parseOrbIdlePreference, type OrbIdleStyle, type OrbIdleVisual } from './orb-idle';
 import {
@@ -850,12 +851,20 @@ export class FeedbackWidget extends HTMLElement {
   private savedOrbIdleStyle: OrbIdleStyle | null = null;
   private summonedOrb: {x: number; y: number; diameter: number; startedAt: number; effect: OrbEntrance; axis: WakePoint} | null = null;
 
+  /**
+   * 宿主是否把「无常驻入口 + 手势唤醒」当作默认形态：显式 beam，
+   * 或 auto 在触屏设备上解析成 beam。桌面 auto（贴边标签）不适用这套待机语义。
+   */
+  private get beamLikeHost(): boolean {
+    return this.launcherMode === 'beam' || (this.launcherMode === 'auto' && this.autoLauncherMode() === 'beam');
+  }
+
   private get orbIdleStyle(): OrbIdleStyle {
-    return this.savedOrbIdleStyle ?? (this.launcherMode === 'beam' && this.wakeEnabled.length > 0 ? 'hidden' : 'handle');
+    return this.savedOrbIdleStyle ?? (this.beamLikeHost && this.wakeEnabled.length > 0 ? 'hidden' : 'handle');
   }
 
   private get gestureStandby(): boolean {
-    return this.effectiveLauncherMode() === 'orb' && this.launcherMode === 'beam' &&
+    return this.effectiveLauncherMode() === 'orb' && this.beamLikeHost &&
       this.orbIdleStyle === 'hidden' && this.wakeEnabled.length > 0;
   }
   private orbIdlePreferenceApp: string | null = null;
@@ -880,11 +889,23 @@ export class FeedbackWidget extends HTMLElement {
   private wakeAvailability!: HTMLParagraphElement;
   private wakePreferenceHint!: HTMLParagraphElement;
   private wakeHint!: HTMLDivElement;
-  /** 宿主 launcher-mode=beam 时终端用户可在光束/灵感球之间切换（按 appId 记忆）。 */
-  private launcherStyle: 'beam' | 'orb' = 'beam';
+  /**
+   * 入口样式偏好（按 appId 记忆）。null = 跟随默认：
+   * 宿主 launcher-mode=auto 时由输入能力决定（精细指针 → 贴边标签，触屏 → 光束），
+   * 宿主显式 beam 时保持光束；灵感球始终可选。
+   */
+  private launcherStyle: 'beam' | 'tab' | 'orb' | null = null;
   private launcherStyleApp: string | null = null;
   private launcherStyleSessionOnly = false;
-  private launcherStyleInputs = new Map<'beam' | 'orb', HTMLInputElement>();
+  private launcherStyleInputs = new Map<'beam' | 'tab' | 'orb', HTMLInputElement>();
+  private launcherStyleIntro: HTMLParagraphElement | null = null;
+  /** 「唤醒方式」里按输入能力分叉的两组：桌面说明组与人手指数组。 */
+  private wakeDesktopList: HTMLDivElement | null = null;
+  private wakeGestureRows: HTMLElement[] = [];
+  private wakeGestureNote: HTMLParagraphElement | null = null;
+  private wakeExclusions: HTMLParagraphElement | null = null;
+  /** 输入能力（连接期探测一次；指针能力变化时失效重探）。 */
+  private inputProfileValue: InputProfile | null = null;
   private launcherStyleHint!: HTMLParagraphElement;
   private launcherStyleSection!: HTMLElement;
   private wakeVisual: 'ripple' | 'aurora' = 'ripple';
@@ -908,16 +929,23 @@ export class FeedbackWidget extends HTMLElement {
   private beamFrame: number | null = null;
   private beamA11yBtn!: HTMLButtonElement;
   private wakeShortcutHandler: ((ev: KeyboardEvent) => void) | null = null;
+  private pointerMedia: MediaQueryList | null = null;
+  /** 首次使用的入口提示（有可见入口时只出现一次，按 appId 记忆）。 */
+  private entryHint: HTMLDivElement | null = null;
+  private entryHintText: HTMLSpanElement | null = null;
+  private entryHintTimer: ReturnType<typeof setTimeout> | null = null;
+  private pointerMediaHandler: (() => void) | null = null;
+  /** 桌面 ⌥/Alt + 拖拽的进行中状态：按住页面画一个矩形，松手直接落到该选区。 */
+  private altDragWake: { pointerId: number; startX: number; startY: number; lastX: number; lastY: number } | null = null;
+  private altDragMoveHandler: ((ev: PointerEvent) => void) | null = null;
+  private altDragUpHandler: ((ev: PointerEvent) => void) | null = null;
   private readonly wakeGestures = new WakeGestures({
     enabled: () => this.wakeEnabled,
     allowed: () => this.canWake(),
     excluded: event => [...event.composedPath(), ...Array.from(event.changedTouches).map(t => t.target)].some(node => node instanceof Element && (this.isOwnFeedbackUi(node) || node.closest('input, textarea, select, button, a, label, summary, [contenteditable]:not([contenteditable="false"]), [role="button"], [role="link"]'))),
     hint: visible => { if (this.wakeHint) this.wakeHint.hidden = !visible; },
-    trigger: (point, fingertips) => {
-      if (!this.canWake()) return;
-      if (this.beamActive()) void this.startBeamWake(point, fingertips);
-      else this.wakeOrb(point, fingertips);
-    },
+    // 0.13：统一走 wakeAt——auto 解析成贴边标签时手势也能进圈选。
+    trigger: (point, fingertips) => { this.wakeAt(point, fingertips); },
   });
   private orbCanvas!: HTMLCanvasElement;
   private orbOutline!: SVGSVGElement;
@@ -1290,12 +1318,12 @@ export class FeedbackWidget extends HTMLElement {
     this.reflect('launcher-bottom', v);
   }
 
-  get launcherMode(): 'beam' | 'tab' | 'orb' {
+  get launcherMode(): 'auto' | 'beam' | 'tab' | 'orb' {
     const value = this.getAttribute('launcher-mode');
-    return value === 'tab' || value === 'orb' || value === 'beam' ? value : 'beam';
+    return value === 'tab' || value === 'orb' || value === 'beam' ? value : 'auto';
   }
-  set launcherMode(v: 'beam' | 'tab' | 'orb') {
-    if (v === 'beam') this.removeAttribute('launcher-mode');
+  set launcherMode(v: 'auto' | 'beam' | 'tab' | 'orb') {
+    if (v === 'auto') this.removeAttribute('launcher-mode');
     else this.setAttribute('launcher-mode', v);
   }
 
@@ -1317,6 +1345,7 @@ export class FeedbackWidget extends HTMLElement {
     if (this.openState) return;
     this.clearOrbRelease(true);
     this.openState = true;
+    this.dismissEntryHint();
     this.syncOrbIdle();
     this.launcher.classList.add('is-hidden');
     this.launcher.setAttribute('aria-expanded', 'true');
@@ -1533,6 +1562,7 @@ export class FeedbackWidget extends HTMLElement {
     releasePoint?: { x: number; y: number };
     lassoFirst?: boolean;
     fingertips?: readonly WakePoint[];
+    initialRect?: { x: number; y: number; width: number; height: number };
   }): Promise<void> {
     if (this.captureInFlight) return this.captureInFlight;
     if (this.phase === 'submitting' || this.polling) return;
@@ -1965,6 +1995,8 @@ export class FeedbackWidget extends HTMLElement {
     regionFlow?: boolean;
     fingertips?: readonly WakePoint[];
     lassoFirst?: boolean;
+    /** 桌面 ⌥+拖拽：0..1 视口比例矩形，冻结后直接作为初始选区。 */
+    initialRect?: { x: number; y: number; width: number; height: number };
   }): Promise<void> {
     const seq = ++this.captureSeq;
     const epoch = this.identityEpoch;
@@ -1977,6 +2009,7 @@ export class FeedbackWidget extends HTMLElement {
     // 加载 / 禁用态必须在隐藏面板之前落到 DOM（同一 tick，不存在中间帧）：
     // 「截取中…」与 aria-busy 因此永远不可能出现在截图里（面板随后整体不可见）。
     this.wakeGestures.reset();
+    this.dismissEntryHint();
     this.isCapturing = true;
     this.syncShotUi();
 
@@ -2084,7 +2117,7 @@ export class FeedbackWidget extends HTMLElement {
 
     // T1 局部选区路径：捕获成功 → 打开覆盖层（不写草稿、不开面板，确认后才进入填写）。
     if (frozen && opts.regionFlow) {
-      this.openRegionFlow(frozen, opts.lassoFirst === true, opts.fingertips);
+      this.openRegionFlow(frozen, opts.lassoFirst === true, opts.fingertips, opts.initialRect);
       this.syncUi();
       return;
     }
@@ -2149,7 +2182,12 @@ export class FeedbackWidget extends HTMLElement {
   // ---------- T1 局部选区覆盖层（拖球 → 松手 → 调整选区 → 确认） ----------
 
   /** 打开覆盖层：144px选区优先围绕最后可见球心展开，provider落点保持真实指针坐标。 */
-  private openRegionFlow(frozen: FrozenCapture, lassoFirst = false, fingertips: readonly WakePoint[] = []): void {
+  private openRegionFlow(
+    frozen: FrozenCapture,
+    lassoFirst = false,
+    fingertips: readonly WakePoint[] = [],
+    initialRect?: { x: number; y: number; width: number; height: number },
+  ): void {
     if (this.regionSession) this.dismissRegionFlow({ focusOrb: false });
     const viewport: RegionViewport = {
       width: Math.max(1, frozen.viewportWidth),
@@ -2164,9 +2202,15 @@ export class FeedbackWidget extends HTMLElement {
     const center = this.releaseVisual
       ? { x: this.releaseVisual.x / overlay.width, y: this.releaseVisual.y / overlay.height }
       : frozen.releasePoint ?? { x: 0.5, y: 0.5 };
-    const sel = lassoFirst
-      ? { x: 0, y: 0, width: 0, height: 0 }
-      : initialRegionSelection(center, viewport);
+    // 桌面 ⌥+拖拽：归一化矩形 → 捕获视口坐标，夹回视口并套用 48px 最小边（不额外外扩）。
+    const preset = initialRect
+      ? regionFromDrag(
+          { x: initialRect.x * viewport.width, y: initialRect.y * viewport.height },
+          { x: (initialRect.x + initialRect.width) * viewport.width, y: (initialRect.y + initialRect.height) * viewport.height },
+          viewport,
+        )
+      : null;
+    const sel = preset ?? (lassoFirst ? { x: 0, y: 0, width: 0, height: 0 } : initialRegionSelection(center, viewport));
     const zero = { x: 0, y: 0, width: 0, height: 0 };
     const session: RegionSession = {
       epoch: this.identityEpoch,
@@ -2180,12 +2224,12 @@ export class FeedbackWidget extends HTMLElement {
       confirming: false,
       phase: 'selection',
       pointerId: null,
-      startedAt: lassoFirst ? performance.now() : performance.now() - (this.releaseVisual ? 0 : 550),
+      startedAt: preset ? performance.now() - 550 : lassoFirst ? performance.now() : performance.now() - (this.releaseVisual ? 0 : 550),
       orbShape: lassoFirst ? null : this.releaseVisual ? { ...this.releaseVisual } : null,
       orbRect: lassoFirst ? zero : this.releaseVisual ? { x:this.releaseVisual.x-this.releaseVisual.radius, y:this.releaseVisual.y-this.releaseVisual.radius, width:2*this.releaseVisual.radius, height:2*this.releaseVisual.radius } : { x:sel.x*overlay.width/viewport.width,y:sel.y*overlay.height/viewport.height,width:sel.width*overlay.width/viewport.width,height:sel.height*overlay.height/viewport.height },
       dragging: null,
-      lassoFirst,
-      selReady: !lassoFirst,
+      lassoFirst: lassoFirst && !preset,
+      selReady: !!preset || !lassoFirst,
       lassoPoints: null,
     };
     this.regionSession = session;
@@ -2940,9 +2984,18 @@ export class FeedbackWidget extends HTMLElement {
     this.loadWakeVisualPreference();
     this.loadEntrancePreference();
     this.syncLauncherMode();
+    this.scheduleEntryHint();
     this.wakeGestures.connect();
     if (!this.wakeShortcutHandler) this.wakeShortcutHandler = (ev) => this.onWakeShortcut(ev);
     document.addEventListener('keydown', this.wakeShortcutHandler, true);
+    document.addEventListener('pointerdown', this.onAltPointerDown, true);
+    // 指针能力会变（接上鼠标、拆下键盘、切平板模式）：变化后重探默认入口与文案。
+    if (!this.pointerMediaHandler && typeof window.matchMedia === 'function') {
+      const media = window.matchMedia('(pointer: fine)');
+      this.pointerMedia = media;
+      this.pointerMediaHandler = () => this.refreshInputProfile();
+      media.addEventListener?.('change', this.pointerMediaHandler);
+    }
 
     // 断开重连：图片字节保留在实例草稿中，重连时重建自己的预览 URL
     for (const img of this.draft.images) {
@@ -3005,6 +3058,13 @@ export class FeedbackWidget extends HTMLElement {
     if (this.wakeShortcutHandler) {
       document.removeEventListener('keydown', this.wakeShortcutHandler, true);
       this.wakeShortcutHandler = null;
+    }
+    document.removeEventListener('pointerdown', this.onAltPointerDown, true);
+    this.releaseAltDrag();
+    if (this.pointerMediaHandler) {
+      this.pointerMedia?.removeEventListener?.('change', this.pointerMediaHandler);
+      this.pointerMediaHandler = null;
+      this.pointerMedia = null;
     }
     if (this.beamLayer) this.stopBeam();
     this.surfaceCleanup?.();
@@ -3081,6 +3141,8 @@ export class FeedbackWidget extends HTMLElement {
       this.loadEntrancePreference();
       this.loadLauncherStylePreference();
       this.loadWakeVisualPreference();
+      // 首用提示按 appId 分槽：换应用后按新应用的记录重新判断是否出现。
+      this.scheduleEntryHint();
       this.settingsOpen = false;
       this.settingsConfirmOpen = false;
       this.pendingServerTarget = undefined;
@@ -3360,7 +3422,7 @@ export class FeedbackWidget extends HTMLElement {
     if (this.beamA11yBtn) {
       const orbEntry = this.gestureStandby && this.orbIdleHidden() && this.canUseOrbLauncher();
       this.beamA11yBtn.hidden = !(this.beamActive() || orbEntry) || this.openState || !!this.regionSession;
-      this.beamA11yBtn.setAttribute('aria-label', orbEntry ? '唤醒灵感球' : '打开反馈（双指长按屏幕或按 Ctrl+Shift+F）');
+      this.syncBeamA11yLabel();
     }
   }
 
@@ -3950,6 +4012,18 @@ export class FeedbackWidget extends HTMLElement {
     this.wakeHint.hidden = true;
     this.wakeHint.setAttribute('role','status');
     this.root.append(this.wakeHint);
+
+    // 0.13 首次使用提示：桌面默认有常驻入口后，用它说明入口与快捷键（只出现一次）。
+    this.entryHint = el('div','fb-entry-hint');
+    this.entryHint.hidden = true;
+    this.entryHint.setAttribute('role','status');
+    this.entryHintText = el('span','fb-entry-hint-text','');
+    const entryHintClose = el('button','fb-entry-hint-close','×');
+    entryHintClose.type = 'button';
+    entryHintClose.setAttribute('aria-label','关闭入口提示');
+    entryHintClose.addEventListener('click', () => this.dismissEntryHint());
+    this.entryHint.append(this.entryHintText, entryHintClose);
+    this.root.append(this.entryHint);
     this.orbOutline = document.createElementNS('http://www.w3.org/2000/svg','svg');
     this.orbOutline.classList.add('fb-orb-lens');
     this.orbOutline.setAttribute('aria-hidden','true'); this.hideOrbOutline();
@@ -4482,7 +4556,7 @@ export class FeedbackWidget extends HTMLElement {
 
     this.beamA11yBtn = el('button', 'fb-beam-a11y', '打开反馈');
     this.beamA11yBtn.type = 'button';
-    this.beamA11yBtn.setAttribute('aria-label', '打开反馈（双指长按屏幕或按 Ctrl+Shift+F）');
+    // 说明文案由 syncBeamA11yLabel() 按输入能力与快捷键配置生成（桌面不提双指长按）。
     this.beamA11yBtn.addEventListener('click', () => this.activateWakeShortcut());
     this.root.append(
       style,
@@ -4507,10 +4581,37 @@ export class FeedbackWidget extends HTMLElement {
    * 提供地址输入、保存、取消、恢复默认与当前有效地址展示；
    * 地址变化且有草稿 / 未确认提交时先展开内联确认块。
    */
-  /** 生效入口模式：宿主显式 tab/orb 优先；宿主要求 beam 时由用户偏好决定光束或灵感球。 */
+  /** 输入能力：连接期探测一次；指针能力变化（接鼠标 / 切平板模式）时失效重探。 */
+  private inputProfile(): InputProfile {
+    return (this.inputProfileValue ??= detectInputProfile(typeof window === 'undefined' ? null : window));
+  }
+
+  /** auto 的默认入口：精细指针给贴边标签，触屏与不可判定环境走光束。 */
+  private autoLauncherMode(): 'tab' | 'beam' {
+    return autoLauncherMode(this.inputProfile());
+  }
+
+  /** 指针能力变化（接上鼠标 / 切平板模式）：重探并刷新入口、设置项与文案。 */
+  private refreshInputProfile(): void {
+    this.inputProfileValue = null;
+    this.syncLauncherMode();
+    this.syncLauncherStyleSettings();
+    this.syncWakeSettings();
+    if (this.isConnected) {
+      this.prepareLens();
+      this.syncOrbIdle(true);
+    }
+  }
+
+  /**
+   * 生效入口模式：宿主显式 tab/orb 优先；auto 由输入能力（或本机偏好）决定；
+   * 宿主 beam 时仍允许用户切到灵感球。
+   */
   private effectiveLauncherMode(): 'beam' | 'tab' | 'orb' {
     const host = this.launcherMode;
-    return host === 'beam' ? this.launcherStyle : host;
+    if (host === 'auto') return this.launcherStyle ?? this.autoLauncherMode();
+    if (host === 'beam') return this.launcherStyle === 'orb' ? 'orb' : 'beam';
+    return host;
   }
 
   private syncLauncherMode(): void {
@@ -4519,16 +4620,146 @@ export class FeedbackWidget extends HTMLElement {
     if (this.wakeHint) {
       this.wakeHint.textContent = mode === 'orb' ? '松开手指唤醒灵感球' : '松开手指开始圈选';
     }
+    this.syncBeamA11yLabel();
+    this.syncEntryHint();
+  }
+
+  /** 桌面（精细指针且无触摸）不提示手指数，改用入口与 ⌥+拖拽。 */
+  private get touchFirstInput(): boolean {
+    const profile = this.inputProfile();
+    return !profile.fine || profile.touch;
+  }
+
+  /** 当前生效的快捷键说明（off / 语法非法时为 null）。 */
+  private wakeShortcutLabel(): string | null {
+    return formatWakeShortcut(this.getAttribute('wake-shortcut') ?? '', typeof window === 'undefined' ? null : window);
+  }
+
+  /** ⌥ / Alt 的写法差异只在提示文案上。 */
+  private get altKeyLabel(): string {
+    return primaryModifierLabel(typeof window === 'undefined' ? null : window) === '⌘' ? '⌥' : 'Alt';
+  }
+
+  /** 桌面唤醒说明：入口按钮、⌥+拖拽、快捷键，按可用能力拼接。 */
+  private desktopEntryHint(): string {
+    const parts: string[] = [];
+    if (this.altDragEnabled && this.captureMode === 'viewport') parts.push(this.altKeyLabel + ' 拖拽圈选');
+    const shortcut = this.wakeShortcutLabel();
+    if (shortcut) parts.push(`按 ${shortcut}`);
+    return parts.join('，');
+  }
+
+  /** 无障碍隐藏入口的说明必须跟随输入能力：桌面用户读到「双指长按」会以为不可用。 */
+  private syncBeamA11yLabel(): void {
+    if (!this.beamA11yBtn) return;
+    const orbEntry = this.gestureStandby && this.orbIdleHidden() && this.canUseOrbLauncher();
+    let label = orbEntry ? '唤醒灵感球' : '打开反馈';
+    if (this.touchFirstInput) {
+      const shortcut = this.wakeShortcutLabel();
+      label += shortcut ? `（双指长按屏幕或按 ${shortcut}）` : '（双指长按屏幕）';
+    } else {
+      const detail = this.desktopEntryHint();
+      if (detail) label += `（${detail}）`;
+    }
+    this.beamA11yBtn.setAttribute('aria-label', label);
+  }
+
+  /**
+   * 首次使用的入口提示：只在「有可见入口」（贴边标签 / 灵感球）时出现一次，
+   * 说明入口与当前快捷键；按 appId 记住已读，不再重复打扰。
+   */
+  private scheduleEntryHint(): void {
+    if (this.entryHintTimer !== null) clearTimeout(this.entryHintTimer);
+    this.entryHintTimer = null;
+    if (!this.entryHint || this.entryHintSeen() || !this.entryHintEligible()) return;
+    this.entryHintTimer = setTimeout(() => {
+      this.entryHintTimer = null;
+      this.showEntryHint();
+    }, 900);
+  }
+
+  private entryHintEligible(): boolean {
+    if (!this.isConnected || this.openState || this.regionSession) return false;
+    if (!this.showLauncher) return false;
+    if (this.effectiveLauncherMode() === 'beam') return false;
+    return document.visibilityState !== 'hidden';
+  }
+
+  private entryHintStorageKey(): string {
+    return 'feedback:entry-hint:v1:' + encodeURIComponent(this.appId ?? '');
+  }
+
+  private entryHintSeen(): boolean {
+    try {
+      return localStorage.getItem(this.entryHintStorageKey()) === 'seen';
+    } catch {
+      // 存储不可用时保持安静：宁可少提示一次，也不每次刷新都弹。
+      return true;
+    }
+  }
+
+  private markEntryHintSeen(): void {
+    try { localStorage.setItem(this.entryHintStorageKey(), 'seen'); } catch { /* 忽略 */ }
+  }
+
+  private showEntryHint(): void {
+    if (!this.entryHint || !this.entryHintText) return;
+    if (!this.entryHintEligible() || this.entryHintSeen()) return;
+    this.entryHintText.textContent = this.entryHintMessage();
+    this.entryHint.hidden = false;
+    this.markEntryHintSeen();
+    if (this.entryHintTimer !== null) clearTimeout(this.entryHintTimer);
+    this.entryHintTimer = setTimeout(() => {
+      this.entryHintTimer = null;
+      if (this.entryHint) this.entryHint.hidden = true;
+    }, 9000);
+  }
+
+  private entryHintMessage(): string {
+    const mode = this.effectiveLauncherMode();
+    const base = mode === 'orb' ? '拖动灵感球指出问题，点一下就能填写' : '反馈入口在这里，点一下就能填写';
+    const shortcut = this.wakeShortcutLabel();
+    return shortcut ? base + ' · 也可以按 ' + shortcut : base;
+  }
+
+  /** 入口不再可见（打开面板、切到光束、开始圈选）时收起提示。 */
+  private syncEntryHint(): void {
+    if (!this.entryHint) return;
+    if (!this.entryHintEligible() && !this.entryHint.hidden) {
+      if (this.entryHintTimer !== null) clearTimeout(this.entryHintTimer);
+      this.entryHintTimer = null;
+      this.entryHint.hidden = true;
+    }
+  }
+
+  private dismissEntryHint(): void {
+    if (this.entryHintTimer !== null) clearTimeout(this.entryHintTimer);
+    this.entryHintTimer = null;
+    if (this.entryHint) this.entryHint.hidden = true;
+    this.markEntryHintSeen();
   }
 
   private syncLauncherStyleSettings(): void {
-    const hostBeam = this.launcherMode === 'beam';
-    if (this.launcherStyleSection) this.launcherStyleSection.hidden = !hostBeam;
-    if (this.orbIdleSection) {
-      this.orbIdleSection.hidden = this.effectiveLauncherMode() !== 'orb';
+    const host = this.launcherMode;
+    const flexible = host === 'auto' || host === 'beam';
+    const profile = this.inputProfile();
+    const current = this.effectiveLauncherMode();
+    if (this.launcherStyleSection) this.launcherStyleSection.hidden = !flexible;
+    if (this.launcherStyleIntro) {
+      this.launcherStyleIntro.textContent = host === 'auto'
+        ? '默认样式按当前输入方式选择：有鼠标时用贴边入口，只有触屏时用光束唤醒。'
+        : '用选好的方式打开反馈。';
     }
     for (const [style, input] of this.launcherStyleInputs) {
-      input.checked = this.launcherStyle === style;
+      const offered = style === current ||
+        (host === 'beam' ? style === 'orb' : style === 'tab' || style === 'orb' || (style === 'beam' && profile.touch));
+      const row = input.closest('.fb-wake-option') as HTMLElement | null;
+      if (row) row.hidden = !offered;
+      input.checked = current === style;
+      input.disabled = !offered;
+    }
+    if (this.orbIdleSection) {
+      this.orbIdleSection.hidden = current !== 'orb';
     }
     if (this.launcherStyleHint) {
       this.launcherStyleHint.hidden = !this.launcherStyleSessionOnly;
@@ -4547,16 +4778,17 @@ export class FeedbackWidget extends HTMLElement {
     this.launcherStyleSessionOnly = false;
     try {
       const stored = localStorage.getItem(this.launcherStylePreferenceKey(app));
-      this.launcherStyle = stored === 'orb' ? 'orb' : 'beam';
+      // 0.13：没有选择时不再回落成 beam，而是跟随宿主模式（auto 由输入能力决定）。
+      this.launcherStyle = stored === 'orb' || stored === 'tab' || stored === 'beam' ? stored : null;
     } catch {
-      this.launcherStyle = 'beam';
+      this.launcherStyle = null;
       this.launcherStyleSessionOnly = true;
     }
     this.syncLauncherMode();
     this.syncLauncherStyleSettings();
   }
 
-  private selectLauncherStyle(style: 'beam' | 'orb'): void {
+  private selectLauncherStyle(style: 'beam' | 'tab' | 'orb'): void {
     this.launcherStyle = style;
     this.syncLauncherMode();
     try {
@@ -4623,9 +4855,66 @@ export class FeedbackWidget extends HTMLElement {
       !this.captureInFlight;
   }
 
-  /** 唤醒手势可用性不再依赖 capture-mode：关闭截图时只打开纯面板。 */
+  /**
+   * 唤醒手势可用性不再依赖 capture-mode：关闭截图时只打开纯面板。
+   * 0.13：auto 解析成贴边标签时（有触屏的笔记本）手势仍然可用；宿主显式 tab 仍不接管手势。
+   */
   private canWake(): boolean {
-    return this.beamActive() || this.canUseOrbLauncher();
+    if (this.beamActive() || this.canUseOrbLauncher()) return true;
+    return this.launcherMode === 'auto' && this.effectiveLauncherMode() === 'tab' && this.canCaptureRegion();
+  }
+
+  /** 页面级唤醒资格（不区分入口模式）：⌥+拖拽、Alt+点击与 auto 解析出的 tab 共用。 */
+  private canCaptureRegion(): boolean {
+    return this.isConnected &&
+      this.showLauncher &&
+      document.visibilityState !== 'hidden' &&
+      !this.closest('[hidden], [inert], [aria-disabled="true"]') &&
+      !this.openState &&
+      !this.regionSession &&
+      !this.isCapturing &&
+      !this.captureInFlight;
+  }
+
+  /**
+   * 桌面 ⌥/Alt + 拖拽：精细化指针才启用；宿主 wake-shortcut=off 表示自己接管入口，
+   * 同时不注入页面级 Alt 拖拽（文档已写明这一连带关系）。
+   */
+  private canAltDragWake(): boolean {
+    if (!this.altDragEnabled) return false;
+    if (!this.inputProfile().fine) return false;
+    return this.canCaptureRegion();
+  }
+
+  /** 宿主用 wake-shortcut=off 表示自己接管入口：此时也不注入页面级 Alt 拖拽。 */
+  private get altDragEnabled(): boolean {
+    return (this.getAttribute('wake-shortcut') ?? '').trim().toLowerCase() !== 'off';
+  }
+
+  /** 统一唤醒路径：光束进入圈选、灵感球浮现、贴边标签直接开面板或圈选。 */
+  private wakeAt(point: WakePoint, fingertips: readonly WakePoint[] = []): void {
+    if (!this.canWake()) return;
+    if (this.beamActive()) {
+      void this.startBeamWake(point, fingertips);
+      return;
+    }
+    if (this.effectiveLauncherMode() === 'orb') {
+      this.wakeOrb(point, fingertips);
+      return;
+    }
+    if (this.captureMode === 'off' || this.isDraftDirty()) {
+      this.open();
+      return;
+    }
+    void this.startRegionCapture({ lassoFirst: true, releasePoint: this.normalizeViewportPoint(point) });
+  }
+
+  /** 客户端坐标 → 0..1 视口比例（与既有 releasePoint 语义一致）。 */
+  private normalizeViewportPoint(point: WakePoint): WakePoint {
+    return {
+      x: Math.max(0, Math.min(1, point.x / (window.innerWidth || 1))),
+      y: Math.max(0, Math.min(1, point.y / (window.innerHeight || 1))),
+    };
   }
 
   private async startBeamWake(point?: WakePoint, fingertips: readonly WakePoint[] = []): Promise<void> {
@@ -4635,10 +4924,7 @@ export class FeedbackWidget extends HTMLElement {
       return;
     }
     // 在冻结前归一化。只有手势中点进入既有截图元数据，双指各自的位置只供本次绘制。
-    const normalize = (p: WakePoint): WakePoint => ({
-      x: Math.max(0, Math.min(1, p.x / (window.innerWidth || 1))),
-      y: Math.max(0, Math.min(1, p.y / (window.innerHeight || 1))),
-    });
+    const normalize = (p: WakePoint): WakePoint => this.normalizeViewportPoint(p);
     await this.startRegionCapture({
       releasePoint: point && normalize(point),
       lassoFirst: true,
@@ -4669,25 +4955,104 @@ export class FeedbackWidget extends HTMLElement {
     return pressedKey === key || codeKey === key;
   }
 
+  /** auto 解析成贴边标签时（桌面默认）快捷键同样可用：视口中心进入圈选或打开面板。 */
+  private mouseEntryWakeAvailable(): boolean {
+    return this.launcherMode === 'auto' && this.effectiveLauncherMode() === 'tab' && this.canCaptureRegion();
+  }
+
   private activateWakeShortcut(): void {
-    if (this.beamActive()) void this.startBeamWake();
-    else if (this.gestureStandby && this.canWakeOrb()) {
-      this.wakeOrb({x: window.innerWidth/2, y: window.innerHeight/2});
-      this.orb.focus();
+    if (this.beamActive()) {
+      void this.startBeamWake();
+      return;
     }
+    if (this.canUseOrbLauncher()) {
+      // 灵感球待机（含手势唤出的隐藏态）：先浮现完整球；已停靠：与点击入口同义。
+      if (this.orbCollapsed || this.gestureStandby) {
+        this.wakeOrb({x: window.innerWidth/2, y: window.innerHeight/2});
+        this.orb.focus();
+      } else if (this.captureMode === 'viewport') {
+        void this.captureAndOpen();
+      } else {
+        this.open();
+      }
+      return;
+    }
+    if (this.mouseEntryWakeAvailable()) this.wakeAt({x: window.innerWidth/2, y: window.innerHeight/2});
   }
 
   private onWakeShortcut(ev: KeyboardEvent): void {
-    if (ev.isComposing || ev.repeat || !(this.beamActive() || (this.gestureStandby && this.canWakeOrb()))) return;
+    if (ev.isComposing || ev.repeat || !(this.beamActive() || this.canUseOrbLauncher() || this.mouseEntryWakeAvailable())) return;
     if (this.openState || this.regionSession || this.isCapturing || this.editorHandle) return;
     const target = ev.target instanceof Element ? ev.target as HTMLElement : null;
     if (target && (target.isContentEditable || target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])'))) return;
+    // 宿主已经处理过的组合键让路（例如应用内的全局搜索），不抢占。
+    if (ev.defaultPrevented) return;
     if (!this.wakeShortcutMatches(ev)) return;
     ev.preventDefault();
     ev.stopImmediatePropagation();
     this.activateWakeShortcut();
   }
 
+  /**
+   * ⌥/Alt + 拖拽（桌面）：按下即接管指针，松手后一次冻结并直接落到该矩形。
+   * 只处理主键、精细指针与非交互起点；拖动不足 8px 视为 ⌥+点击，按普通唤醒处理。
+   */
+  private readonly onAltPointerDown = (ev: PointerEvent): void => {
+    if (!ev.altKey || ev.button !== 0 || ev.pointerType === 'touch') return;
+    if (this.altDragWake || !this.canAltDragWake()) return;
+    const target = ev.target instanceof Element ? ev.target : null;
+    if (target && (this.isOwnFeedbackUi(target) || target.closest('input, textarea, select, button, a, label, summary, [contenteditable]:not([contenteditable="false"]), [role="button"], [role="link"]'))) return;
+    this.altDragWake = { pointerId: ev.pointerId, startX: ev.clientX, startY: ev.clientY, lastX: ev.clientX, lastY: ev.clientY };
+    this.altDragMoveHandler = (move: PointerEvent) => {
+      const drag = this.altDragWake;
+      if (!drag || move.pointerId !== drag.pointerId) return;
+      drag.lastX = move.clientX;
+      drag.lastY = move.clientY;
+      if (move.cancelable) move.preventDefault();
+    };
+    this.altDragUpHandler = (up: PointerEvent) => this.finishAltDrag(up);
+    document.addEventListener('pointermove', this.altDragMoveHandler, { capture: true, passive: false });
+    document.addEventListener('pointerup', this.altDragUpHandler, true);
+    document.addEventListener('pointercancel', this.altDragUpHandler, true);
+    if (ev.cancelable) ev.preventDefault();
+    ev.stopPropagation();
+  };
+
+  private finishAltDrag(ev: PointerEvent): void {
+    const drag = this.altDragWake;
+    if (!drag || ev.pointerId !== drag.pointerId) return;
+    this.releaseAltDrag();
+    if (ev.type === 'pointercancel') return;
+    const width = Math.abs(drag.lastX - drag.startX);
+    const height = Math.abs(drag.lastY - drag.startY);
+    const center = { x: (drag.startX + drag.lastX) / 2, y: (drag.startY + drag.lastY) / 2 };
+    if (width < 8 || height < 8) {
+      this.wakeAt(center);
+      return;
+    }
+    if (ev.cancelable) ev.preventDefault();
+    // 宿主关闭截图（capture-mode=off）时没有冻结画面可框选：只打开面板。
+    if (this.captureMode === 'off') {
+      this.open();
+      return;
+    }
+    const start = this.normalizeViewportPoint({ x: Math.min(drag.startX, drag.lastX), y: Math.min(drag.startY, drag.lastY) });
+    const end = this.normalizeViewportPoint({ x: Math.max(drag.startX, drag.lastX), y: Math.max(drag.startY, drag.lastY) });
+    void this.startRegionCapture({
+      initialRect: { x: start.x, y: start.y, width: Math.max(0, end.x - start.x), height: Math.max(0, end.y - start.y) },
+    });
+  }
+
+  private releaseAltDrag(): void {
+    this.altDragWake = null;
+    if (this.altDragMoveHandler) document.removeEventListener('pointermove', this.altDragMoveHandler, true);
+    if (this.altDragUpHandler) {
+      document.removeEventListener('pointerup', this.altDragUpHandler, true);
+      document.removeEventListener('pointercancel', this.altDragUpHandler, true);
+    }
+    this.altDragMoveHandler = null;
+    this.altDragUpHandler = null;
+  }
   private canWakeOrb(): boolean {
     // 0.8.5：待机隐藏不等于入口不可用——canUseOrbLauncher() 仍为 true，手势可继续唤醒完整球。
     // 0.10：触发与截图能力解耦（capture-mode=off 时只打开纯面板）。
@@ -4709,14 +5074,20 @@ export class FeedbackWidget extends HTMLElement {
     this.syncOrbIdle(true);
   }
 
-  /** 宿主 beam 时终端用户可在「光束唤醒 / 灵感球」之间选择。 */
+  /** 宿主 auto/beam 时终端用户可选择入口样式；具体可选项由输入能力与宿主模式决定。 */
   private buildLauncherStyleSettings(): HTMLElement {
     const group = el('section','fb-launcher-style');
     const title = el('h3','fb-settings-title','入口样式');
     title.id = 'fb-launcher-style-title';
     group.setAttribute('aria-labelledby', title.id);
-    group.append(title, el('p','fb-footnote','用下方选好的手势唤醒。光束直接进入圈选；灵感球从手指之间浮现，点一下反馈，拖到问题处松手选区。'));
-    for (const style of ['beam','orb'] as const) {
+    this.launcherStyleIntro = el('p','fb-footnote','默认样式按当前输入方式选择：有鼠标时用贴边入口，只有触屏时用光束唤醒。');
+    group.append(title, this.launcherStyleIntro);
+    const copy: Record<'tab' | 'orb' | 'beam', [string, string]> = {
+      tab: ['贴边标签', '页面侧边的常驻入口，点一下就能填写'],
+      orb: ['灵感球', '把球拖到问题处松手选区，点一下直接填写'],
+      beam: ['光束唤醒', '触屏用法：双指长按后画圈，页面不显示常驻入口'],
+    };
+    for (const style of ['tab','orb','beam'] as const) {
       const row = el('label','fb-wake-option');
       const input = el('input');
       input.type = 'radio';
@@ -4724,8 +5095,8 @@ export class FeedbackWidget extends HTMLElement {
       input.dataset.launcherStyle = style;
       const text = el('span','fb-wake-option-text');
       text.append(
-        el('span','fb-wake-option-title', style === 'beam' ? '光束唤醒' : '灵感球'),
-        el('span','fb-footnote', style === 'beam' ? '默认：无驻留入口，按需唤醒' : '从手势位置出现，可拖到问题处选区'),
+        el('span','fb-wake-option-title', copy[style][0]),
+        el('span','fb-footnote', copy[style][1]),
       );
       row.append(input, text);
       group.append(row);
@@ -4857,22 +5228,28 @@ export class FeedbackWidget extends HTMLElement {
     this.syncWakeSettings();
   }
 
+  /**
+   * 「唤醒方式」按输入能力分组：精细指针显示入口 / ⌥+拖拽 / 快捷键，
+   * 有触摸输入时才出现手势组（0.13：桌面用户不再看到「双指长按」这类手机用法）。
+   */
   private buildWakeSettings(): HTMLElement {
     const group = el('section','fb-wake-settings');
     const title = el('h3','fb-settings-title','唤醒方式');
     title.id = 'fb-wake-title'; group.setAttribute('aria-labelledby',title.id);
-    const note = el('p','fb-footnote','可同时开启，仅在当前应用内生效；悬浮入口仍可使用。');
-    const exclusions = el('p','fb-footnote','为避免误触，不在输入框、链接、按钮或可编辑区域识别。');
+    this.wakeDesktopList = el('div','fb-wake-desktop');
+    this.wakeGestureNote = el('p','fb-footnote','触屏手势可与上面的方式同时使用，仅在当前应用内生效。');
+    this.wakeExclusions = el('p','fb-footnote','为避免误触，不在输入框、链接、按钮或可编辑区域识别。');
     this.wakeAvailability = el('p','fb-wake-availability','应用未开启截图，手势暂不可用');
     this.wakePreferenceHint = el('p','fb-wake-pref-hint','仅本次生效');
     this.wakePreferenceHint.setAttribute('role','status');
-    group.append(title);
+    group.append(title, this.wakeDesktopList, this.wakeGestureNote);
     for (const gesture of WAKE_GESTURES) {
       const row = el('label','fb-wake-option');
       const input = el('input'); input.type='checkbox'; input.dataset.wakeGesture=gesture.id;
       const text = el('span','fb-wake-option-text');
       text.append(el('span','fb-wake-option-title',gesture.title),el('span','fb-footnote',gesture.description));
       row.append(input,text); group.append(row); this.wakeInputs.set(gesture.id,input);
+      this.wakeGestureRows.push(row);
       input.addEventListener('change',() => {
         this.wakeGestures.reset();
         this.wakeEnabled = WAKE_GESTURES.map(g=>g.id).filter(id=>this.wakeInputs.get(id)!.checked);
@@ -4883,16 +5260,54 @@ export class FeedbackWidget extends HTMLElement {
         this.syncOrbIdle(true);
       });
     }
-    group.append(note,exclusions,this.wakeAvailability,this.wakePreferenceHint);
+    group.append(this.wakeExclusions,this.wakeAvailability,this.wakePreferenceHint);
     return group;
+  }
+
+  /** 桌面可用的三道入口：可见入口、⌥+拖拽、快捷键（按当前配置实时生成）。 */
+  private desktopWakeRows(): HTMLElement[] {
+    const rows: HTMLElement[] = [];
+    const mode = this.effectiveLauncherMode();
+    if (this.showLauncher && mode !== 'beam') {
+      rows.push(this.wakeFactRow(
+        '点击入口',
+        mode === 'orb' ? '点击灵感球直接填写；把它拖到问题处松手改为圈选' : '页面侧边的「反馈」按钮，点一下就能填写',
+      ));
+    }
+    if (this.altDragEnabled) {
+      rows.push(this.wakeFactRow(
+        '按住 ' + this.altKeyLabel + ' 拖拽',
+        this.captureMode === 'off' ? '在页面上按住并拖动，松手直接打开反馈' : '在页面上拖出一个矩形，松手即圈定该区域',
+      ));
+    }
+    const shortcut = this.wakeShortcutLabel();
+    if (shortcut) rows.push(this.wakeFactRow('快捷键', shortcut + ' 打开反馈并圈选'));
+    return rows;
+  }
+
+  private wakeFactRow(title: string, detail: string): HTMLElement {
+    const row = el('div','fb-wake-option fb-wake-fact');
+    const text = el('span','fb-wake-option-text');
+    text.append(el('span','fb-wake-option-title',title),el('span','fb-footnote',detail));
+    row.append(text);
+    return row;
   }
 
   private syncWakeSettings(): void {
     if (!this.wakeAvailability) return;
+    const profile = this.inputProfile();
     // 0.10：唤醒与截图能力解耦；关闭截图时手势只打开纯面板。
     this.wakeAvailability.hidden = true;
     this.wakePreferenceHint.hidden = !this.wakePreferenceSessionOnly;
     for (const [id,input] of this.wakeInputs) { input.checked=this.wakeEnabled.includes(id); input.disabled=false; }
+    for (const row of this.wakeGestureRows) row.hidden = !profile.touch;
+    if (this.wakeGestureNote) this.wakeGestureNote.hidden = !profile.touch;
+    if (this.wakeExclusions) this.wakeExclusions.hidden = !profile.touch;
+    if (this.wakeDesktopList) {
+      const rows = profile.fine ? this.desktopWakeRows() : [];
+      this.wakeDesktopList.hidden = rows.length === 0;
+      this.wakeDesktopList.replaceChildren(...rows);
+    }
   }
 
   private buildSettingsView(): HTMLDivElement {

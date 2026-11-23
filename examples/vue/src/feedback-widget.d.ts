@@ -12,8 +12,8 @@ declare module 'vue' {
       theme?: 'system' | 'light' | 'dark';
       'show-launcher'?: 'true' | 'false';
       'launcher-bottom'?: string;
-      /** `tab`（默认，贴边标签）| `orb`（灵感球）。 */
-      'launcher-mode'?: 'tab' | 'orb';
+      /** `auto`（默认，按输入能力：精细指针用贴边标签，触屏走光束）| `beam` | `tab` | `orb`。 */
+      'launcher-mode'?: 'auto' | 'beam' | 'tab' | 'orb';
       /** `off`（默认）| `viewport`（呼出时截取当前应用视口）。 */
       'capture-mode'?: 'off' | 'viewport';
     }>;
