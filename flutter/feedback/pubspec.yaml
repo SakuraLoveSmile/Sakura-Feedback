@@ -1,6 +1,6 @@
 name: feedback_widget
 description: Personal feedback widget for Flutter apps (orb launcher + panel).
-version: 0.12.0
+version: 0.13.0
 publish_to: none
 
 environment:
