@@ -2,10 +2,9 @@
 
 - 任务编号：fb-beam-001
 - 项目：personal-feedback
-- 分支：`feat/20261122-fb-beam-001-beam-wake`
-- Worktree：`Project Worktree/personal-feedback/20261122-feat-fb-beam-001-beam-wake`
+- 开发分支 `feat/20261122-fb-beam-001-beam-wake` 已合入 `main`，本地任务分支和工作树已清理。
 - 计划：`.qoder/plans/tender-wave-clam.md`（批准于 2026-11-22）
-- 状态：待体验。用户已授权验证通过后公开发布 v0.10.0。七种灵感球动画的真机手感待体验。
+- 状态：待体验。v0.10.0 已公开发布，七种灵感球动画的真机手感待体验。
 
 ## 目标
 
@@ -154,9 +153,7 @@
 
 ## 遗留与后续
 
-- `e2e/run_browser.py` T7a/T7b/T8/P8/P10 依赖「归档后仍可撰写」的旧面板形态；
-  当前面板在 accepted 后隐藏撰写区与「再记一条」。是否恢复该入口属产品决定，本任务未改。
-- 上述遗留记录对应 11 月 22 日的开发阶段。发布核验见下文。
+- 11 月 22 日曾将 T7a/T7b/T8/P8/P10 的失败归因于回执缺少「再记一条」。11 月 23 日在实际页面确认该入口可用，更新浏览器脚本后完整回归通过，已解决。验证详情见下文。
 
 ## 七种灵感球唤醒效果（2026-11-22，待体验）
 
@@ -173,3 +170,11 @@
 - Node 22.23.2 / pnpm 11.23.0 完成冻结安装、构建、类型检查和 lint。服务端 469 项、Web 705 项通过。Flutter 3.41.3 组件 699 项、示例 38 项通过，三档安全存储兼容矩阵通过。
 - 发布安装包经过解包、入口和类型声明检查，Web 与后台 dist 压缩包逐文件比对构建输出，三份文件通过 SHA-256 复核。用打包后的组件在 Chrome 验证波光、水波纹与圈选，以及七种灵感球的保存、唤醒、拖动和减少动态效果。
 - 浏览器回归更新了过时的操作和几何断言。当前回执有可见的「再记一条」，初始选区为 144×144，缩放手柄位于四角。截图、裁剪、遮挡与提交断言继续保留。
+
+## v0.10.0 公开发布（2026-11-23）
+
+- 台北时间 09:37 公开为最新稳定版。签名标签 `v0.10.0` 对应提交 `bd5a235abab32adabe42de99d9d4a01fa291e0dd`。该提交的主分支 CI 和正式发布流程均通过。[GitHub Release](https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/tag/v0.10.0) · [主分支 CI](https://github.com/SakuraLoveSmile/Sakura-Feedback/actions/runs/45094662021) · [发布流程](https://github.com/SakuraLoveSmile/Sakura-Feedback/actions/runs/45095024051)
+- 本地 Chrome 完整回归 399/399 项通过，光束专项 36/36 项通过。七种灵感球均已验证设置保存、触发、拖动和减少动态效果。七种动画在手机上的实际手感仍待体验。
+- 已从公开 Release 下载全部 7 个附件，核对发布说明、文件摘要、来源提交和稳定版清单。Web 安装包与两份 dist 压缩包均通过 SHA-256 和解包检查。
+- 匿名读取 GHCR，`ghcr.io/sakuralovesmile/sakura-feedback` 的 `v0.10.0` 和 `latest` 均提供 `linux/amd64`，两者的实际摘要与清单一致，为 `sha256:e1bb2fd4e4632cffbefd81abff18b4bb909318acfa4ea6468d504165ff194d1f`。数据库 schema 为 15。本次操作限于发布，生产部署单独进行。
+- 工作树中的 161 个截图及本地示例构建文件已归档并逐文件核对。归档位于本机 `Documents/Codex/2026-11-23/Feedback-v0.10.0/工作树留存/`。
