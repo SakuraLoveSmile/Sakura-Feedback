@@ -37,7 +37,7 @@ web、android、ios、windows、macos、linux（平台差异经条件导入隔�
 
 ## 从 0.10.0 升级与宿主托管
 
-在宿主 `pubspec.yaml` 的 `feedback_widget.git` 下使用 `ref: v0.11.0` 和
+在宿主 `pubspec.yaml` 的 `feedback_widget.git` 下使用 `ref: v0.12.0` 和
 `path: flutter/feedback`，执行 `flutter pub get`。省略新参数时，默认入口、动效与按应用保存的偏好沿用 0.10.0。
 
 宿主可从包入口导入 `FeedbackLauncherStyle`、`FeedbackWakeVisual`、`FeedbackOrbEntrance`，
