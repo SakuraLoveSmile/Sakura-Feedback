@@ -1,15 +1,29 @@
+import { Badge, Button, NativeSelect, Paper, Table } from "@mantine/core";
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { ApiError, api, type SessionItem } from "../api.ts";
-import { ConfirmDialog, EmptyState, Icon, InlineError, SkeletonRows, useToast } from "../ui.tsx";
+import {
+  ConfirmDialog,
+  EmptyState,
+  Icon,
+  InlineError,
+  ListSearch,
+  SectionIcon,
+  SkeletonRows,
+  useToast,
+} from "../ui.tsx";
 
 export default function SessionsView() {
   const toast = useToast();
+  const [query, setQuery] = useState("");
+  const [kind, setKind] = useState("");
+  const [revoking, setRevoking] = useState(false);
   const [sessions, setSessions] = useState<SessionItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [revokeAllAsk, setRevokeAllAsk] = useState(false);
   const [revokeTarget, setRevokeTarget] = useState<string | null>(null);
 
   const load = useCallback(async () => {
+    setError(null);
     try {
       const r = await api.get<{ sessions: SessionItem[] }>("/api/auth/sessions");
       setSessions(r.sessions);
@@ -24,16 +38,22 @@ export default function SessionsView() {
   }, [load]);
 
   async function revoke(id: string) {
+    if (revoking) return;
+    setRevoking(true);
     try {
       await api.del(`/api/auth/sessions/${id}`);
       toast("ok", "会话已撤销");
       await load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "撤销失败");
+    } finally {
+      setRevoking(false);
     }
   }
 
   async function revokeAll() {
+    if (revoking) return;
+    setRevoking(true);
     try {
       const r = await api.post<{ revoked: number }>("/api/auth/sessions/revoke-all");
       setError(null);
@@ -41,11 +61,20 @@ export default function SessionsView() {
       await load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "撤销失败");
+    } finally {
+      setRevoking(false);
     }
   }
 
   const current = sessions?.find((s) => s.current) ?? null;
 
+  const shown = (sessions ?? []).filter(
+    (s) =>
+      (!kind || s.kind === kind) &&
+      (s.clientLabel || kindLabel(s.kind)).toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
+  );
+  const otherCount = sessions?.filter((s) => !s.current).length ?? 0;
+  const target = sessions?.find((s) => s.id === revokeTarget);
   return (
     <div className="sessions-page">
       <div className="page-header">
@@ -54,90 +83,131 @@ export default function SessionsView() {
           <div className="sub">当前登录的浏览器会话与客户端令牌；撤销后对应客户端需重新登录，当前会话始终保留。</div>
         </div>
         <div className="btn-row">
-          <button type="button" className="btn" onClick={() => void load()}>
+          <Button type="button" className="btn" onClick={() => void load()}>
             <Icon name="refresh" size={16} />
             刷新
-          </button>
+          </Button>
         </div>
       </div>
       {error && <InlineError message={error} onRetry={() => void load()} />}
 
       <div className="sessions-grid">
-        <div className="table-wrap">
-          {sessions === null ? (
-            <SkeletonRows rows={4} />
-          ) : sessions.length === 0 ? (
-            <EmptyState
-              title="没有会话"
-              hint="在其他浏览器或客户端登录后，会话会自动出现在这里。"
-              action={
-                <button type="button" className="btn sm" onClick={() => void load()}>
-                  刷新
-                </button>
-              }
-            />
-          ) : (
-            <table className="session-table">
-              <thead>
-                <tr>
-                  <th>设备 / 标签</th>
-                  <th>类型</th>
-                  <th>最近使用</th>
-                  <th>过期</th>
-                  <th className="col-action">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sessions.map((s) => (
-                  <tr key={s.id} className={s.current ? "current" : undefined}>
-                    <td>
-                      <span className="session-name">
-                        <span className={`session-icon tone-${s.kind}`} aria-hidden="true">
-                          {kindIcon(s.kind)}
-                        </span>
-                        <span className="session-label">{s.clientLabel ?? "—"}</span>
-                      </span>
-                    </td>
-                    <td>{kindLabel(s.kind)}</td>
-                    <td className="muted tnum">
-                      {s.lastUsedAt ? (
-                        <time dateTime={s.lastUsedAt} title={new Date(s.lastUsedAt).toLocaleString()}>
-                          {relTime(s.lastUsedAt)}
-                        </time>
-                      ) : (
-                        "—"
-                      )}
-                    </td>
-                    <td className="muted tnum">
-                      <time dateTime={s.expiresAt} title={new Date(s.expiresAt).toLocaleString()}>
-                        {relTime(s.expiresAt)}
-                      </time>
-                    </td>
-                    <td className="col-action">
-                      {s.current ? (
-                        <span className="tag tone-info">当前</span>
-                      ) : (
-                        <button
-                          type="button"
-                          className="btn sm danger"
-                          title="撤销该会话后，对应客户端需要重新登录"
-                          onClick={() => setRevokeTarget(s.id)}
-                        >
-                          撤销
-                        </button>
-                      )}
-                    </td>
-                  </tr>
+        <div className="sessions-list">
+          {sessions && sessions.length > 0 && (
+            <div className="directory-toolbar">
+              <ListSearch label="搜索设备或会话名称" value={query} onChange={setQuery} />
+              <NativeSelect aria-label="会话类型筛选" value={kind} onChange={(e) => setKind(e.target.value)}>
+                <option value="">全部类型</option>
+                {Array.from(new Set(sessions.map((s) => s.kind))).map((k) => (
+                  <option key={k} value={k}>
+                    {kindLabel(k)}
+                  </option>
                 ))}
-              </tbody>
-            </table>
+              </NativeSelect>
+            </div>
           )}
+          <div className="table-wrap">
+            {sessions === null && error ? (
+              <EmptyState title="会话列表未加载" hint="点击上方的重试按钮重新读取会话。" />
+            ) : sessions === null ? (
+              <SkeletonRows rows={4} />
+            ) : sessions.length === 0 ? (
+              <EmptyState
+                title="没有会话"
+                hint="在其他浏览器或客户端登录后，会话会自动出现在这里。"
+                action={
+                  <Button size="xs" type="button" className="btn sm" onClick={() => void load()}>
+                    刷新
+                  </Button>
+                }
+              />
+            ) : shown.length === 0 ? (
+              <EmptyState
+                title="没有匹配的会话"
+                action={
+                  <Button
+                    type="button"
+                    className="btn"
+                    onClick={() => {
+                      setKind("");
+                      setQuery("");
+                    }}
+                  >
+                    清除筛选
+                  </Button>
+                }
+              />
+            ) : (
+              <Table className="session-table directory-table sessions-directory">
+                <Table.Thead>
+                  <Table.Tr>
+                    <Table.Th>设备 / 标签</Table.Th>
+                    <Table.Th>类型</Table.Th>
+                    <Table.Th>最近使用</Table.Th>
+                    <Table.Th>过期</Table.Th>
+                    <Table.Th className="col-action">操作</Table.Th>
+                  </Table.Tr>
+                </Table.Thead>
+                <Table.Tbody>
+                  {shown.map((s) => (
+                    <Table.Tr key={s.id} className={s.current ? "current" : undefined}>
+                      <Table.Td>
+                        <span className="session-name">
+                          <span className={`session-icon tone-${s.kind}`} aria-hidden="true">
+                            {kindIcon(s.kind)}
+                          </span>
+                          <span className="session-label">{s.clientLabel || kindLabel(s.kind)}</span>
+                        </span>
+                      </Table.Td>
+                      <Table.Td data-label="类型">{kindLabel(s.kind)}</Table.Td>
+                      <Table.Td data-label="最近使用" className="muted tnum">
+                        {s.lastUsedAt ? (
+                          <time dateTime={s.lastUsedAt} title={new Date(s.lastUsedAt).toLocaleString()}>
+                            {relTime(s.lastUsedAt)}
+                          </time>
+                        ) : (
+                          "—"
+                        )}
+                      </Table.Td>
+                      <Table.Td data-label="过期时间" className="muted tnum">
+                        <time dateTime={s.expiresAt} title={new Date(s.expiresAt).toLocaleString()}>
+                          {relTime(s.expiresAt)}
+                        </time>
+                      </Table.Td>
+                      <Table.Td className="col-action">
+                        {s.current ? (
+                          <Badge component="span" variant="light" radius="sm" color="blue" className="tag tone-info">
+                            当前
+                          </Badge>
+                        ) : (
+                          <Button
+                            variant="light"
+                            color="red"
+                            size="xs"
+                            type="button"
+                            className="btn sm danger"
+                            title="撤销该会话后，对应客户端需要重新登录"
+                            disabled={revoking}
+                            onClick={() => setRevokeTarget(s.id)}
+                          >
+                            撤销
+                          </Button>
+                        )}
+                      </Table.Td>
+                    </Table.Tr>
+                  ))}
+                </Table.Tbody>
+              </Table>
+            )}
+          </div>
         </div>
-
         <div className="sessions-side">
           {current && (
-            <div className="card session-current-card">
-              <h2 className="session-current-title">当前会话</h2>
+            <Paper withBorder p="lg" className="card session-current-card">
+              <h2 className="session-current-title">
+                <SectionIcon name="clock" />
+                当前会话
+              </h2>
               <div className="session-name">
                 <span className={`session-icon tone-${current.kind}`} aria-hidden="true">
                   {kindIcon(current.kind)}
@@ -155,21 +225,30 @@ export default function SessionsView() {
                 <dt>过期时间</dt>
                 <dd>{new Date(current.expiresAt).toLocaleString()}</dd>
               </dl>
-            </div>
+            </Paper>
           )}
 
           {/* 危险操作独立分区：与常规列表/刷新分开，进入即知影响范围，执行仍走二次确认。 */}
           <div className="danger-zone">
             <div className="danger-zone-head">
               <h2>危险操作</h2>
-              <span className="tag tone-err">需二次确认</span>
+              <Badge component="span" variant="light" radius="sm" color="red" className="tag tone-err">
+                需二次确认
+              </Badge>
             </div>
             <p>
               撤销除当前会话外的全部浏览器会话与客户端令牌：相关客户端需重新登录，且此操作不可撤销。当前会话不受影响。
             </p>
-            <button type="button" className="btn danger" onClick={() => setRevokeAllAsk(true)}>
+            <Button
+              variant="light"
+              color="red"
+              type="button"
+              className="btn danger"
+              disabled={revoking || !otherCount}
+              onClick={() => setRevokeAllAsk(true)}
+            >
               撤销其它全部会话
-            </button>
+            </Button>
           </div>
         </div>
       </div>
@@ -177,7 +256,7 @@ export default function SessionsView() {
       {revokeAllAsk && (
         <ConfirmDialog
           title="撤销其它全部会话？"
-          body={<p>除当前会话外，所有浏览器会话与客户端令牌将被撤销，相关客户端需重新登录。</p>}
+          body={<p>将撤销当前会话以外的 {otherCount} 个会话，相关客户端需重新登录。</p>}
           confirmLabel="全部撤销"
           danger
           onClose={() => setRevokeAllAsk(false)}
@@ -190,7 +269,9 @@ export default function SessionsView() {
       {revokeTarget && (
         <ConfirmDialog
           title="撤销该会话？"
-          body={<p>对应客户端需要重新登录。</p>}
+          body={
+            <p>将撤销「{target?.clientLabel || kindLabel(target?.kind || "会话")}」的登录。对应客户端需要重新登录。</p>
+          }
           confirmLabel="撤销"
           danger
           onClose={() => setRevokeTarget(null)}
@@ -205,7 +286,7 @@ export default function SessionsView() {
   );
 }
 
-function kindLabel(k: string): ReactNode {
+function kindLabel(k: string): string {
   return { cookie: "浏览器会话", client: "客户端令牌", handshake: "Web 短期令牌" }[k] ?? k;
 }
 

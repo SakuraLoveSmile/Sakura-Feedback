@@ -1,23 +1,44 @@
+import {
+  ActionIcon,
+  Alert,
+  Button,
+  CloseButton,
+  Group,
+  Input,
+  Modal as LibraryModal,
+  Menu,
+  Notification,
+  Skeleton,
+  Stack,
+  Text,
+  TextInput,
+  ThemeIcon,
+} from "@mantine/core";
 /**
  * 共享 UI 组件：图标、状态标签、弹窗、抽屉、通知、空状态、骨架屏。
  * 全站同一套交互：焦点约束、Escape 关闭、关闭后焦点恢复、背景不可交互。
  */
-import {
-  createContext,
-  type ReactNode,
-  useCallback,
-  useContext,
-  useEffect,
-  useId,
-  useLayoutEffect,
-  useRef,
-  useState,
-} from "react";
+import { createContext, type ReactNode, useCallback, useContext, useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 // ---------- 图标（单色线性 SVG，18px / 线宽 1.75） ----------
 
 const PATHS: Record<string, ReactNode> = {
+  brand: (
+    <>
+      <path
+        d="M3 5.5A2.5 2.5 0 0 1 5.5 3H16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2H9l-5.5 4v-4A2 2 0 0 1 3 10z"
+        fill="currentColor"
+        stroke="none"
+      />
+      <path d="M21 8v7a2 2 0 0 1-2 2h-1v4l-4.5-4H10" />
+    </>
+  ),
+  logout: (
+    <>
+      <path d="M10 4H5v16h5M9 12h12m-4-4 4 4-4 4" />
+    </>
+  ),
   inbox: (
     <>
       <path d="M22 12h-6l-2 3h-4l-2-3H2" />
@@ -45,6 +66,7 @@ const PATHS: Record<string, ReactNode> = {
       <path d="M3 3v5h5" />
     </>
   ),
+  filter: <path d="M3 5h18l-7 8v6l-4 2v-8z" />,
   search: (
     <>
       <circle cx="11" cy="11" r="8" />
@@ -53,11 +75,11 @@ const PATHS: Record<string, ReactNode> = {
   ),
   refresh: (
     <>
-      <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-      <path d="M3 3v5h5" />
-      <path d="M21 12a9 9 0 1 1-9 9" />
+      <path d="M20 7v5h-5M4 17v-5h5" />
+      <path d="M5.5 8a7 7 0 0 1 11.6-2L20 9M4 15l2.9 3A7 7 0 0 0 18.5 16" />
     </>
   ),
+  chevronDown: <path d="m6 9 6 6 6-6" />,
   close: <path d="M18 6 6 18M6 6l12 12" />,
   external: (
     <>
@@ -165,6 +187,14 @@ export function Icon({ name, size = 18 }: { name: keyof typeof PATHS | string; s
   );
 }
 
+export function SectionIcon({ name }: { name: string }) {
+  return (
+    <span className="section-title-icon" aria-hidden="true">
+      <Icon name={name} size={16} />
+    </span>
+  );
+}
+
 // ---------- 焦点约束（弹窗/抽屉共用） ----------
 
 const FOCUSABLE =
@@ -242,20 +272,18 @@ export function Field({
 }) {
   const describedBy = [hint ? `${id}-hint` : "", error ? `${id}-error` : ""].filter(Boolean).join(" ") || undefined;
   return (
-    <div className="field">
-      <label htmlFor={id}>{label}</label>
+    <Input.Wrapper
+      className="field"
+      id={id}
+      label={label}
+      description={hint}
+      error={error}
+      descriptionProps={{ id: `${id}-hint`, className: "field-hint" }}
+      errorProps={{ id: `${id}-error`, role: "alert", className: "field-error" }}
+      inputWrapperOrder={["label", "input", "description", "error"]}
+    >
       {children({ id, "aria-describedby": describedBy, "aria-invalid": error ? true : undefined })}
-      {hint ? (
-        <div className="field-hint" id={`${id}-hint`}>
-          {hint}
-        </div>
-      ) : null}
-      {error ? (
-        <div className="field-error" id={`${id}-error`} role="alert">
-          {error}
-        </div>
-      ) : null}
-    </div>
+    </Input.Wrapper>
   );
 }
 
@@ -276,23 +304,34 @@ export function Modal({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useFocusTrap(true, ref, onClose);
-  const labelId = useId();
   return createPortal(
-    // biome-ignore lint/a11y/noStaticElementInteractions: 背景遮罩点击关闭是弹窗标准交互，键盘走 Escape
-    <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div
-        ref={ref}
-        className={`modal${wide ? " wide" : ""}`}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={labelId}
-        tabIndex={-1}
-      >
-        <h2 id={labelId}>{title}</h2>
-        <div className="modal-body">{children}</div>
-        {actions && <div className="modal-actions">{actions}</div>}
-      </div>
-    </div>,
+    <LibraryModal.Root
+      opened
+      onClose={onClose}
+      centered
+      size={wide ? "xl" : "md"}
+      withinPortal={false}
+      returnFocus={false}
+      trapFocus={false}
+      closeOnEscape={false}
+      transitionProps={{ duration: 0 }}
+      classNames={{ inner: "overlay" }}
+    >
+      <LibraryModal.Overlay />
+      <LibraryModal.Content ref={ref} className="modal" tabIndex={-1}>
+        <LibraryModal.Header>
+          <LibraryModal.Title>{title}</LibraryModal.Title>
+        </LibraryModal.Header>
+        <LibraryModal.Body>
+          <div className="modal-body">{children}</div>
+          {actions && (
+            <Group justify="flex-end" gap="xs" mt="lg">
+              {actions}
+            </Group>
+          )}
+        </LibraryModal.Body>
+      </LibraryModal.Content>
+    </LibraryModal.Root>,
     document.body,
   );
 }
@@ -324,10 +363,12 @@ export function ConfirmDialog({
       onClose={onClose}
       actions={
         <>
-          <button type="button" className="btn" onClick={onClose}>
+          <Button type="button" className="btn" onClick={onClose}>
             取消
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="filled"
+            color={danger ? "red" : "blue"}
             type="button"
             className={`btn ${danger ? "danger" : "primary"}`}
             disabled={!ok}
@@ -335,7 +376,7 @@ export function ConfirmDialog({
             onClick={onConfirm}
           >
             {confirmLabel}
-          </button>
+          </Button>
         </>
       }
     >
@@ -344,7 +385,8 @@ export function ConfirmDialog({
         <div className="dialog-field">
           <Field id="confirm-text" label={<>输入「{need}」以确认</>}>
             {(control) => (
-              <input
+              <Input
+                error={control["aria-invalid"]}
                 {...control}
                 type="text"
                 value={text}
@@ -415,10 +457,12 @@ export function PromptDialog({
       onClose={close}
       actions={
         <>
-          <button type="button" className="btn" disabled={submitting} onClick={close}>
+          <Button type="button" className="btn" disabled={submitting} onClick={close}>
             取消
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="filled"
+            color={danger ? "red" : "blue"}
             type="button"
             className={`btn ${danger ? "danger" : "primary"}`}
             disabled={empty || submitting}
@@ -426,7 +470,7 @@ export function PromptDialog({
             onClick={() => void submit()}
           >
             {submitting ? "提交中…" : confirmLabel}
-          </button>
+          </Button>
         </>
       }
     >
@@ -434,7 +478,8 @@ export function PromptDialog({
       <div className="dialog-field">
         <Field id="prompt-input" label={label} error={error}>
           {(control) => (
-            <input
+            <Input
+              error={control["aria-invalid"]}
               {...control}
               type={inputType}
               value={value}
@@ -504,9 +549,16 @@ export function Drawer({
     >
       <div className="drawer-head">
         <h2 id={labelId}>{title}</h2>
-        <button type="button" className="icon-btn" onClick={onClose} aria-label="关闭">
+        <ActionIcon
+          variant="subtle"
+          color="gray"
+          type="button"
+          className="icon-btn"
+          onClick={onClose}
+          aria-label="关闭"
+        >
           <Icon name="close" />
-        </button>
+        </ActionIcon>
       </div>
       <div className="drawer-body">{children}</div>
       {footer && <div className="drawer-foot">{footer}</div>}
@@ -552,17 +604,16 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       {createPortal(
         <div className="toasts" role="status" aria-live="polite">
           {toasts.map((t) => (
-            <div key={t.id} className={`toast ${t.kind}`}>
-              <span className="toast-text">{t.text}</span>
-              <button
-                type="button"
-                className="icon-btn"
-                aria-label="关闭通知"
-                onClick={() => setToasts((prev) => prev.filter((x) => x.id !== t.id))}
-              >
-                <Icon name="close" size={14} />
-              </button>
-            </div>
+            <Notification
+              key={t.id}
+              className="toast"
+              withBorder
+              color={t.kind === "ok" ? "teal" : t.kind === "err" ? "red" : "blue"}
+              closeButtonProps={{ "aria-label": "关闭通知" }}
+              onClose={() => setToasts((prev) => prev.filter((x) => x.id !== t.id))}
+            >
+              {t.text}
+            </Notification>
           ))}
         </div>,
         document.body,
@@ -573,13 +624,60 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 
 // ---------- 空状态 / 骨架 ----------
 
+/** 目录页共用搜索框。清除后焦点留在输入框，便于重新查找。 */
+export function ListSearch({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const input = useRef<HTMLInputElement>(null);
+  return (
+    <TextInput
+      className="list-search"
+      type="search"
+      leftSection={<Icon name="search" size={16} />}
+      ref={input}
+      aria-label={label}
+      placeholder={label}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      rightSectionPointerEvents="all"
+      rightSection={
+        value && (
+          <CloseButton
+            size="sm"
+            aria-label="清除搜索"
+            onClick={() => {
+              onChange("");
+              input.current?.focus();
+            }}
+          />
+        )
+      }
+    />
+  );
+}
+
 export function EmptyState({ title, hint, action }: { title: string; hint?: string; action?: ReactNode }) {
   return (
-    <div className="empty">
-      <div className="empty-title">{title}</div>
-      {hint && <div className="empty-hint">{hint}</div>}
-      {action && <div className="empty-action">{action}</div>}
-    </div>
+    <Stack align="center" gap="xs" py="xl" px="md" ta="center">
+      <ThemeIcon variant="light" size="lg" radius="xl">
+        <Icon name="inbox" />
+      </ThemeIcon>
+      <Text fw={600} size="sm">
+        {title}
+      </Text>
+      {hint && (
+        <Text c="dimmed" size="sm">
+          {hint}
+        </Text>
+      )}
+      {action}
+    </Stack>
   );
 }
 
@@ -588,7 +686,7 @@ export function SkeletonRows({ rows = 5 }: { rows?: number }) {
     <div className="skeleton-rows">
       {Array.from({ length: rows }, (_, i) => (
         // biome-ignore lint/suspicious/noArrayIndexKey: 骨架行为静态占位，无顺序变化
-        <div key={i} className="skeleton skeleton-row" />
+        <Skeleton key={i} height={32} radius="sm" />
       ))}
     </div>
   );
@@ -597,15 +695,16 @@ export function SkeletonRows({ rows = 5 }: { rows?: number }) {
 /** 加载失败的内联提示（保留已有内容，提供重试）。 */
 export function InlineError({ message, onRetry }: { message: string; onRetry?: () => void }) {
   return (
-    <div className="inline-error" role="alert">
-      <Icon name="alert" />
-      <span className="inline-error-message">{message}</span>
-      {onRetry && (
-        <button type="button" className="btn sm" onClick={onRetry}>
-          重试
-        </button>
-      )}
-    </div>
+    <Alert color="red" role="alert" icon={<Icon name="alert" />}>
+      <Group gap="xs" justify="space-between">
+        <span>{message}</span>
+        {onRetry && (
+          <Button size="xs" type="button" className="btn sm" onClick={onRetry}>
+            重试
+          </Button>
+        )}
+      </Group>
+    </Alert>
   );
 }
 
@@ -618,135 +717,62 @@ export function MoreMenu({
   items: { label: string; danger?: boolean; onClick: () => void }[];
   label?: string;
 }) {
-  const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
-  const btnRef = useRef<HTMLButtonElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-
-  /** 按按钮视口位置放置菜单：右缘对齐，底部放不下时向上翻，四周留 8px 边距。 */
-  const updatePos = useCallback(() => {
-    const btn = btnRef.current;
-    const menu = menuRef.current;
-    if (!btn || !menu) return;
-    const r = btn.getBoundingClientRect();
-    const mw = menu.offsetWidth;
-    const mh = menu.offsetHeight;
-    let top = r.bottom + 4;
-    let left = r.right - mw;
-    if (top + mh > window.innerHeight - 8) top = Math.max(8, r.top - mh - 4);
-    if (left < 8) left = 8;
-    else if (left + mw > window.innerWidth - 8) left = Math.max(8, window.innerWidth - 8 - mw);
-    setPos({ top, left });
-  }, []);
-
-  // 打开即测量（layout effect 避免先闪到左上角）；菜单 portal 到 body，
-  // 不受 .table-wrap 等 overflow 容器裁剪。
-  useLayoutEffect(() => {
-    if (open) updatePos();
-  }, [open, updatePos]);
-
-  const positioned = pos !== null;
-  useLayoutEffect(() => {
-    if (open && positioned) menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
-  }, [open, positioned]);
-
-  useEffect(() => {
-    if (!open) return;
-    function onDoc(e: MouseEvent) {
-      const t = e.target as Node;
-      if (btnRef.current?.contains(t) || menuRef.current?.contains(t)) return;
-      setOpen(false);
-    }
-    function onKey(e: KeyboardEvent) {
-      if (!menuRef.current?.contains(document.activeElement) && document.activeElement !== btnRef.current) return;
-      if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopPropagation();
-        setOpen(false);
-        btnRef.current?.focus();
-        return;
-      }
-      if (e.key === "Tab") {
-        setOpen(false);
-        btnRef.current?.focus();
-        return;
-      }
-      const list = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? []);
-      const i = list.indexOf(document.activeElement as HTMLButtonElement);
-      let next: HTMLButtonElement | undefined;
-      if (e.key === "ArrowDown") next = list[i + 1] ?? list[0];
-      else if (e.key === "ArrowUp") next = list[i - 1] ?? list[list.length - 1];
-      else if (e.key === "Home") next = list[0];
-      else if (e.key === "End") next = list[list.length - 1];
-      else return;
-      e.preventDefault();
-      next?.focus();
-    }
-    document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
-    // 容器横向/纵向滚动时重新定位（capture 捕获所有祖先滚动），视口缩放同理。
-    window.addEventListener("scroll", updatePos, true);
-    window.addEventListener("resize", updatePos);
-    return () => {
-      document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKey);
-      window.removeEventListener("scroll", updatePos, true);
-      window.removeEventListener("resize", updatePos);
-    };
-  }, [open, updatePos]);
-
+  const [opened, setOpened] = useState(false);
+  const trigger = useRef<HTMLButtonElement>(null);
   if (items.length === 0) return null;
   return (
     <span className="more-menu">
-      <button
-        ref={btnRef}
-        type="button"
-        className="icon-btn"
-        aria-label={label}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
-        onKeyDown={(e) => {
-          if (!open && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
-            e.preventDefault();
-            e.stopPropagation();
-            setOpen(true);
-          }
-        }}
+      <Menu
+        position="bottom-end"
+        width={164}
+        withinPortal
+        loop
+        opened={opened}
+        onChange={setOpened}
+        withInitialFocusPlaceholder={false}
+        menuItemTabIndex={0}
+        transitionProps={{ duration: 0 }}
       >
-        <Icon name="more" />
-      </button>
-      {open &&
-        createPortal(
-          <div
-            ref={menuRef}
-            className="more-menu-pop"
-            role="menu"
-            style={{
-              top: pos?.top ?? -9999,
-              left: pos?.left ?? -9999,
-              visibility: pos ? "visible" : "hidden",
+        <Menu.Target>
+          <ActionIcon
+            ref={trigger}
+            className="icon-btn"
+            variant="subtle"
+            color="gray"
+            aria-label={label}
+            onKeyDown={(event) => {
+              if (!opened && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+                event.preventDefault();
+                setOpened(true);
+              }
             }}
           >
-            {items.map((it) => (
-              <button
-                key={it.label}
-                type="button"
-                role="menuitem"
-                tabIndex={-1}
-                className={it.danger ? "danger" : ""}
-                onClick={() => {
-                  setOpen(false);
-                  btnRef.current?.focus();
-                  it.onClick();
-                }}
-              >
-                {it.label}
-              </button>
-            ))}
-          </div>,
-          document.body,
-        )}
+            <Icon name="more" />
+          </ActionIcon>
+        </Menu.Target>
+        <Menu.Dropdown
+          className="more-menu-pop"
+          onKeyDown={(event) => {
+            if (event.key === "Tab") {
+              setOpened(false);
+              trigger.current?.focus();
+            }
+          }}
+        >
+          {items.map((item) => (
+            <Menu.Item
+              key={item.label}
+              color={item.danger ? "red" : undefined}
+              onClick={() => {
+                trigger.current?.focus();
+                item.onClick();
+              }}
+            >
+              {item.label}
+            </Menu.Item>
+          ))}
+        </Menu.Dropdown>
+      </Menu>
     </span>
   );
 }

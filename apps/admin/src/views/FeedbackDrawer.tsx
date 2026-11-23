@@ -1,3 +1,4 @@
+import { Badge, Button, NativeSelect, Textarea } from "@mantine/core";
 /**
  * 反馈详情抽屉（T5 固定内容顺序，优先展示阅读主体）：
  * 1. 标题 + 工单状态（主标签）、Kaneo 入口（头部）
@@ -14,7 +15,8 @@
  * v12：标记已解决必须填写处理说明（1..2000 字符），走独立弹窗提交；
  * Kaneo 撤销任务区保留审计展示（含 cancelled 状态）。
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+
+import { type Ref, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import {
   ApiError,
   type AppItem,
@@ -26,12 +28,13 @@ import {
   type FeedbackImageMeta,
   ISSUE_STATUS_LABELS,
   type IssueStatus,
-  issueTone,
+  issueColor,
   type KaneoCancellationTask,
   type LifecycleAction,
   STATUS_LABELS,
   syncFeedbackKaneoStatus,
 } from "../api.ts";
+import { usePageEdits } from "../page-edits.ts";
 import { ConfirmDialog, Drawer, EmptyState, Icon, InlineError, Modal, SkeletonRows, useToast } from "../ui.tsx";
 
 const SECTION_LABELS: Record<string, string> = {
@@ -103,7 +106,12 @@ const CANCEL_ACTIONABLE = new Set<KaneoCancellationTask["status"]>(["uncertain",
 /** 警示外观的撤销状态。 */
 const CANCEL_ALERT = new Set<KaneoCancellationTask["status"]>(["uncertain", "failed", "pending", "processing"]);
 
+export interface FeedbackDrawerHandle {
+  requestSwitch: (openNext: () => void) => void;
+}
+
 export default function FeedbackDrawer({
+  ref,
   detail,
   onClose,
   onRetry,
@@ -113,6 +121,7 @@ export default function FeedbackDrawer({
   onChanged,
   inline = false,
 }: {
+  ref: Ref<FeedbackDrawerHandle>;
   detail: FeedbackDetail | "loading" | "purged" | "error" | null;
   onClose: () => void;
   /** 详情拉取失败（非 410）时由父级重新请求。 */
@@ -128,7 +137,7 @@ export default function FeedbackDrawer({
 }) {
   const toast = useToast();
   const [classifyDirty, setClassifyDirty] = useState(false);
-  const [discardAsk, setDiscardAsk] = useState(false);
+  const [pendingLeave, setPendingLeave] = useState<{ next: () => void; switching: boolean } | null>(null);
   const [lightbox, setLightbox] = useState<LightboxState | null>(null);
   const [logPreview, setLogPreview] = useState<{ id: string; name: string; text: string } | null>(null);
   const [actionErr, setActionErr] = useState<string | null>(null);
@@ -137,6 +146,7 @@ export default function FeedbackDrawer({
   const [dialogue, setDialogue] = useState<FeedbackDialogueResponse | null>(null);
   const [dialogueLoading, setDialogueLoading] = useState(false);
   const [dialogueError, setDialogueError] = useState<string | null>(null);
+  const replyInputRef = useRef<HTMLTextAreaElement>(null);
   const [replyText, setReplyText] = useState("");
   const [replySubmitting, setReplySubmitting] = useState(false);
   const [statusUpdating, setStatusUpdating] = useState(false);
@@ -207,36 +217,41 @@ export default function FeedbackDrawer({
   }, [detail, loadDialogue]);
 
   const dialogueBusy = replySubmitting || statusUpdating || resolveSubmitting || kaneoSyncBusy;
-  /** 所有关闭入口共用：提交中保留现场，其他时候检查分类草稿与未发送回复。 */
-  const requestClose = useCallback(() => {
-    if (dialogueBusy) {
-      toast("info", "正在提交，请等待操作完成后再关闭。");
-      return;
-    }
-    if (classifyDirty || replyText.trim()) setDiscardAsk(true);
-    else onClose();
-  }, [classifyDirty, replyText, dialogueBusy, onClose, toast]);
+  usePageEdits(Boolean(replyText.trim()) || classifyDirty, dialogueBusy);
+  const requestLeave = useCallback(
+    (next: () => void, switching: boolean) => {
+      if (dialogueBusy) {
+        toast("info", "正在提交，请等待操作完成。");
+      } else if (classifyDirty || replyText.trim()) {
+        setPendingLeave({ next, switching });
+      } else {
+        next();
+      }
+    },
+    [classifyDirty, replyText, dialogueBusy, toast],
+  );
+  const requestClose = useCallback(() => requestLeave(onClose, false), [onClose, requestLeave]);
+  useImperativeHandle(ref, () => ({ requestSwitch: (next) => requestLeave(next, true) }), [requestLeave]);
 
-  const discardDialog = discardAsk ? (
+  const discardDialog = pendingLeave ? (
     <ConfirmDialog
       title="放弃未保存的内容？"
       body={
         <p>
           {classifyDirty && replyText.trim()
-            ? "分类表单有未保存的修改，回复也尚未发送。关闭抽屉将丢弃这些内容。"
+            ? "分类修改和未发送的回复都将丢失。"
             : classifyDirty
-              ? "分类表单有未保存的修改，关闭抽屉将丢弃这些修改。"
-              : "回复尚未发送，关闭抽屉将丢弃输入的回复内容。"}
+              ? "尚未保存的分类修改将丢失。"
+              : "尚未发送的回复将丢失。"}
         </p>
       }
-      confirmLabel="放弃并关闭"
+      confirmLabel={pendingLeave.switching ? "放弃并切换" : "放弃并关闭"}
       danger
       onConfirm={() => {
-        setDiscardAsk(false);
-        setReplyText("");
-        onClose();
+        setPendingLeave(null);
+        pendingLeave.next();
       }}
-      onClose={() => setDiscardAsk(false)}
+      onClose={() => setPendingLeave(null)}
     />
   ) : null;
 
@@ -279,9 +294,9 @@ export default function FeedbackDrawer({
           title="详情加载失败"
           hint="网络或服务暂时不可用，可重试。"
           action={
-            <button type="button" className="btn primary" onClick={onRetry}>
+            <Button variant="filled" type="button" className="btn primary" onClick={onRetry}>
               重试
-            </button>
+            </Button>
           }
         />
         {discardDialog}
@@ -418,57 +433,87 @@ export default function FeedbackDrawer({
           <span className="drawer-title-text">{detail.title || detail.text.slice(0, 40) || "（无标题）"}</span>
           <span className="drawer-title-tags">
             {/* 主要标签：工单状态（issueStatus）；处理状态降为灰度辅助 */}
-            <span className={`tag ${issueTone(detail.issueStatus)}`}>
+            <Badge component="span" variant="light" radius="sm" color={issueColor(detail.issueStatus)} className="tag">
               {ISSUE_STATUS_LABELS[detail.issueStatus ?? "open"] ?? detail.issueStatus ?? "新反馈"}
-            </span>
-            <span className="tag">{STATUS_LABELS[detail.status] ?? detail.status}</span>
-            {readOnly && <span className="tag tone-warn">回收站 · 只读</span>}
+            </Badge>
+            <Badge component="span" variant="light" radius="sm" color="gray" className="tag">
+              {STATUS_LABELS[detail.status] ?? detail.status}
+            </Badge>
+            {readOnly && (
+              <Badge component="span" variant="light" radius="sm" color="orange" className="tag tone-warn">
+                回收站 · 只读
+              </Badge>
+            )}
           </span>
         </span>
       }
       onClose={requestClose}
       footer={
         <>
+          {!readOnly && (
+            <Button
+              variant="filled"
+              type="button"
+              className="btn primary"
+              disabled={dialogueBusy}
+              onClick={() => replyInputRef.current?.focus()}
+            >
+              <Icon name="feedback" size={16} />
+              写回复
+            </Button>
+          )}
           {available.has("archive") && (
-            <button type="button" className="btn primary" onClick={() => void onAction("archive", detail.id)}>
+            <Button type="button" className="btn" onClick={() => void onAction("archive", detail.id)}>
               <Icon name="archive" size={16} />
               归档
-            </button>
+            </Button>
           )}
           {available.has("unarchive") && (
-            <button type="button" className="btn" onClick={() => void onAction("unarchive", detail.id)}>
+            <Button type="button" className="btn" onClick={() => void onAction("unarchive", detail.id)}>
               <Icon name="restore" size={16} />
               恢复到收件箱
-            </button>
+            </Button>
           )}
           {available.has("resume_processing") && (
-            <button type="button" className="btn" onClick={() => void onAction("resume_processing", detail.id)}>
+            <Button type="button" className="btn" onClick={() => void onAction("resume_processing", detail.id)}>
               <Icon name="play" size={16} />
               恢复处理
-            </button>
+            </Button>
           )}
           {available.has("restore") && (
-            <button type="button" className="btn primary" onClick={() => void onAction("restore", detail.id)}>
+            <Button
+              variant="filled"
+              type="button"
+              className="btn primary"
+              onClick={() => void onAction("restore", detail.id)}
+            >
               <Icon name="restore" size={16} />
               恢复
-            </button>
+            </Button>
           )}
           {available.has("trash") && (
-            <button type="button" className="btn" onClick={() => onTrash(detail)}>
+            <Button type="button" className="btn" onClick={() => onTrash(detail)}>
               <Icon name="trash" size={16} />
               移入回收站
-            </button>
+            </Button>
           )}
           {available.has("purge") && (
-            <button type="button" className="btn danger" onClick={() => onPurge(detail)}>
+            <Button variant="light" color="red" type="button" className="btn danger" onClick={() => onPurge(detail)}>
               <Icon name="trash" size={16} />
               彻底删除
-            </button>
+            </Button>
           )}
           {detail.kaneoUrl && (
-            <a className="btn" href={detail.kaneoUrl} target="_blank" rel="noreferrer" style={{ marginLeft: "auto" }}>
+            <Button
+              component="a"
+              className="btn"
+              href={detail.kaneoUrl}
+              target="_blank"
+              rel="noreferrer"
+              style={{ marginLeft: "auto" }}
+            >
               <Icon name="external" size={16} />在 Kaneo 中查看
-            </a>
+            </Button>
           )}
         </>
       }
@@ -513,18 +558,25 @@ export default function FeedbackDrawer({
                 <div>
                   截图
                   {detail.screenshot.capture?.region && (
-                    <span className="tag tone-info" style={{ marginLeft: "var(--sp-2)" }}>
+                    <Badge
+                      component="span"
+                      variant="light"
+                      radius="sm"
+                      color="blue"
+                      className="tag tone-info"
+                      style={{ marginLeft: "var(--sp-2)" }}
+                    >
                       局部截图
-                    </span>
+                    </Badge>
                   )}
                 </div>
                 <div className="muted small">
                   {detail.screenshot.width}×{detail.screenshot.height} · {formatBytes(detail.screenshot.byteSize)}
                 </div>
               </div>
-              <button type="button" className="btn sm" onClick={() => openImages(0)}>
+              <Button size="xs" type="button" className="btn sm" onClick={() => openImages(0)}>
                 查看
-              </button>
+              </Button>
             </div>
           )
         )}
@@ -537,14 +589,26 @@ export default function FeedbackDrawer({
           <dd>
             <div className="row" style={{ alignItems: "center", gap: 8, flexWrap: "wrap" }}>
               {detail.issueStatus && (
-                <span
-                  className={`tag ${detail.issueStatus === "waiting_admin" ? "tone-warn" : detail.issueStatus === "waiting_user" ? "tone-info" : detail.issueStatus === "resolved" ? "tone-ok" : ""}`}
+                <Badge
+                  component="span"
+                  variant="light"
+                  radius="sm"
+                  color={
+                    detail.issueStatus === "waiting_admin"
+                      ? "orange"
+                      : detail.issueStatus === "waiting_user"
+                        ? "blue"
+                        : detail.issueStatus === "resolved"
+                          ? "teal"
+                          : "gray"
+                  }
+                  className="tag"
                 >
                   {ISSUE_STATUS_LABELS[detail.issueStatus] ?? detail.issueStatus}
-                </span>
+                </Badge>
               )}
               {!readOnly && (
-                <select
+                <NativeSelect
                   aria-label="工单状态"
                   value={detail.issueStatus ?? "open"}
                   disabled={dialogueBusy}
@@ -579,10 +643,11 @@ export default function FeedbackDrawer({
                       {label}
                     </option>
                   ))}
-                </select>
+                </NativeSelect>
               )}
               {!readOnly && (
-                <button
+                <Button
+                  size="xs"
                   type="button"
                   className="btn sm"
                   title="读取 Kaneo 任务当前列，若已完成则标记已解决并通知提交者"
@@ -593,7 +658,7 @@ export default function FeedbackDrawer({
                 >
                   <Icon name="check" size={14} />
                   {kaneoSyncBusy ? "同步中…" : "同步看板状态"}
-                </button>
+                </Button>
               )}
             </div>
           </dd>
@@ -614,7 +679,11 @@ export default function FeedbackDrawer({
           <dd>
             {detail.app?.name ?? detail.appId}
             <span className="muted small wrap-anywhere">（{detail.appId}）</span>
-            {detail.app?.deletedAt && <span className="tag tone-warn">软件已删除</span>}
+            {detail.app?.deletedAt && (
+              <Badge component="span" variant="light" radius="sm" color="orange" className="tag tone-warn">
+                软件已删除
+              </Badge>
+            )}
           </dd>
           <dt>提交账号</dt>
           <dd>{detail.username ?? "—"}</dd>
@@ -665,11 +734,8 @@ export default function FeedbackDrawer({
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>
                 <div>
                   <strong>
-                    {msg.senderType === "admin"
-                      ? `管理员（${msg.senderName}）`
-                      : msg.senderType === "system"
-                        ? `系统（${msg.senderName}）`
-                        : `用户（${msg.senderName}）`}
+                    {{ admin: "管理员", system: "系统", user: "用户" }[msg.senderType]}
+                    {msg.senderName && `（${msg.senderName}）`}
                   </strong>
                   <span className="muted small" style={{ marginLeft: "8px" }}>
                     #{msg.seq}
@@ -726,10 +792,18 @@ export default function FeedbackDrawer({
                       );
                     }
                     return (
-                      <a key={att.id} className="btn sm" href={url} target="_blank" rel="noreferrer">
+                      <Button
+                        component="a"
+                        size="xs"
+                        key={att.id}
+                        className="btn sm"
+                        href={url}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
                         <Icon name="file" size={14} />
                         {att.filename} ({formatBytes(att.byteSize)})
-                      </a>
+                      </Button>
                     );
                   })}
                 </div>
@@ -751,7 +825,8 @@ export default function FeedbackDrawer({
               「回复」= 追加一条消息并保持当前工单状态；「回复并解决」=
               发送同一条消息并将工单置为「已解决」（需在弹窗填写处理说明）。管理员回复暂不支持附件。
             </div>
-            <textarea
+            <Textarea
+              ref={replyInputRef}
               value={replyText}
               placeholder="输入回复内容，向用户补充信息或告知排查结果…"
               rows={3}
@@ -761,7 +836,8 @@ export default function FeedbackDrawer({
               aria-label="回复内容"
             />
             <div className="row row-wrap" style={{ marginTop: "8px", gap: "8px" }}>
-              <button
+              <Button
+                variant="filled"
                 type="button"
                 className="btn primary"
                 disabled={dialogueBusy || !replyText.trim()}
@@ -788,8 +864,8 @@ export default function FeedbackDrawer({
                 }}
               >
                 {replySubmitting ? "发送中…" : "回复"}
-              </button>
-              <button
+              </Button>
+              <Button
                 type="button"
                 className="btn"
                 disabled={dialogueBusy || !replyText.trim()}
@@ -800,7 +876,7 @@ export default function FeedbackDrawer({
                 }}
               >
                 回复并解决
-              </button>
+              </Button>
             </div>
           </div>
         )}
@@ -837,7 +913,8 @@ export default function FeedbackDrawer({
               </div>
             </div>
             {!readOnly && CANCEL_ACTIONABLE.has(dialogue.cancellation.status) && (
-              <button
+              <Button
+                size="xs"
                 type="button"
                 className="btn sm"
                 disabled={retryingCancel}
@@ -855,7 +932,7 @@ export default function FeedbackDrawer({
                 }}
               >
                 {retryingCancel ? "重试中…" : "立即重试撤销"}
-              </button>
+              </Button>
             )}
           </div>
         </section>
@@ -869,7 +946,7 @@ export default function FeedbackDrawer({
           <h3>恢复动作</h3>
           <div className="row" style={{ flexWrap: "wrap" }}>
             {detail.recovery.allowedActions.map((action) => (
-              <button
+              <Button
                 key={action}
                 type="button"
                 className="btn"
@@ -891,7 +968,7 @@ export default function FeedbackDrawer({
                 }
               >
                 {RECOVERY_LABELS[action] ?? action}
-              </button>
+              </Button>
             ))}
           </div>
           <p className="muted small" style={{ marginTop: "var(--sp-2)" }}>
@@ -948,12 +1025,18 @@ export default function FeedbackDrawer({
                   {l.source === "auto" ? "自动" : "手动"} · {formatBytes(l.byteSize)}
                 </div>
               </div>
-              <button type="button" className="btn sm" onClick={() => void openLogPreview(l.id, l.filename)}>
+              <Button size="xs" type="button" className="btn sm" onClick={() => void openLogPreview(l.id, l.filename)}>
                 预览
-              </button>
-              <a className="btn sm" href={`/api/admin/feedback/${detail.id}/logs/${l.id}/download`} download>
+              </Button>
+              <Button
+                component="a"
+                size="xs"
+                className="btn sm"
+                href={`/api/admin/feedback/${detail.id}/logs/${l.id}/download`}
+                download
+              >
                 下载
-              </a>
+              </Button>
             </div>
           ))}
         </details>
@@ -1019,15 +1102,17 @@ export default function FeedbackDrawer({
             )}
             {lightbox.items.length > 1 && (
               <div className="row" style={{ justifyContent: "center", gap: "8px", marginTop: "8px" }}>
-                <button
+                <Button
+                  size="xs"
                   type="button"
                   className="btn sm"
                   disabled={lightbox.index === 0}
                   onClick={() => setLightbox((s) => (s ? { ...s, index: Math.max(0, s.index - 1) } : s))}
                 >
                   上一张
-                </button>
-                <button
+                </Button>
+                <Button
+                  size="xs"
                   type="button"
                   className="btn sm"
                   disabled={lightbox.index >= lightbox.items.length - 1}
@@ -1036,7 +1121,7 @@ export default function FeedbackDrawer({
                   }
                 >
                   下一张
-                </button>
+                </Button>
               </div>
             )}
           </div>
@@ -1050,10 +1135,11 @@ export default function FeedbackDrawer({
           }}
           actions={
             <>
-              <button type="button" className="btn" disabled={resolveSubmitting} onClick={() => setResolveModal(null)}>
+              <Button type="button" className="btn" disabled={resolveSubmitting} onClick={() => setResolveModal(null)}>
                 取消
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="filled"
                 type="button"
                 className="btn primary"
                 disabled={
@@ -1062,7 +1148,7 @@ export default function FeedbackDrawer({
                 onClick={() => void submitResolve()}
               >
                 {resolveSubmitting ? "提交中…" : resolveModal.kind === "message" ? "发送回复并解决" : "确认标记已解决"}
-              </button>
+              </Button>
             </>
           }
         >
@@ -1072,7 +1158,7 @@ export default function FeedbackDrawer({
               : "仅更新工单状态，不发送新消息。"}
             标记已解决必须填写处理说明（1–2000 字），随状态变更入库并对用户可见。
           </p>
-          <textarea
+          <Textarea
             value={resolveNote}
             rows={4}
             maxLength={RESOLUTION_NOTE_MAX}
@@ -1324,7 +1410,7 @@ function ClassifyPanel({
       <div className="form-grid">
         <label htmlFor="cls-project">项目</label>
         <span>
-          <select
+          <NativeSelect
             id="cls-project"
             value={state.projectId}
             disabled={locked}
@@ -1336,11 +1422,11 @@ function ClassifyPanel({
                 {p.name}
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </span>
         <label htmlFor="cls-column">目标列</label>
         <span>
-          <select
+          <NativeSelect
             id="cls-column"
             value={state.columnId}
             disabled={locked || !state.projectId || !options}
@@ -1355,11 +1441,11 @@ function ClassifyPanel({
                 {col.name}（{col.slug}）
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </span>
         <label htmlFor="cls-assignee">负责人（可选）</label>
         <span>
-          <select
+          <NativeSelect
             id="cls-assignee"
             value={state.assigneeId}
             disabled={locked || !options}
@@ -1374,7 +1460,7 @@ function ClassifyPanel({
                 {m.name}
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </span>
       </div>
       <div style={{ margin: "var(--sp-2) 0" }}>
@@ -1400,17 +1486,18 @@ function ClassifyPanel({
       {notice && <p className={notice.kind === "err" ? "err" : "ok-text"}>{notice.text}</p>}
       {!locked && (
         <div className="row row-wrap" style={{ marginTop: "var(--sp-2)" }}>
-          <button type="button" className="btn" disabled={busy} onClick={() => void submit("save")}>
+          <Button type="button" className="btn" disabled={busy} onClick={() => void submit("save")}>
             保存
-          </button>
-          <button
+          </Button>
+          <Button
+            variant="filled"
             type="button"
             className="btn primary"
             disabled={busy || !complete}
             onClick={() => void submit("archive")}
           >
             保存并同步到 Kaneo
-          </button>
+          </Button>
           {!complete && <span className="muted small">同步前请补齐项目、目标列与标签</span>}
         </div>
       )}

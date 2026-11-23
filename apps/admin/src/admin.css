@@ -1,0 +1,223 @@
+@import "./styles.css" layer(layout);
+@import "./views/ChangelogView.css" layer(layout);
+@import "@mantine/core/styles.css" layer(mantine);
+@import "./login.css";
+
+body {
+  background: var(--bg);
+  font-size: var(--mantine-font-size-sm);
+}
+.shell-nav {
+  background: var(--panel);
+}
+.shell-nav .shell-brand {
+  border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: 10px;
+}
+.nav-item {
+  border-radius: var(--mantine-radius-md);
+}
+.shell-nav .nav-item {
+  margin-block: 2px;
+}
+.shell-nav .nav-item.active {
+  box-shadow: none;
+}
+.shell-brand .brand-mark {
+  border-radius: var(--mantine-radius-md);
+}
+.shell-preferences {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+.shell-preferences .btn {
+  padding-inline: 8px;
+}
+.btn .mantine-Button-label {
+  gap: 6px;
+}
+.theme-select {
+  width: 98px;
+}
+.shell-nav .theme-select {
+  width: 100%;
+}
+.queue-tabs {
+  margin-bottom: var(--sp-4);
+  flex-shrink: 0;
+}
+.view-tab {
+  min-height: 44px;
+}
+.view-tab[data-active] {
+  color: var(--primary);
+}
+.page-header h1 {
+  font-size: 28px;
+  font-weight: 650;
+}
+.list-search {
+  flex: 1 1 140px;
+  min-width: 0;
+}
+.list-search input::-webkit-search-cancel-button {
+  display: none;
+}
+.feedback-search {
+  flex: 1 1 230px;
+  min-width: 0;
+  max-width: 400px;
+}
+.feedback-filter-group {
+  min-width: 0;
+}
+.feedback-filters .feedback-filter-label {
+  font-weight: 500;
+}
+.feedback-filters .feedback-search .mantine-TextInput-label {
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+.feedback-filters .mantine-NativeSelect-root {
+  min-width: 118px;
+}
+.table-wrap thead th {
+  background: var(--subtle);
+  color: var(--text-2);
+  font-size: 12px;
+}
+.table-wrap .mantine-Table-td {
+  vertical-align: middle;
+}
+.mantine-Badge-root.tag {
+  font-size: 12px;
+  font-weight: 550;
+  letter-spacing: normal;
+  text-transform: none;
+}
+.mantine-Modal-inner.overlay {
+  background: transparent;
+  padding: 0;
+  animation: none;
+  backdrop-filter: none;
+}
+.mantine-Modal-content.modal {
+  padding: 0;
+  width: auto;
+  animation: none;
+}
+.modal .mantine-Modal-title {
+  font-size: var(--mantine-font-size-lg);
+  font-weight: 600;
+}
+.mantine-Notification-root.toast {
+  width: min(380px, calc(100vw - 32px));
+}
+.field .mantine-InputWrapper-label {
+  margin-bottom: 4px;
+}
+.field .mantine-InputWrapper-description {
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+select.mantine-Input-input {
+  appearance: none;
+}
+.version-hero {
+  background: var(--panel);
+}
+.shell-top .mobile-menu-toggle {
+  display: none;
+}
+@media (min-width: 768px) and (max-width: 1199px) {
+  .nav-scroll .nav-item {
+    width: 100%;
+    padding-inline: 2px;
+  }
+  .nav-scroll .mantine-NavLink-body {
+    flex: 0 1 auto;
+    min-width: 0;
+  }
+  .nav-scroll .mantine-NavLink-section {
+    margin-inline-end: 4px;
+  }
+}
+@media (min-width: 768px) and (max-width: 920px) {
+  .nav-scroll .mantine-NavLink-section {
+    display: none;
+  }
+}
+@media (max-width: 767px) {
+  .shell-top .mobile-menu-toggle {
+    display: inline-flex;
+    padding-inline: 6px;
+  }
+  .queue-tabs .view-tab {
+    flex: 1;
+    padding-inline: 4px;
+  }
+  .view-tab .mantine-Tabs-tabSection {
+    margin-inline: 4px;
+  }
+  .queue-tabs .mantine-Tabs-list {
+    flex-wrap: nowrap;
+  }
+  .feedback-search {
+    max-width: none;
+  }
+  .directory-table.mantine-Table-table {
+    display: block;
+  }
+  .directory-table tbody {
+    display: grid;
+  }
+  .directory-table tr {
+    display: grid;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .directory-table td {
+    padding: 0;
+  }
+  .btn,
+  .icon-btn,
+  .mobile-nav .nav-item {
+    min-height: 44px;
+  }
+  .page-header h1 {
+    font-size: 24px;
+  }
+}
+.shell-nav .nav-item {
+  gap: 0;
+}
+.feedback-filters .feedback-search {
+  gap: 0;
+}
+.feedback-filters .feedback-search .mantine-TextInput-label {
+  color: var(--text-2);
+  font-weight: 500;
+  margin-bottom: 8px;
+  line-height: 18px;
+}
+.queue-tabs .count {
+  min-width: 22px;
+  padding-inline: 5px;
+}
+@media (max-width: 767px) {
+  .feedback-mobile-tools .mantine-TextInput-label {
+    display: none;
+  }
+  .feedback-mobile-tools .mantine-TextInput-input {
+    min-height: 44px;
+  }
+}
+@media (max-width: 359px) {
+  .feedback-page .page-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+  .view-tab .mantine-Tabs-tabSection[data-position="left"] {
+    display: none;
+  }
+}

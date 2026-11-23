@@ -13,7 +13,20 @@ export default defineConfig({
     // 管理端自身版本（反馈组件的 app-version 上报值）：构建期常量，与 package.json 同步。
     __ADMIN_VERSION__: JSON.stringify(pkg.version),
   },
-  build: { outDir: "dist", emptyOutDir: true },
+  build: {
+    outDir: "dist",
+    emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          // 独立缓存组件库和宿主组件，管理页改动只更新自己的脚本。
+          if (id.includes("/node_modules/@mantine/")) return "admin-ui";
+          if (id.endsWith("/packages/web/dist/feedback-web.js")) return "feedback-widget";
+          return undefined;
+        },
+      },
+    },
+  },
   server: {
     proxy: {
       "/api": "http://localhost:8787",

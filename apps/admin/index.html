@@ -22,6 +22,7 @@
               : "light"
             : themePref;
         document.documentElement.dataset.theme = resolved;
+        document.documentElement.dataset.mantineColorScheme = resolved;
         document.documentElement.style.colorScheme = resolved;
       } catch (e) {
         /* 兜底：解析失败不阻塞渲染 */

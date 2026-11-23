@@ -1,6 +1,7 @@
+import { Badge, Button, Paper } from "@mantine/core";
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, api, type SystemUpdateStatus } from "../api.ts";
-import { Icon, InlineError, SkeletonRows } from "../ui.tsx";
+import { Icon, InlineError, SectionIcon, SkeletonRows } from "../ui.tsx";
 
 function fmt(iso: string | null): string {
   return iso ? new Date(iso).toLocaleString() : "—";
@@ -20,6 +21,7 @@ export default function SystemUpdateView() {
   const [error, setError] = useState<string | null>(null);
   /** 卡内：手动检查失败——贴近「检查更新」按钮，点按钮即重试。 */
   const [checkError, setCheckError] = useState<string | null>(null);
+  const [copyMessage, setCopyMessage] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
 
   const loadStatus = useCallback(async () => {
@@ -41,11 +43,11 @@ export default function SystemUpdateView() {
       const r = await api.post<{ check: SystemUpdateStatus["check"] }>("/api/admin/system/update/check");
       setStatus((prev) => (prev ? { ...prev, check: r.check } : prev));
       setNotice(
-        r.check.state === "failed"
-          ? "检查失败（不影响正在运行的服务，可稍后重试）"
-          : r.check.state === "up_to_date"
-            ? "当前已是最新稳定版"
-            : "发现新版本，请到服务器上手动更新",
+        r.check.state === "up_to_date"
+          ? "当前已是最新稳定版"
+          : r.check.state === "ok"
+            ? "发现新版本，请到服务器上手动更新"
+            : null,
       );
     } catch (err) {
       setCheckError(err instanceof ApiError ? err.message : "检查失败");
@@ -69,9 +71,9 @@ export default function SystemUpdateView() {
             onRetry={() => void loadStatus().catch((e) => setError(e instanceof ApiError ? e.message : "加载失败"))}
           />
         ) : (
-          <div className="card">
+          <Paper withBorder p="lg" className="card">
             <SkeletonRows rows={3} />
-          </div>
+          </Paper>
         )}
       </div>
     );
@@ -81,13 +83,21 @@ export default function SystemUpdateView() {
   const latest = checkInfo.state === "up_to_date" || checkInfo.state === "ok" ? checkInfo.latest : null;
   const stateTag =
     checkInfo.state === "never" ? (
-      <span className="tag">尚未检查</span>
+      <Badge component="span" variant="light" radius="sm" color="gray" className="tag">
+        尚未检查
+      </Badge>
     ) : checkInfo.state === "failed" ? (
-      <span className="tag tone-err">检查失败</span>
+      <Badge component="span" variant="light" radius="sm" color="red" className="tag tone-err">
+        检查失败
+      </Badge>
     ) : checkInfo.state === "up_to_date" ? (
-      <span className="tag archived">已是最新</span>
+      <Badge component="span" variant="light" radius="sm" color="teal" className="tag archived">
+        已是最新
+      </Badge>
     ) : (
-      <span className="tag received">可更新</span>
+      <Badge component="span" variant="light" radius="sm" color="blue" className="tag received">
+        可更新
+      </Badge>
     );
   const stateText =
     checkInfo.state === "never"
@@ -119,7 +129,7 @@ export default function SystemUpdateView() {
 
       <section className="version-hero">
         <div className="version-hero-main">
-          <div className="version-eyebrow">Current Version</div>
+          <div className="version-eyebrow">当前运行版本</div>
           <div className="version-line">
             <b>{status.current.version}</b>
             <span className="muted">{stateText}</span>
@@ -132,12 +142,13 @@ export default function SystemUpdateView() {
                 ? `每 ${Math.round(status.config.checkIntervalMs / 3600_000)} 小时`
                 : "已关闭"}
             </span>
-            <span>来源：{status.config.manifestUrl ? "GitHub Releases 清单" : "已关闭"}</span>
+            <span>来源：{status.config.manifestUrl ? "版本清单" : "已关闭"}</span>
           </div>
         </div>
         <div className="version-hero-side">
           {stateTag}
-          <button
+          <Button
+            size="xs"
             type="button"
             className="btn sm"
             onClick={check}
@@ -153,7 +164,7 @@ export default function SystemUpdateView() {
           >
             <Icon name="refresh" size={14} />
             {checking ? "检查中…" : "检查更新"}
-          </button>
+          </Button>
         </div>
       </section>
       {/* 禁用原因可见化：配置关闭检查时说明为什么按钮不可点 */}
@@ -163,17 +174,22 @@ export default function SystemUpdateView() {
       {/* 检查请求失败：贴近按钮回显，点「检查更新」即重试 */}
       {checkError && <InlineError message={checkError} onRetry={() => void check()} />}
       {checkInfo.state === "failed" && (
-        <p className="err">
+        <p className="inline-error" role="alert">
           检查失败：{checkInfo.failedMessage ?? "未知原因"}
           {checkInfo.failedCode ? `（${checkInfo.failedCode}）` : ""}
         </p>
       )}
 
       <div className="update-grid">
-        <div className="card update-card">
+        <Paper withBorder p="lg" className="card update-card">
           <div className="update-card-head">
-            <h2 className="update-card-title">版本信息</h2>
-            <span className="tag">版本清单</span>
+            <h2 className="update-card-title">
+              <SectionIcon name="apps" />
+              版本信息
+            </h2>
+            <Badge component="span" variant="light" radius="sm" color="gray" className="tag">
+              版本清单
+            </Badge>
           </div>
           <dl className="kv">
             <dt>当前版本</dt>
@@ -205,7 +221,9 @@ export default function SystemUpdateView() {
             <dd className="muted">
               {status.config.checkIntervalMs > 0
                 ? `每 ${Math.round(status.config.checkIntervalMs / 3600_000)} 小时一次（只检查，绝不自动安装）`
-                : "已关闭自动检查（仅手动）"}
+                : status.config.manifestUrl
+                  ? "仅手动检查"
+                  : "已关闭"}
             </dd>
             {latest?.image && (
               <>
@@ -221,11 +239,14 @@ export default function SystemUpdateView() {
             <i style={{ background: "var(--ok-text)" }} aria-hidden="true" />
             <span>检查来源与自动检查间隔由服务器环境变量控制；本页不提供在线安装。</span>
           </div>
-        </div>
+        </Paper>
 
-        <div className="card update-card">
+        <Paper withBorder p="lg" className="card update-card">
           <div className="update-card-head">
-            <h2 className="update-card-title">发布说明</h2>
+            <h2 className="update-card-title">
+              <SectionIcon name="file" />
+              发布说明
+            </h2>
           </div>
           {latest ? (
             noteLines.length > 0 ? (
@@ -241,27 +262,58 @@ export default function SystemUpdateView() {
               <p className="muted">该版本清单未包含发布说明。</p>
             )
           ) : (
-            <p className="muted">还没有可用的版本信息；点击「检查更新」获取最新稳定版与发布说明。</p>
+            <p className="muted">
+              {status.config.manifestUrl ? "检查更新后可查看最新稳定版的发布说明。" : "更新检查已关闭，暂无发布说明。"}
+            </p>
           )}
           {latest?.releaseUrl && (
             <p style={{ marginTop: 12, marginBottom: 0 }}>
-              <a className="btn sm" href={latest.releaseUrl} target="_blank" rel="noreferrer">
+              <Button
+                component="a"
+                size="xs"
+                className="btn sm"
+                href={latest.releaseUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
                 查看完整发布页
                 <Icon name="external" size={14} />
-              </a>
+              </Button>
             </p>
           )}
-        </div>
+        </Paper>
       </div>
 
-      <div className="card update-card how-to">
+      <Paper withBorder p="lg" className="card update-card how-to">
         <div className="update-card-head">
-          <h2 className="update-card-title">如何在服务器上更新</h2>
-          <span className="tag tone-warn">确认有新版本后再执行</span>
+          <h2 className="update-card-title">
+            <SectionIcon name="update" />
+            如何在服务器上更新
+          </h2>
+          <Button
+            size="xs"
+            type="button"
+            className="btn sm"
+            onClick={async () => {
+              try {
+                await navigator.clipboard.writeText("bash deploy/update.sh");
+                setCopyMessage("已复制更新命令");
+              } catch {
+                setCopyMessage("请选中下方命令手动复制。");
+              }
+            }}
+          >
+            复制更新命令
+          </Button>
         </div>
         <p className="muted">
           进入部署目录执行下面的命令。脚本会先备份数据卷，再拉取镜像并重建服务；详见部署文档「升级」一节。
         </p>
+        {copyMessage && (
+          <p className="small" role="status">
+            {copyMessage}
+          </p>
+        )}
         <div className="code-block">
           <span className="prompt">$</span> bash deploy/update.sh
           <br />
@@ -269,7 +321,7 @@ export default function SystemUpdateView() {
           <br />
           <span className="prompt">$</span> docker compose pull &amp;&amp; docker compose up -d
         </div>
-      </div>
+      </Paper>
     </div>
   );
 }

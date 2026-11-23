@@ -1,3 +1,4 @@
+import { Button, Input, Paper } from "@mantine/core";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
@@ -8,8 +9,18 @@ import {
   type FeedbackAppOption,
   type FeedbackListItem,
 } from "../api.ts";
-import { EmptyState, Field, Icon, InlineError, Modal, SkeletonRows, useToast } from "../ui.tsx";
-import "./ChangelogView.css";
+import { usePageEdits } from "../page-edits.ts";
+import {
+  ConfirmDialog,
+  EmptyState,
+  Field,
+  Icon,
+  InlineError,
+  Modal,
+  SectionIcon,
+  SkeletonRows,
+  useToast,
+} from "../ui.tsx";
 
 const GROUPS: { type: ChangelogEntryType; label: string }[] = [
   { type: "added", label: "新增" },
@@ -124,7 +135,7 @@ function FeedbackPicker({
           setQuery(search.trim());
         }}
       >
-        <input
+        <Input
           aria-label="搜索关联反馈"
           type="search"
           maxLength={200}
@@ -132,9 +143,9 @@ function FeedbackPicker({
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
-        <button className="btn" type="submit" disabled={busy}>
+        <Button className="btn" type="submit" disabled={busy}>
           搜索
-        </button>
+        </Button>
       </form>
       {error && <InlineError message={error} onRetry={() => void load(cursor)} />}
       {busy && items.length === 0 ? (
@@ -150,9 +161,9 @@ function FeedbackPicker({
                   {item.createdAt.slice(0, 10)}
                 </div>
               </div>
-              <button className="btn" type="button" disabled={selected.has(item.id)} onClick={() => onChoose(item)}>
+              <Button className="btn" type="button" disabled={selected.has(item.id)} onClick={() => onChoose(item)}>
                 {selected.has(item.id) ? "已关联" : "选择"}
-              </button>
+              </Button>
             </div>
           ))}
           {!busy && !items.length && !error && (
@@ -161,9 +172,9 @@ function FeedbackPicker({
         </div>
       )}
       {cursor && (
-        <button className="btn" type="button" disabled={busy} onClick={() => void load(cursor)}>
+        <Button className="btn" type="button" disabled={busy} onClick={() => void load(cursor)}>
           {busy ? "加载中…" : "加载更多反馈"}
-        </button>
+        </Button>
       )}
     </Modal>
   );
@@ -172,9 +183,10 @@ function FeedbackPicker({
 function ReleasePreview({ draft }: { draft: Draft }) {
   return (
     <article className="changelog-preview" aria-label="更新日志预览">
-      <h2>
-        [{draft.version || "版本号"}] — {draft.releaseDate}
-      </h2>
+      <div className="release-dateline">
+        <h2>{draft.version || "版本号"}</h2>
+        <time dateTime={draft.releaseDate}>{draft.releaseDate}</time>
+      </div>
       {draft.summary && <p>{draft.summary}</p>}
       {GROUPS.map((group) => {
         const entries = draft.entries.filter((entry) => entry.type === group.type);
@@ -219,6 +231,9 @@ export default function ChangelogView() {
   const [draft, setDraft] = useState<Draft>(() => toDraft(null));
   const [baseline, setBaseline] = useState(() => JSON.stringify(payload(draft)));
   const [loading, setLoading] = useState(false);
+  const [releaseError, setReleaseError] = useState<string | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [discard, setDiscard] = useState<{ run: () => void } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [appError, setAppError] = useState<string | null>(null);
@@ -226,6 +241,7 @@ export default function ChangelogView() {
   const [feedbackLabels, setFeedbackLabels] = useState<Record<string, FeedbackListItem>>({});
   const epoch = useRef(0);
   const dirty = JSON.stringify(payload(draft)) !== baseline;
+  usePageEdits(dirty, busy);
   const published = saved?.publishedAt != null;
   const selectedApp = apps?.find((app) => app.appId === appId);
   const pageUrl = `/changelog/${encodeURIComponent(appId)}`;
@@ -257,6 +273,7 @@ export default function ChangelogView() {
   const loadReleases = useCallback(async () => {
     const requestEpoch = ++epoch.current;
     openRelease(null);
+    setReleaseError(null);
     setItems([]);
     setFeedbackLabels({});
     if (!appId) return;
@@ -269,7 +286,7 @@ export default function ChangelogView() {
         openRelease(result.items[0] ?? null);
       })
       .catch((e: unknown) => {
-        if (epoch.current === requestEpoch) setError(errorMessage(e));
+        if (epoch.current === requestEpoch) setReleaseError(errorMessage(e));
       })
       .finally(() => {
         if (epoch.current === requestEpoch) setLoading(false);
@@ -282,6 +299,11 @@ export default function ChangelogView() {
       epoch.current++;
     };
   }, [loadReleases]);
+
+  function changeDraft(run: () => void) {
+    if (dirty) setDiscard({ run });
+    else run();
+  }
 
   function updateEntry(key: string, update: Partial<ChangelogEntry>) {
     setDraft((prev) => ({
@@ -353,67 +375,69 @@ export default function ChangelogView() {
   }
 
   const pickerEntry = draft.entries.find((entry) => entry.key === pickerKey);
-  const locked = busy || published || loading;
+  const locked = busy || published || loading || Boolean(releaseError);
 
   return (
     <div className="changelog-page">
       <div className="page-header">
         <div>
           <h1>更新日志</h1>
-          <div className="sub">
-            把用户的建议与问题变成看得见的改进。按软件管理版本，关联反馈，在更新条目中感谢提出者。
-          </div>
+          <div className="sub">按软件编写版本记录，关联反馈并预览发布内容。</div>
         </div>
       </div>
       {appError && <InlineError message={appError} onRetry={() => void loadApps()} />}
-      <div className="card changelog-toolbar">
-        <Field
-          id="changelog-app"
-          label="选择软件"
-          hint={dirty ? "有未保存的修改；请先保存，或点击“撤销未保存的修改”。" : "每款软件独立维护版本和公开展示页。"}
-        >
+      <Paper withBorder p="lg" className="card changelog-toolbar">
+        <Field id="changelog-app" label="选择软件" hint={dirty ? "当前版本还有未保存的修改。" : undefined}>
           {(ctl) => (
-            <select
+            <Input
+              component="select"
+              rightSection={<Icon name="chevronDown" size={14} />}
               {...ctl}
               value={appId}
-              disabled={busy || dirty || loading}
-              onChange={(e) => setAppId(e.target.value)}
+              disabled={busy || !apps?.length}
+              onChange={(e) => {
+                const next = e.target.value;
+                changeDraft(() => setAppId(next));
+              }}
             >
-              {!apps?.length && <option value="">{apps === null ? "加载软件…" : "暂无软件"}</option>}
+              {!apps?.length && (
+                <option value="">{appError ? "软件未加载" : apps === null ? "加载软件…" : "暂无软件"}</option>
+              )}
               {apps?.map((app) => (
                 <option key={app.appId} value={app.appId}>
                   {app.name}
                   {app.deleted ? "（已删除）" : ""} · {app.appId}
                 </option>
               ))}
-            </select>
+            </Input>
           )}
         </Field>
         {appId && (
           <div className="changelog-actions">
-            <a className="btn" href={pageUrl} target="_blank" rel="noreferrer">
+            <Button component="a" className="btn" href={pageUrl} target="_blank" rel="noreferrer">
               <Icon name="external" size={16} />
               软件展示页
-            </a>
-            <a
+            </Button>
+            <Button
+              component="a"
               className="btn"
               href={`/api/changelog/${encodeURIComponent(appId)}/markdown`}
               target="_blank"
               rel="noreferrer"
             >
               Markdown 文件
-            </a>
-            <button
+            </Button>
+            <Button
               className="btn"
               type="button"
               disabled={busy || !items.some((item) => item.publishedAt)}
               onClick={() => void copyMarkdown()}
             >
               复制已发布 Markdown
-            </button>
+            </Button>
           </div>
         )}
-      </div>
+      </Paper>
       {selectedApp?.deleted && (
         <p className="warn-text" role="status">
           这款软件已删除：日志记录保留，公开展示已停用。
@@ -424,19 +448,24 @@ export default function ChangelogView() {
       )}
       {appId && (
         <div className="changelog-layout">
-          <aside className="card changelog-versions" aria-label="更新日志版本">
+          <Paper component="aside" withBorder p="lg" className="card changelog-versions" aria-label="更新日志版本">
             <div className="changelog-section-head">
-              <h2>版本记录</h2>
-              <button
+              <h2>
+                <SectionIcon name="archive" />
+                版本记录
+              </h2>
+              <Button
                 className="btn"
                 type="button"
-                disabled={busy || dirty || loading || selectedApp?.deleted}
-                onClick={() => openRelease(null)}
+                disabled={busy || loading || !!releaseError || selectedApp?.deleted}
+                onClick={() => changeDraft(() => openRelease(null))}
               >
                 新建版本
-              </button>
+              </Button>
             </div>
-            {loading ? (
+            {releaseError ? (
+              <InlineError message={releaseError} onRetry={() => void loadReleases()} />
+            ) : loading ? (
               <SkeletonRows rows={3} />
             ) : items.length ? (
               <div className="changelog-version-list">
@@ -446,8 +475,10 @@ export default function ChangelogView() {
                     key={item.id}
                     type="button"
                     aria-pressed={saved?.id === item.id}
-                    disabled={busy || dirty}
-                    onClick={() => openRelease(item)}
+                    disabled={busy}
+                    onClick={() => {
+                      if (item.id !== saved?.id) changeDraft(() => openRelease(item));
+                    }}
                   >
                     <span>
                       <strong>{item.version}</strong>
@@ -462,270 +493,319 @@ export default function ChangelogView() {
                 ))}
               </div>
             ) : (
-              <p className="muted">还没有版本记录。右侧填写第一份更新日志。</p>
+              <p className="muted">还没有版本记录，可以编写第一份更新日志。</p>
             )}
-            <div className="changelog-template-hint">
-              <h3>规范模板</h3>
-              <p>版本与日期 → 更新摘要 → 新增 / 改进 / 修复 → 升级说明</p>
-              <p>每条更新关联提出者，自动生成一致的展示内容与 Markdown；没有内容的分类不显示。</p>
-            </div>
-          </aside>
-          <div className="changelog-editor">
-            <form
-              className="card"
-              onSubmit={(e) => {
-                e.preventDefault();
-                void save();
-              }}
-            >
-              <div className="changelog-section-head">
-                <h2>{saved ? `${saved.version} · ${published ? "已发布" : "草稿"}` : "新建版本"}</h2>
-                {dirty && (
-                  <span className="warn-text" role="status">
-                    未保存
-                  </span>
-                )}
-              </div>
-              {published && <p className="field-hint">这个版本已对外展示。需要修改时，请先取消发布。</p>}
-              {error && <InlineError message={error} />}
-              <fieldset className="changelog-fields" disabled={locked || selectedApp?.deleted}>
-                <legend className="sr-only">版本信息与更新条目</legend>
-                <div className="fields-2col">
-                  <Field id="changelog-version-input" label="版本号">
-                    {(ctl) => (
-                      <input
-                        {...ctl}
-                        required
-                        maxLength={80}
-                        placeholder="例如 1.2.0"
-                        value={draft.version}
-                        onChange={(e) => setDraft({ ...draft, version: e.target.value })}
-                      />
-                    )}
-                  </Field>
-                  <Field id="changelog-date" label="发布日期">
-                    {(ctl) => (
-                      <input
-                        {...ctl}
-                        required
-                        type="date"
-                        value={draft.releaseDate}
-                        onChange={(e) => setDraft({ ...draft, releaseDate: e.target.value })}
-                      />
-                    )}
-                  </Field>
-                </div>
-                <Field id="changelog-summary" label="更新摘要" hint="用一两句话说明这次更新给用户带来的变化。">
-                  {(ctl) => (
-                    <textarea
-                      {...ctl}
-                      rows={2}
-                      maxLength={2000}
-                      value={draft.summary}
-                      onChange={(e) => setDraft({ ...draft, summary: e.target.value })}
-                    />
-                  )}
-                </Field>
+          </Paper>
+          {!releaseError && !loading && (
+            <div className="changelog-editor">
+              <Paper
+                component="form"
+                withBorder
+                p="lg"
+                className="card"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void save();
+                }}
+              >
                 <div className="changelog-section-head">
-                  <h3>更新条目</h3>
-                  <span className="muted">{draft.entries.length} / 100</span>
+                  <h2>{saved ? `${saved.version} · ${published ? "已发布" : "草稿"}` : "新建版本"}</h2>
+                  <Button size="xs" className="btn sm" type="button" onClick={() => setPreviewOpen(true)}>
+                    预览当前版本
+                  </Button>
+                  {dirty && (
+                    <span className="warn-text" role="status">
+                      未保存
+                    </span>
+                  )}
                 </div>
-                {draft.entries.map((entry, index) => (
-                  <section className="changelog-entry" key={entry.key} aria-label={`更新条目 ${index + 1}`}>
-                    <div className="changelog-section-head">
-                      <strong>条目 {index + 1}</strong>
-                      <button
-                        className="btn"
-                        type="button"
-                        aria-label={`移除条目 ${index + 1}`}
-                        disabled={draft.entries.length === 1}
-                        onClick={() =>
-                          setDraft({ ...draft, entries: draft.entries.filter((item) => item.key !== entry.key) })
-                        }
-                      >
-                        移除条目
-                      </button>
-                    </div>
-                    <div className="changelog-entry-heading">
-                      <Field id={`entry-type-${entry.key}`} label="分类">
-                        {(ctl) => (
-                          <select
-                            {...ctl}
-                            value={entry.type}
-                            onChange={(e) => updateEntry(entry.key, { type: e.target.value as ChangelogEntryType })}
-                          >
-                            {GROUPS.map((group) => (
-                              <option key={group.type} value={group.type}>
-                                {group.label}
-                              </option>
-                            ))}
-                          </select>
-                        )}
-                      </Field>
-                      <Field id={`entry-title-${entry.key}`} label="条目标题">
-                        {(ctl) => (
-                          <input
-                            {...ctl}
-                            required
-                            maxLength={120}
-                            placeholder="例如：修复导出文件时偶发的闪退"
-                            value={entry.title}
-                            onChange={(e) => updateEntry(entry.key, { title: e.target.value })}
-                          />
-                        )}
-                      </Field>
-                    </div>
-                    <Field id={`entry-description-${entry.key}`} label="变化说明">
+                {published && <p className="field-hint">这个版本已对外展示。需要修改时，请先取消发布。</p>}
+                {error && <InlineError message={error} />}
+                <fieldset className="changelog-fields" disabled={locked || selectedApp?.deleted}>
+                  <legend className="sr-only">版本信息与更新条目</legend>
+                  <div className="fields-2col">
+                    <Field id="changelog-version-input" label="版本号">
                       {(ctl) => (
-                        <textarea
+                        <Input
+                          error={ctl["aria-invalid"]}
                           {...ctl}
-                          rows={2}
-                          maxLength={2000}
-                          placeholder="描述用户现在可以做成什么，避免直接粘贴内部讨论。"
-                          value={entry.description}
-                          onChange={(e) => updateEntry(entry.key, { description: e.target.value })}
+                          required
+                          maxLength={80}
+                          placeholder="例如 1.2.0"
+                          value={draft.version}
+                          onChange={(e) => setDraft({ ...draft, version: e.target.value })}
                         />
                       )}
                     </Field>
-                    {entry.feedbacks.map((ref, refIndex) => (
-                      <div className="changelog-credit-row" key={ref.feedbackId}>
-                        <Field
-                          id={`credit-${entry.key}-${refIndex}`}
-                          label={`公开署名 ${refIndex + 1}`}
-                          hint={`关联反馈：${feedbackLabels[ref.feedbackId]?.title || ref.feedbackId}`}
+                    <Field id="changelog-date" label="发布日期">
+                      {(ctl) => (
+                        <input
+                          {...ctl}
+                          required
+                          type="date"
+                          value={draft.releaseDate}
+                          onChange={(e) => setDraft({ ...draft, releaseDate: e.target.value })}
+                        />
+                      )}
+                    </Field>
+                  </div>
+                  <Field id="changelog-summary" label="更新摘要" hint="用一两句话说明这次更新给用户带来的变化。">
+                    {(ctl) => (
+                      <Input
+                        component="textarea"
+                        multiline
+                        error={ctl["aria-invalid"]}
+                        {...ctl}
+                        rows={2}
+                        maxLength={2000}
+                        value={draft.summary}
+                        onChange={(e) => setDraft({ ...draft, summary: e.target.value })}
+                      />
+                    )}
+                  </Field>
+                  <div className="changelog-section-head">
+                    <h3>更新条目</h3>
+                    <span className="muted">{draft.entries.length} / 100</span>
+                  </div>
+                  {draft.entries.map((entry, index) => (
+                    <section className="changelog-entry" key={entry.key} aria-label={`更新条目 ${index + 1}`}>
+                      <div className="changelog-section-head">
+                        <strong>条目 {index + 1}</strong>
+                        <Button
+                          className="btn"
+                          type="button"
+                          aria-label={`移除条目 ${index + 1}`}
+                          disabled={draft.entries.length === 1}
+                          onClick={() =>
+                            setDraft({ ...draft, entries: draft.entries.filter((item) => item.key !== entry.key) })
+                          }
                         >
+                          移除条目
+                        </Button>
+                      </div>
+                      <div className="changelog-entry-heading">
+                        <Field id={`entry-type-${entry.key}`} label="分类">
                           {(ctl) => (
-                            <input
+                            <Input
+                              component="select"
+                              rightSection={<Icon name="chevronDown" size={14} />}
                               {...ctl}
-                              required={ref.creditName !== null}
-                              disabled={ref.creditName === null}
-                              maxLength={80}
-                              placeholder={ref.creditName === null ? "匿名用户" : "填写公开昵称"}
-                              value={ref.creditName ?? ""}
+                              value={entry.type}
+                              onChange={(e) => updateEntry(entry.key, { type: e.target.value as ChangelogEntryType })}
+                            >
+                              {GROUPS.map((group) => (
+                                <option key={group.type} value={group.type}>
+                                  {group.label}
+                                </option>
+                              ))}
+                            </Input>
+                          )}
+                        </Field>
+                        <Field id={`entry-title-${entry.key}`} label="条目标题">
+                          {(ctl) => (
+                            <Input
+                              error={ctl["aria-invalid"]}
+                              {...ctl}
+                              required
+                              maxLength={120}
+                              placeholder="例如：修复导出文件时偶发的闪退"
+                              value={entry.title}
+                              onChange={(e) => updateEntry(entry.key, { title: e.target.value })}
+                            />
+                          )}
+                        </Field>
+                      </div>
+                      <Field id={`entry-description-${entry.key}`} label="变化说明">
+                        {(ctl) => (
+                          <Input
+                            component="textarea"
+                            multiline
+                            error={ctl["aria-invalid"]}
+                            {...ctl}
+                            rows={2}
+                            maxLength={2000}
+                            placeholder="描述用户现在可以做成什么，避免直接粘贴内部讨论。"
+                            value={entry.description}
+                            onChange={(e) => updateEntry(entry.key, { description: e.target.value })}
+                          />
+                        )}
+                      </Field>
+                      {entry.feedbacks.map((ref, refIndex) => (
+                        <div className="changelog-credit-row" key={ref.feedbackId}>
+                          <Field
+                            id={`credit-${entry.key}-${refIndex}`}
+                            label={`公开署名 ${refIndex + 1}`}
+                            hint={`关联反馈：${feedbackLabels[ref.feedbackId]?.title || ref.feedbackId}`}
+                          >
+                            {(ctl) => (
+                              <Input
+                                error={ctl["aria-invalid"]}
+                                {...ctl}
+                                required={ref.creditName !== null}
+                                disabled={ref.creditName === null}
+                                maxLength={80}
+                                placeholder={ref.creditName === null ? "匿名用户" : "填写公开昵称"}
+                                value={ref.creditName ?? ""}
+                                onChange={(e) =>
+                                  updateEntry(entry.key, {
+                                    feedbacks: entry.feedbacks.map((f) =>
+                                      f.feedbackId === ref.feedbackId ? { ...f, creditName: e.target.value } : f,
+                                    ),
+                                  })
+                                }
+                              />
+                            )}
+                          </Field>
+                          <label className="changelog-anonymous">
+                            <input
+                              type="checkbox"
+                              checked={ref.creditName === null}
                               onChange={(e) =>
                                 updateEntry(entry.key, {
                                   feedbacks: entry.feedbacks.map((f) =>
-                                    f.feedbackId === ref.feedbackId ? { ...f, creditName: e.target.value } : f,
+                                    f.feedbackId === ref.feedbackId
+                                      ? {
+                                          ...f,
+                                          creditName: e.target.checked
+                                            ? null
+                                            : feedbackLabels[ref.feedbackId]?.username || "",
+                                        }
+                                      : f,
                                   ),
                                 })
                               }
                             />
-                          )}
-                        </Field>
-                        <label className="changelog-anonymous">
-                          <input
-                            type="checkbox"
-                            checked={ref.creditName === null}
-                            onChange={(e) =>
+                            匿名
+                          </label>
+                          <Button
+                            className="btn"
+                            type="button"
+                            aria-label={`移除署名 ${refIndex + 1}`}
+                            onClick={() =>
                               updateEntry(entry.key, {
-                                feedbacks: entry.feedbacks.map((f) =>
-                                  f.feedbackId === ref.feedbackId
-                                    ? {
-                                        ...f,
-                                        creditName: e.target.checked
-                                          ? null
-                                          : feedbackLabels[ref.feedbackId]?.username || "",
-                                      }
-                                    : f,
-                                ),
+                                feedbacks: entry.feedbacks.filter((f) => f.feedbackId !== ref.feedbackId),
                               })
                             }
-                          />
-                          匿名
-                        </label>
-                        <button
-                          className="btn"
-                          type="button"
-                          aria-label={`移除署名 ${refIndex + 1}`}
-                          onClick={() =>
-                            updateEntry(entry.key, {
-                              feedbacks: entry.feedbacks.filter((f) => f.feedbackId !== ref.feedbackId),
-                            })
-                          }
-                        >
-                          移除关联
-                        </button>
-                      </div>
-                    ))}
-                    <button
+                          >
+                            移除关联
+                          </Button>
+                        </div>
+                      ))}
+                      <Button
+                        className="btn"
+                        type="button"
+                        disabled={entry.feedbacks.length >= 20}
+                        onClick={() => setPickerKey(entry.key)}
+                      >
+                        <Icon name="link" size={16} />
+                        关联反馈
+                      </Button>
+                      <p className="field-hint">
+                        默认使用提出者账号名称，可改为公开昵称或匿名；不关联反馈的条目也可以发布。
+                      </p>
+                    </section>
+                  ))}
+                  <Button
+                    className="btn"
+                    type="button"
+                    disabled={draft.entries.length >= 100}
+                    onClick={() => setDraft({ ...draft, entries: [...draft.entries, newEntry()] })}
+                  >
+                    添加更新条目
+                  </Button>
+                  <Field
+                    id="changelog-upgrade"
+                    label="升级说明（可选）"
+                    hint="需要用户操作、兼容性变化或已知限制放在这里。"
+                  >
+                    {(ctl) => (
+                      <Input
+                        component="textarea"
+                        multiline
+                        error={ctl["aria-invalid"]}
+                        {...ctl}
+                        rows={3}
+                        maxLength={4000}
+                        value={draft.upgradeNotes}
+                        onChange={(e) => setDraft({ ...draft, upgradeNotes: e.target.value })}
+                      />
+                    )}
+                  </Field>
+                </fieldset>
+                <div className="changelog-actions changelog-save">
+                  {!published && (
+                    <Button
+                      variant="filled"
+                      className="btn primary"
+                      type="submit"
+                      disabled={locked || selectedApp?.deleted || (!dirty && saved !== null)}
+                    >
+                      {busy ? "处理中…" : "保存草稿"}
+                    </Button>
+                  )}
+                  {saved && (
+                    <Button
+                      variant={published ? "default" : "filled"}
+                      className={`btn ${published ? "" : "primary"}`}
+                      type="button"
+                      disabled={busy || dirty || (selectedApp?.deleted && !published)}
+                      onClick={() => void changePublication()}
+                    >
+                      {published ? "取消发布" : "发布更新日志"}
+                    </Button>
+                  )}
+                  {dirty && (
+                    <Button
                       className="btn"
                       type="button"
-                      disabled={entry.feedbacks.length >= 20}
-                      onClick={() => setPickerKey(entry.key)}
+                      disabled={busy}
+                      onClick={() => changeDraft(() => openRelease(saved))}
                     >
-                      <Icon name="link" size={16} />
-                      关联反馈
-                    </button>
-                    <p className="field-hint">
-                      默认使用提出者账号名称，可改为公开昵称或匿名；不关联反馈的条目也可以发布。
-                    </p>
-                  </section>
-                ))}
-                <button
-                  className="btn"
-                  type="button"
-                  disabled={draft.entries.length >= 100}
-                  onClick={() => setDraft({ ...draft, entries: [...draft.entries, newEntry()] })}
-                >
-                  添加更新条目
-                </button>
-                <Field
-                  id="changelog-upgrade"
-                  label="升级说明（可选）"
-                  hint="需要用户操作、兼容性变化或已知限制放在这里。"
-                >
-                  {(ctl) => (
-                    <textarea
-                      {...ctl}
-                      rows={3}
-                      maxLength={4000}
-                      value={draft.upgradeNotes}
-                      onChange={(e) => setDraft({ ...draft, upgradeNotes: e.target.value })}
-                    />
+                      撤销未保存的修改
+                    </Button>
                   )}
-                </Field>
-              </fieldset>
-              <div className="changelog-actions changelog-save">
-                {!published && (
-                  <button
-                    className="btn primary"
-                    type="submit"
-                    disabled={locked || selectedApp?.deleted || (!dirty && saved !== null)}
-                  >
-                    {busy ? "处理中…" : "保存草稿"}
-                  </button>
-                )}
-                {saved && (
-                  <button
-                    className={`btn ${published ? "" : "primary"}`}
-                    type="button"
-                    disabled={busy || dirty || (selectedApp?.deleted && !published)}
-                    onClick={() => void changePublication()}
-                  >
-                    {published ? "取消发布" : "发布更新日志"}
-                  </button>
-                )}
-                {dirty && (
-                  <button className="btn" type="button" disabled={busy} onClick={() => openRelease(saved)}>
-                    撤销未保存的修改
-                  </button>
-                )}
-                {error && (
-                  <button className="btn" type="button" disabled={busy} onClick={() => void loadReleases()}>
-                    {dirty ? "舍弃修改并重新载入" : "重新载入版本"}
-                  </button>
-                )}
-              </div>
-            </form>
-            <div className="card">
-              <div className="changelog-section-head">
-                <h2>展示预览</h2>
-                <span className="muted">{published ? "已发布内容" : "仅预览，保存草稿不会对外展示"}</span>
-              </div>
-              <ReleasePreview draft={draft} />
+                  {error && (
+                    <Button
+                      className="btn"
+                      type="button"
+                      disabled={busy}
+                      onClick={() => changeDraft(() => void loadReleases())}
+                    >
+                      {dirty ? "舍弃修改并重新载入" : "重新载入版本"}
+                    </Button>
+                  )}
+                </div>
+              </Paper>
             </div>
-          </div>
+          )}
         </div>
+      )}
+      {previewOpen && (
+        <Modal
+          title="展示预览"
+          wide
+          onClose={() => setPreviewOpen(false)}
+          actions={
+            <Button className="btn" type="button" onClick={() => setPreviewOpen(false)}>
+              返回编辑
+            </Button>
+          }
+        >
+          <ReleasePreview draft={draft} />
+        </Modal>
+      )}
+      {discard && (
+        <ConfirmDialog
+          title="放弃本版本的修改？"
+          body={<p>继续后会丢弃尚未保存的编辑。</p>}
+          danger
+          confirmLabel="放弃修改并继续"
+          onClose={() => setDiscard(null)}
+          onConfirm={() => {
+            setDiscard(null);
+            discard.run();
+          }}
+        />
       )}
       {pickerEntry && (
         <FeedbackPicker
