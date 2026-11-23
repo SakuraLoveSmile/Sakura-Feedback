@@ -184,23 +184,23 @@ Shadow DOM 查询节点或覆盖内部样式）；`test/` 下的测试辅助文�
 
 ### 2.1 Web：通过构建出的 npm tarball 安装（打包器宿主推荐）
 
-包名 `@feedback/web`，当前版本 `0.10.0`，因此 tarball 文件名为 **`feedback-web-0.10.0.tgz`**（版本变了文件名跟着变）。
+包名 `@feedback/web`，当前版本 `0.11.0`，因此 tarball 文件名为 **`feedback-web-0.11.0.tgz`**（版本变了文件名跟着变）。
 
 优先安装正式 Release 的固定产物（保留锁文件）；不要把工作区源码或 `main` 当成稳定版本：
 
 ```bash
-pnpm add https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/download/v0.10.0/feedback-web-0.10.0.tgz
+pnpm add https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/download/v0.11.0/feedback-web-0.11.0.tgz
 ```
 
-完整 Web dist、SHA256 与服务端镜像清单均在 [v0.10.0 Release](https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/tag/v0.10.0)。
-需要自行构建时，先检出 `v0.10.0`，再执行：
+完整 Web dist、SHA256 与服务端镜像清单均在 [v0.11.0 Release](https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/tag/v0.11.0)。
+需要自行构建时，先检出 `v0.11.0`，再执行：
 
 ```bash
 # ① 在仓库根构建组件包
 pnpm install
 pnpm --filter @feedback/web build
 
-# ② 打成 tarball（真实产物：/tmp/fbpack/feedback-web-0.10.0.tgz）
+# ② 打成 tarball（真实产物：/tmp/fbpack/feedback-web-0.11.0.tgz）
 mkdir -p /tmp/fbpack
 pnpm --filter @feedback/web pack --pack-destination /tmp/fbpack
 ```
@@ -209,8 +209,8 @@ tarball 内含 `dist/` 全部产物（含 ESM 懒加载分块）、`package.json
 
 ```bash
 # ③ 在你的宿主项目里安装这个 tgz
-pnpm add /tmp/fbpack/feedback-web-0.10.0.tgz
-# 等价写法：npm install /tmp/fbpack/feedback-web-0.10.0.tgz
+pnpm add /tmp/fbpack/feedback-web-0.11.0.tgz
+# 等价写法：npm install /tmp/fbpack/feedback-web-0.11.0.tgz
 ```
 
 ```ts
@@ -274,7 +274,7 @@ dependencies:
   feedback_widget:
     git:
       url: https://github.com/SakuraLoveSmile/Sakura-Feedback.git
-      ref: v0.10.0                    # 或该标签对应的完整 commit SHA
+      ref: v0.11.0                    # 或该标签对应的完整 commit SHA
       path: flutter/feedback        # 包在仓库的子目录里
 ```
 
@@ -824,30 +824,39 @@ MaterialApp(
 `FeedbackController.effectiveApiBase`（只读）：当前实际使用的服务地址——
 本机覆盖优先于 `config.apiBase`；偏好加载完成前先返回 `config.apiBase`。
 
-#### 4.2.1 宿主托管灵感球设置（v0.8.4，可选）
+#### 4.2.1 Flutter 宿主托管反馈设置（可选）
 
-默认（不传参）由组件自己持久化「设置 → 灵感球」的待机样式与「设置 → 唤醒方式」的唤醒手势，
-按宿主 `appId` 分别保存在本机。宿主若要在自己的设置页提供这两项设置，可改为**宿主托管**：
+从 v0.11.0 起，宿主可在 `FeedbackWidget` 上独立托管以下五项。所有类型都可通过
+`import 'package:feedback_widget/feedback_widget.dart';` 导入。
+
+| 面板设置 | 宿主值 | 面板改选回调 | 适用入口 |
+|---|---|---|---|
+| 入口样式 | `FeedbackLauncherStyle? launcherStyle` | `onLauncherStyleChanged` | 光束 / 灵感球二选一 |
+| 唤醒动效 | `FeedbackWakeVisual? wakeVisual` | `onWakeVisualChanged` | 光束 |
+| 唤醒效果（灵感球入场） | `FeedbackOrbEntrance? orbEntrance` | `onOrbEntranceChanged` | 灵感球 |
+| 灵感球待机样式 | `FeedbackOrbIdleStyle? orbIdleStyle` | `onOrbIdleStyleChanged` | 灵感球 |
+| 唤醒方式 | `Set<FeedbackWakeGesture>? wakeGestures` | `onWakeGesturesChanged` | 应用内手势 |
+
+- **只传值**时，组件直接使用宿主值，并隐藏面板里的对应设置项。例如传入 `FeedbackLauncherStyle.orb` 后，唤醒会使用灵感球，面板也会隐藏光束专属的「唤醒动效」。
+- **值和回调一起传**时，面板显示适用于当前入口的选项。用户改选会调用宿主回调，例如 `onWakeVisualChanged: settings.setWakeVisual`。宿主负责保存并重建组件以应用新值，组件保留这项原有的本机偏好。
+- **省略值**时，该项沿用 0.10.0 的行为，由组件按 `appId` 读取和保存本机偏好。未托管入口样式时，`config.launcherMode` 显式指定的 `tab` / `orb` 仍固定入口，默认的 `beam` 允许用户选择入口样式。灵感球待机样式 `hidden` 仍可由已开启的手势唤醒。
+- **整页只留服务器设置**时，传 `hideSettings: true`。开关默认 `false`，只控制面板显示。唤醒手势和待机样式即使仍使用组件偏好，也会从设置页一起隐藏。
+
+以下示例从宿主设置读取三个值。设置页改选后用新值重建此组件即可，三项均无需回调。
 
 ```dart
 FeedbackWidget(
-  config: ...,
-  controller: ...,
-  orbIdleStyle: settings.orbIdleStyle,               // FeedbackOrbIdleStyle.handle / .edge / .hidden
-  onOrbIdleStyleChanged: settings.setOrbIdleStyle,   // 用户在内置设置改选时回调宿主
-  wakeGestures: settings.wakeGestures,               // Set<FeedbackWakeGesture>
-  onWakeGesturesChanged: settings.setWakeGestures,   // 用户勾选 / 取消时回调宿主
+  config: FeedbackConfig('https://fb.example.com', 'com.example.player'),
+  launcherStyle: settings.launcherStyle,
+  wakeVisual: settings.wakeVisual,
+  orbEntrance: settings.orbEntrance,
+  hideSettings: true,
   child: child,
 )
 ```
 
-- 提供某个取值时，该设置**不再写组件自己的存储**：宿主负责保存（数据库 / preferences 均可），
-  收到回调后把新值回传，组件按新值立即生效——`hidden` 只隐藏待机（收起）状态，完整球在初始显示与被唤醒后照常可见，改回其他样式立即恢复对应待机入口。
-- 内置反馈面板的对应设置区会显示同一份当前值并调用宿主回调；**只提供取值、不提供回调**时该
-  设置区隐藏（由宿主 UI 负责改写）。两个设置可以各自独立托管。
-- 类型从包入口导出：`FeedbackOrbIdleStyle { handle, edge, hidden }`、
-  `FeedbackWakeGesture { twoFingerHold, threeFingerSwipeUp, twoFingerDoubleTap }`。
-- 都不传时由组件自行持久化这两项设置（默认行为）；「隐藏」的待机语义以 0.8.5 为准（只隐藏待机态，已开启的手势仍可唤醒）。
+快捷键在 `FeedbackConfig` 中单独配置。包入口已导出 `FeedbackWakeShortcut`，可用
+`wakeShortcut: const FeedbackWakeShortcut.off()` 关闭，或传入自定义组合键。
 
 ### 4.3 方法
 
@@ -1021,11 +1030,10 @@ Flutter 端：宿主传入新 `apiBase` / `appId` 重建 `FeedbackWidget` 时走
 - 快捷键默认 `Primary+Shift+F`（macOS ⌘ / 其他 Ctrl），可在配置里自定义或关闭；输入框聚焦、面板打开、选区进行中不触发，并 `preventDefault` 避免宿主收到同组合键。
 - 手势仅限当前宿主内容；反馈面板、选区及球体拖动时暂停识别。Web 排除输入框、链接、按钮等交互起点；单指滚动和正常双指缩放不会被保留为唤醒手势。启用三指上滑时，及时到齐且尚未滚动的三指序列保留给该手势。
 - 选择即时生效、按本机宿主的 `appId` 保存，切换 Feedback 服务器不重置手势/入口样式。存储失败时提示「仅本次生效」。根组件初始化即恢复偏好，不要求先打开反馈面板。
-- 「入口样式」单选（光束唤醒 / 灵感球）只在宿主 `launcher-mode=beam` 时出现，写入本机偏好 `feedback:launcher-style:v1:<appId>`；宿主显式 `tab` / `orb` 时以宿主为准，不显示该单选。
+- 使用组件本机偏好时，「入口样式」单选（光束唤醒 / 灵感球）只在宿主 `launcher-mode=beam` 时出现，写入本机偏好 `feedback:launcher-style:v1:<appId>`；宿主显式 `tab` / `orb` 时以宿主为准，不显示该单选。
 - 「唤醒动效」单选（水波纹 / 波光）只在生效样式为光束唤醒时出现，写入本机偏好 `feedback:wake-visual:v1:<appId>`；默认水波纹，波光为可选项。
 - 「设置 → 灵感球」提供小把手、球体贴边和隐藏。在默认宿主里选用灵感球并启用手势后，首次使用默认隐藏，已保存的待机偏好优先。可在「唤醒效果」中选择七种入场动画，默认小珠浮现，选择按应用保存。手势结束时，球从各指的中点浮现。点击可反馈，拖到问题处松手可进入局部选区。闲置 5 秒后按偏好收起。显式设置宿主为 `orb` 时默认显示停靠球，可从内置设置或宿主入口更改偏好。尺寸和折射见[灵感球设计契约](orb-spec.md)。
-- **宿主托管（v0.8.4）**：宿主可用 `FeedbackWidget.orbIdleStyle` / `wakeGestures` 接管这两项设置，
-  在自己的设置页提供同样的选项（见 4.2.1）；内置设置区会同步显示并回调宿主。不传时由组件自行保存。
+- Flutter 的入口、动效、待机与手势支持逐项托管。以上本机保存规则适用于组件管理的设置；只传宿主值会隐藏对应项，整页只留服务器设置用 `hideSettings: true`。见 §4.2.1。
 - 不监听其他应用，不使用传感器或系统级截图。系统先截获的多指操作可能无法到达组件。
 
 光束动效时序、颜色与圈选常量见 [beam-spec.md](beam-spec.md)；灵感球具体识别阈值、形变参数见[任务计划 R2](tasks/液态灵感球双端落地_032e28ef.plan.md)。

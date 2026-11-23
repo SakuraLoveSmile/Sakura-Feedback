@@ -179,6 +179,13 @@ class FeedbackWidget extends StatefulWidget {
     this.logProvider,
     this.filePicker,
     this.imagePicker,
+    this.launcherStyle,
+    this.onLauncherStyleChanged,
+    this.wakeVisual,
+    this.onWakeVisualChanged,
+    this.orbEntrance,
+    this.onOrbEntranceChanged,
+    this.hideSettings = false,
     this.orbIdleStyle,
     this.onOrbIdleStyleChanged,
     this.wakeGestures,
@@ -206,6 +213,27 @@ class FeedbackWidget extends StatefulWidget {
 
   /// 手动图片选择器（可选，优先于 config.imagePicker；v12）。
   final FeedbackImagePicker? imagePicker;
+
+  /// 宿主选定的入口样式。提供时直接决定入口模式，省略时沿用配置与本机偏好。
+  final FeedbackLauncherStyle? launcherStyle;
+
+  /// 宿主在面板中改选入口样式后的回调。只提供 [launcherStyle] 时隐藏该项。
+  final ValueChanged<FeedbackLauncherStyle>? onLauncherStyleChanged;
+
+  /// 光束唤醒时的动效。提供值时由宿主保存，否则沿用组件本机偏好。
+  final FeedbackWakeVisual? wakeVisual;
+
+  /// 面板中改选唤醒动效后的回调。只提供 [wakeVisual] 时隐藏该项。
+  final ValueChanged<FeedbackWakeVisual>? onWakeVisualChanged;
+
+  /// 灵感球下次唤醒时播放的入场动画。提供值时由宿主保存，否则沿用组件本机偏好。
+  final FeedbackOrbEntrance? orbEntrance;
+
+  /// 面板中改选入场动画后的回调。只提供 [orbEntrance] 时隐藏该项。
+  final ValueChanged<FeedbackOrbEntrance>? onOrbEntranceChanged;
+
+  /// 设置页只显示服务器设置。默认为 false，按各项托管状态显示反馈设置。
+  final bool hideSettings;
 
   /// 宿主可控的灵感球待机样式（v0.8.4 新增，可选）。
   ///
@@ -242,6 +270,9 @@ class FeedbackWidget extends StatefulWidget {
   /// 测试注入的服务器覆盖偏好仓库。
   @visibleForTesting
   final FeedbackServerPrefStore? serverPrefStore;
+
+  bool get _usesLauncherStyle =>
+      launcherStyle != null || config.launcherMode == FeedbackLauncherMode.beam;
 
   @override
   State<FeedbackWidget> createState() => _FeedbackWidgetState();
@@ -290,14 +321,13 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   FeedbackOrbIdleStyle get _orbIdleStyle =>
       widget.orbIdleStyle ??
       _idlePreferences.savedStyle ??
-      (widget.config.launcherMode == FeedbackLauncherMode.beam &&
-              _wakeGestures.isNotEmpty
+      (widget._usesLauncherStyle && _wakeGestures.isNotEmpty
           ? FeedbackOrbIdleStyle.hidden
           : FeedbackOrbIdleStyle.handle);
 
   bool get _gestureStandby =>
       _effectiveLauncherMode == FeedbackLauncherMode.orb &&
-      widget.config.launcherMode == FeedbackLauncherMode.beam &&
+      widget._usesLauncherStyle &&
       _orbIdleStyle == FeedbackOrbIdleStyle.hidden &&
       _wakeGestures.isNotEmpty;
 
@@ -305,15 +335,25 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   Set<FeedbackWakeGesture> get _wakeGestures =>
       widget.wakeGestures ?? _wakePreferences.enabled;
 
-  /// 生效入口模式：宿主 tab/orb 优先；宿主 beam 时由终端用户偏好决定。
-  FeedbackLauncherMode get _effectiveLauncherMode {
-    if (widget.config.launcherMode != FeedbackLauncherMode.beam) {
-      return widget.config.launcherMode;
+  FeedbackLauncherStyle get _launcherStyle =>
+      widget.launcherStyle ?? _launcherStylePreferences.style;
+  FeedbackWakeVisual get _wakeVisual =>
+      widget.wakeVisual ?? _wakeVisualPreferences.visual;
+  FeedbackOrbEntrance get _entrance =>
+      widget.orbEntrance ?? _entrancePreferences.visual;
+
+  /// 宿主托管值优先；未托管时，仅默认模式读取本机入口偏好。
+  FeedbackLauncherMode _launcherModeFor(FeedbackWidget host) {
+    if (!host._usesLauncherStyle) {
+      return host.config.launcherMode;
     }
-    return _launcherStylePreferences.style == FeedbackLauncherStyle.orb
+    return (host.launcherStyle ?? _launcherStylePreferences.style) ==
+            FeedbackLauncherStyle.orb
         ? FeedbackLauncherMode.orb
         : FeedbackLauncherMode.beam;
   }
+
+  FeedbackLauncherMode get _effectiveLauncherMode => _launcherModeFor(widget);
 
   /// 「仅本次生效」只描述组件自身持久化失败；宿主托管时由宿主负责保存。
   bool get _orbIdleSessionOnly =>
@@ -419,7 +459,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     _cancelOrbIdle();
     _snapOrbMorph(0);
     _resetLiquid();
-    _activeEntrance = _entrancePreferences.visual;
+    _activeEntrance = _entrance;
     _orbEntrance.duration = Duration(milliseconds: _activeEntrance.milliseconds);
     _entranceAxis = const Offset(.89, -.22);
     if (fingertips.length == 2 && _lastViewport != null) {
@@ -482,7 +522,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   }
 
   void _launcherStylePreferencesChanged() {
-    if (!mounted || _disposed) return;
+    if (!mounted || _disposed || widget.launcherStyle != null) return;
     _wakeRecognizer?.cancel();
     setState(() => _resetOrbReleaseState());
     _syncWakeRecognizer();
@@ -1194,6 +1234,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   @override
   void didUpdateWidget(FeedbackWidget oldWidget) {
     super.didUpdateWidget(oldWidget);
+    final previousMode = _launcherModeFor(oldWidget);
     if (oldWidget.config.theme != widget.config.theme) {
       _invalidateLensTheme();
     }
@@ -1252,15 +1293,9 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
       // 换入的控制器可能已打开：入口随即 hidden，抢占进行中的回弹。
       if (_controller.isOpen) _resetOrbReleaseState();
     }
-    final bool wasOrbMode = oldWidget.config.launcherMode ==
-            FeedbackLauncherMode.orb ||
-        (oldWidget.config.launcherMode == FeedbackLauncherMode.beam &&
-            _launcherStylePreferences.style == FeedbackLauncherStyle.orb);
-    if ((oldWidget.config.showLauncher && !_launcherVisible) ||
-        (wasOrbMode && _effectiveLauncherMode != FeedbackLauncherMode.orb)) {
-      // 入口变为 hidden（关闭入口或离开 orb 模式）：抢占进行中的回弹，恢复
-      // 可见后从静态起点开始。本次 didUpdateWidget 后必然重建（待机样式变化
-      // 另外由 _applyOrbIdleStyleChange 处理）。
+    if (previousMode != _effectiveLauncherMode ||
+        (oldWidget.config.showLauncher && !_launcherVisible)) {
+      _wakeRecognizer?.cancel();
       _resetOrbReleaseState();
     }
   }
@@ -2560,7 +2595,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
                       gestureGlass: _selectionGestureGlass,
                       lassoFirst:
                           _effectiveLauncherMode == FeedbackLauncherMode.beam,
-                      wakeVisual: _wakeVisualPreferences.visual,
+                      wakeVisual: _wakeVisual,
                       onUseRegion: (Rect region) {
                         unawaited(_deliverSelection(selection: region));
                       },
@@ -3155,20 +3190,31 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
           tokenStore: widget.tokenStore,
           tokenStoreFactory: widget.tokenStoreFactory,
           serverPrefStore: widget.serverPrefStore,
-          // 宿主托管（v0.8.4）：值以宿主为准，变更回调透传给宿主保存；
+          // 宿主托管：值以宿主为准，变更回调透传给宿主保存；
           // 宿主只给值不给回调时隐藏面板内对应的设置区，避免无效操作。
           orbIdleStyle: _orbIdleStyle,
           orbIdleSessionOnly: _orbIdleSessionOnly,
           launcherMode: _effectiveLauncherMode,
-          launcherStyle: _launcherStylePreferences.style,
-          launcherStyleSessionOnly: _launcherStylePreferences.sessionOnly,
-          onLauncherStyleChanged: _launcherStylePreferences.select,
-          wakeVisual: _wakeVisualPreferences.visual,
-          wakeVisualSessionOnly: _wakeVisualPreferences.sessionOnly,
-          onWakeVisualChanged: _wakeVisualPreferences.select,
-          entrance: _entrancePreferences.visual,
-          onEntranceChanged: _entrancePreferences.select,
-          entranceSessionOnly: _entrancePreferences.sessionOnly,
+          allowLauncherStyle: widget._usesLauncherStyle,
+          hideSettings: widget.hideSettings,
+          launcherStyle: _launcherStyle,
+          launcherStyleSessionOnly: widget.launcherStyle == null &&
+              _launcherStylePreferences.sessionOnly,
+          onLauncherStyleChanged: widget.launcherStyle != null
+              ? widget.onLauncherStyleChanged
+              : _launcherStylePreferences.select,
+          wakeVisual: _wakeVisual,
+          wakeVisualSessionOnly:
+              widget.wakeVisual == null && _wakeVisualPreferences.sessionOnly,
+          onWakeVisualChanged: widget.wakeVisual != null
+              ? widget.onWakeVisualChanged
+              : _wakeVisualPreferences.select,
+          entrance: _entrance,
+          onEntranceChanged: widget.orbEntrance != null
+              ? widget.onOrbEntranceChanged
+              : _entrancePreferences.select,
+          entranceSessionOnly:
+              widget.orbEntrance == null && _entrancePreferences.sessionOnly,
           onOrbIdleStyleChanged: widget.orbIdleStyle != null
               ? widget.onOrbIdleStyleChanged
               : _idlePreferences.select,

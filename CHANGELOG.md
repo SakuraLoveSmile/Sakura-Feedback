@@ -7,6 +7,19 @@
 [`docs/integration.md`](docs/integration.md) §1.7。标注 **破坏性** 的条目表示
 宿主升级时需要处理；未标注的均为兼容变更（新增可选字段 / 属性 / 端点）或内部变更。
 
+## [0.11.0] — 2026-11-23
+
+### Flutter 宿主托管反馈设置
+
+- `FeedbackWidget` 增加可选的 `launcherStyle`、`wakeVisual`、`orbEntrance`。只传值时使用宿主选择并隐藏对应设置项；同时传入 `onLauncherStyleChanged`、`onWakeVisualChanged` 或 `onOrbEntranceChanged` 时可在面板改选，由宿主保存并回传。选择灵感球时自动隐藏光束动效。
+- 设置 `hideSettings: true` 可让面板设置页只显示服务器设置。开关默认 `false`。省略新参数时，入口、动效和组件本机偏好的默认行为与 0.10.0 相同。
+- 包入口新增导出 `FeedbackWakeShortcut`、`FeedbackLauncherStyle`、`FeedbackWakeVisual` 和 `FeedbackOrbEntrance`。宿主可直接配置 `FeedbackConfig.wakeShortcut`。
+
+### 宿主升级
+
+- Flutter 宿主将 `pubspec.yaml` 中 `feedback_widget` 的 Git 依赖更新为 `ref: v0.11.0`，保留 `path: flutter/feedback`，然后运行 `flutter pub get`。集中管理设置的宿主可按接入指南 §4.2.1 的示例传三个值并开启 `hideSettings`。
+- 本次功能更新面向 Flutter。仓库标准产物同步版本号，数据库 schema 沿用 15。
+
 ## [0.10.0] — 2026-11-23
 
 ### 默认行为变更

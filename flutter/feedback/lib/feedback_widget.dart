@@ -52,6 +52,9 @@ export 'src/images.dart'
         FeedbackImageException,
         kFeedbackMaxImages,
         normalizeFeedbackImage;
+export 'src/launcher_style.dart' show FeedbackLauncherStyle;
+export 'src/wake_visual.dart' show FeedbackWakeVisual;
+export 'src/orb_entrance.dart' show FeedbackOrbEntrance;
 export 'src/orb_idle.dart' show FeedbackOrbIdleStyle;
 export 'src/wake_gestures.dart' show FeedbackWakeGesture;
 export 'src/capture_mask.dart' show FeedbackCaptureMask;
@@ -61,7 +64,8 @@ export 'src/config.dart'
         FeedbackCaptureMode,
         FeedbackLauncherMode,
         FeedbackSide,
-        FeedbackThemeMode;
+        FeedbackThemeMode,
+        FeedbackWakeShortcut;
 export 'src/controller.dart' show FeedbackController;
 export 'src/idempotency.dart' show generateFeedbackIdempotencyKey;
 export 'src/panel.dart'

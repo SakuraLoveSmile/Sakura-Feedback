@@ -35,6 +35,27 @@ web、android、ios、windows、macos、linux（平台差异经条件导入隔�
 📄 完整的版本矩阵、平台要求、迁移步骤与边界、验证范围与证据追溯：
 [`docs/flutter-storage-compat.md`](../../docs/flutter-storage-compat.md)（权威记录见 `VERIFICATION.md`）。
 
+## 从 0.10.0 升级与宿主托管
+
+在宿主 `pubspec.yaml` 的 `feedback_widget.git` 下使用 `ref: v0.11.0` 和
+`path: flutter/feedback`，执行 `flutter pub get`。省略新参数时，默认入口、动效与按应用保存的偏好沿用 0.10.0。
+
+宿主可从包入口导入 `FeedbackLauncherStyle`、`FeedbackWakeVisual`、`FeedbackOrbEntrance`，
+以及配置快捷键用的 `FeedbackWakeShortcut`。要让用户在宿主设置页选择入口、光束动效和灵感球入场动画，可这样挂载：
+
+```dart
+FeedbackWidget(
+  config: FeedbackConfig('https://fb.example.com', 'com.example.player'),
+  launcherStyle: settings.launcherStyle,
+  wakeVisual: settings.wakeVisual,
+  orbEntrance: settings.orbEntrance,
+  hideSettings: true,
+  child: child,
+)
+```
+
+宿主保存这三个值后重建组件。只传值会隐藏对应设置项；`hideSettings: true` 还会隐藏其余反馈设置，面板只保留服务器设置。开关默认 `false`。如果也要让用户在面板改选，可给相应的值配上 `onLauncherStyleChanged`、`onWakeVisualChanged` 或 `onOrbEntranceChanged`，由宿主保存并回传新值。待机样式与唤醒手势遵循同一规则。各项适用的入口见[接入指南 §4.2.1](../../docs/integration.md#421-flutter-宿主托管反馈设置可选)。
+
 ## 使用
 
 ```dart

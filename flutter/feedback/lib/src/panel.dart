@@ -208,6 +208,8 @@ class FeedbackPanel extends StatefulWidget {
     this.orbIdleSessionOnly = false,
     this.onOrbIdleStyleChanged,
     this.launcherMode = FeedbackLauncherMode.beam,
+    this.hideSettings = false,
+    this.allowLauncherStyle,
     this.launcherStyle = FeedbackLauncherStyle.beam,
     this.launcherStyleSessionOnly = false,
     this.onLauncherStyleChanged,
@@ -229,8 +231,14 @@ class FeedbackPanel extends StatefulWidget {
   /// 宿主可自行决定是否展示提示）。
   final ValueChanged<int>? onUnreadCountChange;
 
-  /// 生效入口模式（宿主 beam 时由用户偏好决定光束或灵感球）。
+  /// 生效入口模式。
   final FeedbackLauncherMode launcherMode;
+
+  /// 是否支持选择光束或灵感球；直接使用面板时默认沿用配置的入口模式。
+  final bool? allowLauncherStyle;
+
+  /// 隐藏反馈设置分组，只显示服务器设置。
+  final bool hideSettings;
 
   /// 终端用户选择的入口样式。
   final FeedbackLauncherStyle launcherStyle;
@@ -3164,10 +3172,67 @@ class FeedbackPanelState extends State<FeedbackPanel>
     }
   }
 
+  bool get _allowsLauncherStyle =>
+      widget.allowLauncherStyle ??
+      (widget.config.launcherMode == FeedbackLauncherMode.beam);
+
+  Widget _entrancePicker(BuildContext context) {
+    const key = Key('feedback-orb-entrance');
+    if (Navigator.maybeOf(context) != null) {
+      return DropdownButtonHideUnderline(
+        child: DropdownButton<FeedbackOrbEntrance>(
+          key: key,
+          isExpanded: true,
+          value: widget.entrance,
+          items: [
+            for (final effect in FeedbackOrbEntrance.values)
+              DropdownMenuItem(value: effect, child: Text(effect.label)),
+          ],
+          onChanged: (value) {
+            if (value != null) widget.onEntranceChanged!(value);
+          },
+        ),
+      );
+    }
+    // 挂在 MaterialApp 外侧时，使用组件自己的 Overlay 展开同一组选项。
+    return MenuAnchor(
+      menuChildren: [
+        for (final effect in FeedbackOrbEntrance.values)
+          MenuItemButton(
+            onPressed: () => widget.onEntranceChanged!(effect),
+            child: Text(effect.label),
+          ),
+      ],
+      builder: (context, menu, child) => InkWell(
+        key: key,
+        onTap: menu.isOpen ? menu.close : menu.open,
+        child: SizedBox(
+          height: kMinInteractiveDimension,
+          child: Row(children: [
+            Expanded(child: Text(widget.entrance.label)),
+            const Icon(Icons.arrow_drop_down),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  String _shortcutLabel(FeedbackWakeShortcut shortcut) => [
+        if (shortcut.primary) 'Ctrl/⌘',
+        if (!shortcut.primary && shortcut.ctrl) 'Ctrl',
+        if (!shortcut.primary && shortcut.meta) '⌘',
+        if (shortcut.alt) 'Alt',
+        if (shortcut.shift) 'Shift',
+        shortcut.key.keyLabel,
+      ].join(' + ');
+
   /// T6：服务器设置视图——地址输入 / 保存 / 恢复默认 / 当前有效地址 /
   /// 连通性提示；覆盖仅保存于本机，不回写宿主默认配置。
   Widget _buildSettingsView(BuildContext context, {bool scrollHeader = false}) {
     final ThemeData theme = Theme.of(context);
+    final showLauncherSettings = !widget.hideSettings && _allowsLauncherStyle;
+    final showOrbSettings =
+        !widget.hideSettings && widget.launcherMode == FeedbackLauncherMode.orb;
     return SingleChildScrollView(
       key: const Key('feedback-settings-view'),
       padding: const EdgeInsets.all(16),
@@ -3175,7 +3240,7 @@ class FeedbackPanelState extends State<FeedbackPanel>
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
           if (scrollHeader) _buildHeader(context, inset: false),
-          if (widget.config.launcherMode == FeedbackLauncherMode.beam) ...<Widget>[
+          if (showLauncherSettings && widget.onLauncherStyleChanged != null) ...<Widget>[
             Text('入口样式', style: theme.textTheme.titleSmall),
             const SizedBox(height: 4),
             Text('用下方选好的手势唤醒。光束直接进入圈选；灵感球从手指之间浮现，点一下反馈，拖到问题处松手选区。',
@@ -3205,7 +3270,7 @@ class FeedbackPanelState extends State<FeedbackPanel>
                                   style == FeedbackLauncherStyle.beam
                                       ? '光束唤醒'
                                       : '灵感球'),
-                              onTap: () => widget.onLauncherStyleChanged?.call(style))))),
+                              onTap: () => widget.onLauncherStyleChanged!(style))))),
             if (widget.launcherStyleSessionOnly)
               Text('仅本次生效，偏好未保存',
                   key: const Key('feedback-launcher-style-session-only'),
@@ -3213,7 +3278,7 @@ class FeedbackPanelState extends State<FeedbackPanel>
                       ?.copyWith(color: theme.colorScheme.primary)),
             const SizedBox(height: 16),
           ],
-          if (widget.config.launcherMode == FeedbackLauncherMode.beam &&
+          if (showLauncherSettings && widget.onWakeVisualChanged != null &&
               widget.launcherStyle == FeedbackLauncherStyle.beam) ...<Widget>[
             Text('唤醒动效', style: theme.textTheme.titleSmall),
             const SizedBox(height: 4),
@@ -3245,7 +3310,7 @@ class FeedbackPanelState extends State<FeedbackPanel>
                                 FeedbackWakeVisual.aurora => '波光',
                               }),
                               onTap: () =>
-                                  widget.onWakeVisualChanged?.call(visual))))),
+                                  widget.onWakeVisualChanged!(visual))))),
             if (widget.wakeVisualSessionOnly)
               Text('仅本次生效，偏好未保存',
                   key: const Key('feedback-wake-visual-session-only'),
@@ -3253,28 +3318,18 @@ class FeedbackPanelState extends State<FeedbackPanel>
                       ?.copyWith(color: theme.colorScheme.primary)),
             const SizedBox(height: 16),
           ],
-          if (widget.onOrbIdleStyleChanged != null &&
-              widget.launcherMode == FeedbackLauncherMode.orb)
+          if (showOrbSettings && widget.onOrbIdleStyleChanged != null)
             Padding(padding: const EdgeInsets.only(bottom: 8),
               child: Text('灵感球', style: theme.textTheme.titleSmall)),
-          if (widget.launcherMode == FeedbackLauncherMode.orb &&
-              widget.onEntranceChanged != null) ...<Widget>[
+          if (showOrbSettings && widget.onEntranceChanged != null) ...<Widget>[
             InputDecorator(
               decoration: const InputDecoration(labelText: '唤醒效果', border: OutlineInputBorder()),
-              child: DropdownButtonHideUnderline(child: DropdownButton<FeedbackOrbEntrance>(
-                key: const Key('feedback-orb-entrance'),
-                isExpanded: true,
-                value: widget.entrance,
-                items: [for (final effect in FeedbackOrbEntrance.values)
-                  DropdownMenuItem(value: effect, child: Text(effect.label))],
-                onChanged: (value) { if (value != null) widget.onEntranceChanged!(value); },
-              )),
+              child: _entrancePicker(context),
             ),
             if (widget.entranceSessionOnly) Text('仅本次生效，偏好未保存', style: theme.textTheme.bodySmall),
             const SizedBox(height: 16),
           ],
-          if (widget.onOrbIdleStyleChanged != null &&
-              widget.launcherMode == FeedbackLauncherMode.orb) ...<Widget>[
+          if (showOrbSettings && widget.onOrbIdleStyleChanged != null) ...<Widget>[
             const SizedBox(height: 4),
             Text('选择「隐藏」后待机时不显示灵感球。用已开启的唤醒手势呼出，闲置 5 秒后收起。可以从宿主入口打开设置改回。',
                 style: theme.textTheme.bodySmall),
@@ -3313,16 +3368,16 @@ class FeedbackPanelState extends State<FeedbackPanel>
                       ?.copyWith(color: theme.colorScheme.primary)),
             const SizedBox(height: 16),
           ],
-          if (widget.onWakeGesturesChanged != null) ...<Widget>[
+          if (!widget.hideSettings && widget.onWakeGesturesChanged != null) ...<Widget>[
             Text('唤醒方式', style: theme.textTheme.titleSmall),
             const SizedBox(height: 4),
             Text('可同时开启，仅在当前应用内生效；未开启自动截图时手势只打开面板。',
                 style: theme.textTheme.bodySmall
                     ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
-            if (widget.config.launcherMode == FeedbackLauncherMode.beam)
+            if (_allowsLauncherStyle && widget.config.wakeShortcut.enabled)
               Padding(
                 padding: const EdgeInsets.only(top: 8),
-                child: Text('快捷键：Ctrl/⌘ + Shift + F（输入框聚焦时不触发）',
+                child: Text('快捷键：${_shortcutLabel(widget.config.wakeShortcut)}（输入框聚焦时不触发）',
                     key: const Key('feedback-wake-shortcut'),
                     style: theme.textTheme.bodySmall),
               ),
