@@ -32,7 +32,9 @@ describe('灵感球与视口截图组件测试', () => {
 
   it('launcherMode 与 captureMode 属性及默认值', () => {
     const m = mountRaw();
-    expect(m.widget.launcherMode).toBe('beam');
+    // 0.13：默认 auto —— 入口形态由输入能力决定（本用例的 matchMedia 桩没有精细指针，解析为 beam）。
+    expect(m.widget.launcherMode).toBe('auto');
+    expect(m.widget.dataset.fbMode).toBe('beam');
     expect(m.widget.captureMode).toBe('viewport');
 
     m.widget.launcherMode = 'orb';
@@ -51,6 +53,8 @@ describe('灵感球与视口截图组件测试', () => {
     expect(m.widget.captureMode).toBe('off');
 
     m.widget.launcherMode = 'beam';
+    expect(m.widget.getAttribute('launcher-mode')).toBe('beam');
+    m.widget.launcherMode = 'auto';
     expect(m.widget.hasAttribute('launcher-mode')).toBe(false);
   });
 

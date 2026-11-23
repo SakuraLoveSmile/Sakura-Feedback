@@ -75,7 +75,7 @@ export interface OpenFeedbackOptions {
   theme?: 'system' | 'light' | 'dark';
   showLauncher?: boolean;
   launcherBottom?: string;
-  launcherMode?: 'tab' | 'orb';
+  launcherMode?: 'auto' | 'beam' | 'tab' | 'orb';
   captureMode?: 'off' | 'viewport';
   logProvider?: import('./element').FeedbackLogProvider;
   /** v12：诊断记录器（注入后组件请求经 wrapFetch 记录；身份切换时清空缓冲）。 */

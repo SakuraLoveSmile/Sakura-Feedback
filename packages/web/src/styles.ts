@@ -1591,8 +1591,30 @@ export const STYLES = /* css */ `
 .fb-wake-option:has(input:disabled) { opacity:.6; cursor:default; }
 .fb-wake-option-text { display:flex; flex-direction:column; gap:3px; min-width:0; overflow-wrap:anywhere; }
 .fb-wake-option .fb-footnote, .fb-wake-settings > .fb-footnote { margin:0; }
+.fb-wake-option-title { font-size:13px; font-weight:500; color:var(--fb-text); }
+.fb-wake-desktop { display:flex; flex-direction:column; gap:8px; min-width:0; }
+/* 只作说明的入口方式行：不是开关，不占用命中区与 Tab 顺序。 */
+.fb-wake-fact { cursor:default; }
 .fb-wake-hint { position:fixed; bottom:32px; left:50%; transform:translateX(-50%); max-width:calc(100vw - 32px); padding:10px 16px; border-radius:10px; background:var(--fb-bg); color:var(--fb-text); border:1px solid var(--fb-border); font-size:13px; pointer-events:none; z-index:calc(var(--fb-z-index, var(--fb-z-index-default)) + 32); }
 .fb-region-entrance { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+
+/* ---- 首次使用入口提示（0.13；有可见入口时只出现一次） ---- */
+.fb-entry-hint {
+  position:fixed; bottom:24px; left:50%; transform:translateX(-50%);
+  display:flex; align-items:center; gap:8px; max-width:min(360px, calc(100vw - 32px));
+  padding:10px 8px 10px 14px; border:1px solid var(--fb-border); border-radius:12px;
+  background:var(--fb-bg); color:var(--fb-text); box-shadow:var(--fb-shadow);
+  font-size:13px; line-height:1.4;
+  z-index:calc(var(--fb-z-index, var(--fb-z-index-default)) + 34);
+}
+.fb-entry-hint-text { min-width:0; overflow-wrap:anywhere; }
+.fb-entry-hint-close {
+  flex:0 0 auto; display:inline-flex; align-items:center; justify-content:center;
+  width:28px; height:28px; padding:0; border:0; border-radius:8px; background:transparent;
+  color:var(--fb-text-tertiary); font:inherit; font-size:16px; line-height:1; cursor:pointer;
+}
+.fb-entry-hint-close:hover { background:rgba(127,127,127,.14); color:var(--fb-text); }
+.fb-entry-hint-close:focus-visible { outline:2px solid var(--fb-accent); outline-offset:2px; }
 
 .fb-settings-title {
   margin: 0;
