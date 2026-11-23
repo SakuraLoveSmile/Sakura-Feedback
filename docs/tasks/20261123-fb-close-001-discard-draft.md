@@ -60,4 +60,14 @@ Web（`packages/web`）：
 
 - 未在真机（Android 宿主）复验「截图 → 关闭 → 再次唤醒」的视觉与手感，需真机验收。
 - Web 浏览器 e2e（`e2e/run_browser.py`、`e2e/browser_paths.py`、`e2e/pages/capture-styles.html`）仍有若干断言按旧语义写成「关闭后草稿 / 截图仍保留」，本轮**未运行、未修改**：`run_browser.py` T3、`browser_paths.py` P1 / P3 / P5、`capture-styles.html` 重拍取消一段。下次跑 e2e 前需按新语义更新并执行。
-- 未发版本、未改 CHANGELOG：本轮只修行为，版本与发布按后续指令。
+- 未发版本前的本地验证已完成；v0.14.0 发布记录见 §7。
+- 生产（blog-prod）与管理页资产尚未升级：发布产物已就绪，升级需单独授权。
+## 7. 发布 v0.14.0（2026-11-23）
+
+- 版本收口：`package.json`、`apps/server`、`apps/admin`、`packages/web`、`flutter/feedback/pubspec.yaml` 统一为 **0.14.0**；
+  `CHANGELOG.md` 增加 `[0.14.0] — 2026-11-23`；接入指南与根 README 的固定版本引用同步到 0.14.0。
+- 提交：`e5007ef`（关闭即放弃 + 接入要求 + 测试与文档）、`b8c0065`（版本与 CHANGELOG）；签名标签 `v0.14.0` 指向 `b8c0065`（GPG Good signature），已推送到 `origin/main`。
+- Release 流水线 [45141707519](https://github.com/SakuraLoveSmile/Sakura-Feedback/actions/runs/45141707519) 全部 job 成功；[v0.14.0](https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/tag/v0.14.0) 已公开、Latest。
+- 资产七份齐全（`feedback-web-0.14.0.tgz`、`feedback-web-dist.zip`、`feedback-admin-dist.zip`、`SHA256SUMS`、`SOURCE.txt`、`feedback-image-digest.txt`、`release-manifest.json`）；`shasum -a 256 -c SHA256SUMS` 三份产物 OK；tgz 内 `version` 为 0.14.0。
+- `release-manifest.json`：version/tag/commit 为 0.14.0/v0.14.0/`b8c00653…`，channel stable，schema **15**，digest `sha256:3709a164…`；GHCR `v0.14.0` 与 `latest` 同一 digest。
+- 生产升级未执行（等待授权）：可用 `bash deploy/update.sh --to v0.14.0` 走「预拉 → 校验 digest → 备份 → 切换 → 健康检查」流程；schema 未变，回退只需改回旧镜像标签。
