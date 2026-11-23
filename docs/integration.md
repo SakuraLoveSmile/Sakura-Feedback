@@ -184,23 +184,23 @@ Shadow DOM 查询节点或覆盖内部样式）；`test/` 下的测试辅助文�
 
 ### 2.1 Web：通过构建出的 npm tarball 安装（打包器宿主推荐）
 
-包名 `@feedback/web`，当前版本 `0.9.3`，因此 tarball 文件名为 **`feedback-web-0.9.3.tgz`**（版本变了文件名跟着变）。
+包名 `@feedback/web`，当前版本 `0.10.0`，因此 tarball 文件名为 **`feedback-web-0.10.0.tgz`**（版本变了文件名跟着变）。
 
 优先安装正式 Release 的固定产物（保留锁文件）；不要把工作区源码或 `main` 当成稳定版本：
 
 ```bash
-pnpm add https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/download/v0.9.3/feedback-web-0.9.3.tgz
+pnpm add https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/download/v0.10.0/feedback-web-0.10.0.tgz
 ```
 
-完整 Web dist、SHA256 与服务端镜像清单均在 [v0.9.3 Release](https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/tag/v0.9.3)。
-需要自行构建时，先检出 `v0.9.3`，再执行：
+完整 Web dist、SHA256 与服务端镜像清单均在 [v0.10.0 Release](https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/tag/v0.10.0)。
+需要自行构建时，先检出 `v0.10.0`，再执行：
 
 ```bash
 # ① 在仓库根构建组件包
 pnpm install
 pnpm --filter @feedback/web build
 
-# ② 打成 tarball（真实产物：/tmp/fbpack/feedback-web-0.9.3.tgz）
+# ② 打成 tarball（真实产物：/tmp/fbpack/feedback-web-0.10.0.tgz）
 mkdir -p /tmp/fbpack
 pnpm --filter @feedback/web pack --pack-destination /tmp/fbpack
 ```
@@ -209,8 +209,8 @@ tarball 内含 `dist/` 全部产物（含 ESM 懒加载分块）、`package.json
 
 ```bash
 # ③ 在你的宿主项目里安装这个 tgz
-pnpm add /tmp/fbpack/feedback-web-0.9.3.tgz
-# 等价写法：npm install /tmp/fbpack/feedback-web-0.9.3.tgz
+pnpm add /tmp/fbpack/feedback-web-0.10.0.tgz
+# 等价写法：npm install /tmp/fbpack/feedback-web-0.10.0.tgz
 ```
 
 ```ts
@@ -274,7 +274,7 @@ dependencies:
   feedback_widget:
     git:
       url: https://github.com/SakuraLoveSmile/Sakura-Feedback.git
-      ref: v0.9.3                    # 或该标签对应的完整 commit SHA
+      ref: v0.10.0                    # 或该标签对应的完整 commit SHA
       path: flutter/feedback        # 包在仓库的子目录里
 ```
 
@@ -723,8 +723,8 @@ MaterialApp(
             appVersion: '1.0.0',
             pageLabel: pageLabel,           // 必须由宿主显式传入
             side: FeedbackSide.right,
-            launcherMode: FeedbackLauncherMode.orb,      // 默认 tab，必须显式写
-            captureMode: FeedbackCaptureMode.viewport,   // 默认 off，必须显式写
+            launcherMode: FeedbackLauncherMode.orb,      // 显式选择常驻灵感球
+            captureMode: FeedbackCaptureMode.viewport,   // 0.10 默认截取视口
             // 必须：宿主应用日志提供者（示例内容须替换为真实诊断数据）（面板打开自动抓取，至多 3 份，每份 ≤1MiB，3秒超时容错）
             logProvider: () async => [
               FeedbackLogFile(
@@ -1010,7 +1010,7 @@ Flutter 端：宿主传入新 `apiBase` / `appId` 重建 `FeedbackWidget` 时走
 
 0.10 起默认形态是**光束唤醒**（`launcher-mode=beam` / `FeedbackLauncherMode.beam`）：
 没有任何常驻入口，用户**双指长按 700ms**（默认开启）或按 **⌘/Ctrl+Shift+F** 唤醒；
-冻结视口 → 水波纹从双指按下的位置扩散（默认；可在设置切换为波光）→ 压暗 → 用户「画个圈」圈出问题位置，松手后
+冻结视口 → 水波纹从两指中点向外扩散（默认；可在设置切换为波光）→ 压暗 → 用户「画个圈」圈出问题位置，松手后
 包围盒外扩 8px（不足 64px 按中心扩展）成为选区框，确认后裁剪并打开面板。
 
 在「设置 → 唤醒方式」中可分别开启双指长按、三指上滑、双指双击，也可以同时开启。
@@ -1023,7 +1023,7 @@ Flutter 端：宿主传入新 `apiBase` / `appId` 重建 `FeedbackWidget` 时走
 - 选择即时生效、按本机宿主的 `appId` 保存，切换 Feedback 服务器不重置手势/入口样式。存储失败时提示「仅本次生效」。根组件初始化即恢复偏好，不要求先打开反馈面板。
 - 「入口样式」单选（光束唤醒 / 灵感球）只在宿主 `launcher-mode=beam` 时出现，写入本机偏好 `feedback:launcher-style:v1:<appId>`；宿主显式 `tab` / `orb` 时以宿主为准，不显示该单选。
 - 「唤醒动效」单选（水波纹 / 波光）只在生效样式为光束唤醒时出现，写入本机偏好 `feedback:wake-visual:v1:<appId>`；默认水波纹，波光为可选项。
-- 「设置 → 灵感球」提供小把手、球体贴边和隐藏。在默认宿主里选用灵感球并启用手势后，首次使用默认隐藏，已保存的待机偏好优先。手势结束时，球从各指的中点浮现。点击可反馈，拖到问题处松手可进入局部选区。闲置 5 秒后按偏好收起。显式设置宿主为 `orb` 时默认显示停靠球，可从内置设置或宿主入口更改偏好。尺寸和折射见[灵感球设计契约](orb-spec.md)。
+- 「设置 → 灵感球」提供小把手、球体贴边和隐藏。在默认宿主里选用灵感球并启用手势后，首次使用默认隐藏，已保存的待机偏好优先。可在「唤醒效果」中选择七种入场动画，默认小珠浮现，选择按应用保存。手势结束时，球从各指的中点浮现。点击可反馈，拖到问题处松手可进入局部选区。闲置 5 秒后按偏好收起。显式设置宿主为 `orb` 时默认显示停靠球，可从内置设置或宿主入口更改偏好。尺寸和折射见[灵感球设计契约](orb-spec.md)。
 - **宿主托管（v0.8.4）**：宿主可用 `FeedbackWidget.orbIdleStyle` / `wakeGestures` 接管这两项设置，
   在自己的设置页提供同样的选项（见 4.2.1）；内置设置区会同步显示并回调宿主。不传时由组件自行保存。
 - 不监听其他应用，不使用传感器或系统级截图。系统先截获的多指操作可能无法到达组件。

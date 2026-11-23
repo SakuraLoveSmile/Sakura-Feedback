@@ -7,64 +7,24 @@
 [`docs/integration.md`](docs/integration.md) §1.7。标注 **破坏性** 的条目表示
 宿主升级时需要处理；未标注的均为兼容变更（新增可选字段 / 属性 / 端点）或内部变更。
 
-## [0.10.0] — 未发布（2026-11-22）
+## [0.10.0] — 2026-11-23
 
-### 破坏性
+### 默认行为变更
 
-- **默认入口改为光束唤醒**：Web `launcher-mode` 缺省值由 `tab` 变为 `beam`；
-  Flutter `FeedbackLauncherMode` 缺省值由 `.tab` 变为 `.beam`。光束模式**没有常驻
-  入口**：双指长按 700ms（默认开启）或 `primary+shift+f`（macOS ⌘ / 其他 Ctrl）
-  唤醒 → 波光从双指按下的位置泛起 → 压暗 → 用户画圈 → 包围盒外扩成方框 →
-  确认后裁剪并打开面板。
-- **默认自动截图**：Web `capture-mode` 缺省值由 `off` 变为 `viewport`；
-  Flutter `captureMode` 缺省值由 `.off` 变为 `.viewport`。显式写 `off` 的宿主行为不变。
-- **迁移**：想保持升级前行为的宿主显式声明：
-
-  ```html
-  <!-- Web：旧式贴边标签 + 关闭自动截图 -->
-  <feedback-widget api-base="…" app-id="…" launcher-mode="tab" capture-mode="off"></feedback-widget>
-  <!-- Web：保留灵感球 -->
-  <feedback-widget api-base="…" app-id="…" launcher-mode="orb" capture-mode="viewport"></feedback-widget>
-  ```
-
-  ```dart
-  // Flutter：保持旧默认
-  FeedbackConfig(apiBase, appId,
-      launcherMode: FeedbackLauncherMode.tab,
-      captureMode: FeedbackCaptureMode.off);
-  ```
-
-  管理后台、React / Vue / SSR 示例已显式固定原形态；Flutter 与 HTML 示例改为演示新默认。
+- **Web 和 Flutter 默认采用光束唤醒。** 页面平时隐藏反馈入口。双指长按 700 毫秒后松手，水波纹从两指中点向外扩散。也可以使用 ⌘/Ctrl+Shift+F 唤醒。
+- **默认自动截取当前应用视口。** 唤醒后在已遮挡敏感内容的画面上圈出问题，松手后可调整选区，确认后将截图带入反馈面板。宿主显式设置 `capture-mode="off"` 或 `FeedbackCaptureMode.off` 时，光束唤醒直接打开表单。
 
 ### 新增
 
-- **光束唤醒与圈选（两端）**：唤醒 720ms 后即可圈选。双指唤醒时，默认水波纹从两指中间起一圈，向四周扩散并折射页面。
-  设置里可切换为双指波光，两道虹彩从指尖扩展并在屏幕边缘淡出；压暗渐入到 `#635D92`@0.26；
-  圈选常量两端一致（外扩 8px、最小 64px、4px 采样）；松手后动画成既有选区框，
-  继续支持拖动 / 四角缩放 / 方向键 / Enter / Esc。`prefers-reduced-motion` /
-  `MediaQuery.disableAnimations` 跳过唤醒动效，直接进入圈选待命。规格见 [`docs/beam-spec.md`](docs/beam-spec.md)。
-- **唤醒快捷键**：Web `wake-shortcut="primary+shift+f"`（或 `off`）；Flutter
-  `FeedbackConfig.wakeShortcut`（`FeedbackWakeShortcut` / `.off()`）。输入框聚焦、
-  面板打开、选区进行中不触发。
-- **入口样式偏好**：宿主为 `beam` 时，用户可在「设置 → 入口样式」在光束唤醒与
-  灵感球之间切换，按本机 `appId` 保存（`feedback:launcher-style:v1:<appId>`）。
-  宿主显式 `tab` / `orb` 时以宿主为准。
-- **无障碍入口**：beam 模式下无可见按钮，但提供可聚焦的视觉隐藏按钮
-  （Web `.fb-beam-a11y`，Flutter `feedback-beam-a11y-slot`），Enter/Space 唤醒；
-  覆盖层取消 / 面板关闭后焦点回到该按钮。
-- **唤醒与截图解耦**：`capture-mode=off` 时手势/快捷键只打开纯表单面板；
-  设置页的唤醒手势不再因截图模式被禁用，说明文案改为「未开启自动截图时手势只打开面板」。
+- 光束唤醒可在设置中选择**水波纹**或**波光**。波光从两个指尖分别亮起，在屏幕边缘淡出。
+- 在默认入口下，用户可在「设置 → 入口样式」选择**灵感球**。唤醒手势与入场动画可分别设置。七种动画为小珠浮现（默认）、指尖合珠、掠光显形、按痕浮起、薄镜翻开、牵丝成滴和取景成球。选择按应用保存在本机。
+- 灵感球在手势中点出现，可直接点按反馈，或拖到问题处松手选区。启用手势后首次默认隐藏，闲置 5 秒按用户偏好收起。开启系统「减少动态效果」时直接显示完整球。
+- Web 可用 `wake-shortcut` 自定义或关闭唤醒快捷键，Flutter 对应 `FeedbackConfig.wakeShortcut`。键盘与读屏用户也可以聚焦唤醒入口，再按 Enter 或空格操作。
 
-### 修复
+### 宿主升级
 
-- 圈选过程中指针捕获丢失（`lostpointercapture`）视为取消，不会提交半截包围盒。
-- 光束模式关闭覆盖层后焦点不再尝试回到已隐藏的灵感球。
-
-### 升级说明
-
-- 数据库 schema、HTTP 契约与归档流程不变；只有默认值、入口与新增可选配置变化。
-- 真机双指长按与系统手势仲裁、iOS/Android 构建、Safari/Firefox 的
-  reduced-motion、Windows forced-colors 未在本仓库内验证。
+- **从 0.9.x 升级且要保留旧默认行为**，Web 显式指定 `launcher-mode="tab" capture-mode="off"`。Flutter 在 `FeedbackConfig` 中指定 `launcherMode: FeedbackLauncherMode.tab` 和 `captureMode: FeedbackCaptureMode.off`。已有常驻灵感球的宿主可继续显式选择 `orb`。
+- Web 使用本版本的 `feedback-web-0.10.0.tgz`。Flutter 的 Git 依赖固定为 `v0.10.0`，子目录为 `flutter/feedback`。数据库 schema 沿用 15，本次升级无需迁移。
 
 ## [0.9.3] — 2026-11-17
 

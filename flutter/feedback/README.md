@@ -62,7 +62,7 @@ FeedbackWidget(
 
 - **默认：光束唤醒（0.10）**（`launcherMode` 默认 `FeedbackLauncherMode.beam`、
   `captureMode` 默认 `.viewport`）。没有常驻入口：双指长按 700ms（默认开启）或
-  ⌘/Ctrl+Shift+F 唤醒 → 波光从双指按压点泛起 → 压暗 → 「画个圈」圈出问题
+  ⌘/Ctrl+Shift+F 唤醒 → 水波纹从手势中点向外扩散 → 压暗 → 「画个圈」圈出问题
   位置 → 松手后包围盒外扩 8px（不足 64px 按中心扩展）成为选区框 → 确认后裁剪并
   打开面板；`captureMode: FeedbackCaptureMode.off` 时只打开纯表单面板。快捷键可用
   `wakeShortcut: FeedbackWakeShortcut.off()` 关闭或改组合键。时序、颜色与常量见
@@ -147,6 +147,7 @@ FeedbackWidget(
   时以宿主为准，不显示该单选。切到灵感球后行为与下述待机样式一致。
 - **唤醒动效**：光束唤醒时设置里可单选「水波纹（默认）/ 波光」，按本机 `appId`
   保存（`feedback:wake-visual:v1`）；水波纹在波峰处轻微折射冻结画面，波光从两个指尖铺开冰青、暖黄、粉紫的柔光，在边缘淡出。
+- **灵感球唤醒效果**。切到灵感球后可单独选择七种入场动画，默认小珠浮现。手势和动画分别按应用保存。
 - **闲置收起**。在设置中选用灵感球并启用手势后，首次使用默认隐藏。用已开启的手势从各指中点唤出玻璃球，闲置 5 秒后收起。可以选择小把手、球体贴边或隐藏，已保存的偏好与宿主托管值优先。宿主显式设置 `launcherMode: orb` 时默认显示停靠球。外观和手势也可由宿主设置页托管，见[接入指南](../../docs/integration.md)。
   原悬浮入口和 `FeedbackController` 自定义入口仍可使用。阈值与视觉参数见
   [灵感球设计契约](../../docs/orb-spec.md)。
