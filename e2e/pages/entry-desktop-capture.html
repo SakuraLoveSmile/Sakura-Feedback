@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>E2E 宿主页 · 桌面入口 + 显式 capture-mode=viewport 与快捷键让路</title>
+    <!--
+      e2e 专用宿主页（不是产品代码）：FB-ENTRY-001 的桌面「选区 + 快捷键让路」宿主。
+
+      与 entry-desktop.html 同一版面，差异是**显式**声明 capture-mode="viewport"
+      （宿主明确要求呼出即冻结视口画面），launcher-mode 仍不写 → auto 解析为贴边标签。
+      本页承担：⌥/Alt + 拖拽选区、⌥/Alt + 点击待命、宿主快捷键让路。
+
+      快捷键让路（场景 6）：宿主在 document capture 阶段注册 keydown，并（可选）
+      对 ⌘/Ctrl+Shift+F preventDefault。带 ?host=owns-shortcut 时宿主真的拦截；
+      不带参数时同一个文件「没有拦截」，用来证明让路行为来自 defaultPrevented，
+      而不是组件在某个页面里被关掉了。
+      注意：宿主监听必须比组件更早注册（组件在 connectedCallback 里挂 document capture）——
+      本页把宿主脚本放在 <head>，组件脚本放在 body 末尾，顺序由文件结构保证。
+
+      版面同 entry-desktop.html（1280x800、dpr=1）：拖拽矩形 (400,300)-(760,560) 落在
+      #details 的连续正文上，按钮/链接在 #actions（矩形之外）。
+    -->
+    <style>
+      html, body { margin: 0; padding: 0; background: #f5f6f8; }
+      body {
+        min-height: 100vh;
+        overflow: hidden;
+        font-family: system-ui, -apple-system, "PingFang SC", sans-serif;
+        color: #1d1d1f;
+      }
+      ::-webkit-scrollbar { display: none; }
+      header {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 16px; padding: 14px 32px; background: #ffffff;
+        border-bottom: 1px solid #e5e7eb;
+      }
+      header h1 { margin: 0; font-size: 20px; font-weight: 600; }
+      header nav { display: flex; gap: 18px; font-size: 14px; }
+      header nav a { color: #6b7280; text-decoration: none; }
+      header nav a:first-child { color: #1d1d1f; font-weight: 500; }
+      main { padding: 24px 48px; max-width: 1184px; }
+      section.card {
+        background: #ffffff; border: 1px solid #e5e7eb; border-radius: 14px;
+        padding: 18px 24px; margin: 0 0 18px;
+      }
+      h2 { margin: 0 0 8px; font-size: 15px; font-weight: 600; }
+      p { margin: 0 0 10px; font-size: 13px; line-height: 1.75; color: #4b5563; }
+      p:last-child { margin-bottom: 0; }
+      #actions { display: flex; align-items: center; gap: 20px; font-size: 13px; }
+      #demo-action {
+        appearance: none; border: 0; border-radius: 10px; cursor: pointer;
+        padding: 10px 18px; font: inherit; font-weight: 500;
+        color: #ffffff; background: #0071e3;
+      }
+      #demo-action:hover { background: #0062c4; }
+      #demo-link { color: #0071e3; text-decoration: none; }
+      #demo-link:hover { text-decoration: underline; }
+      @media (max-width: 720px) {
+        header { flex-wrap: wrap; padding: 12px 20px; }
+        main { padding: 16px 20px; }
+        section.card { padding: 14px 16px; }
+        #actions { flex-wrap: wrap; gap: 12px; }
+      }
+    </style>
+    <script>
+      // 宿主自己的快捷键：document capture 阶段最早注册，模拟「应用内已有全局搜索/命令」的页面。
+      window.__host = { clicks: [], shortcutSeen: 0, shortcutPrevented: 0 };
+      window.__hostOwnsShortcut = new URLSearchParams(location.search).get("host") === "owns-shortcut";
+      document.addEventListener("keydown", (ev) => {
+        const primary = ev.ctrlKey || ev.metaKey;
+        if (!primary || !ev.shiftKey || ev.altKey) return;
+        if ((ev.key || "").toLowerCase() !== "f") return;
+        window.__host.shortcutSeen += 1;
+        if (window.__hostOwnsShortcut) {
+          ev.preventDefault();
+          window.__host.shortcutPrevented += 1;
+        }
+      }, true);
+
+      // 测试脚手架（仅 e2e）：只暴露读取入口与宿主自身事件计数，不改变组件行为。
+      window.__entry = {
+        widget: () => document.querySelector("feedback-widget"),
+        shadow() {
+          const widget = this.widget();
+          return widget ? widget.shadowRoot : null;
+        },
+        q(selector) {
+          const root = this.shadow();
+          return root ? root.querySelector(selector) : null;
+        },
+        overlay() { return this.q(".fb-region-overlay"); },
+        panelOpen() { return !!this.q(".fb-panel.is-open"); },
+        mode() { const widget = this.widget(); return widget ? widget.dataset.fbMode : null; },
+      };
+    </script>
+  </head>
+  <body>
+    <header>
+      <h1>订单分析工作台</h1>
+      <nav>
+        <a href="#intro">概览</a>
+        <a href="#details">订单</a>
+        <a href="#actions">报表</a>
+      </nav>
+    </header>
+
+    <main>
+      <section id="intro" class="card">
+        <h2>本周概览</h2>
+        <p>本页显式要求呼出即冻结视口画面（capture-mode="viewport"），用于验证 ⌥/Alt + 拖拽只提交拖出的矩形，以及「使用此区域」后面板里插入的截图尺寸等于裁剪尺寸。</p>
+        <p>高客单价订单占比继续上升；有三个供应商的到货时间需要跟进。</p>
+      </section>
+
+      <section id="details" class="card">
+        <h2>订单明细</h2>
+        <p>按天汇总的成交金额。这里是一段连续正文，用来承载 ⌥/Alt + 拖拽的拖拽矩形（本页的拖拽矩形故意落在文字上，而不是按钮或链接上，因为从可交互元素起手不会被组件接管）。</p>
+        <p>第一列是日期，第二列是订单数，第三列是成交金额与周同比。数据每十分钟刷新一次，刷新失败时保留上一份快照并在右上角提示。</p>
+        <p>筛选器支持按渠道、地区与供应商组合；筛选条件会写进地址栏，刷新后仍然保留。清空筛选后回到最近七天。</p>
+        <p>导出报表会生成当前筛选条件下的明细；如果选择的时间范围超过 31 天，导出会改为异步任务并在完成后通知。</p>
+        <p>异常订单以浅黄色底标记：地址校验失败、支付超时或库存不足。点开任意一行可以看到处理时间线，包括系统判定与人工处理记录。</p>
+      </section>
+
+      <section id="actions" class="card">
+        <button id="demo-action" type="button">导出报表</button>
+        <a id="demo-link" href="#details">查看帮助文档</a>
+      </section>
+    </main>
+
+    <script>
+      const action = document.getElementById("demo-action");
+      action.addEventListener("click", () => {
+        window.__host.clicks.push({ id: "demo-action", at: Date.now() });
+      });
+      const link = document.getElementById("demo-link");
+      link.addEventListener("click", (ev) => {
+        window.__host.clicks.push({ id: "demo-link", at: Date.now() });
+        ev.preventDefault();
+      });
+    </script>
+
+    <script src="/sdk/feedback-web.umd.js"></script>
+    <!-- launcher-mode 不写（auto → 贴边标签）；capture-mode 显式 viewport：呼出即冻结并可直接框选 -->
+    <feedback-widget
+      id="widget"
+      capture-mode="viewport"
+      app-id="com.example.entry-e2e"
+      app-version="0.13.0"
+      page-label="e2e-entry-desktop-capture"
+    ></feedback-widget>
+    <script>
+      // e2e：api-base 指向测试服务器自身（同源；未实现的接口返回 404，不产生跨域噪声）。
+      // 组件不需要真实后端就能走通入口/选区/面板，提交不在本次断言范围。
+      document.getElementById("widget").setAttribute("api-base", location.origin);
+    </script>
+  </body>
+</html>

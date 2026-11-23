@@ -6,9 +6,13 @@
     <!--
       e2e 专用宿主页（不是产品代码）：0.10 起组件默认形态的宿主。
 
-      **刻意不声明** launcher-mode / capture-mode，走组件新默认：
+      本页验证「光束形态」，因此**显式**声明 launcher-mode="beam"：
         launcher-mode=beam    → 没有任何常驻入口，双指长按 700ms（或 ⌘/Ctrl+Shift+F）唤醒
         capture-mode=viewport → 唤醒后先冻结视口画面，再「画个圈」圈出问题位置
+
+      为什么不省略 launcher-mode：0.13 起默认值由 beam 改为 auto，auto 按输入能力解析
+      （精细指针 → 贴边标签，触屏/不可判定 → 光束）。省略属性时，运行环境的指针能力
+      会决定形态，桌面 headless 下可能解析成贴边标签，本页的光束断言就不再成立。
 
       版面（1280x800 视口，dpr=1 → CSS 坐标 == 截图输出像素坐标）：
         顶部：演示站点标题与导航（纯文本，无脚本）
@@ -259,9 +263,10 @@
     </script>
 
     <script src="/sdk/feedback-web.umd.js"></script>
-    <!-- 不声明 launcher-mode / capture-mode：本页演示 0.10 默认的 beam + viewport -->
+    <!-- 显式 beam（默认值已改为 auto，本页验证光束形态）+ 默认 capture-mode=viewport -->
     <feedback-widget
       id="widget"
+      launcher-mode="beam"
       api-base="http://localhost:8787"
       app-id="com.example.demo-e2e"
       app-version="3.1.4"
