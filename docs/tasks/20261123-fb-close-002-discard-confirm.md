@@ -55,4 +55,18 @@ FB-CLOSE-001 / 0.14.0 把「关闭反馈面板」定成**放弃本次未提交�
 - 未在真机复验弹窗手感、遮罩观感与安卓返回序列（状态：待体验）。
 - 未跑真实浏览器 / e2e。已知需按新交互更新的旧断言：`e2e/browser_paths.py:728-731`（P3 Esc 关闭）、
   `browser_paths.py:977-979`（P5 关闭按钮）、`browser_paths.py:992-997`（P5 旧「重开保留草稿」断言，0.14.0 起已过时）。
-- 未提交、未发版：`CHANGELOG.md` 已加 `[未发布]` 段落；版本号与 Release 按后续指令。
+- 生产（blog-prod）与管理页资产未升级：发布产物已就绪，升级需单独授权（见 §8）。
+## 8. 发布 v0.15.0（2026-11-23）
+
+- 版本收口：`package.json`、`apps/server`、`apps/admin`、`packages/web`、`flutter/feedback/pubspec.yaml` 统一为 **0.15.0**，
+  `CHANGELOG.md` 的 `[未发布]` 转为 `[0.15.0] — 2026-11-23` 并补升级说明 / 兼容性；README、接入指南与 Flutter 包 README 的
+  固定引用（tgz 名、下载链接、`ref: v0.15.0`）同步。
+- 提交：`89b4410`（关闭前确认 + 安卓返回 + 测试 + 文档）、`fad2562a`（版本与 CHANGELOG）；签名标签 `v0.15.0` 指向 `fad2562a`
+  （GPG Good signature），已推送 `origin/main`。
+- Release 流水线 [45147866004](https://github.com/SakuraLoveSmile/Sakura-Feedback/actions/runs/45147866004) 全部 job 成功；
+  [v0.15.0](https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/tag/v0.15.0) 已公开、Latest。
+- 资产七份齐全；`shasum -a 256 -c SHA256SUMS` 三份产物 OK；tgz 内 `version` 为 0.15.0。
+- `release-manifest.json`：version/tag/commit 为 0.15.0/v0.15.0/`fad2562a…`，channel stable，schema **15**，
+  digest `sha256:c8e630f4…`；GHCR `v0.15.0` 与 `latest` 同一 digest。
+- 生产升级未执行（等待授权）：目前生产仍是 v0.13.0，可直接 `bash deploy/update.sh --to v0.15.0`；schema 未变（15），
+  回退只需改回旧镜像标签。
