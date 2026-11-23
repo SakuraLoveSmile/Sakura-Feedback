@@ -85,7 +85,8 @@ const FeedbackWidgetLazy = dynamic(() => import('./FeedbackWidgetClient'), { ssr
 
 `api-base` / `app-id` 由服务端注入到元素属性里（`escapeHtml` 转义），
 `launcher-mode="orb"` 与 `capture-mode="viewport"` 显式写在标记上
-（0.10 起组件默认是 `beam` / `viewport`，本示例显式选择灵感球形态）。
+（组件默认是 `auto` / `viewport`：有鼠标的桌面显示贴边入口，只有触屏时才走光束唤醒；
+本示例显式选择灵感球形态）。
 
 ## 连你本地的服务
 

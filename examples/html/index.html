@@ -64,7 +64,9 @@
     <main>
       <h1>原生 HTML × @feedback/web 示例</h1>
       <p>
-        右下角为灵感球（可拖动到界面任意位置指出问题并截图）。没有打包器、没有框架：
+        桌面默认在页面侧边显示「反馈」贴边入口：点一下即截取当前视口并打开面板，
+        也可以按住 <code>⌥</code>/<code>Alt</code> 在页面拖出一个矩形直接框选区域；
+        触屏设备则是双指长按（或快捷键）唤出光束后画圈。没有打包器、没有框架：
         只有一个 <code>&lt;script&gt;</code> 标签 + 一个自定义元素。
       </p>
 
@@ -106,10 +108,11 @@
     <script src="./feedback-web.umd.js"></script>
 
     <!--
-      3) 声明元素。0.10 起组件默认就是「光束唤醒 + 视口截图」：
-         launcher-mode=beam（双指长按或 ⌘/Ctrl+Shift+F 唤醒 → 圈选，无常驻入口）、
-         capture-mode=viewport。本示例不写这两项，直接演示默认形态；
-         想改用灵感球请显式写 launcher-mode="orb"。
+      3) 声明元素。默认 launcher-mode=auto + capture-mode=viewport：
+         有鼠标 / 触控板时显示贴边标签入口（点击先截图再开面板，⌥/Alt+拖拽直接框选区），
+         只有触屏时走光束唤醒（双指长按或 ⌘/Ctrl+Shift+F → 圈选，无常驻入口）。
+         本示例不写这两项，直接演示 Web 默认形态；想固定「无常驻入口」写
+         launcher-mode="beam"，想用灵感球写 launcher-mode="orb"。
     -->
     <feedback-widget
       id="widget"

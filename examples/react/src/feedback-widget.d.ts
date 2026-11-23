@@ -14,8 +14,8 @@ type FeedbackWidgetAttributes = React.DetailedHTMLProps<
     'show-launcher'?: 'true' | 'false';
     /** 入口垂直位置，百分比或像素，默认 '25%'。 */
     'launcher-bottom'?: string;
-    /** 默认 'tab'（贴边标签）；'orb' 为灵感球（可拖拽指出位置并截图）。 */
-    'launcher-mode'?: 'tab' | 'orb';
+    /** 默认 'auto'（按输入能力：精细指针用贴边标签，触屏走光束）；'beam' 无入口，'orb' 为灵感球（可拖拽指出位置并截图）。 */
+    'launcher-mode'?: 'auto' | 'beam' | 'tab' | 'orb';
     /** 默认 'off'；'viewport' 为呼出时截取当前应用视口。 */
     'capture-mode'?: 'off' | 'viewport';
   },

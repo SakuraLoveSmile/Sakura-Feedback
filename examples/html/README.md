@@ -51,21 +51,23 @@ pnpm --filter @feedback/example-html serve        # http://127.0.0.1:8080/
 <feedback-widget
   api-base="http://localhost:8787"
   app-id="com.example.demo-html"
-  side="right"              <!-- 不写 launcher-mode / capture-mode：0.10 默认 beam + viewport -->
+  side="right"              <!-- 不写 launcher-mode / capture-mode：默认 auto + viewport -->
 ></feedback-widget>
 ```
 
-- 不写 `launcher-mode` / `capture-mode` 时走 0.10 默认：双指长按（或 ⌘/Ctrl+Shift+F）
-  唤醒光束 → 圈选 → 视口截图；想改用灵感球请显式加 `launcher-mode="orb"`。
+- 不写 `launcher-mode` / `capture-mode` 时走默认形态：有鼠标 / 触控板的桌面显示贴边
+  入口（点一下先截图再开面板），也可以按住 `⌥`/`Alt` 拖出矩形直接框选区；只有触屏的
+  设备仍是双指长按（或 ⌘/Ctrl+Shift+F）唤醒光束 → 圈选 → 视口截图。想固定「无常驻
+  入口」写 `launcher-mode="beam"`，想用灵感球写 `launcher-mode="orb"`。
 - `open()`：只打开面板，**不截图**；`captureAndOpen()`：截图并打开。
   `openFeedback()` 内部只调 `open()`，即使传 `captureMode: 'viewport'`
   也不会立即截图（需要截图请调元素上的 `captureAndOpen()`）。
 - `feedback-submitted`：服务**已接收**提交（201/200）后派发，
   `event.detail = { feedbackId, status, replayed }`。
 - `data-feedback-capture-mask`：标在任意元素上，截图时整棵子树被中性遮罩覆盖。
-- 截图来源是**当前应用视口**；灵感球拖拽松手后可调整选区、只提交选中区域
-  （选区先完成敏感区遮挡，落点、选区与工具栏不入图）。没有系统悬浮窗、
-  不跨应用截图、不自动长截图。
+- 截图来源是**当前应用视口**；灵感球拖拽、桌面 `⌥`/`Alt` 拖拽或触屏光束圈选松手后
+  可调整选区、只提交选中区域（选区先完成敏感区遮挡，落点、选区与工具栏不入图）。
+  没有系统悬浮窗、不跨应用截图、不自动长截图。
 
 ## 连你本地的服务
 

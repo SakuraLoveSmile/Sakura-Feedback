@@ -163,11 +163,13 @@
   `FeedbackConfig.imagePicker`（类型 `FeedbackImagePicker`）与诊断导出
   `FeedbackDiagnosticsRecorder` / `FeedbackHttpClient`（`http.Client` 包装）/
   `FeedbackExceptionCapture`（显式启用的异常捕获适配），旧接入方式继续可用。
-- **默认值（0.10 起）**：`launcher-mode` 默认 `beam`（光束唤醒，无常驻入口）、
-  `capture-mode` 默认 `viewport`、`theme` 默认 `system`、`side` 默认 `right`。
-  0.10 是**破坏性默认值变更**：未显式配置的宿主会从 tab/off 变为 beam/viewport，
-  迁移方式见 CHANGELOG；显式写 `launcher-mode="tab"` / `capture-mode="off"`
-  可保持旧行为。
+- **默认值**：Web 的 `launcher-mode` 默认 `auto`（按输入能力选择：精细指针 → 贴边标签，
+  只有触屏 / 探测不到 `matchMedia` → 光束唤醒；0.10–0.12 的默认是 `beam`）；Flutter 的
+  `launcherMode` 仍是 `FeedbackLauncherMode.beam`。两端 `capture-mode` 默认 `viewport`、
+  `theme` 默认 `system`、`side` 默认 `right`。
+  默认值变更属**破坏性**：0.10 把未配置的 tab/off 改成 beam/viewport（见 CHANGELOG 0.10.0），
+  其后 Web 又从 beam 改成 auto（见 CHANGELOG「未发布」段）。希望保持「无常驻入口」的 Web 宿主
+  显式写 `launcher-mode="beam"`；显式 `tab` / `orb` / `beam` 的宿主不受影响。
 
 **兼容变更**：新增可选 attribute / `OpenFeedbackOptions` 字段 / 导出符号 / 事件 `detail`
 字段。宿主对未使用的可选能力保持无感即可。
@@ -237,9 +239,11 @@ pnpm --filter @feedback/example-html serve        # http://127.0.0.1:8080/
 <feedback-widget api-base="http://localhost:8787" app-id="com.example.app"></feedback-widget>
 ```
 
-默认形态是 0.10 的光束唤醒（双指长按或 ⌘/Ctrl+Shift+F → 圈选 → 视口截图），
-没有常驻入口。旧式贴边标签需显式写 `launcher-mode="tab" capture-mode="off"`；
-可选的灵感球写 `launcher-mode="orb"`。
+Web 默认 `launcher-mode="auto"`：有鼠标 / 触控板时页面侧边显示「反馈」入口（点击先截图
+再开面板，也可按住 `⌥`/`Alt` 拖出矩形直接框选区）；只有触屏或探测不到指针能力时走光束唤醒
+（双指长按或 ⌘/Ctrl+Shift+F → 圈选 → 视口截图，没有常驻入口）。要保持无入口形态写
+`launcher-mode="beam"`；0.9 及更早的「贴边标签 + 手动截图」组合写
+`launcher-mode="tab" capture-mode="off"`；可选的灵感球写 `launcher-mode="orb"`（Flutter 默认仍是 `beam`）。
 
 拷贝时**改名成 `.js`**：静态服务器多按扩展名给 MIME，`.cjs` 常被当成 `application/octet-stream`，
 浏览器会拒绝执行 classic script。构建产物不入库（见 [`examples/html/README.md`](../examples/html/README.md)）。
@@ -460,10 +464,12 @@ docker compose --env-file .env.prod pull && docker compose --env-file .env.prod 
 
 ## 3. 完整接入示例
 
-五份示例与 `examples/` 下的真实工程一一对应。0.10 起组件默认是 **beam + viewport**
-（光束唤醒：双指长按或 ⌘/Ctrl+Shift+F → 圈选 → 视口截图，无常驻入口），Flutter 对应
+五份示例与 `examples/` 下的真实工程一一对应。Web 默认是 **auto + viewport**：精细指针
+（鼠标 / 触控板）时显示贴边标签，点击先截图再开面板、`⌥`/`Alt`+拖拽直接框选区；只有触屏时
+才走光束唤醒（双指长按或 ⌘/Ctrl+Shift+F → 圈选 → 视口截图，无常驻入口）。Flutter 默认仍是
 `FeedbackLauncherMode.beam` + `FeedbackCaptureMode.viewport`。React / Vue / SSR 示例
-显式写 `launcher-mode="orb"` 演示可选的灵感球；HTML 与 Flutter 示例直接使用新默认。
+显式写 `launcher-mode="orb"` 演示可选的灵感球；HTML 示例直接使用 Web 默认形态，Flutter 示例
+直接使用 Flutter 默认形态。
 
 ### 3.1 原生 HTML（[`examples/html`](../examples/html)）
 
@@ -486,7 +492,7 @@ pnpm --filter @feedback/example-html serve            # http://127.0.0.1:8080/
 ```html
 <script src="./feedback-web.umd.js"></script>
 
-<!-- 不写 launcher-mode / capture-mode：使用 0.10 默认 beam + viewport -->
+<!-- 不写 launcher-mode / capture-mode：使用默认 auto + viewport（桌面显示贴边标签，触屏走光束） -->
 <feedback-widget
   id="widget"
   api-base="http://localhost:8787"
@@ -775,19 +781,19 @@ MaterialApp(
 | `theme` | `theme` | `system` \| `light` \| `dark` | `system` | 主题 | 只改样式，**不清空草稿** |
 | `show-launcher` | `showLauncher` | 字符串属性：只有 `"false"` 表示隐藏，其余值（含缺省）都显示 | 显示（`true`） | 是否显示内置入口 | 纯展示 |
 | `launcher-bottom` | `launcherBottom` | CSS 长度字符串（百分比或像素，如 `25%` / `80px`） | `25%` | 入口距底部的垂直位置 | 纯展示 |
-| `launcher-mode` | `launcherMode` | `beam`（**光束唤醒**，0.10 默认；无常驻入口） \| `tab`（贴边标签） \| `orb`（**灵感球**，可拖拽指出位置并截图） | **`beam`** | 入口形态 | 纯展示；`beam` 下双指长按 / 快捷键唤醒后先圈选；宿主为 `beam` 时用户可在「设置 → 入口样式」切到灵感球（本机偏好）。切到 `orb` 时标签隐藏、切到 `tab` 时灵感球隐藏。**不影响草稿与截图开关** |
-| `capture-mode` | `captureMode` | `off` \| `viewport` | **`viewport`** | 呼出时是否**自动**截取当前应用视口 | 只改下一次呼出的行为；**不清空草稿**。`off` 只关闭**自动**截图：面板里始终有手动的「截取当前页面」；光束模式下 `off` 时手势只打开面板 |
-| `wake-shortcut` | `wakeShortcut` | 字符串组合，如 `primary+shift+f`（macOS ⌘ / 其他 Ctrl）\| `off` | `primary+shift+f` | 光束模式的唤醒快捷键 | 纯入口；输入框聚焦 / 面板打开 / 选区中不触发 |
+| `launcher-mode` | `launcherMode` | `auto`（**默认**：精细指针 → `tab`；只有触屏 / 探测不到 `matchMedia` → `beam`）\| `beam`（**光束唤醒**，0.10–0.12 的默认；无常驻入口）\| `tab`（贴边标签）\| `orb`（**灵感球**，可拖拽指出位置并截图） | **`auto`** | 入口形态 | 纯展示；`auto` / `beam` 下双指长按 / 快捷键唤醒后先圈选，用户还可在「设置 → 入口样式」切换贴边标签 / 灵感球（有触摸输入时另有光束唤醒；本机偏好）；显式 `tab` 时不接管触摸手势。**不影响草稿与截图开关** |
+| `capture-mode` | `captureMode` | `off` \| `viewport` | **`viewport`** | 呼出时是否**自动**截取当前应用视口 | 只改下一次呼出的行为；**不清空草稿**。`off` 只关闭**自动**截图：面板里始终有手动的「截取当前页面」；`off` 时点击入口、手势、`⌥`/`Alt`+拖拽与快捷键都只打开面板 |
+| `wake-shortcut` | `wakeShortcut` | 字符串组合，如 `primary+shift+f`（macOS ⌘ / 其他 Ctrl）\| `off` | `primary+shift+f` | 唤醒快捷键（光束 / 贴边标签 / 灵感球都可用） | 纯入口；输入框聚焦 / 面板打开 / 选区中不触发，宿主已 `preventDefault` 的同组合键让路。`off` 同时关闭桌面 `⌥`/`Alt`+拖拽（表示入口由宿主接管） |
 | — | `effectiveApiBase` | string \| null（只读 property） | — | 当前实际使用的服务地址：用户本机覆盖优先于 `api-base`，未覆盖时等于 `api-base` | 用户通过面板内「服务器设置」改变；语义见 5.3.1 |
 | — | `logProvider` | `FeedbackLogProvider?`（即 `() => Promise<FeedbackLogFile[]> \| FeedbackLogFile[]`） | `undefined` | **宿主接入必配**（验收要求见 5.6；SDK 类型仍允许缺省）；自动日志采集提供者，呼出面板时调用（3秒超时容错），至多采集 3 份附件，单文件 ≤1MiB | 仅 property，替换后下一次呼出面板生效；**不清空草稿** |
 
 **明确结论（易踩坑）**：
 
-- `launcher-mode` 与 `capture-mode` 的默认值是 `beam` / `viewport`（0.10 起）。不写这两项即使用光束唤醒 + 视口截图；要旧式贴边标签需显式 `launcher-mode="tab" capture-mode="off"`。
-- `capture-mode="off"` **不等于没有截图入口**：用户仍可在面板里点「截取当前页面」手动截图（先输入文字也能截、失败可重试、移除后可补拍）。希望「呼出即截图」才需要 `capture-mode="viewport"`；光束模式下 `off` 时手势/快捷键只打开面板，不压暗、不圈选。
+- Web 的 `launcher-mode` 默认 `auto`、`capture-mode` 默认 `viewport`：不写这两项时，有鼠标的桌面用贴边标签 + 视口截图，只有触屏的环境用光束唤醒 + 视口截图。要固定「无常驻入口」写 `launcher-mode="beam"`；要 0.9 及更早的「贴边标签 + 手动截图」组合写 `launcher-mode="tab" capture-mode="off"`。Flutter 默认仍是 `.beam`。
+- `capture-mode="off"` **不等于没有截图入口**：用户仍可在面板里点「截取当前页面」手动截图（先输入文字也能截、失败可重试、移除后可补拍）。希望「呼出即截图」才需要 `capture-mode="viewport"`；`off` 时点击入口、手势、`⌥`/`Alt`+拖拽与快捷键都只打开面板，不压暗、不圈选。
 - `page-label` / `app-version` / `theme` 变化**绝不清空草稿**。
 - 提交来源取自**提交瞬间冻结的快照**：快照冻结后再改 `page-label`（含后续重试）不会改变请求的元数据与截图字节。
-- 属性会在页面里被读回来（`widget.launcherMode` 等），取值非法时回落默认值（例如 `launcher-mode="orb2"` 等价于 `beam`）。
+- 属性会在页面里被读回来（`widget.launcherMode` 等），取值非法时回落默认值（例如 `launcher-mode="orb2"` 等价于默认的 `auto`）。
 
 ### 4.2 Flutter `FeedbackConfig` 参数
 
@@ -1020,20 +1026,33 @@ Flutter 端：宿主传入新 `apiBase` / `appId` 重建 `FeedbackWidget` 时走
 
 #### 5.3.2 唤醒入口与手势（本机偏好）
 
-0.10 起默认形态是**光束唤醒**（`launcher-mode=beam` / `FeedbackLauncherMode.beam`）：
-没有任何常驻入口，用户**双指长按 700ms**（默认开启）或按 **⌘/Ctrl+Shift+F** 唤醒；
-冻结视口 → 水波纹从两指中点向外扩散（默认；可在设置切换为波光）→ 压暗 → 用户「画个圈」圈出问题位置，松手后
-包围盒外扩 8px（不足 64px 按中心扩展）成为选区框，确认后裁剪并打开面板。
+Web 默认 `launcher-mode=auto`：主指针是精细指针时显示**贴边标签**入口——点击在
+`capture-mode=viewport` 下先截图再开面板，`⌥`/`Alt`+拖拽则把拖出的矩形直接送进选区工具条。
+只有触屏、或探测不到指针能力（无 `matchMedia`）时才是**光束唤醒**：没有任何常驻入口，
+用户**双指长按 700ms**（默认开启）或按 **⌘/Ctrl+Shift+F** 唤醒；冻结视口 → 水波纹从两指中点
+向外扩散（默认；可在设置切换为波光）→ 压暗 → 用户「画个圈」圈出问题位置，松手后包围盒外扩
+8px（不足 64px 按中心扩展）成为选区框，确认后裁剪并打开面板。Flutter 默认仍是
+`FeedbackLauncherMode.beam`：两端默认入口形态从此不一致，Web 宿主想保持无入口形态须显式
+写 `launcher-mode="beam"`。
 
-在「设置 → 唤醒方式」中可分别开启双指长按、三指上滑、双指双击，也可以同时开启。
-默认只开启双指长按；原有宿主控制器方法（`open()` / `captureAndOpen()`）始终可用。
-唤醒与截图已解耦：`capture-mode=off` 时手势/快捷键只打开纯表单面板，不压暗、不圈选。
+桌面指针入口：`⌥`/`Alt`+拖拽在页面上拖出矩形，松手直接以该矩形为初始选区（最小 48×48、
+夹回视口，不套用圈选的 8px 外扩）；拖动不足 8px 视为 `⌥`/`Alt`+点击，在该点进入圈选；
+从输入框 / 按钮 / 链接 / 可编辑区域起手不接管。`wake-shortcut="off"` 同时关闭它（宿主的单一
+入口开关）。
+
+「设置 → 唤醒方式」按输入能力分叉：精细指针显示「点击入口 / 按住 ⌥ 拖拽 / 快捷键」三条说明，
+有触摸输入时才出现双指长按、三指上滑、双指双击复选框，也可以同时开启。默认只开启双指长按；
+原有宿主控制器方法（`open()` / `captureAndOpen()`）始终可用。
+唤醒与截图已解耦：`capture-mode=off` 时点击入口、手势、`⌥`/`Alt`+拖拽与快捷键只打开纯表单
+面板，不压暗、不圈选。
 
 - 光束模式下识别成功后提示松开手指，全部手指抬起后进入圈选；`capture-mode=off` 时直接打开面板。圈选确认后更新真实附件并打开反馈面板；手势本身不预截草稿，也不改变已有草稿。
-- 快捷键默认 `Primary+Shift+F`（macOS ⌘ / 其他 Ctrl），可在配置里自定义或关闭；输入框聚焦、面板打开、选区进行中不触发，并 `preventDefault` 避免宿主收到同组合键。
+- 快捷键默认 `Primary+Shift+F`（macOS ⌘ / 其他 Ctrl），可在配置里自定义或关闭；输入框聚焦、面板打开、选区进行中不触发，并 `preventDefault` 避免宿主收到同组合键。Web 的 `auto` 解析为贴边标签时快捷键同样可用；宿主已 `preventDefault` 的同组合键则让路，不抢占应用内快捷键。这条让路依赖注册顺序：组件在 `connectedCallback` 里向 `document` 的 capture 阶段注册 keydown，只有宿主脚本**先于组件**注册同一组合键的监听，宿主的 `preventDefault()` 才会先执行；晚于组件注册时组件先跑并 `stopImmediatePropagation()`。宿主想用同名组合键，推荐直接 `wake-shortcut="off"` 或换组合键，不要依赖注册顺序。
+- 首次使用提示（Web）：有可见入口（贴边标签 / 灵感球）时出现一次，说明入口与当前快捷键，9 秒自动收起、可关闭；按 `appId` 记在 `feedback:entry-hint:v1:<appId>`，`beam` 形态（无常驻入口）不出现。
+- 无障碍隐藏入口的 `aria-label` 与上面的能力分叉同源：触屏念「双指长按屏幕」，桌面念入口 / `⌥` 拖拽 / 快捷键，不再对着鼠标用户念手指数。
 - 手势仅限当前宿主内容；反馈面板、选区及球体拖动时暂停识别。Web 排除输入框、链接、按钮等交互起点；单指滚动和正常双指缩放不会被保留为唤醒手势。启用三指上滑时，及时到齐且尚未滚动的三指序列保留给该手势。
 - 选择即时生效、按本机宿主的 `appId` 保存，切换 Feedback 服务器不重置手势/入口样式。存储失败时提示「仅本次生效」。根组件初始化即恢复偏好，不要求先打开反馈面板。
-- 使用组件本机偏好时，「入口样式」单选（光束唤醒 / 灵感球）只在宿主 `launcher-mode=beam` 时出现，写入本机偏好 `feedback:launcher-style:v1:<appId>`；宿主显式 `tab` / `orb` 时以宿主为准，不显示该单选。
+- 使用组件本机偏好时，「入口样式」单选（贴边标签 / 灵感球，有触摸输入时另有光束唤醒）只在宿主 `launcher-mode=auto` / `beam` 时出现，写入本机偏好 `feedback:launcher-style:v1:<appId>`；宿主显式 `tab` / `orb` 时以宿主为准，不显示该单选。
 - 「唤醒动效」单选（水波纹 / 波光）只在生效样式为光束唤醒时出现，写入本机偏好 `feedback:wake-visual:v1:<appId>`；默认水波纹，波光为可选项。
 - 「设置 → 灵感球」提供小把手、球体贴边和隐藏。在默认宿主里选用灵感球并启用手势后，首次使用默认隐藏，已保存的待机偏好优先。可在「唤醒效果」中选择七种入场动画，默认小珠浮现，选择按应用保存。手势结束时，球从各指的中点浮现。点击可反馈，拖到问题处松手可进入局部选区。闲置 5 秒后按偏好收起。显式设置宿主为 `orb` 时默认显示停靠球，可从内置设置或宿主入口更改偏好。尺寸和折射见[灵感球设计契约](orb-spec.md)。
 - Flutter 的入口、动效、待机与手势支持逐项托管。以上本机保存规则适用于组件管理的设置；只传宿主值会隐藏对应项，整页只留服务器设置用 `hideSettings: true`。见 §4.2.1。
@@ -1457,9 +1476,9 @@ widget.dropSession();                            // 宿主会话结束时清除
 | 详情里「保存并同步到 Kaneo」按钮不可用 / 分类只读 | 记录已授权或已同步 | 用下方「恢复操作」（`recheck` / `retry_comment` / `replace_upload` / `retry_log`）继续，而不是改分类 |
 | 标签关联失败（`failed`，提示"关联标签失败"/"工作区标签已不存在"） | 标签在授权后被删除，或 API Key 无标签权限 | 确认 Kaneo 工作区仍存在该标签；重新归档该记录（需先确认分类仍有效） |
 | 归档卡在 `needs_review` 且反复出现 | 远端写入结果不确定（超时 / 断连 / 5xx / 服务在发送中崩溃 / 上传地址过期或被拒） | **不要再让用户重新提交**；按 8.2 在管理页执行 `recheck` → 必要时 `retry_comment` / `replace_upload`（注意各自风险） |
-| 灵感球不显示 / 点了不截图 | 0.10 默认入口是 `beam`（无常驻入口）；或宿主显式设了 `tab`；或面板已打开时入口被隐藏 | 想用灵感球：Web 写 `launcher-mode="orb"`（Flutter：`FeedbackLauncherMode.orb`），或在光束模式下让用户从「设置 → 入口样式」切换；关闭面板 |
+| 灵感球不显示 / 点了不截图 | Web 默认 `auto` 只有在触屏环境才解析为 `beam`（无常驻入口），桌面默认是贴边标签；或宿主显式设了 `tab`；或面板已打开时入口被隐藏 | 想用灵感球：Web 写 `launcher-mode="orb"`（Flutter：`FeedbackLauncherMode.orb`），或在 `auto` / `beam` 下让用户从「设置 → 入口样式」切换；关闭面板 |
 | `capture-mode="off"` 时找不到截图入口 / 输入文字后无法补拍 | 这里的 `off` 只表示**不自动截图**；面板里应始终有手动的「截取当前页面」，无截图时不应出现缩略图或「重新截图 / 移除截图」 | 升级到本轮修复后的 Web 组件；面板内点「截取当前页面」即可手动截图（与文字草稿互不影响）。若按钮不可见，检查宿主是否用 CSS 压掉了 `[hidden]`（组件已内置 `[hidden]{display:none!important}` 兜底） |
-| 双指长按 / ⌘+Shift+F 没有反应 | 可能已被用户在本机「设置 → 唤醒方式」关闭；或 `wake-shortcut="off"`；或焦点在输入框/面板/选区中；或宿主 `launcher-mode="tab"`（手势仅对 beam / orb 生效） | 打开面板「设置 → 唤醒方式」重新勾选；确认快捷键组合；把焦点移出输入框 |
+| 双指长按 / ⌘+Shift+F 没有反应 | 可能已被用户在本机「设置 → 唤醒方式」关闭；或 `wake-shortcut="off"`；或焦点在输入框/面板/选区中；或宿主显式 `launcher-mode="tab"`（手势只对 `beam` / `orb` / `auto` 生效）；或宿主自己 `preventDefault` 了该组合键（组件让路） | 打开面板「设置 → 唤醒方式」重新勾选；确认快捷键组合；把焦点移出输入框；需要无入口形态时写 `launcher-mode="beam"` |
 | Flutter 面板里输入框选择浮层 / 截图放大预览异常 | 组件挂载位置缺少 `Overlay` / `Navigator` 祖先 | 按 3.5 用 `MaterialApp.builder` + 外层 Navigator 包裹 |
 | Flutter 宿主对话框压住灵感球，或不出现在截图里 | `showDialog` 默认 `useRootNavigator: true`，对话框被推到组件上方 | 用 `useRootNavigator: false` 让对话框落在应用自己的 Navigator 里 |
 | Android 构建因插件所需 `compileSdk` 高于应用而失败（AGP 的 AAR metadata 校验） | 宿主继承的默认 `compileSdk` 低于插件要求（Flutter 3.41.3 默认 36） | 在 `android/app/build.gradle.kts` 显式写 `compileSdk = 37`，并保证 `minSdk >= 24`（见 2.4.1） |
@@ -1511,9 +1530,10 @@ Blog 是"只要一个反馈入口"的宿主，**不需要**知道 Kaneo、AI 或
 Blog 侧**不需要**、也**不应该**配置：管理员用户名/口令、AI 密钥、Kaneo 地址与 API Key、目标项目或列 id。
 这些**只配置在 Feedback 服务端**（管理员在 `/admin/` 里维护，密钥 AES-256-GCM 加密落库）。
 
-Blog 的反馈入口建议：直接使用 0.10 默认的 `launcher-mode="beam"` + `capture-mode="viewport"`
-（双指长按或快捷键 → 圈选 → 当前视口截图，页面无常驻遮挡），或显式写
-`launcher-mode="orb"` 保留悬浮球形态；
+Blog 的反馈入口建议：直接使用默认的 `launcher-mode="auto"` + `capture-mode="viewport"`
+（有鼠标的桌面显示贴边入口，点一下即截图并开面板，也可 `⌥`/`Alt`+拖拽框选区；触屏走双指长按
+或快捷键 → 圈选 → 当前视口截图）。不想让桌面出现常驻入口就显式写 `launcher-mode="beam"`；
+想保留悬浮球形态写 `launcher-mode="orb"`；
 主题与站点一致时传 `theme="dark"` / `theme="light"`（默认 `system` 跟随系统）。
 接入完成前，Blog 侧必须通过第 5.6 节宿主日志验收，并确认「面板能打开 → 能登录 → 提交成功且提示等待配置/等待同步」；
 **提交成功不等于已进 Kaneo**，管理员确认来源并启用自动同步到 Kaneo（或逐条人工同步）后才会写入（见 9.0 与 1.5）。
