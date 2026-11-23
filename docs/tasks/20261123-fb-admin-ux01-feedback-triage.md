@@ -1,6 +1,6 @@
 # FB-ADMIN-UX01 管理端界面与操作体验
 
-状态为待体验。以 `main` 的 `099faf35` 为基线，改动在 `feat/20261123-fb-admin-ux01-feedback-triage` 工作树，合入目标为 `main`。当前保留工作树和本地示例预览，待用户体验。
+状态为待体验（已发布 v0.12.0 并升级生产）。以 `main` 的 `099faf35` 为基线，改动在 `feat/20261123-fb-admin-ux01-feedback-triage` 工作树，合入目标为 `main`。当前保留工作树和本地示例预览，待用户体验。
 
 ## 第一阶段 · 收件箱与反馈处理
 
@@ -65,3 +65,26 @@
 - 构建和类型检查通过。Vite 将组件库、内嵌反馈组件和管理页打成独立脚本，入口 JS 为 359.15 kB（gzip 108.88 kB），本次构建没有超过 500 kB 的脚本。管理页 lint 通过，保留 5 条样式选择器顺序提示。最终产物首页 SHA-256 为 `c218d2983b66f45e74c4c31b5b2250f1932cd00f815d6bd95964b16836e1a722`。
 - 最终构建在临时数据库与本机 AI/Kaneo 模拟服务通过 54/54 项检查（含环境准备）。浏览器复查 45 个页面画面、3 个详情画面及 768px 导航，未发现整页横向滚动。手机为 Chrome 视口模拟。[运行报告](/Users/sakurasep/Documents/Codex/2026-11-23/feedback-admin-ux01/outputs/component-regression/report.json) · [画面清单](/Users/sakurasep/Documents/Codex/2026-11-23/feedback-admin-ux01/outputs/component-design/visual-check.json)
 - 状态为待体验。当前 Codex 浏览器已刷新至本机示例预览。代码保存在本任务工作树，基线为 `099faf35`。开发期间主分支因另一个 Flutter 发布推进到 `a6c940c`，本轮构建验证对应本任务树，尚未合入或发布。[体验收件箱](http://127.0.0.1:65298/admin/?page=feedbacks)
+
+## 发布记录（2026-11-23）
+
+- 提交 `f5e5b1d`（管理端重做）、`e61d422`（e2e）、`be3ee5d`（任务记录）；合并 `731bffb`，版本收口 `0b5a20c`。`main` CI 45122826367 success。
+- 签名标签 `v0.12.0` 指向 `0b5a20c`，GPG Good signature；Release 流水线 45123243910 全部 job 成功，[v0.12.0](https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/tag/v0.12.0) 已公开、Latest。
+- 资产七份齐全，`shasum -a 256 -c SHA256SUMS` 三份产物 OK；Web tarball 版本 0.12.0；admin `dist/index.html` SHA-256 `ce843a3c…`。
+- `release-manifest.json`：version/tag/commit 为 0.12.0/v0.12.0/`0b5a20c`，channel stable，schema 15，digest `sha256:e4bd5240…`；GHCR `v0.12.0` 与 `latest` 的 Docker-Content-Digest 一致。
+
+## 生产升级（2026-11-23）
+
+- 目标 `blog-prod:/opt/1panel/docker/compose/feedback`（compose 项目 feedback，容器 feedback-feedback-1）；从 v0.9.3（digest `db26a2d8…`）升级到 v0.12.0。生产机时间 14:26。
+- 预拉与核对：`docker pull …:v0.12.0` 得到 digest `e4bd5240…`，与清单一致；镜像内 server 版本 0.12.0。
+- 备份：`backups/fb-rel-012-pre-v0.12.0-20261123-142610/`（700），含升级前 compose 与 `.env`、在线一致性备份 `feedback-online.db`（sha256 `6d793b27…`）、停机库 `feedback-stopped.db`（`2bdab2f4…`）、停机整目录 `feedback-data-stopped-v0.9.3.tgz`、升级后在线库 `feedback-after-online.db` 及 online/stopped/after 三份 audit。
+- 停机 14:26:21–14:26:23，data 仅 `feedback.db` 与 `update-check.json`，无 `-wal`/`-shm`；切换 compose 镜像为 `:v0.12.0@sha256:e4bd5240…` 后 `up -d`，约 6 秒 healthy，RestartCount 0。
+- 数据：升级前后 schema 15、integrity ok、20 张表 1769 行，逐表行哈希与在线/停机备份完全一致。
+- 公网核验：`/healthz`、`/api/features`、`/api/changelog/studytool`、`/admin/` 均 200，未登录 `/api/admin/apps` 401；管理页 `index.html` 与 4 个资产同 Release `feedback-admin-dist.zip` 逐字节一致。
+- 回退：compose 改回 `:v0.9.3@sha256:db26a2d8…` 后 `up -d`；需要恢复数据时用停机 tar 或 `feedback-stopped.db`（schema 同为 15）。
+
+## 剩余
+
+- 生产 `data/update-check.json` 仍是旧版本结果，24 小时自动检查或后台手动「检查更新」后显示 0.12.0。
+- 任务工作树与未合并分支保留；`docs/assistant-spec.md` 等未跟踪文件未纳入本次发布。
+- 浏览器需强刷新 `/admin/` 才会载入新资产。
