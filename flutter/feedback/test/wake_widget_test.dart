@@ -350,6 +350,7 @@ void main() {
       }
       await tester.tap(find.byKey(const Key('feedback-close')));
       await tester.pump();
+      await confirmDiscardIfAsked(tester);
       expect(host.controller.isOpen, isFalse);
       expect(panel.settingsOpen, isTrue);
       await _hold(tester);
@@ -459,6 +460,7 @@ void main() {
       }
       await tester.tap(find.byKey(const Key('feedback-close')));
       await tester.pump();
+      await confirmDiscardIfAsked(tester);
       await _hold(tester);
       await tester.pump();
       final CaptureSelectionOverlay overlay = await host.selection(tester);
@@ -487,6 +489,7 @@ void main() {
       }
       await tester.tap(find.byKey(const Key('feedback-close')));
       await tester.pump();
+      await confirmDiscardIfAsked(tester);
       await _hold(tester);
       await tester.pump();
       await host.selection(tester);

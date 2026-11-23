@@ -688,6 +688,18 @@ export class FeedbackWidget extends HTMLElement {
   private logPreviewCloseBtn!: HTMLButtonElement;
 
   /**
+   * 关闭前确认层（0.14.0「关闭即放弃」的误触保护）：
+   * 仅用户主动关闭（关闭按钮 / Esc / 返回键）且草稿里有用户亲手写/加的内容时出现；
+   * 宿主调用 close() 与内部流程（身份切换、提交后重置、捕获相关）一律不弹。
+   */
+  private closeConfirmEl!: HTMLDivElement;
+  private closeConfirmCancelBtn!: HTMLButtonElement;
+  private closeConfirmDiscardBtn!: HTMLButtonElement;
+  private closeConfirmOpen = false;
+  /** 确认层打开前的焦点来源：选「继续编辑」后把焦点还回去。 */
+  private closeConfirmReturnFocus: HTMLElement | null = null;
+
+  /**
    * v11 对话与未读提示。0.8.2 起入口不再渲染未读数字角标（launcher / orb / Tab 三处已移除），
    * `unreadCount` 只用于灵感球 aria-label 的未读提示；列表行内的「未读」文本小标签保留。
    */
@@ -1100,14 +1112,23 @@ export class FeedbackWidget extends HTMLElement {
     return this.openState;
   }
 
+  /**
+   * 宿主返回键（Android 返回键 / 系统关闭手势）的层级退出：
+   * 关闭确认层打开时先取消确认层 → 再关图片编辑器 → 最后才是面板。
+   * 面板这一级属于用户主动关闭，与关闭按钮 / Esc 同一语义（有亲手内容先确认）。
+   */
   handleBackPressed(): boolean {
+    if (this.closeConfirmOpen) {
+      this.cancelCloseConfirm();
+      return true;
+    }
     if (this.editorHandle && this.editorHandle.open) {
       this.editorHandle.close();
       this.editorHandle = null;
       return true;
     }
     if (this.isOpen) {
-      this.close();
+      this.requestUserClose();
       return true;
     }
     return false;
@@ -1422,6 +1443,9 @@ export class FeedbackWidget extends HTMLElement {
   }
 
   close(): void {
+    // 程序化关闭（宿主 close() / 身份切换 / 提交后重置 / 捕获相关流程）不需要用户确认：
+    // 这里顺带收起可能开着的确认层，避免它留在已关闭的面板上。
+    this.dismissCloseConfirm(false);
     this.stopDialoguePolling();
     // 关闭面板：使尚未完成的登录接续与额度查询失效（已建立的登录态、
     // 额度与偏好不受影响；草稿与任务态按「关闭即放弃」清空，见下方
@@ -1537,6 +1561,97 @@ export class FeedbackWidget extends HTMLElement {
       this.switchTab('compose');
     }
     this.syncUi();
+  }
+
+  // ---------- 关闭前确认（关闭即放弃的误触保护） ----------
+
+  /**
+   * 用户主动关闭（关闭按钮 / Esc / 返回键）：0.14.0 起「关闭 = 放弃本次未提交的反馈」，
+   * 所以草稿里有用户亲手写/加的内容时先弹确认；没有用户内容时直接关闭，不打扰。
+   * 公开 close() 不走这里——宿主与内部流程关闭必须保持立即关闭、不弹窗。
+   */
+  private requestUserClose(): void {
+    if (!this.openState) {
+      // 面板尚未打开（先截图后开面板阶段）：沿用原有「关闭即取消进行中的截图」语义
+      this.close();
+      return;
+    }
+    if (this.closeConfirmOpen) return;
+    if (!this.hasUserContent()) {
+      this.close();
+      return;
+    }
+    this.openCloseConfirm();
+  }
+
+  /**
+   * 草稿里是否有用户亲手写 / 加的内容（关闭确认的唯一触发条件）：
+   * - 正文去掉首尾空白后非空；
+   * - 手动添加的图片（origin≠capture，含手动图片的编辑结果）；
+   * - 编辑过的截图（origin 仍是 capture，但用户亲手改过，也算）；
+   * - 手动添加的日志附件（source=manual）。
+   * 自动截图（origin=capture 且未编辑）与自动采集的日志（source=auto）不算，
+   * 否则每次「打开再关闭」都会弹窗。
+   */
+  private hasUserContent(): boolean {
+    if (this.draft.text.trim().length > 0) return true;
+    if (this.draft.images.some((img) => img.origin !== 'capture' || img.source === 'edited')) return true;
+    if (this.draft.logs.some((log) => log.source === 'manual')) return true;
+    return false;
+  }
+
+  /** 打开「放弃这次反馈？」确认层：初始焦点给「继续编辑」，误触 Enter 只回到编辑。 */
+  private openCloseConfirm(): void {
+    if (this.closeConfirmOpen || !this.openState) return;
+    this.closeConfirmOpen = true;
+    const active = this.root.activeElement;
+    this.closeConfirmReturnFocus = active instanceof HTMLElement ? active : null;
+    this.closeConfirmEl.hidden = false;
+    try {
+      this.closeConfirmCancelBtn.focus({ preventScroll: true });
+    } catch {
+      /* 不可聚焦时忽略：键盘 Tab 循环仍能把焦点拉回本层 */
+    }
+  }
+
+  /** 收起确认层（面板保持打开）；restoreFocus=true 时把焦点还给打开前的控件。 */
+  private dismissCloseConfirm(restoreFocus: boolean): void {
+    if (!this.closeConfirmOpen) return;
+    this.closeConfirmOpen = false;
+    this.closeConfirmEl.hidden = true;
+    const back = this.closeConfirmReturnFocus;
+    this.closeConfirmReturnFocus = null;
+    if (restoreFocus && back && back.isConnected) {
+      try {
+        back.focus({ preventScroll: true });
+      } catch {
+        /* 目标已不可聚焦时忽略 */
+      }
+    }
+  }
+
+  /** 「继续编辑」/ Esc / 点遮罩：取消关闭，草稿原样保留，焦点回到原处。 */
+  private cancelCloseConfirm(): void {
+    this.dismissCloseConfirm(true);
+  }
+
+  /** 「放弃」：确认后才按 0.14.0 语义关闭（丢弃未提交草稿）。 */
+  private confirmCloseDiscard(): void {
+    if (!this.closeConfirmOpen) return;
+    this.dismissCloseConfirm(false);
+    this.close();
+  }
+
+  /** 确认层的 Tab 循环：焦点只在两个按钮之间移动，不跑回被遮住的面板。 */
+  private trapCloseConfirmFocus(ev: KeyboardEvent): void {
+    const order = [this.closeConfirmCancelBtn, this.closeConfirmDiscardBtn];
+    const active = this.root.activeElement;
+    const idx = active ? order.indexOf(active as HTMLButtonElement) : -1;
+    const next = ev.shiftKey
+      ? order[(idx <= 0 ? order.length : idx) - 1]
+      : order[idx === -1 ? 0 : (idx + 1) % order.length];
+    ev.preventDefault();
+    next?.focus({ preventScroll: true });
   }
 
   cancelCapture(): void {
@@ -3160,10 +3275,11 @@ export class FeedbackWidget extends HTMLElement {
         img.url = '';
       }
     }
-    // 断开时关闭图片编辑器与放大预览（不改动草稿字节）
+    // 断开时关闭图片编辑器、放大预览与关闭确认层（不改动草稿字节）
     this.editorHandle?.close();
     this.editorHandle = null;
     this.closeZoomModal();
+    this.dismissCloseConfirm(false);
   }
 
   attributeChangedCallback(name: string, oldVal: string | null, newVal: string | null): void {
@@ -4168,7 +4284,8 @@ export class FeedbackWidget extends HTMLElement {
     closeBtn.type = 'button';
     closeBtn.setAttribute('aria-label', '关闭反馈面板');
     closeBtn.append(svgCloseIcon());
-    closeBtn.addEventListener('click', () => this.close());
+    // 用户主动关闭：有未提交的亲手内容时先确认，避免误触丢弃
+    closeBtn.addEventListener('click', () => this.requestUserClose());
     headerActions.append(this.settingsBtn, closeBtn);
     header.append(titleGroup, headerActions);
 
@@ -4605,6 +4722,38 @@ export class FeedbackWidget extends HTMLElement {
       }
     });
 
+    // 关闭前确认层：挂在 shadow root（与上面两个弹窗同级）而不是面板内——
+    // .fb-panel 有自己的 transform 与 overflow:hidden，fixed 子元素会被裁在面板里。
+    this.closeConfirmEl = el('div', 'fb-close-confirm');
+    this.closeConfirmEl.hidden = true;
+    this.closeConfirmEl.setAttribute('role', 'dialog');
+    this.closeConfirmEl.setAttribute('aria-modal', 'true');
+    this.closeConfirmEl.setAttribute('aria-labelledby', 'fb-close-confirm-title');
+    this.closeConfirmEl.setAttribute('aria-describedby', 'fb-close-confirm-text');
+
+    const closeConfirmCard = el('div', 'fb-close-confirm-card');
+    const closeConfirmTitle = el('h3', 'fb-close-confirm-title', '放弃这次反馈？');
+    closeConfirmTitle.id = 'fb-close-confirm-title';
+    const closeConfirmText = el(
+      'p',
+      'fb-close-confirm-text',
+      '关闭后，已写的文字、手加图片和日志会被丢弃，下次打开是新的反馈。',
+    );
+    closeConfirmText.id = 'fb-close-confirm-text';
+    const closeConfirmActions = el('div', 'fb-close-confirm-actions');
+    this.closeConfirmCancelBtn = el('button', 'fb-btn-secondary fb-close-confirm-cancel', '继续编辑');
+    this.closeConfirmDiscardBtn = el('button', 'fb-btn-secondary fb-close-confirm-discard', '放弃');
+    for (const btn of [this.closeConfirmCancelBtn, this.closeConfirmDiscardBtn]) btn.type = 'button';
+    this.closeConfirmCancelBtn.addEventListener('click', () => this.cancelCloseConfirm());
+    this.closeConfirmDiscardBtn.addEventListener('click', () => this.confirmCloseDiscard());
+    closeConfirmActions.append(this.closeConfirmCancelBtn, this.closeConfirmDiscardBtn);
+    closeConfirmCard.append(closeConfirmTitle, closeConfirmText, closeConfirmActions);
+    this.closeConfirmEl.append(closeConfirmCard);
+    // 点遮罩 = 取消（留在面板继续编辑），与 Esc /「继续编辑」同一语义
+    this.closeConfirmEl.addEventListener('click', (ev) => {
+      if (ev.target === this.closeConfirmEl) this.cancelCloseConfirm();
+    });
+
     this.beamA11yBtn = el('button', 'fb-beam-a11y', '打开反馈');
     this.beamA11yBtn.type = 'button';
     // 说明文案由 syncBeamA11yLabel() 按输入能力与快捷键配置生成（桌面不提双指长按）。
@@ -4619,6 +4768,7 @@ export class FeedbackWidget extends HTMLElement {
       this.panel,
       this.zoomModal,
       this.logPreviewModal,
+      this.closeConfirmEl,
       this.regionOverlay,
       this.flyingShot,
     );
@@ -8332,6 +8482,34 @@ export class FeedbackWidget extends HTMLElement {
     if (this.handledKey === ev) return;
     this.handledKey = ev;
 
+    // 关闭确认层是模态的：Esc=继续编辑（不是关闭面板）、Tab 在本层内循环、
+    // Enter 触发当前聚焦按钮（显式处理，避免不同引擎对按钮原生激活的差异）。
+    // 其余按键一律不派发给面板的快捷键（提交、Tab 焦点锁等）。
+    if (this.closeConfirmOpen) {
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        ev.stopPropagation();
+        this.cancelCloseConfirm();
+        return;
+      }
+      if (ev.key === 'Tab') {
+        this.trapCloseConfirmFocus(ev);
+        return;
+      }
+      if (ev.key === 'Enter') {
+        const active = this.root.activeElement;
+        if (active === this.closeConfirmCancelBtn) {
+          ev.preventDefault();
+          this.cancelCloseConfirm();
+        } else if (active === this.closeConfirmDiscardBtn) {
+          ev.preventDefault();
+          this.confirmCloseDiscard();
+        }
+        return;
+      }
+      return;
+    }
+
     // 快捷键提交：桌面支持 ⌘/Ctrl + Enter（中文输入法组词期间不触发）
     if ((ev.metaKey || ev.ctrlKey) && ev.key === 'Enter') {
       // 检查输入法合成状态
@@ -8369,7 +8547,8 @@ export class FeedbackWidget extends HTMLElement {
           this === document.activeElement;
         if (inside) {
           ev.preventDefault();
-          this.close();
+          // 用户主动关闭：有未提交的亲手内容时先确认（无内容时 requestUserClose 直接关闭）
+          this.requestUserClose();
           return;
         }
       }

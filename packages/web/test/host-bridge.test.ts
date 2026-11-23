@@ -346,9 +346,16 @@ describe('宿主接口与返回键支持（hostBridge / sessionStore / handleBac
       expect(m.root.querySelector<HTMLElement>('.fb-editor')).toBeNull();
       expect(m.widget.isOpen).toBe(true);
 
-      // 第 2 次返回：关闭反馈面板，返回 true
+      // 第 2 次返回：草稿里有手动添加的图片 → 先展开「放弃这次反馈？」确认层
+      // （0.14.0「关闭即放弃」的误触保护：用户主动关闭入口都要确认），面板仍打开
       const back2 = m.widget.handleBackPressed();
       expect(back2).toBe(true);
+      expect(m.widget.isOpen).toBe(true);
+      const confirmEl = m.root.querySelector<HTMLElement>('.fb-close-confirm')!;
+      expect(confirmEl.hidden).toBe(false);
+
+      // 选「放弃」才真正关闭并按新语义丢弃草稿
+      m.root.querySelector<HTMLButtonElement>('.fb-close-confirm-discard')!.click();
       expect(m.widget.isOpen).toBe(false);
 
       // 第 3 次返回：均已关闭，返回 false

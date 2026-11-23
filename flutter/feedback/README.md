@@ -37,7 +37,7 @@ web、android、ios、windows、macos、linux（平台差异经条件导入隔�
 
 ## 从 0.10.0 升级与宿主托管（0.14.0 起为接入要求）
 
-在宿主 `pubspec.yaml` 的 `feedback_widget.git` 下使用 `ref: v0.14.0` 和
+在宿主 `pubspec.yaml` 的 `feedback_widget.git` 下使用 `ref: v0.15.0` 和
 `path: flutter/feedback`，执行 `flutter pub get`。省略新参数时，默认入口、动效与按应用保存的偏好沿用 0.10.0。
 
 **0.14.0 起，宿主必须自己接管反馈外观设置**：入口样式（贴边标签 / 灵感球）、灵感球待机样式、
@@ -294,12 +294,22 @@ FeedbackWidget(
   捕获结果，通过只读 `hasDraft` / `hasScreenshot` / `captureInfo`
   判断行为（呼出守卫即依赖它们）。移除截图会同时移除落点与捕获时间。
 - **关闭面板 = 放弃本次未提交的反馈**（2026-11-23 裁决）：`visible` 由 true
-  变 false（用户点关闭 / Esc / 窄屏返回 / 宿主 `controller.close()`）时清空
+  变 false（用户点关闭 / Esc / 窄屏遮罩 / 安卓返回 / 宿主 `controller.close()`）时清空
   正文、截图、图片、日志与上一次提交的任务态，面板回到「新建反馈」撰写页；
   下次呼出不恢复旧草稿，按 `captureMode` 重新截图。保留登录态与令牌、额度、
   我的反馈数据与各家设置；已经发出的提交请求不撤回（关闭不清屏外状态）。
   非关闭的中断（截图失败、重拍取消、提交失败、401 回登录态、额度用尽）
   仍保留草稿。
+- **关闭前先确认**：面板里有用户亲手写 / 加的内容（正文去空白后非空、手动添加
+  或编辑过的图片、手动添加的日志）时，关闭按钮 / Esc / 遮罩 / 安卓返回先弹
+  「放弃这次反馈？」——「继续编辑」留在面板且内容原样保留，「放弃」才关闭。
+  自动截图与自动采集的日志不算（否则每次打开再关都要弹窗）；宿主程序化
+  `controller.close()` 不确认。判定入口是只读 `hasAbandonableWork`，确认框由
+  面板 `confirmDiscard()` 提供。
+- **安卓返回**：面板打开时 `didPopRoute` 接管返回并走上面同一条确认，确认后
+  关闭面板、不再把返回交给宿主。组件挂在 Navigator 之外（`MaterialApp.builder`），
+  宿主仍有可 pop 的路由时系统可能先 pop 宿主路由；那种场景请宿主自己在返回前
+  调 `controller.close()`。
 - 正文 10000 码点（runes）上限；提交体携带自制 uuid 幂等键、
   `appId`、`text` 与显式 `context`。
 - **两条失败路径严格区分，服务端已接收的反馈绝不重发**：

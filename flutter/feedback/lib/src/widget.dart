@@ -1529,10 +1529,48 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
 
   void _open() => _controller.open();
 
+  /// 关闭面板（用户手势入口：关闭按钮 / Esc / 宽屏遮罩 / 安卓返回）。
+  ///
+  /// 面板里有用户亲手写或加的内容时先确认「放弃这次反馈？」——关闭即丢弃，
+  /// 误触会把刚写的字和刚加的图一起丢掉。宿主的 `controller.close()` 不走
+  /// 这里：程序化关闭不做确认。
   void _close() {
+    unawaited(_requestClose());
+  }
+
+  /// 关闭确认进行中：挡住重复点击与连按返回。
+  bool _closeInFlight = false;
+
+  Future<void> _requestClose() async {
+    if (_disposed || !mounted || _closeInFlight) return;
+    final FeedbackPanelState? panel = _panelKey.currentState;
+    if (panel != null && panel.hasAbandonableWork) {
+      _closeInFlight = true;
+      bool discard = false;
+      try {
+        discard = await panel.confirmDiscard();
+      } finally {
+        _closeInFlight = false;
+      }
+      if (!discard) return;
+      if (_disposed || !mounted || !_controller.isOpen) return;
+    }
     // 关闭面板使进行中的捕获会话失效：捕获完成后不再挂载 / 恢复面板 UI。
     _invalidateCaptureSession();
     _controller.close();
+  }
+
+  /// 安卓返回键 / 返回手势：面板打开时先走关闭确认，返回 true 表示已处理
+  /// （不再把返回交给宿主，避免返回键把面板底下的宿主页面 pop 掉）。
+  ///
+  /// 组件挂在 Navigator 之外（`MaterialApp.builder`）：宿主仍有可 pop 的路由
+  /// 时系统可能先 pop 宿主路由、这里收不到回调——那种情况需要宿主自己在返回
+  /// 前调用 `controller.close()`。
+  @override
+  Future<bool> didPopRoute() async {
+    if (_disposed || !mounted || !_controller.isOpen) return false;
+    await _requestClose();
+    return true;
   }
 
   double _parseBottom(String val, double height) {

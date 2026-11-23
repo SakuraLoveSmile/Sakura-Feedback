@@ -8,6 +8,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+import 'capture_test_utils.dart';
+
 void main() {
   late MemoryTokenStore store;
   late List<http.Request> requests;
@@ -219,6 +221,7 @@ void main() {
         tester.state<FeedbackPanelState>(find.byType(FeedbackPanel));
     await tester.tap(find.byKey(const Key('feedback-close')));
     await tester.pump();
+    await confirmDiscardIfAsked(tester);
     expect(controller.isOpen, isFalse);
     expect(panel.hasDraft, isFalse, reason: '关闭面板即放弃本次未提交的反馈');
 

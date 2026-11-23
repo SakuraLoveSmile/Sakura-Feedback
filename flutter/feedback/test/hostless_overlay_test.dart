@@ -88,6 +88,7 @@ void main() {
     // 关闭 → 再次打开：子树必须仍能重建。
     await tester.tap(find.byKey(const Key('feedback-close')));
     await tester.pump();
+    await confirmDiscardIfAsked(tester);
     expect(controller.isOpen, isFalse);
     expect(find.byKey(const Key('feedback-orb')), findsOneWidget);
 
@@ -139,6 +140,7 @@ void main() {
 
     await tester.sendKeyEvent(LogicalKeyboardKey.escape);
     await tester.pump();
+    await confirmDiscardIfAsked(tester);
     expect(controller.isOpen, isFalse);
     controller.open();
     await pumpUntil(tester, () => input.evaluate().isNotEmpty);

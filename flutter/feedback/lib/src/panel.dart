@@ -499,6 +499,50 @@ class FeedbackPanelState extends State<FeedbackPanel>
   /// 面板是否持有任意图片附件（只读）。
   bool get hasImages => _images.isNotEmpty;
 
+
+  /// 面板里是否有用户亲手写 / 加的内容：正文、手动添加（或编辑过）的图片、
+  /// 手动添加的日志。自动截图与自动采集的日志不算——它们每次呼出都会产生，
+  /// 让「打开看一眼再关闭」也弹确认没有意义。
+  ///
+  /// 关闭面板会丢弃这些内容，[FeedbackWidget] 据此决定是否先问一句。
+  bool get hasAbandonableWork =>
+      _draft.text.trim().isNotEmpty ||
+      _images.any((FeedbackImageFile img) => img.source != 'capture') ||
+      _logs.any((FeedbackLogFile log) => log.source == 'manual');
+
+  /// 关闭前的放弃确认：返回 true 表示用户确认放弃（可以关闭）；
+  /// false（「继续编辑」/ Esc / 点遮罩）表示留在面板继续写。
+  Future<bool> confirmDiscard() async {
+    if (!mounted) return true;
+    final bool? discard = await _showPanelDialog<bool>(
+      builder: (BuildContext ctx, void Function([bool?]) close) =>
+          CallbackShortcuts(
+        bindings: <ShortcutActivator, VoidCallback>{
+          const SingleActivator(LogicalKeyboardKey.escape): () => close(false),
+        },
+        child: AlertDialog(
+          key: const Key('feedback-discard-confirm'),
+          title: const Text('放弃这次反馈？'),
+          content: const Text('关闭后，已写的文字、手加图片和日志会被丢弃，下次打开是新的反馈。'),
+          actions: <Widget>[
+            TextButton(
+              key: const Key('feedback-discard-cancel'),
+              autofocus: true,
+              onPressed: () => close(false),
+              child: const Text('继续编辑'),
+            ),
+            FilledButton(
+              key: const Key('feedback-discard-ok'),
+              onPressed: () => close(true),
+              child: const Text('放弃'),
+            ),
+          ],
+        ),
+      ),
+    );
+    return discard ?? false;
+  }
+
   /// 图片上限（T1.4 捕获前置检查用）：能力未确认时乐观按契约上限判断，
   /// 确认后按服务端能力（缺省单图）判断——与界面文案同一个来源。
   int get captureImageLimit => _imageLimit;

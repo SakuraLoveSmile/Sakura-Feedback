@@ -138,6 +138,9 @@ void main() {
 
     await tester.tap(find.byKey(const Key('feedback-close')));
     await tester.pump();
+    // 关闭即丢弃：先确认「放弃这次反馈？」。
+    expect(find.byKey(const Key('feedback-discard-confirm')), findsOneWidget);
+    await confirmDiscardIfAsked(tester);
     expect(controller.isOpen, isFalse);
     expect(panel.hasDraft, isFalse, reason: '关闭面板即放弃本次正文');
     expect(panel.hasImages, isFalse, reason: '关闭面板即放弃本次截图');
@@ -169,6 +172,7 @@ void main() {
     await tester.pump();
     await tester.tap(find.byKey(const Key('feedback-close')));
     await tester.pump();
+    await confirmDiscardIfAsked(tester);
     expect(panel.hasDraft, isFalse, reason: '关闭面板即放弃本次草稿');
 
     // 关闭后草稿已放弃：拖动超过 8dp 松手是明确重截，进入局部选区流程。

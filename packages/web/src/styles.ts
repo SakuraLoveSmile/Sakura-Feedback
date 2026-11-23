@@ -1486,6 +1486,69 @@ export const STYLES = /* css */ `
   flex: 1;
 }
 
+/* ---- 关闭前确认层（0.14.0：关闭即放弃本次未提交反馈的误触保护） ----
+   遮罩层挂在 shadow root（与上面的日志预览 / 放大预览同级），覆盖整个面板；
+   卡片样式沿用设置视图内联确认块的令牌与描边按钮，深浅主题自动跟随。 */
+.fb-close-confirm {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--fb-z-index, var(--fb-z-index-default)) + 30);
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  box-sizing: border-box;
+}
+
+.fb-close-confirm-card {
+  background: var(--fb-bg);
+  color: var(--fb-text);
+  border: 1px solid var(--fb-border);
+  border-radius: 14px;
+  box-shadow: var(--fb-shadow);
+  padding: 18px 20px 16px;
+  width: 100%;
+  max-width: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.fb-close-confirm-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.fb-close-confirm-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--fb-text-secondary);
+}
+
+.fb-close-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* 「放弃」用警告色文字 + 描边，与「继续编辑」区分开（不改按钮尺寸与命中区） */
+.fb-close-confirm-discard {
+  color: var(--fb-status-error-text);
+  border-color: var(--fb-status-error-border);
+}
+
+.fb-close-confirm-discard:hover {
+  background: var(--fb-status-error-bg);
+}
+
 /* ---- 截图大图弹窗 (Zoom Modal) ---- */
 .fb-zoom-modal {
   position: fixed;

@@ -84,6 +84,18 @@ Future<void> pollPure(WidgetTester tester, bool Function() cond) async {
   fail('pollPure 等待超时');
 }
 
+
+/// 关闭前的放弃确认（有用户撰写 / 手动添加的内容时出现）：点「放弃」继续关闭。
+/// 只用于把既有用例推进到关闭之后的断言；确认对话框本身的行为由
+/// `close_confirm_test.dart` 显式断言。
+Future<void> confirmDiscardIfAsked(WidgetTester tester) async {
+  if (find.byKey(const Key('feedback-discard-confirm')).evaluate().isEmpty) {
+    return;
+  }
+  await tester.tap(find.byKey(const Key('feedback-discard-ok')));
+  await tester.pump();
+}
+
 /// 触发一次截图并等待交付完成（先截图后开面板：等待期间面板不展开）。
 Future<FeedbackPanelState> captureAndWait(
   WidgetTester tester,

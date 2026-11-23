@@ -187,23 +187,23 @@ Shadow DOM 查询节点或覆盖内部样式）；`test/` 下的测试辅助文�
 
 ### 2.1 Web：通过构建出的 npm tarball 安装（打包器宿主推荐）
 
-包名 `@feedback/web`，当前版本 `0.14.0`，因此 tarball 文件名为 **`feedback-web-0.14.0.tgz`**（版本变了文件名跟着变）。
+包名 `@feedback/web`，当前版本 `0.15.0`，因此 tarball 文件名为 **`feedback-web-0.15.0.tgz`**（版本变了文件名跟着变）。
 
 优先安装正式 Release 的固定产物（保留锁文件）；不要把工作区源码或 `main` 当成稳定版本：
 
 ```bash
-pnpm add https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/download/v0.14.0/feedback-web-0.14.0.tgz
+pnpm add https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/download/v0.15.0/feedback-web-0.15.0.tgz
 ```
 
-完整 Web dist、SHA256 与服务端镜像清单均在 [v0.14.0 Release](https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/tag/v0.14.0)。
-需要自行构建时，先检出 `v0.14.0`，再执行：
+完整 Web dist、SHA256 与服务端镜像清单均在 [v0.15.0 Release](https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/tag/v0.15.0)。
+需要自行构建时，先检出 `v0.15.0`，再执行：
 
 ```bash
 # ① 在仓库根构建组件包
 pnpm install
 pnpm --filter @feedback/web build
 
-# ② 打成 tarball（真实产物：/tmp/fbpack/feedback-web-0.14.0.tgz）
+# ② 打成 tarball（真实产物：/tmp/fbpack/feedback-web-0.15.0.tgz）
 mkdir -p /tmp/fbpack
 pnpm --filter @feedback/web pack --pack-destination /tmp/fbpack
 ```
@@ -212,8 +212,8 @@ tarball 内含 `dist/` 全部产物（含 ESM 懒加载分块）、`package.json
 
 ```bash
 # ③ 在你的宿主项目里安装这个 tgz
-pnpm add /tmp/fbpack/feedback-web-0.14.0.tgz
-# 等价写法：npm install /tmp/fbpack/feedback-web-0.14.0.tgz
+pnpm add /tmp/fbpack/feedback-web-0.15.0.tgz
+# 等价写法：npm install /tmp/fbpack/feedback-web-0.15.0.tgz
 ```
 
 ```ts
@@ -279,7 +279,7 @@ dependencies:
   feedback_widget:
     git:
       url: https://github.com/SakuraLoveSmile/Sakura-Feedback.git
-      ref: v0.14.0                    # 或该标签对应的完整 commit SHA
+      ref: v0.15.0                    # 或该标签对应的完整 commit SHA
       path: flutter/feedback        # 包在仓库的子目录里
 ```
 
@@ -910,6 +910,10 @@ FeedbackWidget(
   「新建反馈」撰写页；**下次呼出不恢复旧草稿，按 `capture-mode` 重新截图**。保留：访问令牌与登录态、额度、
   我的反馈数据、服务地址与各家设置；已经发出的提交请求不撤回（关闭不等于撤销），只清本地草稿。
   非关闭的中断（截图失败、重拍取消、提交失败、401 回登录态、额度用尽）仍保留草稿。
+- **用户主动关闭前先确认**（2026-11-23 裁决，两端一致）：面板里有**用户亲手写 / 加**的内容（正文、手动添加
+  或编辑过的图片、手动添加的日志）时，关闭按钮 / Esc / 宽屏遮罩 / 安卓返回先弹「放弃这次反馈？」——「继续编辑」留在面板
+  且内容原样保留，「放弃」才关闭并按上一条丢弃。**自动截图与自动采集的日志不单独触发**（它们每次呼出都会产生，
+  否则「打开看一眼再关」也要弹窗）；宿主的程序化 `close()`（Flutter `controller.close()`）不确认，保持立即关闭。
 - **`captureAndOpen()` 遇到已有草稿时"恢复草稿、不重拍"**：面板**仍打开**且已持有文字或截图时，宿主再次要截图
   不重新截图，原有的文字与截图字节原样恢复，避免新图覆盖用户正在编辑的内容。关闭后草稿已清空，所以关掉再呼出
   总是重新截图。
@@ -1107,7 +1111,10 @@ Flutter：
 - **入口可见性**：面板打开时入口不渲染（`if (!open && config.showLauncher)`），关闭后恢复。
 - 灵感球：单击 = 按 `captureMode` 决定是否截图；拖拽（位移 > 8 逻辑像素）释放 = **总是**带落点截图并打开
   （例外：面板仍打开且已持有草稿 / 截图时不重拍，直接恢复草稿，见 4.3）。**关闭面板即放弃本次未提交的草稿**，
-  再次唤醒 / 点击灵感球重新截图、空白开始。
+  再次唤醒 / 点击灵感球重新截图、空白开始；关闭前若面板里有用户写 / 加的内容，先确认（见 4.3）。
+- **安卓返回键 / 返回手势**：面板打开时先走同一条关闭确认，确认后关闭面板、不再把返回交给宿主
+  （避免返回键把面板底下的宿主页面 pop 掉）。组件挂在 Navigator 之外：宿主仍有可 pop 的路由时，系统可能先 pop
+  宿主路由、组件收不到这次返回；那种场景需要宿主自己在返回前调用 `controller.close()`。
 - **键盘避让（Android / 小屏，T9）**：面板底部只抬升「未被宿主避让的实际重叠」——
   宿主已收缩（含 Scaffold 消费 `viewInsets`）或已避开时不再额外留白；撰写 / 登录 /
   设置内容有界可滚，底部按钮始终可达；账号「下一步」→ 密码、「完成」→ 登录，

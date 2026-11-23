@@ -90,7 +90,7 @@ import { FeedbackWidget, openFeedback } from '@feedback/web';
 
 ## 方法与事件
 
-- `open()` / `close()`：开关面板。`close()` 会同时取消进行中的截图（即使面板尚未打开）；面板**确实打开时**关闭还会**放弃本次未提交的反馈**（清空正文 / 截图 / 图片 / 日志与上一次提交的任务态，回到「新建反馈」撰写页，见「行为摘要」草稿一条）。`open()` **只打开面板、不截图**；自动截图只发生在 `capture-mode="viewport"` 的呼出路径。
+- `open()` / `close()`：开关面板。`close()` 会同时取消进行中的截图（即使面板尚未打开）；面板**确实打开时**关闭还会**放弃本次未提交的反馈**（清空正文 / 截图 / 图片 / 日志与上一次提交的任务态，回到「新建反馈」撰写页，见「行为摘要」草稿一条）。用户主动关闭（面板关闭按钮 / Esc / 返回键）在有亲手内容（正文、手动图片或编辑过的截图、手动日志）时先弹「放弃这次反馈？」，选「继续编辑」留在面板、内容原样保留，选「放弃」才丢弃；`close()` 这类程序化关闭与内部流程（身份切换、提交后重置、捕获相关）保持立即关闭、不弹窗。`open()` **只打开面板、不截图**；自动截图只发生在 `capture-mode="viewport"` 的呼出路径。
 - `captureAndOpen(opts?)`：截图并打开面板。`opts.releasePoint` 为可选截图落点（0..1 视口比例）；灵感球**拖拽**不再直接调用它——拖拽走「冻结画面 → 调整选区 → 确认」流程，确认后落点同样写入 `capture.releasePoint`，灵感球**点击**仍按 `capture-mode` 走原有呼出路径。
   - 面板**仍打开**且已有草稿（文字或截图）时**恢复草稿、不重拍**；有捕获进行中时**合并**到该会话，不重复发起。
   - 这是**呼出**语义：面板打开期间草稿一脏就不再重拍；关闭面板会放弃本次草稿（见「行为摘要」），所以关掉后再呼出总是重新截图。面板内的手动截图入口（「截取当前页面」/「重新截图」）走显式重拍流程，**不受草稿影响**。
@@ -213,7 +213,7 @@ widget.captureProvider = async (ctx) => {
 - 幂等与冲突：草稿未变化的重试复用**同一幂等键与同一字节**；`409 idempotency_conflict` 显示冲突、**不自动换 key**；结果未知的提交（网络错误/5xx）在草稿被修改时保留原请求标识与时间供人工核对，新内容用新 key 重新提交。
 - 登录：未登录可在面板内编辑；点击「登录并提交」就地展开账号密码表单，`POST /api/auth/login` 显式携带 `clientLabel=web:<appId>` 与 `appId`，令牌仅存内存，成功后只提交一次。登录响应绑定发起时的服务身份：`api-base` / `app-id` 变化会丢弃迟到的登录结果（新身份必须重新登录）。响应含 `user` 与 `quota`：普通账号为数值形态 `{ dailyLimit, used, remaining, resetAt }`（默认每日 3 次，北京时间零点刷新），面板显示「今日剩余 N 次」，用尽返回 `429 daily_quota_exceeded`；管理员为 `{ unlimited: true, used, resetAt }`（不含 `dailyLimit` / `remaining`），面板显示「不限次数」且不受额度阻断。
 - 令牌仅存组件实例内存，且**只属于签发它的服务**（`api-base` 变化即清空，需重新登录）；未提交草稿仅存组件实例内存。
-- 无障碍：Esc 关闭（先关截图预览再关面板）、focus trap、打开聚焦 textarea、关闭恢复焦点、`role="dialog"` `aria-modal`、`prefers-reduced-motion` 尊重。
+- 无障碍：Esc 关闭（先关截图预览再关面板）、focus trap、打开聚焦 textarea、关闭恢复焦点、`role="dialog"` `aria-modal`、`prefers-reduced-motion` 尊重。关闭确认层是独立模态：`role="dialog"` + `aria-modal="true"`，标题/正文经 `aria-labelledby` / `aria-describedby` 关联，初始焦点在「继续编辑」，Tab 在层内循环、Enter 触发当前焦点按钮、Esc 只关确认层（不关面板），点遮罩等同取消。
 
 ## 包体与懒加载
 
