@@ -6,10 +6,12 @@
 > —— 从服务端配置、组件安装、挂载悬浮球到登录/截图/反馈/归档的端到端步骤。
 > 本 README 是属性 / 方法 / 事件 / 截图与遮挡的**权威参考**。
 >
-> **0.10 默认形态**：光束唤醒（`launcher-mode=beam`，无常驻入口）+ 视口截图
-> （`capture-mode=viewport`）。双指长按或 ⌘/Ctrl+Shift+F 唤出（默认水波纹，可在设置切波光）→ 画圈选区 → 面板；
-> 旧式贴边标签需显式 `launcher-mode="tab" capture-mode="off"`，灵感球需显式
-> `launcher-mode="orb"`（或在光束模式下由用户从「设置 → 入口样式」切换）。
+> **默认形态（`launcher-mode=auto`）**：按输入能力选择入口——主指针是精细指针
+> （鼠标 / 触控板）时页面侧边显示**贴边标签**，点击即「先截图后开面板」；只有触屏、或环境
+> 探测不到指针能力时才是**光束唤醒**（无常驻入口，双指长按或 ⌘/Ctrl+Shift+F 唤出（默认
+> 水波纹，可在设置切波光）→ 画圈选区 → 面板）。截图默认 `capture-mode=viewport`。
+> 显式 `launcher-mode="tab" / "orb" / "beam"` 与 0.12 行为一致；要恢复「无常驻入口」写
+> `launcher-mode="beam"`。Flutter 端本次未改，默认仍是 `beam`（见下方「入口形态与桌面唤醒」）。
 
 **宿主日志必须接入**：通过 `logProvider` 提供真实、脱敏的应用诊断日志，并通过[完整接入指南第 5.6 节](../../docs/integration.md#56-诊断日志接入v12)的接入验收；仅记录组件自身请求或使用固定示例日志不算完成。采集失败、暂无事件或用户移除日志仍允许提交。
 
@@ -42,11 +44,11 @@ import { FeedbackWidget, openFeedback } from '@feedback/web';
 | `page-label` | `pageLabel` | 否 | 随 `context.pageLabel` 上报（变化只刷新头部信息，不清空草稿） |
 | `side` | `side` | 否 | 悬浮按钮位置 `left` \| `right`（默认 `right`） |
 | `theme` | `theme` | 否 | `system` \| `light` \| `dark`（默认 `system`） |
-| `show-launcher` | `showLauncher` | 否 | 是否显示贴边入口（默认 `true`） |
+| `show-launcher` | `showLauncher` | 否 | 是否显示内置入口（默认 `true`；`launcher-mode=beam` 时本来没有常驻入口） |
 | `launcher-bottom` | `launcherBottom` | 否 | 入口垂直位置（默认 `25%`） |
-| `launcher-mode` | `launcherMode` | 否 | `beam`（光束唤醒，**默认**；无常驻入口，双指长按或快捷键唤出后圈选）\| `tab`（贴边标签）\| `orb`（灵感球）。宿主为 `beam` 时用户可在「设置 → 入口样式」切到灵感球（本机偏好） |
-| `capture-mode` | `captureMode` | 否 | `off` \| `viewport`：呼出时是否**自动**截取当前视口（默认 `viewport`）。`off` 只关闭**自动**截图——面板里始终有手动的「截取当前页面」；光束模式下 `off` 时手势只打开面板 |
-| `wake-shortcut` | `wakeShortcut` | 否 | 光束模式快捷键：`primary+shift+f`（默认；macOS ⌘ / 其他 Ctrl）或 `off`；输入框聚焦 / 面板 / 选区中不触发 |
+| `launcher-mode` | `launcherMode` | 否 | `auto`（**默认**：精细指针 → 贴边标签；只有触屏 / 探测不到 `matchMedia` → 光束唤醒）\| `beam`（光束唤醒，无常驻入口，双指长按或快捷键唤出后圈选）\| `tab`（贴边标签）\| `orb`（灵感球）。宿主为 `auto` 或 `beam` 时用户可在「设置 → 入口样式」切换贴边标签 / 灵感球（有触摸输入时另有光束唤醒；本机偏好） |
+| `capture-mode` | `captureMode` | 否 | `off` \| `viewport`：呼出时是否**自动**截取当前视口（默认 `viewport`）。`off` 只关闭**自动**截图——面板里始终有手动的「截取当前页面」；`off` 时点击入口、手势、⌥/Alt+拖拽与快捷键都只打开面板 |
+| `wake-shortcut` | `wakeShortcut` | 否 | 唤醒快捷键：`primary+shift+f`（默认；macOS ⌘ / 其他 Ctrl）或 `off`；输入框聚焦 / 面板 / 选区中不触发，宿主已 `preventDefault` 的同组合键让路。`off` 同时关闭桌面 ⌥/Alt+拖拽——宿主用它表示「入口自己接管」 |
 | — | `effectiveApiBase` | — | **只读**：当前实际使用的服务地址（用户本机覆盖优先于 `api-base`；未覆盖时等于 `api-base`） |
 | — | `logProvider` | 否 | `FeedbackLogProvider?`（`() => FeedbackLogFile \| FeedbackLogFile[] \| null \| undefined` 或其 Promise，`FeedbackLogFile = { filename, blob }`）。仅 property：打开面板且尚未采集过时自动调用一次（3 秒超时、至多 3 份、单份 ≤1MiB、扩展名 `.log/.txt/.json/.jsonl`、非空）。替换 / 置空后下一次呼出面板生效；**不清空草稿** |
 
@@ -60,6 +62,19 @@ import { FeedbackWidget, openFeedback } from '@feedback/web';
 - 失败 / 超时：提示「日志获取失败，可继续提交」并提供显式「重试」——**详情区自动展开**，不展示 provider 抛出的原始异常文本；
 - **未接入 `logProvider`**：展开的日志区显示固定说明 `未接入日志采集，可手动添加日志文件；宿主接入需提供 logProvider`（`.fb-logs-no-provider`），「重新采集」按原样隐藏；首次呼出面板还会向 console 输出一次 `[Feedback] 未接入日志采集…` 警告。只是提示，手动添加日志与提交都不受影响——见[接入指南 5.6](../../docs/integration.md#56-诊断日志接入v12)；
 - 用户移除自动附件后不会静默重新附加；日志只随用户主动提交作为附件，绝不后台上传。诊断记录器（`diagnosticsRecorder` + `wrapFetch`）、容量上限与身份切换清理保持不变。
+
+## 入口形态与桌面唤醒
+
+`launcher-mode` 缺省为 `auto`：主指针是精细指针（`matchMedia('(pointer: fine)')`）时给贴边标签入口；只有触屏、或环境不支持 `matchMedia`（探测不到）时保持光束唤醒。显式 `beam` / `tab` / `orb` 完全按宿主指定，不受探测影响。
+
+- **贴边标签**：点击入口在 `capture-mode="viewport"` 时先截图再开面板，`off` 时只开面板。
+- **桌面 ⌥/Alt + 拖拽**（仅精细指针，且 `wake-shortcut` 不为 `off`）：在页面上拖出矩形，松手后直接以该矩形作为初始选区进入既有选区工具条（最小 48×48 逻辑像素、夹回视口，不套用圈选的 8px 外扩）；拖动不足 8px 视为 `⌥/Alt+点击`，在该点进入圈选（`capture-mode="off"` 时只打开面板）；从输入框 / 按钮 / 链接 / 可编辑区域起手不接管，避免抢宿主操作。
+- **触摸手势仍可用**：触屏笔记本（同时有精细指针与触摸）默认显示贴边标签，双指长按 / 三指上滑 / 双指双击仍可唤醒；宿主显式 `launcher-mode="tab"` 时不接管手势。
+- **快捷键**：默认组合仍是 `primary+shift+f`，`auto` 解析为贴边标签时同样可用（从视口中心进入圈选或打开面板）；宿主已 `preventDefault` 的同组合键让路。
+  - ⚠️「让路」依赖注册顺序：组件在 `connectedCallback` 里向 `document` 的 **capture** 阶段注册 keydown，只有宿主脚本**先于**组件注册同一组合键的监听时，宿主的 `preventDefault()` 才会先执行；晚于组件注册时组件先跑并 `stopImmediatePropagation()`。宿主想用同名组合键，推荐直接 `wake-shortcut="off"` 或换组合键，不要依赖注册顺序。
+- **首次使用提示**：有可见入口（贴边标签 / 灵感球）时出现一次，说明入口与当前快捷键，9 秒自动收起、可关闭；按 `appId` 记在 `feedback:entry-hint:v1:<appId>`。光束形态（无常驻入口）不提示。
+- **设置面板**：「入口样式」在宿主 `auto` / `beam` 时出现（贴边标签 / 灵感球，有触摸输入时另有光束唤醒）；「唤醒方式」按输入能力分叉——精细指针显示「点击入口 / 按住 ⌥ 拖拽 / 快捷键」，有触摸时才显示双指长按 / 三指上滑 / 双指双击。无障碍隐藏入口的 `aria-label` 同源生成，桌面不再念「双指长按屏幕」。
+- **两端默认形态不再一致**：Flutter 端本次未改，`FeedbackLauncherMode.beam` 仍是默认；Web 要回到「无常驻入口」表现写 `launcher-mode="beam"`。
 
 ## 自定义服务器（设置视图）
 
