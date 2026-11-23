@@ -549,10 +549,10 @@ export const ISSUE_STATUS_LABELS: Record<IssueStatus, string> = {
 };
 
 /** 工单状态主标签配色（列表与详情共用）：待管理处理=警示黄、已解决=成功绿，其余=信息蓝。 */
-export function issueTone(s?: IssueStatus): string {
-  if (s === "waiting_admin") return "tone-warn";
-  if (s === "resolved") return "tone-ok";
-  return "tone-info";
+export function issueColor(s?: IssueStatus): string {
+  if (s === "waiting_admin") return "orange";
+  if (s === "resolved") return "teal";
+  return "blue";
 }
 
 export interface FeedbackMessageAttachment {

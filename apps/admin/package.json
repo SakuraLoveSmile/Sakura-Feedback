@@ -13,6 +13,8 @@
   },
   "dependencies": {
     "@feedback/web": "workspace:*",
+    "@mantine/core": "9.8.2",
+    "@mantine/hooks": "9.8.2",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },

@@ -1,3 +1,4 @@
+import { Button, Group, Input, NavLink, Paper, Text, Title } from "@mantine/core";
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 // 导入即自动注册 <feedback-widget> 自定义元素（副作用）。
@@ -6,9 +7,11 @@ import type { FeedbackWidget } from "@feedback/web";
 import { ApiError, api, type SessionUser } from "./api.ts";
 import { recordDiagnostic } from "./diagnostics.ts";
 import { bindFeedbackDiagnostics, startFeedbackHostSession } from "./feedback-host.ts";
-import { ThemeSelect, useThemePreference, useThemeSync } from "./theme.tsx";
-import { Field, Icon, Modal, ToastProvider } from "./ui.tsx";
-import { useUrlState } from "./url.ts";
+
+import { type EditState, PageEditsContext } from "./page-edits.ts";
+import { ThemeSelect, useThemePreference } from "./theme.tsx";
+import { ConfirmDialog, Field, Icon, InlineError, Modal, ToastProvider } from "./ui.tsx";
+import { useHistoryEditGuard, useUrlState } from "./url.ts";
 import AccountsView from "./views/AccountsView.tsx";
 import AppsView from "./views/AppsView.tsx";
 import ChangelogView from "./views/ChangelogView.tsx";
@@ -67,6 +70,17 @@ function pageOf(params: URLSearchParams): Page {
   return (PAGE_IDS.has(p) ? p : "feedbacks") as Page;
 }
 
+function Brand({ caption = false }: { caption?: boolean }) {
+  return (
+    <span className="shell-brand">
+      <span className="brand-mark">
+        <Icon name="brand" size={23} />
+      </span>
+      <span>Feedback{caption && <span className="brand-caption">反馈管理工作台</span>}</span>
+    </span>
+  );
+}
+
 function LoginView({
   onSuccess,
   initialUsername = "",
@@ -78,6 +92,7 @@ function LoginView({
 }) {
   const [username, setUsername] = useState(initialUsername);
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -86,7 +101,12 @@ function LoginView({
     setBusy(true);
     setError(null);
     try {
-      await api.post("/api/auth/login", { username, password });
+      const result = await api.post<{ user: SessionUser }>("/api/auth/login", { username, password });
+      if (result.user.role !== "admin") {
+        setError("这个账号可以提交反馈。请使用管理员账号登录工作台。");
+        setPassword("");
+        return;
+      }
       onSuccess();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "登录失败");
@@ -97,57 +117,18 @@ function LoginView({
   }
 
   return (
-    <div className="login-wrap login-stage">
-      {/* 左侧品牌说明（纯展示）：讲清产品边界与能力；窄屏隐藏，只留登录表单。 */}
-      <div className="login-visual" aria-hidden="true">
-        <div className="login-brand">
-          <Icon name="feedback" size={22} />
-          <span>Feedback</span>
-        </div>
-        <h2 className="login-headline">
-          把每一条反馈，
-          <br />
-          <em>变成可跟进的行动</em>。
-        </h2>
-        <p className="login-lede">
-          截图、对话、自动整理与 Kaneo 归档在同一条链路里完成。管理员登录后即可处理反馈、维护软件配置与接入凭据。
-        </p>
-        <ul className="login-feats">
-          <li>
-            <span className="feat-ic">
-              <Icon name="image" size={15} />
-            </span>
-            截图即反馈，敏感信息自动遮罩
-          </li>
-          <li>
-            <span className="feat-ic">
-              <Icon name="feedback" size={15} />
-            </span>
-            对话式跟进，状态与未读一目了然
-          </li>
-          <li>
-            <span className="feat-ic">
-              <Icon name="archive" size={15} />
-            </span>
-            自动整理并同步到 Kaneo 任务
-          </li>
-        </ul>
-      </div>
-
-      {/* 右侧登录表单：单一卡片，页头（标题 + 主题）→ 用途 → 服务身份 → 表单 → 提交。
-          错误经 Field 渲染在密码框正下方（贴近表单、role=alert、aria 关联），
-          出错后提交按钮变「重试登录」，原地重试即可。 */}
-      <form className="card login-form" onSubmit={submit}>
+    <div className="login-stage">
+      <Group justify="space-between" mb="md">
+        <Brand caption />
+        <ThemeSelect />
+      </Group>
+      <Paper component="form" className="login-form" onSubmit={submit} withBorder p="xl" shadow="xs">
         <div className="login-card-head">
-          <h1>管理登录</h1>
-          <ThemeSelect />
+          <Title order={1} size="h2">
+            管理登录
+          </Title>
         </div>
-        <p className="login-purpose">集中查看反馈、跟进问题，管理软件与账号。</p>
-        <div className="login-server">
-          <Icon name="link" size={14} />
-          <span>服务地址</span>
-          <code>{window.location.origin}</code>
-        </div>
+        <p className="login-purpose">使用管理员账号登录反馈工作台。</p>
         {notice && (
           <p className="ok-text login-notice" role="status">
             {notice}
@@ -155,7 +136,8 @@ function LoginView({
         )}
         <Field id="u" label="用户名">
           {(ctl) => (
-            <input
+            <Input
+              error={ctl["aria-invalid"]}
               {...ctl}
               type="text"
               value={username}
@@ -168,18 +150,34 @@ function LoginView({
         </Field>
         <Field id="p" label="密码" error={error}>
           {(ctl) => (
-            <input
-              {...ctl}
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              autoComplete="current-password"
-              placeholder="输入密码"
-              required
-            />
+            <div className="password-control">
+              <Input
+                error={ctl["aria-invalid"]}
+                {...ctl}
+                type={showPassword ? "text" : "password"}
+                data-feedback-capture-mask=""
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="current-password"
+                placeholder="输入密码"
+                required
+              />
+              <Button
+                variant="subtle"
+                size="xs"
+                type="button"
+                className="btn sm ghost"
+                aria-pressed={showPassword}
+                aria-label="显示密码"
+                onClick={() => setShowPassword(!showPassword)}
+              >
+                {showPassword ? "隐藏" : "显示"}
+              </Button>
+            </div>
           )}
         </Field>
-        <button
+        <Button
+          variant="filled"
           className="btn primary login-submit"
           type="submit"
           disabled={busy}
@@ -187,9 +185,11 @@ function LoginView({
           title={busy ? "正在登录…" : error ? "修正信息后可原地重试" : undefined}
         >
           {busy ? "登录中…" : error ? "重试登录" : "登录"}
-        </button>
-        <p className="login-foot">凭据仅用于本次管理会话 · 不开放注册</p>
-      </form>
+        </Button>
+      </Paper>
+      <Text c="dimmed" size="xs" ta="center" mt="md">
+        服务地址　{window.location.origin}
+      </Text>
     </div>
   );
 }
@@ -201,16 +201,17 @@ function NavItems({ page, onNav }: { page: Page; onNav: (p: Page) => void }) {
         <div key={g.label}>
           <div className="nav-group-label">{g.label}</div>
           {g.items.map((it) => (
-            <button
+            <NavLink
+              component="button"
               type="button"
               key={it.id}
               className={`nav-item${page === it.id ? " active" : ""}`}
               aria-current={page === it.id ? "page" : undefined}
+              active={page === it.id}
+              label={it.label}
+              leftSection={<Icon name={it.icon} size={17} />}
               onClick={() => onNav(it.id)}
-            >
-              <Icon name={it.icon} />
-              {it.label}
-            </button>
+            />
           ))}
         </div>
       ))}
@@ -228,26 +229,41 @@ export default function App() {
   const [loginUsername, setLoginUsername] = useState("");
   const [loginNotice, setLoginNotice] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [edits] = useState(() => new Set<{ state: EditState }>());
+  const [pendingDestination, setPendingDestination] = useState<Page | "logout" | null>(null);
+  const [navError, setNavError] = useState<string | null>(null);
+  const [sessionError, setSessionError] = useState<string | null>(null);
+  const [loggingOut, setLoggingOut] = useState(false);
+  useHistoryEditGuard(edits, setNavError);
 
   useEffect(() => {
     document.title = `${authed ? pageLabelOf(page) : "管理登录"} · Feedback`;
     setMenuOpen(false);
   }, [page, authed]);
 
-  // 主题：把偏好同步到 <html>，仅 "system" 时跟随系统变化（监听注册/清理由 hook 内部处理）。
-  useThemeSync();
   const [themePref] = useThemePreference();
 
   const check = useCallback(async () => {
+    setSessionError(null);
     try {
-      const s = await api.get<{ user?: SessionUser }>("/api/auth/session");
-      setSessionUser(s.user ?? null);
+      const s = await api.get<{ user: SessionUser }>("/api/auth/session");
+      if (s.user.role !== "admin") {
+        setSessionUser(null);
+        setLoginNotice("当前登录的是普通账号，请使用管理员账号。");
+        setAuthed(false);
+        return;
+      }
+      setSessionUser(s.user);
       setAuthed(true);
       // 会话确认留痕（新会话起点标记；同账号续登也记录，缓冲有界）。
       recordDiagnostic({ level: "info", event: "auth_session", code: "ok" });
-    } catch {
+    } catch (err) {
       setSessionUser(null);
-      setAuthed(false);
+      if (err instanceof ApiError && err.status === 401) setAuthed(false);
+      else {
+        setAuthed(null);
+        setSessionError("暂时无法连接管理服务，请重试。");
+      }
     }
   }, []);
 
@@ -273,7 +289,18 @@ export default function App() {
   }, [authed, sessionUserId]);
 
   async function logout() {
-    await api.post("/api/auth/logout").catch(() => undefined);
+    setLoggingOut(true);
+    setNavError(null);
+    try {
+      await api.post("/api/auth/logout");
+    } catch (err) {
+      if (!(err instanceof ApiError && err.status === 401)) {
+        setNavError("退出失败，当前页面已保留。请重试退出。");
+        return;
+      }
+    } finally {
+      setLoggingOut(false);
+    }
     setSessionUser(null);
     setAuthed(false);
   }
@@ -302,6 +329,22 @@ export default function App() {
     [page, setParams],
   );
 
+  function navigate(destination: Page | "logout") {
+    if (loggingOut) return;
+    setMenuOpen(false);
+    setNavError(null);
+    if (destination === page) return;
+    if ([...edits].some((edit) => edit.state === "saving")) {
+      setNavError("操作正在提交，请稍后再离开。");
+    } else if (edits.size > 0) {
+      setPendingDestination(destination);
+    } else if (destination === "logout") {
+      void logout();
+    } else {
+      nav(destination);
+    }
+  }
+
   /** 管理员设置保存成功：会话已在服务端撤销，回到登录页并预填新用户名。 */
   function handleCredentialsUpdated(username: string) {
     setLoginUsername(username);
@@ -315,14 +358,20 @@ export default function App() {
     // 会话检查中：骨架加载态（复用登录卡片位置），比纯文案更明确地表达「进行中」。
     content = (
       <div className="login-wrap">
-        <div className="card boot-card" role="status" aria-live="polite">
-          <div className="skeleton" style={{ height: 24, width: "55%" }} />
-          <div className="skeleton" style={{ height: 14, width: "80%" }} />
-          <div className="skeleton" style={{ height: 36, width: "100%" }} />
-          <p className="muted small" style={{ margin: 0 }}>
-            正在检查登录状态…
-          </p>
-        </div>
+        <Paper withBorder p="lg" className="card boot-card" role="status" aria-live="polite">
+          {sessionError ? (
+            <InlineError message={sessionError} onRetry={() => void check()} />
+          ) : (
+            <>
+              <div className="skeleton" style={{ height: 24, width: "55%" }} />
+              <div className="skeleton" style={{ height: 14, width: "80%" }} />
+              <div className="skeleton" style={{ height: 36, width: "100%" }} />
+              <p className="muted small" style={{ margin: 0 }}>
+                正在检查登录状态…
+              </p>
+            </>
+          )}
+        </Paper>
       </div>
     );
   } else if (!authed) {
@@ -341,92 +390,112 @@ export default function App() {
   } else {
     content = (
       <ToastProvider>
-        <a className="skip-link" href="#feedback-main">
-          跳到主要内容
-        </a>
-        <div className="shell">
-          {/* 顶部菜单：仅 <1200px 显示 */}
-          <div className="shell-top">
-            <button
-              type="button"
-              className="btn mobile-menu-toggle"
-              aria-label="打开管理菜单"
-              aria-haspopup="dialog"
-              aria-expanded={menuOpen}
-              onClick={() => setMenuOpen(true)}
-            >
-              <Icon name="apps" size={18} />
-              <span>{pageLabelOf(page)}</span>
-            </button>
-            <span className="shell-brand" style={{ padding: 0 }}>
-              Feedback 管理
-            </span>
-            <nav className="nav-scroll" aria-label="管理导航">
-              <NavItems page={page} onNav={nav} />
-            </nav>
-            <ThemeSelect />
-            <button type="button" className="btn sm" onClick={logout}>
-              退出
-            </button>
-          </div>
-          {/* 侧边导航：≥1200px */}
-          <nav className="shell-nav" aria-label="管理导航">
-            <div className="shell-brand">
-              <span className="brand-mark">
-                <Icon name="feedback" size={20} />
-              </span>
-              <div>
-                Feedback<span className="brand-caption">反馈管理工作台</span>
-              </div>
-            </div>
-            <div className="shell-nav-links">
-              <NavItems page={page} onNav={nav} />
-            </div>
-            <div className="shell-nav-footer">
-              <div className="session-identity">
-                <span className="session-avatar">
-                  <Icon name="users" size={16} />
+        <PageEditsContext.Provider value={edits}>
+          <a className="skip-link" href="#feedback-main">
+            跳到主要内容
+          </a>
+          <div className="shell">
+            {/* 顶部菜单：仅 <1200px 显示 */}
+            <div className="shell-top">
+              <Button
+                type="button"
+                className="btn mobile-menu-toggle"
+                aria-label="打开管理菜单"
+                aria-haspopup="dialog"
+                aria-expanded={menuOpen}
+                onClick={() => setMenuOpen(true)}
+              >
+                <span className="brand-mark">
+                  <Icon name="brand" size={20} />
                 </span>
-                <div>
-                  <strong>{sessionUser?.username ?? "管理员"}</strong>
-                  <span className="small muted session-role">管理员</span>
+                <span>{pageLabelOf(page)}</span>
+                <Icon name="chevronDown" size={13} />
+              </Button>
+              <Brand />
+              <nav className="nav-scroll" aria-label="管理导航">
+                <NavItems page={page} onNav={navigate} />
+              </nav>
+              <ThemeSelect />
+              <Button
+                size="xs"
+                type="button"
+                className="btn sm"
+                disabled={loggingOut}
+                onClick={() => navigate("logout")}
+              >
+                退出
+              </Button>
+            </div>
+            {/* 侧边导航：≥1200px */}
+            <nav className="shell-nav" aria-label="管理导航">
+              <Brand caption />
+              <div className="shell-nav-links">
+                <NavItems page={page} onNav={navigate} />
+              </div>
+              <div className="shell-nav-footer">
+                <div className="session-identity">
+                  <span className="session-avatar">
+                    <Icon name="users" size={16} />
+                  </span>
+                  <div>
+                    <strong>{sessionUser?.username ?? "管理员"}</strong>
+                    <span className="small muted session-role">管理员</span>
+                  </div>
+                </div>
+                <div className="shell-preferences">
+                  <ThemeSelect />
+                  <Button type="button" className="btn" disabled={loggingOut} onClick={() => navigate("logout")}>
+                    <Icon name="logout" size={15} />
+                    退出登录
+                  </Button>
                 </div>
               </div>
-              <div className="shell-preferences">
-                <ThemeSelect />
-              </div>
-              <button type="button" className="btn" style={{ width: "100%" }} onClick={logout}>
-                退出登录
-              </button>
-            </div>
-          </nav>
-          {/* 面包屑：分组 / 当前页（纯文本导航上下文，不引入额外焦点项） */}
-          <main className="shell-body" id="feedback-main" tabIndex={-1}>
-            <nav className="crumbs" aria-label="面包屑">
-              <span>{groupLabelOf(page)}</span>
-              <span className="crumb-sep" aria-hidden="true">
-                /
-              </span>
-              <span aria-current="page">{pageLabelOf(page)}</span>
             </nav>
-            {renderPage(page, handleCredentialsUpdated)}
-          </main>
-        </div>
-        {menuOpen && (
-          <Modal
-            title="管理菜单"
-            onClose={() => setMenuOpen(false)}
-            actions={
-              <button type="button" className="btn" onClick={() => setMenuOpen(false)}>
-                关闭菜单
-              </button>
-            }
-          >
-            <nav className="mobile-nav" aria-label="管理导航">
-              <NavItems page={page} onNav={nav} />
-            </nav>
-          </Modal>
-        )}
+            {/* 面包屑：分组 / 当前页（纯文本导航上下文，不引入额外焦点项） */}
+            <main className="shell-body" id="feedback-main" tabIndex={-1}>
+              <nav className="crumbs" aria-label="面包屑">
+                <Icon name="apps" size={14} />
+                <span>{groupLabelOf(page)}</span>
+                <span className="crumb-sep" aria-hidden="true">
+                  /
+                </span>
+                <span aria-current="page">{pageLabelOf(page)}</span>
+              </nav>
+              {navError && <InlineError message={navError} />}
+              {renderPage(page, handleCredentialsUpdated)}
+            </main>
+          </div>
+          {menuOpen && (
+            <Modal
+              title="管理菜单"
+              onClose={() => setMenuOpen(false)}
+              actions={
+                <Button type="button" className="btn" onClick={() => setMenuOpen(false)}>
+                  关闭菜单
+                </Button>
+              }
+            >
+              <nav className="mobile-nav" aria-label="管理导航">
+                <NavItems page={page} onNav={navigate} />
+              </nav>
+            </Modal>
+          )}
+          {pendingDestination && (
+            <ConfirmDialog
+              title="离开当前页面？"
+              body={<p>当前页还有未保存的修改。取消可以继续编辑。</p>}
+              confirmLabel="放弃修改并离开"
+              danger
+              onClose={() => setPendingDestination(null)}
+              onConfirm={() => {
+                const destination = pendingDestination;
+                setPendingDestination(null);
+                if (destination === "logout") void logout();
+                else nav(destination);
+              }}
+            />
+          )}
+        </PageEditsContext.Provider>
       </ToastProvider>
     );
   }

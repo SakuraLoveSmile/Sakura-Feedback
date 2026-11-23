@@ -82,14 +82,6 @@
   cursor: default;
 }
 
-.changelog-template-hint {
-  margin-top: var(--sp-6);
-  border-top: 1px solid var(--border);
-  color: var(--text-2);
-  font-size: 12px;
-  line-height: 20px;
-}
-
 .changelog-fields {
   border: 0;
   padding: 0;
@@ -98,8 +90,9 @@
 }
 
 .changelog-entry {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-ctl);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-panel);
+  background: color-mix(in srgb, var(--subtle) 46%, var(--panel));
   padding: var(--sp-4);
   margin-bottom: var(--sp-4);
 }
@@ -232,4 +225,45 @@
   .changelog-anonymous {
     min-height: 44px;
   }
+}
+
+.changelog-save {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  background: var(--panel);
+  padding-block: var(--sp-3);
+}
+@media (max-width: 767px) {
+  .changelog-save {
+    padding-right: 54px;
+  }
+}
+
+.changelog-page .changelog-save {
+  margin-top: var(--sp-2);
+}
+.changelog-section-head .warn-text {
+  margin-left: auto;
+}
+.release-dateline {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-block: 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.release-dateline time {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.release-dateline h2 {
+  margin: 0;
+  color: var(--primary);
+  font-size: 27px;
+  line-height: 1.2;
+}
+.changelog-preview li::marker {
+  color: var(--primary);
 }

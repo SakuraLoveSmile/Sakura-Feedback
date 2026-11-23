@@ -211,6 +211,90 @@ def dialogue_draft(page, base: str) -> None:
     page.unroute(pattern, dialogue_route)
 
 
+
+def triage_navigation(page, base: str) -> None:
+    page.goto(base + "/admin/")
+    entries = page.locator(".fb-table .cell-open")
+    expect(entries.first).to_be_visible()
+    expect(page.locator("th.col-user")).to_be_visible()
+    expect(page.locator(".feedback-detail-pane")).to_have_count(0)
+    entries.first.click()
+    current_url = page.url
+    drawer = page.locator(".drawer")
+    drawer.get_by_role("button", name="写回复", exact=True).click()
+    reply = drawer.get_by_role("textbox", name="回复内容")
+    expect(reply).to_be_focused()
+    reply.fill("待复核的回复草稿")
+    entries.nth(1).click()
+    confirm = page.get_by_role("dialog", name="放弃未保存的内容？")
+    expect(confirm).to_be_visible()
+    expect(page).to_have_url(current_url)
+    confirm.get_by_role("button", name="取消").click()
+    expect(reply).to_have_value("待复核的回复草稿")
+    expect(entries.first).to_have_attribute("aria-current", "true")
+    entries.nth(1).click()
+    confirm.get_by_role("button", name="放弃并切换").click()
+    expect(entries.nth(1)).to_have_attribute("aria-current", "true")
+    expect(reply).to_have_value("")
+    second_url = page.url
+    pending = []
+    messages = re.compile(re.escape(base) + r"/api/admin/feedback/[^/]+/messages$")
+    page.route(messages, lambda route: pending.append(route))
+    reply.fill("已收到，正在核对导出流程。")
+    drawer.get_by_role("button", name="回复", exact=True).click()
+    expect(reply).to_be_disabled()
+    entries.first.click()
+    expect(page).to_have_url(second_url)
+    expect(entries.nth(1)).to_have_attribute("aria-current", "true")
+    expect(confirm).to_have_count(0)
+    assert len(pending) == 1
+    pending.pop().continue_()
+    expect(reply).to_have_value("")
+    expect(drawer.get_by_text("已收到，正在核对导出流程。", exact=True)).to_be_visible()
+    page.unroute(messages)
+    check("回复发送中留在原反馈，真实提交后对话可读回", True)
+    drawer.get_by_role("button", name="关闭", exact=True).click()
+    expect(entries.nth(1)).to_be_focused()
+    check("桌面全宽列表、写回复入口、取消保留草稿、确认切换及关闭后焦点恢复", True)
+
+    page.set_viewport_size({"width": 390, "height": 844})
+    try:
+        search = page.get_by_role("searchbox", name="搜索反馈")
+        expect(search).to_be_visible()
+        toggle = page.locator("#fb-filter-toggle")
+        expect(toggle).to_have_attribute("aria-expanded", "false")
+        search.fill("CSV")
+        cards = page.locator(".fb-card-open")
+        expect(cards).to_have_count(1)
+        expect(cards.first).to_contain_text("CSV")
+        toggle.click()
+        page.get_by_label("软件筛选").select_option(helpers.SEED_APP_ID)
+        toggle.click()
+        expect(search).to_have_value("CSV")
+        expect(page.get_by_role("region", name="已生效筛选")).to_contain_text(helpers.SEED_APP_NAME)
+        page.get_by_role("button", name="清除全部筛选", exact=True).click()
+        expect(cards).to_have_count(3)
+        check("手机可直接搜索，与软件筛选组合后能清除并恢复完整列表", True)
+    finally:
+        page.set_viewport_size({"width": 1440, "height": 900})
+
+
+def list_failure_retry(page, base: str) -> None:
+    for name, endpoint, title in (
+        ("accounts", "/api/admin/users", "账号列表未加载"),
+        ("sessions", "/api/auth/sessions", "会话列表未加载"),
+    ):
+        path = base + endpoint
+        page.route(path, lambda route: fail(route, "读取列表暂时失败"))
+        page.goto(base + "/admin/?page=" + name)
+        expect(page.get_by_text(title, exact=True)).to_be_visible()
+        expect(page.locator(".skeleton-rows")).to_have_count(0)
+        page.unroute(path)
+        page.get_by_role("button", name="重试", exact=True).click()
+        expect(page.locator("tbody tr").first).to_be_visible()
+        expect(page.get_by_text(title, exact=True)).to_have_count(0)
+        check(title + "时停止骨架，重试真实读取恢复列表", True)
+
 def apps_draft(page, base: str, api) -> None:
     st, _ = api.call("POST", "/api/admin/apps", {
         "appId": "com.experience.second", "name": "体验回归第二软件", "allowedOrigins": [],
@@ -261,6 +345,246 @@ def apps_draft(page, base: str, api) -> None:
     st, saved = api.call("GET", "/api/admin/apps")
     names = {a["appId"]: a["name"] for a in saved["apps"]}
     check("放弃与取消均未写入服务器或意外创建软件", st == 200 and names == expected_names)
+
+
+
+def directories(page, base: str, api) -> None:
+    page.set_viewport_size({"width": 390, "height": 844})
+    try:
+        for slug, label, title in (
+            ("accounts", "搜索用户名", "没有匹配的账号"),
+            ("apps", "搜索软件名称或 appId", "没有匹配的软件"),
+            ("sessions", "搜索设备或会话名称", "没有匹配的会话"),
+        ):
+            page.goto(base + "/admin/?page=" + slug)
+            find = page.get_by_role("searchbox", name=label)
+            expect(page.locator(".directory-table tbody tr").first).to_be_visible()
+            assert page.locator(".directory-table").evaluate("el => el.getBoundingClientRect().width <= innerWidth")
+            find.fill("zz-no-matches-zz")
+            expect(page.get_by_text(title, exact=True)).to_be_visible()
+            page.get_by_role("button", name="清除筛选", exact=True).click()
+            expect(page.locator(".directory-table tbody tr").first).to_be_visible()
+            if slug == "accounts":
+                row = page.get_by_role("row").filter(has_text=helpers.USER_NAME)
+                limit = row.get_by_role("textbox", name=helpers.USER_NAME + " 每日上限")
+                limit.fill("")
+                row.get_by_role("button", name="保存", exact=True).click()
+                expect(row.get_by_role("alert")).to_be_visible()
+                limit.fill("19")
+                row.get_by_role("button", name="保存", exact=True).click()
+                expect(page.get_by_text("每日上限已更新", exact=True)).to_be_visible()
+                _, users = api.call("GET", "/api/admin/users")
+                assert next(u for u in users["users"] if u["username"] == helpers.USER_NAME)["dailyLimit"] == 19
+            if slug == "apps":
+                find.fill(helpers.SEED_APP_ID)
+                page.get_by_role("button", name="配置", exact=True).click()
+                expect(page.get_by_role("heading", name=re.compile(r"配置：\s*" + re.escape(helpers.SEED_APP_NAME)))).to_be_focused()
+            check("手机目录搜索、恢复与完整卡片：" + slug, True)
+    finally:
+        page.set_viewport_size({"width": 1440, "height": 900})
+
+
+def changelog_edit(page, base: str, api) -> None:
+    page.goto(base + "/admin/?page=feedbacks")
+    nav = page.locator(".shell-nav")
+    release_list = base + "/api/admin/changelog?*"
+    page.route(release_list, lambda route: fail(route, "版本记录暂时不可用"))
+    nav.get_by_role("button", name="更新日志", exact=True).click()
+    expect(page.get_by_text("版本记录暂时不可用", exact=True)).to_be_visible()
+    expect(page.locator("#changelog-version-input")).to_have_count(0)
+    page.unroute(release_list)
+    page.get_by_role("button", name="重试", exact=True).click()
+    version = page.locator("#changelog-version-input")
+    version.fill("1.2.3")
+    page.locator("#changelog-summary").fill("手机端可以直接查找账号")
+    page.get_by_placeholder("例如：修复导出文件时偶发的闪退").fill("改善手机账号操作")
+    page.get_by_role("button", name="预览当前版本").click()
+    preview = page.get_by_role("dialog", name="展示预览")
+    expect(preview.get_by_text("改善手机账号操作", exact=True)).to_be_visible()
+    preview.get_by_role("button", name="返回编辑").click()
+    page.get_by_role("button", name="新建版本", exact=True).click()
+    page.get_by_role("dialog", name="放弃本版本的修改？").get_by_role("button", name="取消").click()
+    expect(version).to_have_value("1.2.3")
+    nav.get_by_role("button", name="会话", exact=True).click()
+    page.get_by_role("dialog", name="离开当前页面？").get_by_role("button", name="取消").click()
+    with page.expect_event("dialog") as pending:
+        page.evaluate("() => { setTimeout(() => history.back(), 0); }")
+    pending.value.dismiss()
+    expect(page).to_have_url(re.compile(r"page=changelog"))
+    expect(version).to_have_value("1.2.3")
+    with page.expect_event("dialog") as leaving:
+        page.evaluate("() => { setTimeout(() => location.reload(), 0); }")
+    assert leaving.value.type == "beforeunload"
+    leaving.value.dismiss()
+    expect(version).to_have_value("1.2.3")
+    page.get_by_role("button", name="保存草稿").click()
+    expect(page.get_by_text("草稿已保存，尚未对外发布", exact=True)).to_be_visible()
+    app = page.locator("#changelog-app").input_value()
+    _, data = api.call("GET", "/api/admin/changelog?appId=" + app)
+    assert any(x["version"] == "1.2.3" and not x["publishedAt"] for x in data["items"])
+    nav.get_by_role("button", name="反馈", exact=True).click()
+    quick = page.get_by_role("button", name="待管理处理", exact=True)
+    quick.click()
+    expect(page.get_by_label("工单沟通状态筛选")).to_have_value("waiting_admin")
+    quick.click()
+    expect(page.get_by_label("工单沟通状态筛选")).to_have_value("")
+    check("版本读取失败可重试，日志预览、跨页/后退/刷新取消保留草稿、保存并读回", True)
+    active = page.get_by_role("tab", selected=True)
+    active.press("End")
+    expect(active).to_contain_text("回收站")
+    expect(active).to_be_focused()
+    active.press("Home")
+    expect(active).to_contain_text("收件箱")
+    check("待管理处理快捷筛选、键盘切换反馈区域及焦点", True)
+
+    panel = page.get_by_role("tabpanel", name=re.compile("收件箱"))
+    menu_button = panel.get_by_role("button", name="更多操作", exact=True).first
+    menu_button.press("ArrowDown")
+    menu = page.get_by_role("menu")
+    expect(menu.get_by_role("menuitem").first).to_be_focused()
+    menu.press("Escape")
+    expect(menu).to_have_count(0)
+    expect(menu_button).to_be_focused()
+    menu_button.click()
+    menu.get_by_role("menuitem", name="移入回收站").click()
+    modal = page.get_by_role("dialog", name=re.compile("移入回收站"))
+    modal.get_by_role("button", name="取消").click()
+    expect(menu_button).to_be_focused()
+    check("行菜单键盘打开和退出、确认弹窗取消后归焦", True)
+
+
+def connections_and_settings(page, base: str, api) -> None:
+    url = base + "/api/admin/connection/kaneo"
+    page.route(url, lambda route: fail(route, "Kaneo 配置读取暂时失败"))
+    page.goto(base + "/admin/?page=connections")
+    k = page.get_by_role("region", name="Kaneo 连接")
+    a = page.get_by_role("region", name="AI 连接")
+    expect(k.get_by_role("alert")).to_be_visible()
+    name = a.get_by_label("模型", exact=True)
+    name.fill("mock-new-model")
+    expect(a.get_by_role("button", name="连接测试", exact=True)).to_be_disabled()
+    page.unroute(url)
+    k.get_by_role("button", name="重试", exact=True).click()
+    expect(k.locator("#kb")).to_be_visible()
+    expect(name).to_have_value("mock-new-model")
+    a.get_by_role("button", name="保存", exact=True).click()
+    expect(a.get_by_text("AI 配置已保存", exact=True)).to_be_visible()
+    _, data = api.call("GET", "/api/admin/connection/ai")
+    assert data["model"] == "mock-new-model" and data["apiKeySet"]
+    a.get_by_role("button", name="连接测试", exact=True).click()
+    expect(a.get_by_role("status")).to_contain_text("AI 连通正常")
+    check("连接卡失败独立重试、草稿隔离、保留原密钥、保存新模型并测试本地模拟服务", True)
+
+    page.goto(base + "/admin/?page=settings")
+    save = page.get_by_role("button", name="保存", exact=True)
+    page.locator("#me-current").fill("temporary-draft")
+    expect(save).to_be_disabled()
+    page.locator("#me-username").fill("new-draft")
+    expect(save).to_be_enabled()
+    expect(page.locator(".profile-text b")).to_have_text(helpers.ADMIN_USER)
+    page.locator(".shell-nav").get_by_role("button", name="系统更新").click()
+    page.get_by_role("button", name="放弃修改并离开").click()
+    expect(page.get_by_role("heading", name="系统更新")).to_be_visible()
+    expect(page.get_by_role("button", name="检查更新")).to_be_disabled()
+    expect(page.get_by_text("更新检查已关闭，暂无发布说明。")).to_be_visible()
+    check("管理员设置拦截无改动保存；离开可取消草稿；关闭版本源时检查状态一致", True)
+
+def session_revoke(page, base: str, api) -> None:
+    client = "回归专用测试设备"
+    response, details = api.call("POST", "/api/auth/login", {
+        "username": helpers.ADMIN_USER, "password": helpers.ADMIN_PASS,
+        "clientLabel": client, "appId": helpers.SEED_APP_ID,
+    })
+    assert response == 200 and "token" in details
+    page.goto(base + "/admin/?page=sessions")
+    page.get_by_label("会话类型筛选").select_option("client")
+    row = page.get_by_role("row").filter(has_text=client)
+    row.get_by_role("button", name="撤销").click()
+    confirm = page.get_by_role("dialog", name="撤销该会话？")
+    expect(confirm).to_contain_text(client)
+    confirm.get_by_role("button", name="取消").click()
+    expect(row).to_be_visible()
+    row.get_by_role("button", name="撤销").click()
+    confirm.get_by_role("button", name="撤销", exact=True).click()
+    expect(row).to_have_count(0)
+    devices = page.context.request.get(base + "/api/auth/sessions").json()["sessions"]
+    assert all(item.get("clientLabel") != client for item in devices)
+    others = sum(not item["current"] for item in devices)
+    page.get_by_role("button", name="撤销其它全部会话").click()
+    bulk = page.get_by_role("dialog", name="撤销其它全部会话？")
+    expect(bulk).to_contain_text(f"以外的 {others} 个会话")
+    bulk.get_by_role("button", name="取消").click()
+    assert page.context.request.get(base + "/api/auth/session").ok
+    check("按类型查找会话，取消后保留、确认后撤销指定测试设备，批量确认显示真实数量", True)
+
+
+def login_and_logout(browser, base: str) -> None:
+    with browser.new_context(viewport={"width": 1440, "height": 900}) as ctx:
+        page = ctx.new_page()
+        session_url = base + "/api/auth/session"
+        page.route(session_url, lambda r: fail(r, "会话服务暂时不可用"))
+        page.goto(base + "/admin/?page=feedbacks")
+        expect(page.get_by_text("暂时无法连接管理服务，请重试。")).to_be_visible()
+        page.unroute(session_url)
+        page.get_by_role("button", name="重试", exact=True).click()
+        form = page.locator(".login-form")
+        form.locator("#u").fill(helpers.USER_NAME)
+        password = form.locator("#p")
+        password.fill(helpers.USER_PASS)
+        toggle = form.get_by_role("button", name="显示密码")
+        toggle.click()
+        expect(password).to_have_attribute("type", "text")
+        expect(password).to_have_attribute("data-feedback-capture-mask", "")
+        toggle.click()
+        expect(password).to_have_attribute("type", "password")
+        form.get_by_role("button", name="登录", exact=True).click()
+        expect(form.get_by_text("这个账号可以提交反馈。请使用管理员账号登录工作台。")).to_be_visible()
+        form.locator("#u").fill(helpers.ADMIN_USER)
+        password.fill(helpers.ADMIN_PASS)
+        form.get_by_role("button", name="重试登录").click()
+        logout = page.get_by_role("button", name="退出登录", exact=True)
+        logout_url = base + "/api/auth/logout"
+        page.route(logout_url, lambda r: fail(r, "退出暂时不可用"))
+        logout.click()
+        expect(page.get_by_text("退出失败，当前页面已保留。请重试退出。")).to_be_visible()
+        page.unroute(logout_url)
+        logout.click()
+        expect(form).to_be_visible()
+        assert ctx.request.get(session_url).status == 401
+        check("会话检查失败可重试、密码显隐、普通账号提示、管理员登录及退出失败重试", True)
+
+
+def update_and_credentials(page, base: str, api) -> None:
+    url = base + "/api/admin/system/update"
+    status_code, status = api.call("GET", "/api/admin/system/update")
+    assert status_code == 200
+    status["config"]["manifestUrl"] = base + "/example-manifest"
+    page.route(url, lambda r: r.fulfill(json=status))
+    page.route(url + "/check", lambda r: r.fulfill(json={"check": {
+        "state": "failed", "checkedAt": "2026-01-02T00:00:00Z", "failedMessage": "本地版本清单暂时不可用"
+    }}))
+    page.goto(base + "/admin/?page=system-update")
+    page.get_by_role("button", name="检查更新").click()
+    expect(page.get_by_role("alert")).to_contain_text("本地版本清单暂时不可用")
+    expect(page.locator(".inline-ok")).to_have_count(0)
+    page.context.grant_permissions(["clipboard-read", "clipboard-write"], origin=base)
+    page.get_by_role("button", name="复制更新命令").click()
+    expect(page.get_by_text("已复制更新命令", exact=True)).to_be_visible()
+    assert page.evaluate("navigator.clipboard.readText()") == "bash deploy/update.sh"
+    check("版本源报错展示失败原因，复制按钮将完整命令写入剪贴板", True)
+
+    page.locator(".shell-nav").get_by_role("button", name="管理员设置").click()
+    new_name = helpers.ADMIN_USER + "-updated"
+    page.locator("#me-username").fill(new_name)
+    page.locator("#me-current").fill(helpers.ADMIN_PASS)
+    page.get_by_role("button", name="保存", exact=True).click()
+    login = page.locator(".login-form")
+    expect(login.locator("#u")).to_have_value(new_name)
+    assert api.call("GET", "/api/auth/session")[0] == 401
+    login.locator("#p").fill(helpers.ADMIN_PASS)
+    login.get_by_role("button", name="登录", exact=True).click()
+    expect(page.locator(".profile-text b")).to_have_text(new_name)
+    check("修改临时管理员名称后旧会话失效，使用预填的新名称重新登录", True)
 
 
 def run() -> int:
@@ -316,9 +640,17 @@ def run() -> int:
                                 raise
                             helpers.seed(api)
                             for name, scenario in (
+                                ("login-and-logout", lambda: login_and_logout(browser, base)),
                                 ("password-reset", lambda: password_reset(page, base, api)),
                                 ("dialogue-draft", lambda: dialogue_draft(page, base)),
+                                ("triage-navigation", lambda: triage_navigation(page, base)),
+                                ("list-failure-retry", lambda: list_failure_retry(page, base)),
                                 ("apps-draft", lambda: apps_draft(page, base, api)),
+                                ("directories", lambda: directories(page, base, api)),
+                                ("changelog-edit", lambda: changelog_edit(page, base, api)),
+                                ("connections-and-settings", lambda: connections_and_settings(page, base, api)),
+                                ("session-revoke", lambda: session_revoke(page, base, api)),
+                                ("update-and-credentials", lambda: update_and_credentials(page, base, api)),
                             ):
                                 try:
                                     scenario()
@@ -356,7 +688,11 @@ def run() -> int:
         "coverage": ["initial-app-list-failure-retry-empty", "password-reset-failure-mask-raw-value",
                      "password-reset-delayed-duplicate-enter", "successful-reset-list-readback-failure-focus",
                      "dialogue-load-retry-draft", "drawer-escape-button-draft-protection-focus",
-                     "apps-switch-existing-and-new-draft-protection"],
+                     "feedback-full-list-switch-draft-reply-focus", "reply-in-flight-switch-guard",
+                     "mobile-search-and-filters", "accounts-sessions-list-failure-retry",
+                     "apps-switch-existing-and-new-draft-protection", "mobile-directories", "changelog-draft-preview-save",
+                     "dirty-page-navigation", "saved-connection-tests", "settings-noop", "disabled-update-source", "session-revoke-confirm-and-readback",
+                     "login-role-logout-retry", "update-failure-and-clipboard", "credential-change-and-relogin"],
         "notCovered": ["deletion", "full-business-lifecycle", "real-AI-or-Kaneo", "visual-matrix"],
         "fixtureNotes": ["初始空列表场景暂时让后台反馈组件的自动注册 POST 返回503，以维持真实空数据库；之后恢复正常 API。",
                          "延迟密码请求只暂停在浏览器网络边界，释放后由真实本地 API 完成重置；新密码用真实登录验证。"],

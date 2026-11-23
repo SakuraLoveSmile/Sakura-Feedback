@@ -1,359 +1,253 @@
-import { useEffect, useState } from "react";
+import { Badge, Button, Input, Paper } from "@mantine/core";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, api, type KaneoTestResult } from "../api.ts";
+import { usePageEdits } from "../page-edits.ts";
 import { Field, Icon, InlineError, SkeletonRows } from "../ui.tsx";
 
-interface KaneoGet {
+interface Connection {
   baseUrl: string | null;
-  clientUrl: string | null;
-  apiKeySet: boolean;
-}
-interface AiGet {
-  baseUrl: string | null;
-  model: string | null;
+  clientUrl?: string | null;
+  model?: string | null;
   apiKeySet: boolean;
 }
 
-type CardMsg = { kind: "ok" | "err"; text: string } | null;
-
-export default function ConnectionsView() {
-  const [k, setK] = useState<KaneoGet | null>(null);
-  const [a, setA] = useState<AiGet | null>(null);
-  const [kBaseUrl, setKBaseUrl] = useState("");
-  const [kClientUrl, setKClientUrl] = useState("");
-  const [kApiKey, setKApiKey] = useState("");
-  const [aBaseUrl, setABaseUrl] = useState("");
-  const [aModel, setAModel] = useState("");
-  const [aApiKey, setAApiKey] = useState("");
-  const [testProjectId, setTestProjectId] = useState("");
-  /** 操作结果按卡片分别回显：贴近各自表单的保存/测试按钮。 */
-  const [kMsg, setKMsg] = useState<CardMsg>(null);
-  const [aMsg, setAMsg] = useState<CardMsg>(null);
-  const [busy, setBusy] = useState(false);
-  /** 初始加载：进行中显示骨架；失败显示可重试的页级错误（不再静默挂骨架）。 */
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [reloadKey, setReloadKey] = useState(0);
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: reloadKey 仅作手动重载触发器，effect 体只依赖网络请求结果
-  useEffect(() => {
-    let alive = true;
-    setLoading(true);
-    setLoadError(null);
-    void (async () => {
-      try {
-        const [kk, aa] = await Promise.all([
-          api.get<KaneoGet>("/api/admin/connection/kaneo"),
-          api.get<AiGet>("/api/admin/connection/ai"),
-        ]);
-        if (!alive) return;
-        setK(kk);
-        setA(aa);
-        setKBaseUrl(kk.baseUrl ?? "");
-        setKClientUrl(kk.clientUrl ?? "");
-        setABaseUrl(aa.baseUrl ?? "");
-        setAModel(aa.model ?? "");
-      } catch (err) {
-        if (!alive) return;
-        setLoadError(err instanceof ApiError ? err.message : "加载失败");
-      } finally {
-        if (alive) setLoading(false);
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [reloadKey]);
-
-  async function run(fn: () => Promise<unknown>, okText: string, setMsg: (m: CardMsg) => void) {
-    setBusy(true);
-    setMsg(null);
+function ConnectionCard({ kind }: { kind: "kaneo" | "ai" }) {
+  const kaneo = kind === "kaneo";
+  const name = kaneo ? "Kaneo" : "AI";
+  const path = `/api/admin/connection/${kind}`;
+  const [saved, setSaved] = useState<Connection | null>(null);
+  const [base, setBase] = useState("");
+  const [extra, setExtra] = useState("");
+  const [key, setKey] = useState("");
+  const [project, setProject] = useState("");
+  const [loadError, setLoadError] = useState("");
+  const [action, setAction] = useState<"save" | "test" | "test-vision" | null>(null);
+  const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const readSeq = useRef(0);
+  const load = useCallback(async () => {
+    const request = ++readSeq.current;
+    setLoadError("");
     try {
-      const r = await fn();
-      const failed = typeof r === "object" && r !== null && "ok" in r && (r as KaneoTestResult).ok === false;
-      if (failed) {
-        setMsg({ kind: "err", text: `测试未通过：${(r as KaneoTestResult).reason}` });
-      } else {
-        const extra =
-          typeof r === "object" && r !== null && "columns" in r
-            ? `，加载到 ${(r as KaneoTestResult).columns?.length} 列（项目「${(r as KaneoTestResult).project?.name}」）`
-            : typeof r === "object" && r !== null && "reply" in r
-              ? `：${String((r as { reply?: string }).reply)}`
-              : "";
-        setMsg({ kind: "ok", text: okText + extra });
-      }
+      const config = await api.get<Connection>(path);
+      if (readSeq.current !== request) return;
+      setSaved(config);
+      setBase(config.baseUrl ?? "");
+      setExtra((kaneo ? config.clientUrl : config.model) ?? "");
     } catch (err) {
-      setMsg({ kind: "err", text: err instanceof ApiError ? err.message : "请求失败" });
+      if (readSeq.current !== request) return;
+      setLoadError(err instanceof ApiError ? err.message : "暂时无法读取配置");
+    }
+  }, [path, kaneo]);
+  useEffect(() => {
+    void load();
+    return () => {
+      readSeq.current++;
+    };
+  }, [load]);
+
+  const dirty =
+    !!saved &&
+    (base.trim() !== (saved.baseUrl ?? "") ||
+      extra.trim() !== ((kaneo ? saved.clientUrl : saved.model) ?? "") ||
+      Boolean(key.trim()));
+  const ready = Boolean(saved?.apiKeySet && saved.baseUrl && (kaneo || saved.model));
+  usePageEdits(dirty, action !== null);
+
+  async function save(event: React.FormEvent) {
+    event.preventDefault();
+    if (action || !dirty) return;
+    setAction("save");
+    setResult(null);
+    try {
+      const values = { baseUrl: base.trim(), ...(kaneo ? { clientUrl: extra.trim() } : { model: extra.trim() }) };
+      const response = await api.put<{ apiKeySet: boolean }>(path, {
+        ...values,
+        ...(key.trim() ? { apiKey: key } : {}),
+      });
+      setSaved({ ...values, apiKeySet: response.apiKeySet });
+      setBase(values.baseUrl);
+      setExtra(extra.trim());
+      setKey("");
+      setResult({ ok: true, text: `${name} 配置已保存` });
+    } catch (err) {
+      setResult({ ok: false, text: err instanceof ApiError ? err.message : "保存失败，请重试" });
     } finally {
-      setBusy(false);
+      setAction(null);
     }
   }
 
-  /** 卡内结果回显：错误红底 role=alert；成功绿底 role=status。就近的保存/测试按钮即重试入口。 */
-  function renderMsg(msg: CardMsg) {
-    if (!msg) return null;
-    return msg.kind === "ok" ? (
-      <p className="inline-ok" role="status">
-        {msg.text}
-      </p>
-    ) : (
-      <InlineError message={msg.text} />
-    );
+  async function test(mode: "test" | "test-vision") {
+    if (action || dirty || !ready || (kaneo && !project.trim())) return;
+    setAction(mode);
+    setResult(null);
+    try {
+      const r = await api.post<KaneoTestResult & { reply?: string }>(
+        `${path}/${mode}`,
+        kaneo ? { projectId: project.trim() } : undefined,
+      );
+      const text =
+        kaneo && r.project
+          ? `连通正常，项目「${r.project.name}」有 ${r.columns?.length ?? 0} 列`
+          : mode === "test-vision"
+            ? "AI 图像识别测试正常"
+            : "AI 连通正常";
+      setResult({ ok: r.ok, text: r.ok ? text + (r.reply ? ` · ${r.reply}` : "") : r.reason || "连接测试失败" });
+    } catch (err) {
+      setResult({ ok: false, text: err instanceof ApiError ? err.message : "连接测试失败" });
+    } finally {
+      setAction(null);
+    }
   }
-
-  const busyTitle = busy ? "有操作进行中，稍候重试" : undefined;
-
-  if (loadError && !k) {
-    return (
-      <div>
-        <div className="page-header">
-          <div>
-            <h1>连接配置</h1>
-            <div className="sub">Kaneo 同步目标与 AI 整理服务；密钥只写服务器，不回显。</div>
-          </div>
-        </div>
-        <InlineError message={loadError} onRetry={() => setReloadKey((x) => x + 1)} />
-      </div>
-    );
-  }
-
-  if (loading || !k || !a) {
-    return (
-      <div>
-        <div className="page-header">
-          <div>
-            <h1>连接配置</h1>
-            <div className="sub">Kaneo 同步目标与 AI 整理服务；密钥只写服务器，不回显。</div>
-          </div>
-        </div>
-        <div className="card">
-          <SkeletonRows rows={4} />
-        </div>
-      </div>
-    );
-  }
-
-  const kReady = Boolean(k.baseUrl && k.apiKeySet);
-  const aReady = Boolean(a.baseUrl && a.model && a.apiKeySet);
-  const readyCount = Number(kReady) + Number(aReady);
 
   return (
-    <div>
+    <Paper component="section" withBorder p="lg" className="card conn-card" aria-label={`${name} 连接`}>
+      <div className="conn-head">
+        <span className={`conn-icon ${kaneo ? "tone-info" : "tone-ai"}`}>
+          <Icon name={kaneo ? "link" : "feedback"} />
+        </span>
+        <div className="conn-title">
+          <h2 className="conn-name">{kaneo ? "Kaneo 连接" : "AI（OpenAI 兼容）"}</h2>
+          <p>{kaneo ? "同步反馈到项目与任务列" : "整理反馈文字与截图"}</p>
+        </div>
+        {saved && (
+          <Badge
+            component="span"
+            variant="light"
+            radius="sm"
+            color={dirty || !ready ? "orange" : "teal"}
+            className="tag"
+          >
+            {dirty ? "未保存" : ready ? "已配置" : "待配置"}
+          </Badge>
+        )}
+      </div>
+      {loadError ? (
+        <InlineError message={loadError} onRetry={() => void load()} />
+      ) : !saved ? (
+        <SkeletonRows rows={4} />
+      ) : (
+        <>
+          <form onSubmit={save} onChange={() => setResult(null)}>
+            <fieldset className="connection-fields" disabled={!!action}>
+              <Field id={kaneo ? "kb" : "ab"} label={kaneo ? "API 地址" : "接口地址"}>
+                {(ctl) => (
+                  <Input
+                    error={ctl["aria-invalid"]}
+                    {...ctl}
+                    type="url"
+                    required
+                    value={base}
+                    onChange={(e) => setBase(e.target.value)}
+                    placeholder={kaneo ? "http://kaneo.local:1337" : "https://api.openai.com/v1"}
+                  />
+                )}
+              </Field>
+              <Field
+                id={kaneo ? "kc" : "am"}
+                label={kaneo ? "Web 地址" : "模型"}
+                hint={kaneo ? "用于打开任务链接，留空时沿用 API 地址。" : undefined}
+              >
+                {(ctl) => (
+                  <Input
+                    error={ctl["aria-invalid"]}
+                    {...ctl}
+                    type={kaneo ? "url" : "text"}
+                    maxLength={kaneo ? undefined : 100}
+                    required={!kaneo}
+                    value={extra}
+                    onChange={(e) => setExtra(e.target.value)}
+                  />
+                )}
+              </Field>
+              <Field
+                id={kaneo ? "kk" : "ak"}
+                label={kaneo ? "API Key" : "密钥"}
+                hint={saved.apiKeySet ? "已保存密钥。留空可沿用，输入新值可替换。" : "密钥加密保存在服务器。"}
+              >
+                {(ctl) => (
+                  <Input
+                    error={ctl["aria-invalid"]}
+                    {...ctl}
+                    type="password"
+                    value={key}
+                    autoComplete="new-password"
+                    placeholder={saved.apiKeySet ? "••••••••" : "输入密钥"}
+                    onChange={(e) => setKey(e.target.value)}
+                  />
+                )}
+              </Field>
+              <Button variant="filled" type="submit" className="btn primary" disabled={!dirty}>
+                {action === "save" ? "保存中…" : "保存"}
+              </Button>
+            </fieldset>
+          </form>
+          <div className="connection-test">
+            {kaneo && (
+              <Field id="tp" label="测试用项目 id">
+                {(ctl) => (
+                  <Input
+                    error={ctl["aria-invalid"]}
+                    {...ctl}
+                    value={project}
+                    disabled={!!action}
+                    onChange={(e) => {
+                      setProject(e.target.value);
+                      setResult(null);
+                    }}
+                  />
+                )}
+              </Field>
+            )}
+            <div className="btn-row">
+              <Button
+                type="button"
+                className="btn"
+                disabled={!!action || dirty || !ready || (kaneo && !project.trim())}
+                onClick={() => void test("test")}
+              >
+                {action === "test" ? "测试中…" : "连接测试"}
+              </Button>
+              {!kaneo && (
+                <Button
+                  type="button"
+                  className="btn"
+                  disabled={!!action || dirty || !ready}
+                  onClick={() => void test("test-vision")}
+                >
+                  {action === "test-vision" ? "测试中…" : "测试图像识别 (Vision)"}
+                </Button>
+              )}
+            </div>
+            {(dirty || !ready) && (
+              <p className="field-hint">{dirty ? "请先保存修改，再测试这组配置。" : "配置地址和密钥后可测试连接。"}</p>
+            )}
+          </div>
+          {result &&
+            (result.ok ? (
+              <p className="inline-ok" role="status">
+                {result.text}
+              </p>
+            ) : (
+              <InlineError message={result.text} />
+            ))}
+        </>
+      )}
+    </Paper>
+  );
+}
+
+export default function ConnectionsView() {
+  return (
+    <div className="connections-page">
       <div className="page-header">
         <div>
           <h1>连接配置</h1>
-          <div className="sub">Kaneo 同步目标与 AI 整理服务；密钥只写服务器，不回显。</div>
+          <div className="sub">管理任务同步与反馈整理使用的服务。</div>
         </div>
-        <span className={`tag ${readyCount === 2 ? "archived" : "tone-warn"}`}>{readyCount} / 2 项已配置</span>
       </div>
       <div className="cards-2col conn-grid">
-        <div className="card conn-card">
-          <div className="conn-head">
-            <span className="conn-icon tone-info">
-              <Icon name="link" size={18} />
-            </span>
-            <div className="conn-title">
-              <h2 className="conn-name">Kaneo 连接</h2>
-              <p>反馈自动同步到任务实例</p>
-            </div>
-            <span className={`tag ${kReady ? "archived" : "tone-warn"}`}>{kReady ? "已配置" : "待配置"}</span>
-          </div>
-          <div className="conn-meta-row">
-            <span className="conn-meta-main">
-              <span className={`status-dot ${k.apiKeySet ? "is-ok" : "is-muted"}`} aria-hidden="true" />
-              API Key {k.apiKeySet ? "已保存" : "未保存"}
-            </span>
-            <span className="muted">测试结果显示在本卡片内</span>
-          </div>
-          <p className="form-section-desc">留空的密钥表示沿用已保存值；保存只写入本服务器。</p>
-          <Field id="kb" label="API 地址" hint="含或不含 /api 后缀均可。">
-            {(ctl) => (
-              <input
-                {...ctl}
-                value={kBaseUrl}
-                onChange={(e) => setKBaseUrl(e.target.value)}
-                placeholder="http://kaneo.local:1337"
-              />
-            )}
-          </Field>
-          <Field id="kc" label="Web 地址" hint="任务链接基址，可留空 = 同 API 地址。">
-            {(ctl) => (
-              <input
-                {...ctl}
-                value={kClientUrl}
-                onChange={(e) => setKClientUrl(e.target.value)}
-                placeholder="https://kaneo.example.com"
-              />
-            )}
-          </Field>
-          <Field
-            id="kk"
-            label={<>API Key {k.apiKeySet && <span className="ok-text">（已保存，留空则不修改）</span>}</>}
-            hint="只写入服务器，保存后不再回显。"
-          >
-            {(ctl) => (
-              <input
-                {...ctl}
-                type="password"
-                value={kApiKey}
-                onChange={(e) => setKApiKey(e.target.value)}
-                placeholder={k.apiKeySet ? "••••••••" : "sk_…"}
-              />
-            )}
-          </Field>
-          <div className="btn-row">
-            <button
-              type="button"
-              className="btn primary"
-              disabled={busy}
-              title={busyTitle}
-              onClick={() =>
-                run(
-                  async () => {
-                    const r = await api.put("/api/admin/connection/kaneo", {
-                      baseUrl: kBaseUrl,
-                      clientUrl: kClientUrl || undefined,
-                      ...(kApiKey ? { apiKey: kApiKey } : {}),
-                    });
-                    setKApiKey("");
-                    const kk = await api.get<KaneoGet>("/api/admin/connection/kaneo");
-                    setK(kk);
-                    return r;
-                  },
-                  "Kaneo 配置已保存",
-                  setKMsg,
-                )
-              }
-            >
-              保存
-            </button>
-          </div>
-          {renderMsg(kMsg)}
-          <p className="save-hint">保存位置：写入本服务器的连接配置；密钥加密存储、不回显。</p>
-          <hr className="sep" />
-          <div className="row" style={{ alignItems: "flex-start" }}>
-            <div style={{ flex: 1 }}>
-              <Field id="tp" label="测试用项目 id" hint="填入要在 Kaneo 中校验连通性的项目 id。">
-                {(ctl) => <input {...ctl} value={testProjectId} onChange={(e) => setTestProjectId(e.target.value)} />}
-              </Field>
-            </div>
-            <button
-              type="button"
-              className="btn"
-              disabled={busy || !testProjectId}
-              title={busy ? busyTitle : !testProjectId ? "先填写测试用项目 id 才能发起连接测试" : undefined}
-              onClick={() =>
-                run(
-                  () => api.post("/api/admin/connection/kaneo/test", { projectId: testProjectId }),
-                  "连通正常",
-                  setKMsg,
-                )
-              }
-              style={{ marginTop: 22 }}
-            >
-              连接测试
-            </button>
-          </div>
-        </div>
-
-        <div className="card conn-card">
-          <div className="conn-head">
-            <span className="conn-icon tone-violet">
-              <Icon name="key" size={18} />
-            </span>
-            <div className="conn-title">
-              <h2 className="conn-name">AI（OpenAI 兼容）</h2>
-              <p>反馈自动整理与摘要</p>
-            </div>
-            <span className={`tag ${aReady ? "archived" : "tone-warn"}`}>{aReady ? "已配置" : "待配置"}</span>
-          </div>
-          <div className="conn-meta-row">
-            <span className="conn-meta-main">
-              <span className={`status-dot ${a.apiKeySet ? "is-ok" : "is-muted"}`} aria-hidden="true" />
-              密钥 {a.apiKeySet ? "已保存" : "未保存"}
-            </span>
-            <span className="muted">支持连接测试与图像识别测试</span>
-          </div>
-          <p className="form-section-desc">留空的密钥表示沿用已保存值；密钥在服务器端加密存储。</p>
-          <Field id="ab" label="接口地址" hint="Chat Completions 的基址，如 https://api.openai.com/v1。">
-            {(ctl) => (
-              <input
-                {...ctl}
-                value={aBaseUrl}
-                onChange={(e) => setABaseUrl(e.target.value)}
-                placeholder="https://api.openai.com/v1"
-              />
-            )}
-          </Field>
-          <Field id="am" label="模型" hint="例如 gpt-4o-mini。">
-            {(ctl) => (
-              <input {...ctl} value={aModel} onChange={(e) => setAModel(e.target.value)} placeholder="gpt-4o-mini" />
-            )}
-          </Field>
-          <Field
-            id="ak"
-            label={<>密钥 {a.apiKeySet && <span className="ok-text">（已保存，留空则不修改）</span>}</>}
-            hint="只写入服务器，保存后不再回显。"
-          >
-            {(ctl) => (
-              <input
-                {...ctl}
-                type="password"
-                value={aApiKey}
-                onChange={(e) => setAApiKey(e.target.value)}
-                placeholder={a.apiKeySet ? "••••••••" : "sk-…"}
-              />
-            )}
-          </Field>
-          <div className="btn-row">
-            <button
-              type="button"
-              className="btn primary"
-              disabled={busy}
-              title={busyTitle}
-              onClick={() =>
-                run(
-                  async () => {
-                    const r = await api.put("/api/admin/connection/ai", {
-                      baseUrl: aBaseUrl,
-                      model: aModel,
-                      ...(aApiKey ? { apiKey: aApiKey } : {}),
-                    });
-                    setAApiKey("");
-                    const aa = await api.get<AiGet>("/api/admin/connection/ai");
-                    setA(aa);
-                    return r;
-                  },
-                  "AI 配置已保存",
-                  setAMsg,
-                )
-              }
-            >
-              保存
-            </button>
-            <button
-              type="button"
-              className="btn"
-              disabled={busy}
-              title={busyTitle}
-              onClick={() => run(() => api.post("/api/admin/connection/ai/test"), "AI 连通正常", setAMsg)}
-            >
-              连接测试
-            </button>
-            <button
-              type="button"
-              className="btn"
-              disabled={busy}
-              title={busyTitle}
-              onClick={() =>
-                run(() => api.post("/api/admin/connection/ai/test-vision"), "AI 图像识别测试正常", setAMsg)
-              }
-            >
-              测试图像识别 (Vision)
-            </button>
-          </div>
-          {renderMsg(aMsg)}
-          <p className="save-hint">保存位置：写入本服务器的连接配置；密钥加密存储、不回显。</p>
-        </div>
+        <ConnectionCard kind="kaneo" />
+        <ConnectionCard kind="ai" />
       </div>
     </div>
   );

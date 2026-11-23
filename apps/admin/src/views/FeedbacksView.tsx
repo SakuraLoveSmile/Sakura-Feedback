@@ -1,10 +1,11 @@
+import { Badge, Button, NativeSelect, Table, Tabs, TextInput } from "@mantine/core";
 /**
  * 反馈工作台：收件箱 / 已归档 / 回收站。
  * - 列表层级：标题/摘要为阅读主体，工单状态（issueStatus）为主要标签（桌面表格 .fb-table
  *   与移动卡片 .fb-cards 用同一结构），同步/处理状态与附件降为灰度辅助信息（次要字号/灰度）；
  * - URL 保存 view/q/status/issueStatus/appId/from/to/id，刷新与前进后退可恢复；
  * - ≥768：搜索与常用筛选（软件/处理状态/工单状态）常驻，「更多筛选」默认收起（日期等次要条件，
- *   收起时仍显示已生效条件的摘要与清除入口）；<768：整个筛选区默认收起，由「筛选」开关展开；
+ *   收起时仍显示已生效条件的摘要与清除入口）；<768：搜索常驻，其余条件由「筛选」开关展开；
  * - 搜索防抖 300ms、上限 200 字符；游标分页每页 50；
  * - 有活动处理时每 5 秒原位刷新（不打断选择、详情与草稿），页面隐藏停止；
  * - 批量只操作已勾选记录（超过服务端单次上限 100 条时自动分片），逐项结果不回滚。
@@ -18,7 +19,7 @@ import {
   type FeedbackDetail,
   type FeedbackListItem,
   ISSUE_STATUS_LABELS,
-  issueTone,
+  issueColor,
   type LifecycleAction,
   type LifecycleBatchResponse,
   type LifecycleItemResult,
@@ -29,7 +30,7 @@ import {
 } from "../api.ts";
 import { ConfirmDialog, EmptyState, Icon, InlineError, MoreMenu, SkeletonRows, useToast } from "../ui.tsx";
 import { useUrlState } from "../url.ts";
-import FeedbackDrawer from "./FeedbackDrawer.tsx";
+import FeedbackDrawer, { type FeedbackDrawerHandle } from "./FeedbackDrawer.tsx";
 
 const STATUSES = Object.keys(STATUS_LABELS);
 const VIEWS: MgmtView[] = ["inbox", "archived", "trash"];
@@ -93,12 +94,13 @@ export default function FeedbacksView() {
   const [detail, setDetail] = useState<FeedbackDetail | "loading" | "purged" | "error" | null>(null);
   /** 「更多筛选」（日期）折叠区：默认收起；纯 UI 状态，不进 URL。 */
   const [moreOpen, setMoreOpen] = useState(false);
-  /** <768 移动断点与筛选区开关：移动端整个筛选区（含搜索）默认收起；纯 UI 状态，不进 URL。 */
+  /** 手机保留搜索，其他筛选条件默认收起。 */
   const [isMobile, setIsMobile] = useState(() => window.matchMedia("(max-width: 767px)").matches);
   /** ≥1280 宽屏：列表与详情同屏；更窄视口继续使用遮罩抽屉。 */
   const [isWide, setIsWide] = useState(() => window.matchMedia("(min-width: 1280px)").matches);
   const [filterAreaOpen, setFilterAreaOpen] = useState(false);
   /** 内联详情关闭后把焦点还给打开它的标题按钮（行点击不设触发元素）。 */
+  const drawerRef = useRef<FeedbackDrawerHandle>(null);
   const detailTriggerRef = useRef<HTMLElement | null>(null);
   const prevDetailIdRef = useRef<string | null>(detailId);
   /** 详情拉取失败后的重试计数：自增触发详情 effect 重新请求。 */
@@ -466,22 +468,40 @@ export default function FeedbacksView() {
 
   const openDetail = useCallback(
     (id: string, trigger?: HTMLElement | null) => {
-      detailTriggerRef.current = trigger ?? null;
-      setParams({ id }, false);
+      if (id === detailId) return;
+      const show = () => {
+        detailTriggerRef.current = trigger ?? null;
+        setParams({ id }, false);
+      };
+      if (drawerRef.current) drawerRef.current.requestSwitch(show);
+      else show();
     },
-    [setParams],
+    [detailId, setParams],
   );
   const closeDetail = useCallback(() => setParams({ id: null }, false), [setParams]);
 
+  const searchField = (
+    <TextInput
+      className="feedback-filter-group feedback-search"
+      label="搜索"
+      type="search"
+      leftSection={<Icon name="search" size={16} />}
+      placeholder="搜索标题、原文或反馈 ID"
+      aria-label="搜索反馈"
+      value={qDraft}
+      onChange={(e) => onSearch(e.target.value)}
+    />
+  );
+  const secondaryFilterCount = activeFilterCount - Number(Boolean(q));
+
   return (
-    <div className="feedback-page" data-split={isWide ? "true" : undefined}>
+    <div className="feedback-page" data-split={isWide && detailId ? "true" : undefined}>
       <div className="page-header">
         <div>
           <h1>反馈</h1>
-          <div className="sub">查看用户反馈、回复并跟进问题，处理完成后归档整理。</div>
         </div>
         <div className="btn-row">
-          <button
+          <Button
             type="button"
             className="btn"
             disabled={loading === "initial"}
@@ -493,8 +513,8 @@ export default function FeedbacksView() {
           >
             <Icon name="refresh" size={16} />
             刷新
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
             className="btn"
             aria-label="同步完成状态"
@@ -505,7 +525,7 @@ export default function FeedbacksView() {
           >
             <Icon name="check" size={16} />
             {kaneoSyncing ? "同步中…" : "同步完成状态"}
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -524,57 +544,68 @@ export default function FeedbacksView() {
         </div>
       )}
 
-      <div className="view-tabs" role="tablist" aria-label="反馈区域">
-        {VIEWS.map((v) => (
-          <button
-            key={v}
-            type="button"
-            role="tab"
-            aria-selected={view === v}
-            className={`view-tab${view === v ? " active" : ""}`}
-            onClick={() => setParams({ view: v === "inbox" ? null : v }, false)}
-          >
-            <Icon name={v === "inbox" ? "inbox" : v === "archived" ? "archive" : "trash"} size={16} />
-            {VIEW_LABELS[v]}
-            <span className="count">{counts ? counts[v] : "…"}</span>
-          </button>
-        ))}
-      </div>
+      <Tabs
+        value={view}
+        onChange={(next) => {
+          if (next && next !== view) setParams({ view: next === "inbox" ? null : next }, false);
+        }}
+        className="queue-tabs"
+      >
+        <Tabs.List aria-label="反馈区域">
+          {VIEWS.map((v) => (
+            <Tabs.Tab
+              key={v}
+              className="view-tab"
+              id={`queue-tab-${v}`}
+              aria-controls="queue-results"
+              value={v}
+              leftSection={<Icon name={v === "inbox" ? "inbox" : v === "archived" ? "archive" : "trash"} size={16} />}
+              rightSection={
+                <Badge
+                  component="span"
+                  className="count"
+                  color={view === v ? "blue" : "gray"}
+                  variant="light"
+                  size="sm"
+                >
+                  {counts ? counts[v] : "…"}
+                </Badge>
+              }
+            >
+              {VIEW_LABELS[v]}
+            </Tabs.Tab>
+          ))}
+        </Tabs.List>
+      </Tabs>
 
-      {/* <768：整个筛选区（含搜索与常用筛选）默认收起，由 #fb-filter-toggle 展开；
-          ≥768：搜索与常用筛选常驻，「更多筛选」默认收起（日期等次要条件在内，收起时
-          仍显示已生效条件的摘要与清除入口）。定位锚点：开关 #fb-filter-toggle、
-          区域 #fb-filter-area（普通块级容器，开关紧邻其前，收起态由 data-collapsed 标记）、
-          分组 #fb-common-filters / #fb-more-filters / #fb-more-filters-summary。 */}
       {isMobile && (
-        <button
-          type="button"
-          id="fb-filter-toggle"
-          className="btn sm"
-          aria-expanded={filterAreaOpen}
-          aria-controls="fb-filter-area"
-          onClick={() => setFilterAreaOpen((v) => !v)}
-        >
-          {filterAreaOpen ? "收起筛选" : "筛选"}
-          {!filterAreaOpen && activeFilterCount > 0 ? `（${activeFilterCount} 项生效）` : ""}
-        </button>
+        <div className="filter-bar feedback-filters feedback-mobile-tools">
+          {searchField}
+          <Button
+            type="button"
+            id="fb-filter-toggle"
+            className="btn"
+            aria-expanded={filterAreaOpen}
+            aria-controls="fb-filter-area"
+            onClick={() => setFilterAreaOpen((v) => !v)}
+          >
+            <Icon name="filter" size={16} />
+            {filterAreaOpen ? "收起" : "筛选"}
+            {secondaryFilterCount > 0 && <span className="filter-count">{secondaryFilterCount}</span>}
+          </Button>
+        </div>
       )}
       <div id="fb-filter-area" data-collapsed={isMobile && !filterAreaOpen ? "true" : undefined}>
         {(!isMobile || filterAreaOpen) && (
           <div className="filter-bar feedback-filters" id="fb-common-filters">
-            <div className="feedback-filter-group">
-              <span className="feedback-filter-label">搜索</span>
-              <input
-                type="search"
-                placeholder="搜索标题、原文或反馈 ID"
-                aria-label="搜索反馈"
-                value={qDraft}
-                onChange={(e) => onSearch(e.target.value)}
-              />
-            </div>
+            {!isMobile && searchField}
             <div className="feedback-filter-group">
               <span className="feedback-filter-label">软件</span>
-              <select aria-label="软件筛选" value={appId} onChange={(e) => setParams({ appId: e.target.value }, true)}>
+              <NativeSelect
+                aria-label="软件筛选"
+                value={appId}
+                onChange={(e) => setParams({ appId: e.target.value }, true)}
+              >
                 <option value="">全部软件</option>
                 {appOptions.map((o) => (
                   <option key={o.appId} value={o.appId}>
@@ -582,11 +613,11 @@ export default function FeedbacksView() {
                     {o.deleted ? "（已删除）" : ""}
                   </option>
                 ))}
-              </select>
+              </NativeSelect>
             </div>
             <div className="feedback-filter-group">
               <span className="feedback-filter-label">处理状态</span>
-              <select
+              <NativeSelect
                 aria-label="处理状态筛选"
                 value={status}
                 onChange={(e) => setParams({ status: e.target.value }, true)}
@@ -597,11 +628,11 @@ export default function FeedbacksView() {
                     {STATUS_LABELS[s]}
                   </option>
                 ))}
-              </select>
+              </NativeSelect>
             </div>
             <div className="feedback-filter-group">
               <span className="feedback-filter-label">工单状态</span>
-              <select
+              <NativeSelect
                 aria-label="工单沟通状态筛选"
                 value={issueStatus}
                 onChange={(e) => setParams({ issueStatus: e.target.value }, true)}
@@ -612,11 +643,12 @@ export default function FeedbacksView() {
                     {label}
                   </option>
                 ))}
-              </select>
+              </NativeSelect>
             </div>
             <div className="feedback-filter-group">
-              <span className="feedback-filter-label">更多</span>
-              <button
+              <span className="feedback-filter-label">日期</span>
+              <Button
+                size="xs"
                 type="button"
                 id="fb-more-filters-toggle"
                 className="btn sm"
@@ -626,7 +658,7 @@ export default function FeedbacksView() {
               >
                 {moreOpen ? "收起日期" : "更多筛选"}
                 {!moreOpen && hasDateFilter ? "（日期已生效）" : ""}
-              </button>
+              </Button>
             </div>
           </div>
         )}
@@ -635,7 +667,7 @@ export default function FeedbacksView() {
           <div className="filter-bar feedback-filters" id="fb-more-filters">
             <div className="feedback-filter-group">
               <span className="feedback-filter-label">日期</span>
-              <span className="feedback-date-range">
+              <div className="feedback-date-range">
                 <input
                   type="date"
                   aria-label="开始日期"
@@ -649,9 +681,11 @@ export default function FeedbacksView() {
                   value={to}
                   onChange={(e) => setParams({ to: e.target.value }, true)}
                 />
-              </span>
+              </div>
             </div>
-            <button
+            <Button
+              variant="subtle"
+              size="xs"
               type="button"
               className="btn sm ghost"
               disabled={!hasDateFilter}
@@ -659,7 +693,7 @@ export default function FeedbacksView() {
               onClick={() => setParams({ from: null, to: null }, true)}
             >
               清除日期
-            </button>
+            </Button>
           </div>
         )}
         {!moreOpen && hasDateFilter && (!isMobile || filterAreaOpen) && (
@@ -671,9 +705,15 @@ export default function FeedbacksView() {
                 {from || "不限"} 至 {to || "不限"}
               </span>
             </div>
-            <button type="button" className="btn sm ghost" onClick={() => setParams({ from: null, to: null }, true)}>
+            <Button
+              variant="subtle"
+              size="xs"
+              type="button"
+              className="btn sm ghost"
+              onClick={() => setParams({ from: null, to: null }, true)}
+            >
               清除日期
-            </button>
+            </Button>
           </div>
         )}
       </div>
@@ -700,13 +740,13 @@ export default function FeedbacksView() {
               <Icon name="close" size={12} />
             </button>
           ))}
-          <button type="button" className="btn sm ghost" onClick={clearFilters}>
+          <Button variant="subtle" size="xs" type="button" className="btn sm ghost" onClick={clearFilters}>
             清除全部筛选
-          </button>
+          </Button>
         </section>
       )}
 
-      <div className="feedback-split">
+      <div className="feedback-split" id="queue-results" role="tabpanel" aria-labelledby={`queue-tab-${view}`}>
         <div className="feedback-list-pane">
           <div className="feedback-list-heading">
             <h2>{VIEW_LABELS[view]}</h2>
@@ -714,15 +754,30 @@ export default function FeedbacksView() {
               {loading === "initial"
                 ? "正在加载反馈…"
                 : counts
-                  ? `共 ${counts[view]} 条 · 已加载 ${items.length} 条`
+                  ? counts[view] === items.length
+                    ? `共 ${items.length} 条`
+                    : `已加载 ${items.length} / ${counts[view]} 条`
                   : `已加载 ${items.length} 条`}
             </span>
+            {view === "inbox" && (
+              <button
+                type="button"
+                className="queue-filter"
+                aria-pressed={issueStatus === "waiting_admin"}
+                onClick={() =>
+                  setParams({ issueStatus: issueStatus === "waiting_admin" ? null : "waiting_admin" }, true)
+                }
+              >
+                <Icon name="feedback" size={14} /> 待管理处理
+              </button>
+            )}
           </div>
 
           {hasNew && (
             <div className="notice-bar" role="status">
               有新的反馈
-              <button
+              <Button
+                size="xs"
                 type="button"
                 className="btn sm"
                 onClick={() => {
@@ -732,7 +787,7 @@ export default function FeedbacksView() {
                 }}
               >
                 刷新列表
-              </button>
+              </Button>
             </div>
           )}
 
@@ -741,7 +796,9 @@ export default function FeedbacksView() {
               <span className="small">已选 {selected.size} 条</span>
               {view === "inbox" && (
                 <>
-                  <button
+                  <Button
+                    variant="filled"
+                    size="xs"
                     type="button"
                     className="btn sm primary"
                     disabled={!selectedItems.every((i) => i.status === "archived")}
@@ -759,16 +816,17 @@ export default function FeedbacksView() {
                   >
                     <Icon name="archive" size={14} />
                     归档
-                  </button>
-                  <button type="button" className="btn sm" onClick={() => askTrash(selectedItems)}>
+                  </Button>
+                  <Button size="xs" type="button" className="btn sm" onClick={() => askTrash(selectedItems)}>
                     <Icon name="trash" size={14} />
                     移入回收站
-                  </button>
+                  </Button>
                 </>
               )}
               {view === "archived" && (
                 <>
-                  <button
+                  <Button
+                    size="xs"
                     type="button"
                     className="btn sm"
                     onClick={() =>
@@ -780,16 +838,17 @@ export default function FeedbacksView() {
                   >
                     <Icon name="restore" size={14} />
                     恢复到收件箱
-                  </button>
-                  <button type="button" className="btn sm" onClick={() => askTrash(selectedItems)}>
+                  </Button>
+                  <Button size="xs" type="button" className="btn sm" onClick={() => askTrash(selectedItems)}>
                     <Icon name="trash" size={14} />
                     移入回收站
-                  </button>
+                  </Button>
                 </>
               )}
               {view === "trash" && (
                 <>
-                  <button
+                  <Button
+                    size="xs"
                     type="button"
                     className="btn sm"
                     onClick={() =>
@@ -801,16 +860,29 @@ export default function FeedbacksView() {
                   >
                     <Icon name="restore" size={14} />
                     恢复
-                  </button>
-                  <button type="button" className="btn sm danger" onClick={() => askPurge(selectedItems)}>
+                  </Button>
+                  <Button
+                    variant="light"
+                    color="red"
+                    size="xs"
+                    type="button"
+                    className="btn sm danger"
+                    onClick={() => askPurge(selectedItems)}
+                  >
                     <Icon name="trash" size={14} />
                     彻底删除
-                  </button>
+                  </Button>
                 </>
               )}
-              <button type="button" className="btn sm ghost" onClick={() => setSelected(new Set())}>
+              <Button
+                variant="subtle"
+                size="xs"
+                type="button"
+                className="btn sm ghost"
+                onClick={() => setSelected(new Set())}
+              >
                 清除选择
-              </button>
+              </Button>
             </div>
           )}
 
@@ -847,9 +919,9 @@ export default function FeedbacksView() {
                 }
                 action={
                   activeFilterCount > 0 ? (
-                    <button type="button" className="btn" onClick={clearFilters}>
+                    <Button type="button" className="btn" onClick={clearFilters}>
                       清除全部筛选
-                    </button>
+                    </Button>
                   ) : undefined
                 }
               />
@@ -858,47 +930,53 @@ export default function FeedbacksView() {
             <>
               {/* 桌面表格（≥768px）：标题/摘要为阅读主体，工单状态为主标签，处理状态降为灰度辅助 */}
               <div className="table-wrap fb-table">
-                <table>
-                  <thead>
-                    <tr>
-                      <th style={{ width: 32 }}>
+                <Table>
+                  <Table.Thead>
+                    <Table.Tr>
+                      <Table.Th style={{ width: 32 }}>
                         <input
                           type="checkbox"
                           aria-label="全选当前已加载记录"
                           checked={allChecked}
+                          ref={(el) => {
+                            if (el) el.indeterminate = selectedItems.length > 0 && !allChecked;
+                          }}
                           onChange={toggleAll}
                         />
-                      </th>
-                      <th>标题 / 摘要</th>
-                      <th className="col-app">软件</th>
-                      <th className="col-user">提交账号</th>
-                      <th>状态</th>
-                      <th className="col-attach">附件</th>
-                      <th>提交时间</th>
-                      <th style={{ width: 80 }}>操作</th>
-                    </tr>
-                  </thead>
-                  <tbody>
+                      </Table.Th>
+                      <Table.Th>标题 / 摘要</Table.Th>
+                      <Table.Th className="col-app">软件</Table.Th>
+                      <Table.Th className="col-user">提交账号</Table.Th>
+                      <Table.Th>状态</Table.Th>
+                      <Table.Th className="col-attach">附件</Table.Th>
+                      <Table.Th>提交时间</Table.Th>
+                      <Table.Th style={{ width: 80 }}>操作</Table.Th>
+                    </Table.Tr>
+                  </Table.Thead>
+                  <Table.Tbody>
                     {items.map((it) => (
-                      <tr
+                      <Table.Tr
                         key={it.id}
                         className={`clickable${selected.has(it.id) ? " selected" : ""}`}
-                        onClick={() => openDetail(it.id)}
+                        data-current={detailId === it.id || undefined}
+                        onClick={(e) =>
+                          openDetail(it.id, e.currentTarget.querySelector<HTMLButtonElement>(".cell-open"))
+                        }
                       >
-                        {/* biome-ignore lint/a11y/useKeyWithClickEvents: 仅阻止行点击冒泡，本身无交互 */}
-                        <td onClick={(e) => e.stopPropagation()}>
+                        <Table.Td onClick={(e) => e.stopPropagation()}>
                           <input
                             type="checkbox"
                             aria-label={`选择反馈 ${it.title ?? it.id}`}
                             checked={selected.has(it.id)}
                             onChange={() => toggleOne(it.id)}
                           />
-                        </td>
-                        <td style={{ minWidth: 220 }}>
+                        </Table.Td>
+                        <Table.Td style={{ minWidth: 220 }}>
                           {/* 整行可点之外，标题做成真按钮：键盘 Tab/Enter 与读屏可直达详情。 */}
                           <button
                             type="button"
                             className="cell-open"
+                            aria-current={detailId === it.id ? "true" : undefined}
                             onClick={(e) => {
                               e.stopPropagation();
                               openDetail(it.id, e.currentTarget);
@@ -916,8 +994,8 @@ export default function FeedbacksView() {
                               {it.appDeleted ? <span>软件已删除</span> : null}
                             </span>
                           </button>
-                        </td>
-                        <td className="col-app">
+                        </Table.Td>
+                        <Table.Td className="col-app">
                           {it.appName && it.appName !== it.appId ? (
                             <>
                               <div>{it.appName}</div>
@@ -926,9 +1004,19 @@ export default function FeedbacksView() {
                           ) : (
                             <div className="wrap-anywhere">{it.appId}</div>
                           )}
-                          {it.appDeleted && <span className="tag tone-warn">软件已删除</span>}
-                        </td>
-                        <td className="col-user">
+                          {it.appDeleted && (
+                            <Badge
+                              component="span"
+                              variant="light"
+                              radius="sm"
+                              color="orange"
+                              className="tag tone-warn"
+                            >
+                              软件已删除
+                            </Badge>
+                          )}
+                        </Table.Td>
+                        <Table.Td className="col-user">
                           {it.username === null || it.username === undefined ? (
                             <span className="muted">—</span>
                           ) : (
@@ -936,22 +1024,34 @@ export default function FeedbacksView() {
                               {it.username}
                             </span>
                           )}
-                        </td>
-                        <td>
+                        </Table.Td>
+                        <Table.Td>
                           <div className="row row-wrap">
                             {/* 主要标签：工单状态（issueStatus），四种状态全部有色 */}
-                            <span className={`tag ${issueTone(it.issueStatus)}`}>
+                            <Badge
+                              component="span"
+                              variant="light"
+                              radius="sm"
+                              color={issueColor(it.issueStatus)}
+                              className="tag"
+                            >
                               {ISSUE_STATUS_LABELS[it.issueStatus ?? "open"] ?? it.issueStatus ?? "新反馈"}
-                            </span>
+                            </Badge>
                             {/* 同步/处理状态：灰度辅助标签，不与主标签争抢 */}
-                            <span className="tag">{STATUS_LABELS[it.status] ?? it.status}</span>
+                            <Badge component="span" variant="light" radius="sm" color="gray" className="tag">
+                              {STATUS_LABELS[it.status] ?? it.status}
+                            </Badge>
                             {it.unread && (
-                              <span
+                              <Badge
+                                component="span"
+                                variant="light"
+                                radius="sm"
+                                color="red"
                                 className="tag tone-err"
                                 style={{ padding: "1px 5px", fontSize: "11px", fontWeight: "bold" }}
                               >
                                 未读
-                              </span>
+                              </Badge>
                             )}
                           </div>
                           {it.resumePaused && <div className="muted small">已暂停</div>}
@@ -961,15 +1061,14 @@ export default function FeedbacksView() {
                             </div>
                           )}
                           {waitingText(it) && <div className="muted small clamp-2">{waitingText(it)}</div>}
-                        </td>
-                        <td className="col-attach muted small nowrap-ellipsis">{attachText(it)}</td>
-                        <td className="muted small" style={{ whiteSpace: "nowrap" }}>
+                        </Table.Td>
+                        <Table.Td className="col-attach muted small nowrap-ellipsis">{attachText(it)}</Table.Td>
+                        <Table.Td className="muted small" style={{ whiteSpace: "nowrap" }}>
                           <time dateTime={it.createdAt} title={new Date(it.createdAt).toLocaleString()}>
                             {listTime(it.createdAt)}
                           </time>
-                        </td>
-                        {/* biome-ignore lint/a11y/useKeyWithClickEvents: 仅阻止行点击冒泡，本身无交互 */}
-                        <td onClick={(e) => e.stopPropagation()}>
+                        </Table.Td>
+                        <Table.Td onClick={(e) => e.stopPropagation()}>
                           <div className="row" style={{ gap: 4 }}>
                             {it.kaneoUrl && (
                               <a
@@ -1000,11 +1099,11 @@ export default function FeedbacksView() {
                               })}
                             />
                           </div>
-                        </td>
-                      </tr>
+                        </Table.Td>
+                      </Table.Tr>
                     ))}
-                  </tbody>
-                </table>
+                  </Table.Tbody>
+                </Table>
               </div>
 
               {/* 移动卡片（<768px）：与桌面同一层级——标题摘要主体、工单状态主标签、灰度辅助信息 */}
@@ -1050,35 +1149,48 @@ export default function FeedbacksView() {
                     </div>
                     <div className="fb-card-meta feedback-meta">
                       {/* 主要标签：工单状态（issueStatus），四种状态全部有色 */}
-                      <span className={`tag ${issueTone(it.issueStatus)}`}>
+                      <Badge
+                        component="span"
+                        variant="light"
+                        radius="sm"
+                        color={issueColor(it.issueStatus)}
+                        className="tag"
+                      >
                         {ISSUE_STATUS_LABELS[it.issueStatus ?? "open"] ?? it.issueStatus ?? "新反馈"}
-                      </span>
+                      </Badge>
                       {/* 同步/处理状态：灰度辅助标签 */}
-                      <span className="tag">{STATUS_LABELS[it.status] ?? it.status}</span>
+                      <Badge component="span" variant="light" radius="sm" color="gray" className="tag">
+                        {STATUS_LABELS[it.status] ?? it.status}
+                      </Badge>
                       {it.unread && (
-                        <span
+                        <Badge
+                          component="span"
+                          variant="light"
+                          radius="sm"
+                          color="red"
                           className="tag tone-err"
                           style={{ padding: "1px 5px", fontSize: "11px", fontWeight: "bold" }}
                         >
                           未读
-                        </span>
+                        </Badge>
                       )}
-                      {it.appName && it.appName !== it.appId ? (
-                        <>
-                          <span>{it.appName}</span>
-                          <span className="muted small wrap-anywhere">{it.appId}</span>
-                        </>
-                      ) : (
-                        <span className="wrap-anywhere">{it.appId}</span>
+                      {it.appDeleted && (
+                        <Badge component="span" variant="light" radius="sm" color="orange" className="tag tone-warn">
+                          软件已删除
+                        </Badge>
                       )}
-                      {it.appDeleted && <span className="tag tone-warn">软件已删除</span>}
-                      <span className="feedback-username feedback-username--mobile">{it.username ?? "—"}</span>
-                      <span>{attachText(it)}</span>
-                      <span>
-                        <time dateTime={it.createdAt} title={new Date(it.createdAt).toLocaleString()}>
-                          {listTime(it.createdAt)}
-                        </time>
+                    </div>
+                    <div className="fb-card-meta feedback-meta">
+                      <span className="wrap-anywhere" title={it.appId}>
+                        {it.appName || it.appId}
                       </span>
+                      {it.username && (
+                        <span className="feedback-username feedback-username--mobile">{it.username}</span>
+                      )}
+                      {it.imageCount || it.hasScreenshot || it.logCount ? <span>{attachText(it)}</span> : null}
+                      <time dateTime={it.createdAt} title={new Date(it.createdAt).toLocaleString()}>
+                        {listTime(it.createdAt)}
+                      </time>
                       {it.resumePaused && <span>已暂停</span>}
                       {it.resolutionNote && (
                         <span className="muted small clamp-2" title={it.resolutionNote}>
@@ -1093,25 +1205,26 @@ export default function FeedbacksView() {
 
               {nextCursor && (
                 <div style={{ padding: "var(--sp-3)", textAlign: "center" }}>
-                  <button
+                  <Button
                     type="button"
                     className="btn"
                     disabled={loading === "more"}
                     onClick={() => void loadList("more")}
                   >
                     {loading === "more" ? "加载中…" : "加载更多"}
-                  </button>
+                  </Button>
                 </div>
               )}
             </>
           )}
         </div>
 
-        {detailId ? (
+        {detailId && (
           <div className={isWide ? "feedback-detail-pane" : "feedback-detail-slot"}>
             <FeedbackDrawer
               key={detailId}
-              detail={detail}
+              ref={drawerRef}
+              detail={detail && typeof detail === "object" && detail.id !== detailId ? "loading" : detail}
               inline={isWide}
               onClose={closeDetail}
               onRetry={() => setDetailRetry((n) => n + 1)}
@@ -1121,18 +1234,6 @@ export default function FeedbacksView() {
               onChanged={() => void refreshAfterAction()}
             />
           </div>
-        ) : (
-          isWide && (
-            <div className="feedback-detail-pane is-empty">
-              <div className="feedback-detail-empty">
-                <span className="empty-art">
-                  <Icon name="feedback" size={22} />
-                </span>
-                <h3>选择一条反馈</h3>
-                <p>在左侧列表中选择反馈，查看原文、对话与同步状态。</p>
-              </div>
-            </div>
-          )
         )}
       </div>
 

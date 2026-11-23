@@ -1,6 +1,8 @@
+import { Badge, Button, Input, Paper } from "@mantine/core";
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, api, type SessionUser } from "../api.ts";
-import { Field, InlineError } from "../ui.tsx";
+import { usePageEdits } from "../page-edits.ts";
+import { Field, InlineError, SectionIcon, SkeletonRows } from "../ui.tsx";
 
 /**
  * T2-A「管理员设置」：修改当前登录管理员自己的用户名与密码。
@@ -11,6 +13,7 @@ import { Field, InlineError } from "../ui.tsx";
  * 两次新密码不一致贴近「确认新密码」字段。
  */
 export default function SettingsView({ onCredentialsUpdated }: { onCredentialsUpdated: (username: string) => void }) {
+  const [savedName, setSavedName] = useState<string | null>(null);
   const [username, setUsername] = useState("");
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -27,6 +30,7 @@ export default function SettingsView({ onCredentialsUpdated }: { onCredentialsUp
     setLoadError(null);
     try {
       const r = await api.get<{ user: SessionUser }>("/api/auth/session");
+      setSavedName(r.user.username);
       setUsername(r.user.username);
     } catch (err) {
       setLoadError(err instanceof ApiError ? err.message : "加载当前账号失败");
@@ -37,8 +41,11 @@ export default function SettingsView({ onCredentialsUpdated }: { onCredentialsUp
     void load();
   }, [load]);
 
+  const changed = savedName !== null && (username.trim() !== savedName || Boolean(newPassword));
+  usePageEdits(changed || Boolean(currentPassword || confirmPassword), saving);
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+    if (saving || !changed) return;
     const nextUsername = username.trim();
     // 两次新密码不一致：前端拦截，不发请求；错误贴近确认字段。
     if (newPassword !== confirmPassword) {
@@ -52,7 +59,7 @@ export default function SettingsView({ onCredentialsUpdated }: { onCredentialsUp
     try {
       await api.patch("/api/admin/me", {
         currentPassword,
-        ...(nextUsername !== "" ? { username: nextUsername } : {}),
+        ...(nextUsername !== savedName ? { username: nextUsername } : {}),
         ...(newPassword !== "" ? { newPassword } : {}),
       });
       onCredentialsUpdated(nextUsername === "" ? username : nextUsername);
@@ -68,119 +75,132 @@ export default function SettingsView({ onCredentialsUpdated }: { onCredentialsUp
   }
 
   return (
-    <div>
+    <div className="settings-page">
       <div className="page-header">
         <div>
           <h1>管理员设置</h1>
-          <div className="sub">
-            这里只能修改当前登录管理员自己的用户名与密码。保存成功后该账号全部会话（含当前）立即失效，需要重新登录。
-            管理员提交反馈不限次数，因此没有管理员额度设置；普通账号的每日额度在「账号」页管理。
-          </div>
+          <div className="sub">管理当前管理员的登录身份和密码。</div>
         </div>
       </div>
       {loadError && <InlineError message={loadError} onRetry={() => void load()} />}
 
-      <form className="settings-grid" onSubmit={submit}>
-        <div className="card settings-card">
-          <div className="profile-top">
-            <span className="profile-avatar" aria-hidden="true">
-              {(username || "A").slice(0, 1).toUpperCase()}
-            </span>
-            <div className="profile-text">
-              <b>{username || "admin"}</b>
-              <span className="muted small">管理员 · 当前登录</span>
+      {savedName === null ? (
+        loadError ? null : (
+          <Paper withBorder p="lg" className="card">
+            <SkeletonRows rows={3} />
+          </Paper>
+        )
+      ) : (
+        <form className="settings-grid" onSubmit={submit}>
+          <Paper withBorder p="lg" className="card settings-card">
+            <div className="profile-top">
+              <span className="profile-avatar" aria-hidden="true">
+                {savedName.slice(0, 1).toUpperCase()}
+              </span>
+              <div className="profile-text">
+                <b>{savedName}</b>
+                <span className="muted small">管理员 · 当前登录</span>
+              </div>
+              <Badge component="span" variant="light" radius="sm" color="teal" className="tag archived">
+                会话正常
+              </Badge>
             </div>
-            <span className="tag archived">会话正常</span>
-          </div>
-          <div className="form-section">
-            <h3 className="form-section-title">登录身份</h3>
-            <p className="form-section-desc">
-              修改后需用新用户名登录。当前密码用于确认本次修改；保存后全部会话失效，更换密码时旧密码也会失效。
-            </p>
-            <Field id="me-username" label="用户名" hint="1..100 字符。">
-              {(ctl) => (
-                <input
-                  {...ctl}
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  autoComplete="username"
-                  required
-                />
-              )}
-            </Field>
-            <Field id="me-current" label="当前密码" hint="必须输入当前密码才能保存。">
-              {(ctl) => (
-                <input
-                  {...ctl}
-                  type="password"
-                  value={currentPassword}
-                  onChange={(e) => setCurrentPassword(e.target.value)}
-                  autoComplete="current-password"
-                  required
-                />
-              )}
-            </Field>
-          </div>
-        </div>
+            <div className="form-section">
+              <h3 className="form-section-title">登录身份</h3>
+              <Field id="me-username" label="用户名" hint="1..100 字符。">
+                {(ctl) => (
+                  <Input
+                    error={ctl["aria-invalid"]}
+                    {...ctl}
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    maxLength={100}
+                    disabled={saving}
+                    autoComplete="username"
+                    required
+                  />
+                )}
+              </Field>
+              <Field id="me-current" label="当前密码" hint="必须输入当前密码才能保存。">
+                {(ctl) => (
+                  <Input
+                    error={ctl["aria-invalid"]}
+                    {...ctl}
+                    type="password"
+                    value={currentPassword}
+                    onChange={(e) => setCurrentPassword(e.target.value)}
+                    disabled={saving}
+                    autoComplete="current-password"
+                    required
+                  />
+                )}
+              </Field>
+            </div>
+          </Paper>
 
-        <div className="card settings-card">
-          <div className="form-section">
-            <h3 className="form-section-title">更换密码</h3>
-            <p className="form-section-desc">新密码 8..200 字符，首尾空格也算字符；两个字段都留空则只改用户名。</p>
-            <Field id="me-new" label="新密码（留空表示只改用户名）">
-              {(ctl) => (
-                <input
-                  {...ctl}
-                  type="password"
-                  value={newPassword}
-                  onChange={(e) => {
-                    setNewPassword(e.target.value);
-                    setConfirmError(null);
-                  }}
-                  autoComplete="new-password"
-                />
-              )}
-            </Field>
-            <Field id="me-confirm" label="确认新密码" error={confirmError}>
-              {(ctl) => (
-                <input
-                  {...ctl}
-                  type="password"
-                  value={confirmPassword}
-                  onChange={(e) => {
-                    setConfirmPassword(e.target.value);
-                    setConfirmError(null);
-                  }}
-                  autoComplete="new-password"
-                />
-              )}
-            </Field>
-          </div>
+          <Paper withBorder p="lg" className="card settings-card">
+            <div className="form-section">
+              <h3 className="form-section-title">
+                <SectionIcon name="key" />
+                更换密码
+              </h3>
+              <p className="form-section-desc">新密码 8..200 字符，首尾空格也算字符；两个字段都留空则只改用户名。</p>
+              <Field id="me-new" label="新密码（留空表示只改用户名）">
+                {(ctl) => (
+                  <Input
+                    error={ctl["aria-invalid"]}
+                    {...ctl}
+                    type="password"
+                    value={newPassword}
+                    onChange={(e) => {
+                      setNewPassword(e.target.value);
+                      setConfirmError(null);
+                    }}
+                    disabled={saving}
+                    maxLength={200}
+                    autoComplete="new-password"
+                  />
+                )}
+              </Field>
+              <Field id="me-confirm" label="确认新密码" error={confirmError}>
+                {(ctl) => (
+                  <Input
+                    error={ctl["aria-invalid"]}
+                    {...ctl}
+                    type="password"
+                    value={confirmPassword}
+                    onChange={(e) => {
+                      setConfirmPassword(e.target.value);
+                      setConfirmError(null);
+                    }}
+                    disabled={saving}
+                    maxLength={200}
+                    autoComplete="new-password"
+                  />
+                )}
+              </Field>
+            </div>
 
-          {/* 保存失败贴近提交按钮：修正后直接再点保存即重试 */}
-          {formError && <InlineError message={formError} />}
-          <div className="form-actions">
-            <button
-              className="btn primary"
-              type="submit"
-              disabled={saving}
-              title={saving ? "正在保存…" : undefined}
-              aria-busy={saving}
-            >
-              {saving ? "保存中…" : "保存"}
-            </button>
-            <p className="save-hint">
-              保存位置：写入本服务器的管理员账号；成功后该账号全部会话（含当前）立即失效，回到登录页重新登录。
-            </p>
-          </div>
-          <div className="settings-note">
-            <span>
-              密码只保存在组件内存中，不写入 localStorage、sessionStorage 或
-              URL。管理员提交反馈不限次数，因此没有管理员额度设置。
-            </span>
-          </div>
-        </div>
-      </form>
+            {/* 保存失败贴近提交按钮：修正后直接再点保存即重试 */}
+            {formError && <InlineError message={formError} />}
+            <div className="form-actions">
+              <Button
+                variant="filled"
+                className="btn primary"
+                type="submit"
+                disabled={saving || !changed || !currentPassword || !username.trim()}
+                title={saving ? "正在保存…" : undefined}
+                aria-busy={saving}
+              >
+                {saving ? "保存中…" : "保存"}
+              </Button>
+              <p className="save-hint">
+                {changed ? "保存成功后，需在所有设备上重新登录。" : "修改用户名或密码后可保存。"}
+              </p>
+            </div>
+          </Paper>
+        </form>
+      )}
     </div>
   );
 }

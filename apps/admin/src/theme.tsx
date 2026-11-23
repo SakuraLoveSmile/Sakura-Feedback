@@ -1,10 +1,6 @@
-/**
- * 主题状态与切换控件。
- * 偏好（"system" | "light" | "dark"）持久化到 localStorage（key: feedback.admin.theme）；
- * 解析结果只写 <html> 的 dataset.theme 与 style.colorScheme，取值仅 "light" | "dark"（绝不写 "system"）。
- * 模块级 store + useSyncExternalStore：登录页 / 侧栏 / 顶栏三处 ThemeSelect 共享同一份状态，
- * 切换只触发重渲染，不 remount 业务视图、不清空输入草稿。
- */
+import { NativeSelect } from "@mantine/core";
+import { useColorScheme } from "@mantine/hooks";
+
 import { useEffect, useSyncExternalStore } from "react";
 
 export type ThemePreference = "system" | "light" | "dark";
@@ -35,22 +31,6 @@ function writePreference(p: ThemePreference): void {
   }
 }
 
-function systemTheme(): ResolvedTheme {
-  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-}
-
-/** 把偏好解析为实际主题，结果只有 "light" | "dark"。 */
-export function resolveTheme(p: ThemePreference): ResolvedTheme {
-  return p === "system" ? systemTheme() : p;
-}
-
-/** 把解析结果写到 <html>：dataset.theme 与 style.colorScheme 同步同值。 */
-function applyTheme(p: ThemePreference): void {
-  const resolved = resolveTheme(p);
-  document.documentElement.dataset.theme = resolved;
-  document.documentElement.style.colorScheme = resolved;
-}
-
 // ---------- 模块级 store（三处 ThemeSelect 共享同一份 preference） ----------
 
 let preference: ThemePreference = readPreference();
@@ -64,7 +44,6 @@ export function setThemePreference(next: ThemePreference): void {
   if (next === preference) return;
   preference = next;
   writePreference(next);
-  applyTheme(next);
   for (const l of listeners) l();
 }
 
@@ -84,28 +63,24 @@ export function useThemePreference(): [ThemePreference, (p: ThemePreference) => 
   return [pref, setThemePreference];
 }
 
-/**
- * 在 App 顶层调用一次：把偏好同步到 <html>，并仅在 "system" 时跟随系统主题变化。
- * 监听器在 effect 内注册、清理函数移除（StrictMode 双挂载安全）；
- * 偏好为 light/dark 时不注册监听，系统变化不影响页面。
- */
-export function useThemeSync(): void {
+/** 让组件库、工作台布局和浏览器原生控件使用相同的实际主题。 */
+export function useThemeSync(): ResolvedTheme {
   const [pref] = useThemePreference();
+  const system = useColorScheme("light", { getInitialValueInEffect: false });
+  const resolved = pref === "system" ? system : pref;
   useEffect(() => {
-    applyTheme(pref);
-    if (pref !== "system") return;
-    const mql = window.matchMedia("(prefers-color-scheme: dark)");
-    const onChange = () => applyTheme("system");
-    mql.addEventListener("change", onChange);
-    return () => mql.removeEventListener("change", onChange);
-  }, [pref]);
+    document.documentElement.dataset.theme = resolved;
+    document.documentElement.style.colorScheme = resolved;
+  }, [resolved]);
+  return resolved;
 }
 
-/** 主题切换控件：<select> 自带 .theme-select，避免继承表单控件 width:100% 撑开工具栏/页头；多处实例共享模块级 store，显示值始终一致。 */
+/** 登录页、顶栏与侧栏共用同一份持久化偏好。 */
 export function ThemeSelect() {
   const [pref, setPref] = useThemePreference();
   return (
-    <select
+    <NativeSelect
+      size="xs"
       className="theme-select"
       aria-label="主题"
       value={pref}
@@ -114,6 +89,6 @@ export function ThemeSelect() {
       <option value="system">跟随系统</option>
       <option value="light">浅色</option>
       <option value="dark">深色</option>
-    </select>
+    </NativeSelect>
   );
 }

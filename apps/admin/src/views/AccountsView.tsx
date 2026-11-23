@@ -1,6 +1,18 @@
+import { Badge, Button, Input, NativeSelect, Paper, Table } from "@mantine/core";
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { type AccountItem, ApiError, api } from "../api.ts";
-import { EmptyState, Field, Icon, InlineError, PromptDialog, SkeletonRows, useToast } from "../ui.tsx";
+import { usePageEdits } from "../page-edits.ts";
+import {
+  EmptyState,
+  Field,
+  Icon,
+  InlineError,
+  ListSearch,
+  PromptDialog,
+  SectionIcon,
+  SkeletonRows,
+  useToast,
+} from "../ui.tsx";
 
 interface Draft {
   username: string;
@@ -12,7 +24,10 @@ const empty: Draft = { username: "", password: "", dailyLimit: "" };
 
 export default function AccountsView() {
   const toast = useToast();
+  const [query, setQuery] = useState("");
+  const [accountFilter, setAccountFilter] = useState("");
   const [accounts, setAccounts] = useState<AccountItem[] | null>(null);
+  const [listError, setListError] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft>(empty);
   const [limitEdits, setLimitEdits] = useState<Record<string, string>>({});
   /** 页级错误：列表加载/行级操作失败——位于页头与列表之间，加载失败可原地重试。 */
@@ -24,20 +39,16 @@ export default function AccountsView() {
   const [busy, setBusy] = useState(false);
   const [pwTarget, setPwTarget] = useState<AccountItem | null>(null);
 
-  const load = useCallback(async () => {
-    const r = await api.get<{ users: AccountItem[] }>("/api/admin/users");
-    setAccounts(r.users);
-  }, []);
-
-  /** 列表加载：失败留痕页级错误并提供重试。 */
   const reload = useCallback(async () => {
     setError(null);
+    setListError(null);
     try {
-      await load();
+      const r = await api.get<{ users: AccountItem[] }>("/api/admin/users");
+      setAccounts(r.users);
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : "加载失败");
+      setListError(e instanceof ApiError ? e.message : "加载失败");
     }
-  }, [load]);
+  }, []);
 
   useEffect(() => {
     void reload();
@@ -63,7 +74,7 @@ export default function AccountsView() {
     if (setErr) setErr(null);
     try {
       await fn();
-      await load();
+      await reload();
       toast("ok", okMsg);
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : "操作失败";
@@ -101,7 +112,7 @@ export default function AccountsView() {
   async function saveLimit(a: AccountItem) {
     const raw = (limitEdits[a.id] ?? String(a.dailyLimit)).trim();
     const value = Number(raw);
-    if (!Number.isSafeInteger(value) || value < 0) {
+    if (!raw || !Number.isSafeInteger(value) || value < 0) {
       setLimitErr(a.id, "每日上限必须是不小于 0 的整数（0 表示禁止新提交）");
       return;
     }
@@ -132,8 +143,22 @@ export default function AccountsView() {
   }
 
   /** 禁用态的可见原因：busy 一律说明「进行中」，创建按钮还区分必填未完成。 */
+  usePageEdits(
+    Boolean(
+      draft.username ||
+        draft.password ||
+        draft.dailyLimit ||
+        accounts?.some((a) => limitEdits[a.id] !== undefined && limitEdits[a.id] !== String(a.dailyLimit)),
+    ),
+    busy,
+  );
   const busyTitle = busy ? "有操作进行中，稍候重试" : undefined;
 
+  const shownAccounts = (accounts ?? []).filter(
+    (a) =>
+      a.username.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()) &&
+      (!accountFilter || a.enabled === (accountFilter === "enabled")),
+  );
   const accountTotal = accounts?.length ?? 0;
   const enabledTotal = accounts?.filter((a) => a.enabled).length ?? 0;
   const usedToday = accounts?.reduce((sum, a) => sum + a.used, 0) ?? 0;
@@ -144,13 +169,19 @@ export default function AccountsView() {
       <div className="page-header">
         <div>
           <h1>账号</h1>
-          <div className="sub">
-            账号由后台创建并分发，不开放注册。这里只列出普通账号：默认每日 3 次，所有接入项目与设备共用同一每日额度，
-            按北京时间每天零点刷新。管理员不在此列表——提交不限次数，无需额度配置。
-          </div>
+          <div className="sub">管理普通账号的登录状态与每日提交额度。额度由同一账号的所有设备共享。</div>
         </div>
+        <Button
+          variant="filled"
+          type="button"
+          className="btn primary"
+          onClick={() => document.getElementById("un")?.focus()}
+        >
+          新建账号
+        </Button>
       </div>
       {error && <InlineError message={error} onRetry={() => void reload()} />}
+      {listError && <InlineError message={listError} onRetry={() => void reload()} />}
 
       <div className="stat-row">
         <div className="stat-card">
@@ -205,8 +236,24 @@ export default function AccountsView() {
 
       <div className="accounts-sections">
         <div className="accounts-list-section">
+          {accounts && accounts.length > 0 && (
+            <div className="directory-toolbar">
+              <ListSearch label="搜索用户名" value={query} onChange={setQuery} />
+              <NativeSelect
+                aria-label="账号状态筛选"
+                value={accountFilter}
+                onChange={(e) => setAccountFilter(e.target.value)}
+              >
+                <option value="">全部状态</option>
+                <option value="enabled">已启用</option>
+                <option value="disabled">已禁用</option>
+              </NativeSelect>
+            </div>
+          )}
           <div className="table-wrap">
-            {accounts === null ? (
+            {accounts === null && listError ? (
+              <EmptyState title="账号列表未加载" hint="点击上方的重试按钮重新读取账号。" />
+            ) : accounts === null ? (
               /* 加载态：进度文案 + 骨架占位（结构高度与真实表格接近，减少跳版） */
               <div>
                 <p className="muted" style={{ margin: 0, padding: "var(--sp-4) var(--sp-4) 0" }}>
@@ -219,38 +266,59 @@ export default function AccountsView() {
                 title="还没有普通账号"
                 hint="使用下方表单创建第一个账号。"
                 action={
-                  <button type="button" className="btn sm" onClick={() => document.getElementById("un")?.focus()}>
+                  <Button
+                    size="xs"
+                    type="button"
+                    className="btn sm"
+                    onClick={() => document.getElementById("un")?.focus()}
+                  >
                     前往新建账号表单
-                  </button>
+                  </Button>
+                }
+              />
+            ) : shownAccounts.length === 0 ? (
+              <EmptyState
+                title="没有匹配的账号"
+                action={
+                  <Button
+                    className="btn"
+                    type="button"
+                    onClick={() => {
+                      setQuery("");
+                      setAccountFilter("");
+                    }}
+                  >
+                    清除筛选
+                  </Button>
                 }
               />
             ) : (
-              <table>
-                <thead>
-                  <tr>
-                    <th>用户名</th>
-                    <th>状态</th>
-                    <th>每日上限</th>
-                    <th>今日已用</th>
-                    <th>剩余次数</th>
-                    <th>操作</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {accounts.map((a) => (
-                    <tr key={a.id}>
-                      <td>
+              <Table className="directory-table accounts-directory">
+                <Table.Thead>
+                  <Table.Tr>
+                    <Table.Th>用户名</Table.Th>
+                    <Table.Th>状态</Table.Th>
+                    <Table.Th>每日上限</Table.Th>
+                    <Table.Th>今日已用</Table.Th>
+                    <Table.Th>剩余次数</Table.Th>
+                    <Table.Th>操作</Table.Th>
+                  </Table.Tr>
+                </Table.Thead>
+                <Table.Tbody>
+                  {shownAccounts.map((a) => (
+                    <Table.Tr key={a.id}>
+                      <Table.Td>
                         <span className="account-name">
                           <span className={`account-avatar${a.enabled ? "" : " is-disabled"}`} aria-hidden="true">
                             {a.username.slice(0, 1).toUpperCase()}
                           </span>
                           <code>{a.username}</code>
                         </span>
-                      </td>
-                      <td>{statusTag(a.enabled)}</td>
-                      <td>
+                      </Table.Td>
+                      <Table.Td data-label="账号状态">{statusTag(a.enabled)}</Table.Td>
+                      <Table.Td data-label="每日上限">
                         <div className="row" style={{ gap: "var(--sp-2)" }}>
-                          <input
+                          <Input
                             aria-label={`${a.username} 每日上限`}
                             style={{ width: 80 }}
                             value={limitEdits[a.id] ?? String(a.dailyLimit)}
@@ -259,7 +327,8 @@ export default function AccountsView() {
                               setLimitErr(a.id, null); // 修改即清除该字段上一轮的错误
                             }}
                           />
-                          <button
+                          <Button
+                            size="xs"
                             type="button"
                             className="btn sm"
                             disabled={busy}
@@ -267,15 +336,15 @@ export default function AccountsView() {
                             onClick={() => saveLimit(a)}
                           >
                             保存
-                          </button>
+                          </Button>
                         </div>
                         {limitErrors[a.id] && (
                           <div className="field-error" role="alert">
                             {limitErrors[a.id]}
                           </div>
                         )}
-                      </td>
-                      <td>
+                      </Table.Td>
+                      <Table.Td data-label="今日已用">
                         <span className="quota-cell">
                           <span className="quota-bar" aria-hidden="true">
                             <i
@@ -289,16 +358,17 @@ export default function AccountsView() {
                             {a.used} / {a.dailyLimit}
                           </span>
                         </span>
-                      </td>
-                      <td>
+                      </Table.Td>
+                      <Table.Td data-label="剩余次数">
                         <b className={a.remaining === 0 ? "quota-empty tnum" : "tnum"}>{a.remaining}</b>
                         <span className="muted small" style={{ marginLeft: 6 }} title={`${resetLabel(a.resetAt)}刷新`}>
                           （{resetDate(a.resetAt)}刷新）
                         </span>
-                      </td>
-                      <td>
+                      </Table.Td>
+                      <Table.Td>
                         <div className="row" style={{ gap: "var(--sp-2)" }}>
-                          <button
+                          <Button
+                            size="xs"
                             type="button"
                             className="btn sm"
                             disabled={busy}
@@ -306,9 +376,12 @@ export default function AccountsView() {
                             onClick={() => toggleEnabled(a)}
                           >
                             {a.enabled ? "禁用" : "启用"}
-                          </button>
+                          </Button>
                           {/* 重置密码是破坏性操作：danger 视觉分级 + 弹窗二次确认（PromptDialog）。 */}
-                          <button
+                          <Button
+                            variant="light"
+                            color="red"
+                            size="xs"
                             type="button"
                             className="btn sm danger"
                             disabled={busy}
@@ -316,31 +389,39 @@ export default function AccountsView() {
                             onClick={() => setPwTarget(a)}
                           >
                             重置密码
-                          </button>
+                          </Button>
                         </div>
-                      </td>
-                    </tr>
+                      </Table.Td>
+                    </Table.Tr>
                   ))}
-                </tbody>
-              </table>
+                </Table.Tbody>
+              </Table>
             )}
             {accounts !== null && accounts.length > 0 && (
               <div className="table-foot">
                 <span>额度在北京时间 00:00 统一刷新</span>
-                <span>共 {accounts.length} 个账号</span>
+                <span role="status">
+                  {query || accountFilter
+                    ? `显示 ${shownAccounts.length} / ${accounts.length} 个账号`
+                    : `共 ${accounts.length} 个账号`}
+                </span>
               </div>
             )}
           </div>
         </div>
 
         <div className="accounts-create-section">
-          <div className="card">
-            <h2>新建账号</h2>
-            <div className="row row-wrap" style={{ alignItems: "flex-start" }}>
-              <div style={{ flex: 1 }}>
+          <Paper withBorder p="lg" className="card">
+            <h2>
+              <SectionIcon name="users" />
+              新建账号
+            </h2>
+            <div className="create-account-fields">
+              <div>
                 <Field id="un" label="用户名" hint="登录时使用的名称，由后台创建与分发。">
                   {(ctl) => (
-                    <input
+                    <Input
+                      error={ctl["aria-invalid"]}
                       {...ctl}
                       value={draft.username}
                       onChange={(e) => {
@@ -351,10 +432,11 @@ export default function AccountsView() {
                   )}
                 </Field>
               </div>
-              <div style={{ flex: 1 }}>
+              <div>
                 <Field id="up" label="密码" hint="分发给使用者；遗忘时可在上方列表中重置。">
                   {(ctl) => (
-                    <input
+                    <Input
+                      error={ctl["aria-invalid"]}
                       {...ctl}
                       type="password"
                       autoComplete="new-password"
@@ -367,10 +449,11 @@ export default function AccountsView() {
                   )}
                 </Field>
               </div>
-              <div style={{ flex: 1 }}>
+              <div>
                 <Field id="ul" label="每日上限" hint="留空使用服务端默认 3；0 表示禁止新提交。">
                   {(ctl) => (
-                    <input
+                    <Input
+                      error={ctl["aria-invalid"]}
                       {...ctl}
                       inputMode="numeric"
                       value={draft.dailyLimit}
@@ -386,7 +469,8 @@ export default function AccountsView() {
             {/* 表单级错误贴近提交按钮：修正后点「创建账号」即重试 */}
             {createError && <InlineError message={createError} />}
             <div className="btn-row">
-              <button
+              <Button
+                variant="filled"
                 type="button"
                 className="btn primary"
                 disabled={busy || !draft.username.trim() || !draft.password}
@@ -396,10 +480,10 @@ export default function AccountsView() {
                 onClick={create}
               >
                 创建账号
-              </button>
+              </Button>
             </div>
             <p className="save-hint">保存位置：写入本服务器的账号列表；创建后立即可用于登录。</p>
-          </div>
+          </Paper>
         </div>
       </div>
 
@@ -421,7 +505,15 @@ export default function AccountsView() {
 }
 
 function statusTag(enabled: boolean): ReactNode {
-  return enabled ? <span className="tag archived">启用</span> : <span className="tag failed">已禁用</span>;
+  return enabled ? (
+    <Badge component="span" variant="light" radius="sm" color="teal" className="tag archived">
+      启用
+    </Badge>
+  ) : (
+    <Badge component="span" variant="light" radius="sm" color="red" className="tag failed">
+      已禁用
+    </Badge>
+  );
 }
 
 function resetLabel(resetAt: string): string {

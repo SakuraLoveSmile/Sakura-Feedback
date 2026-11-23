@@ -1,3 +1,4 @@
+import { Badge, Button, Input, NativeSelect, Paper, Table } from "@mantine/core";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
@@ -8,7 +9,8 @@ import {
   type ClassifyOptions,
   type KaneoTestResult,
 } from "../api.ts";
-import { ConfirmDialog, EmptyState, Field, Icon, InlineError, useToast } from "../ui.tsx";
+import { usePageEdits } from "../page-edits.ts";
+import { ConfirmDialog, EmptyState, Field, Icon, InlineError, ListSearch, useToast } from "../ui.tsx";
 
 interface Draft {
   id?: string;
@@ -198,6 +200,9 @@ const valueBoxStyle = {
 
 export default function AppsView() {
   const toast = useToast();
+  const [query, setQuery] = useState("");
+  const [appFilter, setAppFilter] = useState("");
+  const editorHeading = useRef<HTMLHeadingElement>(null);
   const [apps, setApps] = useState<AppItem[]>([]);
   const [listLoading, setListLoading] = useState(true);
   const [listError, setListError] = useState<string | null>(null);
@@ -488,29 +493,32 @@ export default function AppsView() {
     [loadOptions, setForm],
   );
 
-  const loadProjects = useCallback(async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const r = await api.get<{
-        ok: boolean;
-        workspaces?: unknown[];
-        projects?: { id: string; workspaceId: string; name: string; slug: string }[];
-        reason?: string;
-      }>("/api/admin/connection/kaneo/projects");
-      if (!r.ok) {
-        setError(`项目列表获取失败：${r.reason ?? "未知原因"}`);
-        setProjects([]);
-      } else {
-        setProjects(r.projects ?? []);
-        toast("ok", `已加载 ${r.projects?.length ?? 0} 个项目`);
+  const loadProjects = useCallback(
+    async (manual = false) => {
+      setBusy(true);
+      setError(null);
+      try {
+        const r = await api.get<{
+          ok: boolean;
+          workspaces?: unknown[];
+          projects?: { id: string; workspaceId: string; name: string; slug: string }[];
+          reason?: string;
+        }>("/api/admin/connection/kaneo/projects");
+        if (!r.ok) {
+          setError(`项目列表获取失败：${r.reason ?? "未知原因"}`);
+          setProjects([]);
+        } else {
+          setProjects(r.projects ?? []);
+          if (manual) toast("ok", `已加载 ${r.projects?.length ?? 0} 个项目`);
+        }
+      } catch (err) {
+        setError(err instanceof ApiError ? err.message : "项目列表请求失败");
+      } finally {
+        setBusy(false);
       }
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "项目列表请求失败");
-    } finally {
-      setBusy(false);
-    }
-  }, [toast]);
+    },
+    [toast],
+  );
 
   useEffect(() => {
     void load().catch(() => {}); // 列表失败由独立错误区提供重试，不显示为成功空列表。
@@ -550,6 +558,7 @@ export default function AppsView() {
         return;
       }
       void openDetail(action.appId);
+      if (!isWide) editorHeading.current?.focus();
       return;
     }
     resetEditing();
@@ -1002,6 +1011,7 @@ export default function AppsView() {
   // —— 规则保存状态摘要：dirty 以编辑基准判定（当前草稿 vs 基准快照），
   //    规则缺项与「来源待确认」分开表述 ——
   const formDirty = editBase ? !sameForm(editBase.form, form) : !sameForm(emptySnapshot, form);
+  usePageEdits(formDirty, saving);
   const effectiveProjectId = rule.projectId || draft.kaneoProjectId;
   const missingRule: string[] = [];
   if (!effectiveProjectId) missingRule.push("缺 Kaneo 项目");
@@ -1178,6 +1188,12 @@ export default function AppsView() {
   const formFrozen = compareOpen || detailLoading;
   const formFrozenHint = detailLoading ? "正在读取软件详情，完成后可继续操作" : "冲突比较期间表单已冻结";
   const conflictPending = conflict !== null;
+  const term = query.trim().toLocaleLowerCase();
+  const shownApps = apps.filter(
+    (app) =>
+      (app.name.toLocaleLowerCase().includes(term) || app.appId.toLocaleLowerCase().includes(term)) &&
+      (!appFilter || (appFilter === "pending" ? app.configStatus === "pending" : app.pendingSources > 0)),
+  );
   const editActionBlocked = busy || saving || detailLoading || deletingId !== null;
   const editActionHint = saving
     ? "保存进行中，完成后可切换软件"
@@ -1197,7 +1213,8 @@ export default function AppsView() {
             <b>{waitingTotal}</b> 条
           </div>
         </div>
-        <button
+        <Button
+          variant="filled"
           type="button"
           className="btn primary"
           disabled={editActionBlocked}
@@ -1205,7 +1222,7 @@ export default function AppsView() {
           onClick={() => requestEditAction({ kind: "new" })}
         >
           新增软件
-        </button>
+        </Button>
       </div>
       {error && <InlineError message={error} />}
       {listError && <InlineError message={listError} onRetry={() => void load().catch(() => {})} />}
@@ -1214,8 +1231,20 @@ export default function AppsView() {
         <div className="apps-list-pane">
           <div className="apps-list-heading">
             <h2 className="apps-list-title">全部软件</h2>
-            <span className="small muted">{apps.length} 个</span>
+            <span className="small muted" role="status">
+              {query || appFilter ? `${shownApps.length} / ${apps.length} 个` : `${apps.length} 个`}
+            </span>
           </div>
+          {apps.length > 0 && (
+            <div className="directory-toolbar">
+              <ListSearch label="搜索软件名称或 appId" value={query} onChange={setQuery} />
+              <NativeSelect aria-label="软件配置筛选" value={appFilter} onChange={(e) => setAppFilter(e.target.value)}>
+                <option value="">全部软件</option>
+                <option value="pending">待配置</option>
+                <option value="sources">有待确认来源</option>
+              </NativeSelect>
+            </div>
+          )}
           <div className="table-wrap" aria-busy={listLoading}>
             {apps.length === 0 && listLoading ? (
               <div className="empty" role="status">
@@ -1228,7 +1257,8 @@ export default function AppsView() {
                 title="还没有软件配置"
                 hint="组件首次提交反馈后会自动出现在这里，也可以手动新增。"
                 action={
-                  <button
+                  <Button
+                    size="xs"
                     type="button"
                     className="btn sm"
                     disabled={editActionBlocked}
@@ -1236,26 +1266,42 @@ export default function AppsView() {
                     onClick={() => requestEditAction({ kind: "new" })}
                   >
                     手动新增软件
-                  </button>
+                  </Button>
+                }
+              />
+            ) : shownApps.length === 0 ? (
+              <EmptyState
+                title="没有匹配的软件"
+                action={
+                  <Button
+                    className="btn"
+                    type="button"
+                    onClick={() => {
+                      setQuery("");
+                      setAppFilter("");
+                    }}
+                  >
+                    清除筛选
+                  </Button>
                 }
               />
             ) : (
-              <table>
-                <thead>
-                  <tr>
-                    <th>名称</th>
-                    <th className="col-appid">appId</th>
-                    <th className="col-status">状态</th>
-                    <th className="col-sync">同步方式</th>
-                    <th className="col-sources">来源（待确认/已确认）</th>
-                    <th className="col-waiting">等待反馈</th>
-                    <th>操作</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {apps.map((a) => (
-                    <tr key={a.id} className={selected?.id === a.id ? "selected" : undefined}>
-                      <td>
+              <Table className="directory-table apps-directory">
+                <Table.Thead>
+                  <Table.Tr>
+                    <Table.Th>名称</Table.Th>
+                    <Table.Th className="col-appid">appId</Table.Th>
+                    <Table.Th className="col-status">状态</Table.Th>
+                    <Table.Th className="col-sync">同步方式</Table.Th>
+                    <Table.Th className="col-sources">来源（待确认/已确认）</Table.Th>
+                    <Table.Th className="col-waiting">等待反馈</Table.Th>
+                    <Table.Th>操作</Table.Th>
+                  </Table.Tr>
+                </Table.Thead>
+                <Table.Tbody>
+                  {shownApps.map((a) => (
+                    <Table.Tr key={a.id} className={selected?.id === a.id ? "selected" : undefined}>
+                      <Table.Td>
                         <div className="apps-name-cell">
                           <span
                             className={`apps-avatar ${a.configStatus === "pending" ? "is-warn" : "is-ok"}`}
@@ -1298,33 +1344,40 @@ export default function AppsView() {
                             }
                           />
                         </div>
-                      </td>
-                      <td className="col-appid">
+                      </Table.Td>
+                      <Table.Td data-label="软件 ID" className="col-appid">
                         <code>{a.appId}</code>
-                      </td>
-                      <td className="col-status">
+                      </Table.Td>
+                      <Table.Td data-label="配置状态" className="col-status">
                         {a.configStatus === "pending" ? (
-                          <span className="tag tone-warn">待配置</span>
+                          <Badge component="span" variant="light" radius="sm" color="orange" className="tag tone-warn">
+                            待配置
+                          </Badge>
                         ) : (
-                          <span className="tag archived">已配置</span>
+                          <Badge component="span" variant="light" radius="sm" color="teal" className="tag archived">
+                            已配置
+                          </Badge>
                         )}
                         {a.configStatus === "pending" && <div className="muted small">自动发现</div>}
-                      </td>
-                      <td className="col-sync">
+                      </Table.Td>
+                      <Table.Td data-label="同步方式" className="col-sync">
                         {archiveModeText(a)}
                         {a.archiveMode === "automatic" && !a.ruleComplete && (
                           <div className="err small">规则不完整</div>
                         )}
                         <div className="muted small">规则 v{a.ruleVersion}</div>
-                      </td>
-                      <td className="col-sources">
+                      </Table.Td>
+                      <Table.Td data-label="来源 · 待确认 / 已确认" className="col-sources">
                         <b>{a.pendingSources}</b> / {a.confirmedSources}
-                      </td>
-                      <td className="col-waiting">{a.waitingFeedbacks}</td>
-                      <td>
+                      </Table.Td>
+                      <Table.Td data-label="等待反馈" className="col-waiting">
+                        {a.waitingFeedbacks}
+                      </Table.Td>
+                      <Table.Td>
                         <div className="row" style={{ gap: "var(--sp-2)", flexWrap: "wrap" }}>
                           {/* 保存或详情加载期间禁止切换对象；未保存修改需先确认。 */}
-                          <button
+                          <Button
+                            size="xs"
                             type="button"
                             className="btn sm"
                             onClick={() => requestEditAction({ kind: "open", appId: a.id })}
@@ -1332,9 +1385,10 @@ export default function AppsView() {
                             title={editActionHint}
                           >
                             配置
-                          </button>
+                          </Button>
                           {a.archiveMode === "automatic" ? (
-                            <button
+                            <Button
+                              size="xs"
                               type="button"
                               className="btn sm row-action-secondary"
                               onClick={() => disableAuto(a)}
@@ -1342,9 +1396,10 @@ export default function AppsView() {
                               title={busy ? "有操作进行中，稍候重试" : undefined}
                             >
                               关闭自动同步
-                            </button>
+                            </Button>
                           ) : (
-                            <button
+                            <Button
+                              size="xs"
                               type="button"
                               className="btn sm row-action-secondary"
                               onClick={() => enableAuto(a)}
@@ -1358,9 +1413,12 @@ export default function AppsView() {
                               }
                             >
                               启用自动同步
-                            </button>
+                            </Button>
                           )}
-                          <button
+                          <Button
+                            variant="light"
+                            color="red"
+                            size="xs"
                             type="button"
                             className="btn sm danger row-action-secondary"
                             onClick={() => void remove(a)}
@@ -1376,84 +1434,95 @@ export default function AppsView() {
                             }
                           >
                             {deletingId === a.id ? "删除中…" : "删除"}
-                          </button>
+                          </Button>
                         </div>
-                      </td>
-                    </tr>
+                      </Table.Td>
+                    </Table.Tr>
                   ))}
-                </tbody>
-              </table>
+                </Table.Tbody>
+              </Table>
             )}
           </div>
         </div>
 
         <div className="apps-detail-pane">
           {selected && (
-            <div className="card">
+            <Paper withBorder p="lg" className="card">
               <h2>来源确认：{selected.name}</h2>
               <p className="muted">
                 服务端按请求 Origin 逐条记录来源；无 Origin 的原生客户端记为 <code>native</code>
                 。待确认来源不会自动同步，确认后由扫描自动补处理。
               </p>
               <div className="table-wrap" style={{ border: "none", borderRadius: 0 }}>
-                <table>
-                  <thead>
-                    <tr>
-                      <th>来源</th>
-                      <th>类型</th>
-                      <th>状态</th>
-                      <th>最近出现</th>
-                      <th>操作</th>
-                    </tr>
-                  </thead>
-                  <tbody>
+                <Table>
+                  <Table.Thead>
+                    <Table.Tr>
+                      <Table.Th>来源</Table.Th>
+                      <Table.Th>类型</Table.Th>
+                      <Table.Th>状态</Table.Th>
+                      <Table.Th>最近出现</Table.Th>
+                      <Table.Th>操作</Table.Th>
+                    </Table.Tr>
+                  </Table.Thead>
+                  <Table.Tbody>
                     {sources.map((s) => (
-                      <tr key={s.origin}>
-                        <td>
+                      <Table.Tr key={s.origin}>
+                        <Table.Td>
                           <code className="wrap-anywhere">{s.origin}</code>
-                        </td>
-                        <td>{s.kind === "native" ? "原生客户端" : "浏览器"}</td>
-                        <td>
+                        </Table.Td>
+                        <Table.Td>{s.kind === "native" ? "原生客户端" : "浏览器"}</Table.Td>
+                        <Table.Td>
                           {s.status === "confirmed" ? (
-                            <span className="tag archived">已确认</span>
+                            <Badge component="span" variant="light" radius="sm" color="teal" className="tag archived">
+                              已确认
+                            </Badge>
                           ) : (
-                            <span className="tag tone-warn">待确认</span>
+                            <Badge
+                              component="span"
+                              variant="light"
+                              radius="sm"
+                              color="orange"
+                              className="tag tone-warn"
+                            >
+                              待确认
+                            </Badge>
                           )}
-                        </td>
-                        <td className="muted">{s.lastSeenAt}</td>
-                        <td>
+                        </Table.Td>
+                        <Table.Td className="muted">{s.lastSeenAt}</Table.Td>
+                        <Table.Td>
                           {s.status === "pending" ? (
-                            <button
+                            <Button
+                              size="xs"
                               type="button"
                               className="btn sm"
                               onClick={() => void confirmSource(selected, s.origin)}
                               disabled={busy}
                             >
                               确认来源
-                            </button>
+                            </Button>
                           ) : (
                             <span className="muted">—</span>
                           )}
-                        </td>
-                      </tr>
+                        </Table.Td>
+                      </Table.Tr>
                     ))}
                     {sources.length === 0 && (
-                      <tr>
-                        <td colSpan={5}>
+                      <Table.Tr>
+                        <Table.Td colSpan={5}>
                           <EmptyState title="还没有观察到任何来源" hint="组件提交后自动登记。" />
-                        </td>
-                      </tr>
+                        </Table.Td>
+                      </Table.Tr>
                     )}
-                  </tbody>
-                </table>
+                  </Table.Tbody>
+                </Table>
               </div>
-            </div>
+            </Paper>
           )}
 
-          <div className="card">
+          <Paper withBorder p="lg" className="card">
             <div className="apps-config-head">
               <div className="apps-config-title">
-                <h2>
+                <h2 ref={editorHeading} tabIndex={-1}>
                   {draft.id ? (
                     <>
                       <span className="sr-only">配置：</span>
@@ -1470,24 +1539,36 @@ export default function AppsView() {
                 </div>
               </div>
               <div className="apps-config-status">
-                {!draft.id && <span className="tag">新建</span>}
+                {!draft.id && (
+                  <Badge component="span" variant="light" radius="sm" color="gray" className="tag">
+                    新建
+                  </Badge>
+                )}
                 {selected && (
-                  <span
-                    className={`tag ${
-                      selected.archiveMode === "automatic" ? (selected.ruleComplete ? "archived" : "tone-warn") : ""
-                    }`}
+                  <Badge
+                    component="span"
+                    variant="light"
+                    radius="sm"
+                    color={selected.archiveMode === "automatic" ? (selected.ruleComplete ? "teal" : "orange") : "gray"}
+                    className="tag"
                   >
                     {selected.archiveMode === "automatic"
                       ? selected.ruleComplete
                         ? "自动同步已开启"
                         : "规则不完整"
                       : "人工同步"}
-                  </span>
+                  </Badge>
                 )}
                 {selected?.archiveMode === "automatic" && (
-                  <button type="button" className="btn sm" onClick={() => disableAuto(selected)} disabled={busy}>
+                  <Button
+                    size="xs"
+                    type="button"
+                    className="btn sm"
+                    onClick={() => disableAuto(selected)}
+                    disabled={busy}
+                  >
                     关闭自动同步
-                  </button>
+                  </Button>
                 )}
               </div>
             </div>
@@ -1512,17 +1593,19 @@ export default function AppsView() {
                         : "；冲突未解决，保存已禁用：请进入比较或取消编辑。"}
                   </span>
                   {conflict.fetchError ? (
-                    <button
+                    <Button
+                      size="xs"
                       type="button"
                       className="btn sm"
                       disabled={busy}
                       onClick={() => void enterConflict(conflict.appId, conflict.message)}
                     >
                       重试读取最新配置
-                    </button>
+                    </Button>
                   ) : (
                     !compareOpen && (
-                      <button
+                      <Button
+                        size="xs"
                         type="button"
                         className="btn sm"
                         disabled={busy}
@@ -1532,7 +1615,7 @@ export default function AppsView() {
                         }}
                       >
                         进入比较
-                      </button>
+                      </Button>
                     )
                   )}
                 </div>
@@ -1559,9 +1642,15 @@ export default function AppsView() {
                   <span className="rule-status-tag warn">已保存</span>
                   <span className="small">
                     {refreshError}{" "}
-                    <button type="button" className="btn sm" disabled={busy} onClick={() => void retrySaveRefresh()}>
+                    <Button
+                      size="xs"
+                      type="button"
+                      className="btn sm"
+                      disabled={busy}
+                      onClick={() => void retrySaveRefresh()}
+                    >
                       重试刷新
-                    </button>
+                    </Button>
                   </span>
                 </div>
               )}
@@ -1626,7 +1715,8 @@ export default function AppsView() {
                         "正在分别读取两侧项目的列、标签和成员名称；读取完成前不能静默应用比较结果。"}
                     </span>
                     {compareOptionsError && (
-                      <button
+                      <Button
+                        size="xs"
                         type="button"
                         className="btn sm"
                         disabled={busy || compareOptionsLoading}
@@ -1635,7 +1725,7 @@ export default function AppsView() {
                         }}
                       >
                         重试读取选项
-                      </button>
+                      </Button>
                     )}
                   </div>
                 )}
@@ -1723,12 +1813,18 @@ export default function AppsView() {
                   </fieldset>
                 ))}
                 <div className="btn-row" style={{ marginTop: "var(--sp-3)" }}>
-                  <button type="button" className="btn primary" disabled={!allResolved || busy} onClick={applyCompare}>
+                  <Button
+                    variant="filled"
+                    type="button"
+                    className="btn primary"
+                    disabled={!allResolved || busy}
+                    onClick={applyCompare}
+                  >
                     应用比较结果
-                  </button>
-                  <button type="button" className="btn" disabled={busy} onClick={exitCompare}>
+                  </Button>
+                  <Button type="button" className="btn" disabled={busy} onClick={exitCompare}>
                     退出比较继续编辑
-                  </button>
+                  </Button>
                 </div>
                 {!allResolved && (
                   <p className="muted small" style={{ marginTop: "var(--sp-2)" }}>
@@ -1742,7 +1838,8 @@ export default function AppsView() {
             <div className="fields-2col">
               <Field id="an" label="名称" hint="在后台列表与反馈详情中展示的名称。">
                 {(ctl) => (
-                  <input
+                  <Input
+                    error={ctl["aria-invalid"]}
                     {...ctl}
                     value={draft.name}
                     disabled={formFrozen}
@@ -1752,7 +1849,8 @@ export default function AppsView() {
               </Field>
               <Field id="ai2" label="appId" hint="组件提交时携带的标识；创建后不可改。">
                 {(ctl) => (
-                  <input
+                  <Input
+                    error={ctl["aria-invalid"]}
                     {...ctl}
                     value={draft.appId}
                     disabled={Boolean(draft.id) || formFrozen}
@@ -1767,7 +1865,10 @@ export default function AppsView() {
               hint="每行一个 origin（如 https://example.com）；此处登记的来源直接视为已确认。"
             >
               {(ctl) => (
-                <textarea
+                <Input
+                  component="textarea"
+                  multiline
+                  error={ctl["aria-invalid"]}
                   {...ctl}
                   rows={2}
                   value={draft.originsText}
@@ -1789,7 +1890,9 @@ export default function AppsView() {
                 >
                   {(ctl) =>
                     projects.length > 0 ? (
-                      <select
+                      <Input
+                        component="select"
+                        rightSection={<Icon name="chevronDown" size={14} />}
                         {...ctl}
                         value={rule.projectId}
                         disabled={detailLoading || formFrozen}
@@ -1813,9 +1916,10 @@ export default function AppsView() {
                             {p.name}（{p.slug}）
                           </option>
                         ))}
-                      </select>
+                      </Input>
                     ) : (
-                      <input
+                      <Input
+                        error={ctl["aria-invalid"]}
                         {...ctl}
                         value={rule.projectId}
                         disabled={detailLoading || formFrozen}
@@ -1825,22 +1929,24 @@ export default function AppsView() {
                   }
                 </Field>
               </div>
-              <button
+              <Button
                 type="button"
                 className="btn"
-                onClick={loadProjects}
+                onClick={() => void loadProjects(true)}
                 disabled={busy || formFrozen}
                 title={formFrozen ? formFrozenHint : busy ? "有操作进行中，稍候重试" : undefined}
                 style={{ marginTop: 22, whiteSpace: "nowrap" }}
               >
                 <Icon name="refresh" size={16} />
                 {busy ? "加载中…" : "刷新项目列表"}
-              </button>
+              </Button>
               <div style={{ flex: 1 }}>
                 <Field id="col" label="目标列" hint="加载选项后从项目列中选择；未加载时直接填目标列 slug。">
                   {(ctl) =>
                     options && options.columns.length > 0 ? (
-                      <select
+                      <Input
+                        component="select"
+                        rightSection={<Icon name="chevronDown" size={14} />}
                         {...ctl}
                         value={rule.columnId}
                         disabled={detailLoading || formFrozen}
@@ -1855,9 +1961,10 @@ export default function AppsView() {
                             {c.name}（{c.slug}）
                           </option>
                         ))}
-                      </select>
+                      </Input>
                     ) : (
-                      <input
+                      <Input
+                        error={ctl["aria-invalid"]}
                         {...ctl}
                         value={rule.columnSlug}
                         disabled={detailLoading || formFrozen}
@@ -1867,7 +1974,7 @@ export default function AppsView() {
                   }
                 </Field>
               </div>
-              <button
+              <Button
                 type="button"
                 className="btn"
                 onClick={() => void loadOptions(rule.projectId)}
@@ -1884,7 +1991,7 @@ export default function AppsView() {
                 style={{ marginTop: 22 }}
               >
                 加载列 / 标签 / 成员
-              </button>
+              </Button>
             </div>
 
             {/* 目标列校验错误：贴近「默认同步目标」字段，点重试即重测连接 */}
@@ -1921,7 +2028,9 @@ export default function AppsView() {
                 <div style={{ flex: 1 }}>
                   <Field id="as" label="负责人" hint="可留空：同步任务不指定负责人。">
                     {(ctl) => (
-                      <select
+                      <Input
+                        component="select"
+                        rightSection={<Icon name="chevronDown" size={14} />}
                         {...ctl}
                         value={rule.assigneeId}
                         disabled={formFrozen}
@@ -1933,7 +2042,7 @@ export default function AppsView() {
                             {m.name}
                           </option>
                         ))}
-                      </select>
+                      </Input>
                     )}
                   </Field>
                 </div>
@@ -1942,7 +2051,8 @@ export default function AppsView() {
 
             <div className="apps-save-bar">
               <div className="btn-row">
-                <button
+                <Button
+                  variant="filled"
                   type="button"
                   className="btn primary"
                   onClick={save}
@@ -1959,9 +2069,9 @@ export default function AppsView() {
                   aria-busy={saving}
                 >
                   {draft.id ? "保存配置（不触发同步）" : "创建"}
-                </button>
+                </Button>
                 {selected && (
-                  <button
+                  <Button
                     type="button"
                     className="btn"
                     onClick={() => enableAuto(selected)}
@@ -1977,10 +2087,10 @@ export default function AppsView() {
                     }
                   >
                     启用自动同步并处理积压
-                  </button>
+                  </Button>
                 )}
                 {draft.id && (
-                  <button
+                  <Button
                     type="button"
                     className="btn"
                     disabled={editActionBlocked}
@@ -1988,7 +2098,7 @@ export default function AppsView() {
                     onClick={() => requestEditAction({ kind: "reset" })}
                   >
                     取消编辑
-                  </button>
+                  </Button>
                 )}
               </div>
               <p className="save-hint">
@@ -1996,20 +2106,24 @@ export default function AppsView() {
               </p>
               {columns.length > 0 && <p className="muted">项目共 {columns.length} 列（已通过连接测试）</p>}
             </div>
-          </div>
+          </Paper>
 
           {/* 危险操作独立分区：与配置表单分开；流程仍是确认弹窗 → 进行中禁用 → 可重试错误（与行内删除同一入口）。 */}
           {selected && (
             <div className="danger-zone">
               <div className="danger-zone-head">
                 <h2>危险操作</h2>
-                <span className="tag tone-err">软删除，历史保留</span>
+                <Badge component="span" variant="light" radius="sm" color="red" className="tag tone-err">
+                  软删除，历史保留
+                </Badge>
               </div>
               <p>
                 删除「{selected.name}」（<code className="wrap-anywhere">{selected.appId}</code>）：历史反馈、截图与日志
                 全部保留；该 appId 再次提交反馈时会以全新待配置记录重新出现。列表行内也有同一删除入口。
               </p>
-              <button
+              <Button
+                variant="light"
+                color="red"
                 type="button"
                 className="btn danger"
                 onClick={() => void remove(selected)}
@@ -2025,7 +2139,7 @@ export default function AppsView() {
                 }
               >
                 {deletingId === selected.id ? "删除中…" : "删除该软件"}
-              </button>
+              </Button>
             </div>
           )}
         </div>
