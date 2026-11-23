@@ -9,10 +9,18 @@ import 'sensitive_card.dart';
 ///
 /// [controller] 由应用根拥有并传入，本页面自己**不**创建也不释放它。
 class HomePage extends StatelessWidget {
-  const HomePage({super.key, required this.controller});
+  const HomePage({
+    super.key,
+    required this.controller,
+    this.onOpenHostSettings,
+  });
 
   /// 应用根持有的控制器。
   final FeedbackController controller;
+
+  /// 打开发送宿主设置页（v0.11.0 托管用法）；由应用根提供，改选后由根
+  /// 重建 [FeedbackWidget] 生效。省略时该入口不可用。
+  final VoidCallback? onOpenHostSettings;
 
   /// 命名路由名（同时作为 pageLabel 上报）。
   static const String routeName = '/';
@@ -28,8 +36,9 @@ class HomePage extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.center,
             children: <Widget>[
               const Text(
-                '双指长按 700ms 可唤醒反馈。在设置里选「灵感球」，'
-                '用你选的手势唤出球，拖到问题处松手即可选区。',
+                '双指长按 700ms 可唤醒反馈，拖到问题处松手即可选区。'
+                '入口样式与动效由「宿主设置」统一管理：改选后组件按新值重建，'
+                '反馈面板里只保留服务器设置。',
                 textAlign: TextAlign.center,
                 style: TextStyle(fontSize: 16),
               ),
@@ -66,6 +75,11 @@ class HomePage extends StatelessWidget {
                     onPressed: () => showHostDialog(context),
                     icon: const Icon(Icons.open_in_new_outlined),
                     label: const Text('打开宿主对话框'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: onOpenHostSettings,
+                    icon: const Icon(Icons.tune_outlined),
+                    label: const Text('宿主设置'),
                   ),
                 ],
               ),

@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 
 import 'details_page.dart';
 import 'home_page.dart';
+import 'host_settings.dart';
 
 void main() => runApp(const FeedbackExampleApp());
 
@@ -55,6 +56,32 @@ class _FeedbackExampleAppState extends State<FeedbackExampleApp> {
   late final NavigatorObserver _routeObserver =
       _RouteLabelObserver(_syncPageLabel);
 
+  /// v0.11.0 宿主托管（§4.2.1）：入口样式、唤醒动效与灵感球入场由宿主设置
+  /// 统一管理，默认光束 / 水波涟漪 / 小珠浮现。改选后 setState 重建
+  /// [FeedbackWidget]，组件按新值生效。
+  FeedbackLauncherStyle _launcherStyle = FeedbackLauncherStyle.beam;
+  FeedbackWakeVisual _wakeVisual = FeedbackWakeVisual.ripple;
+  FeedbackOrbEntrance _orbEntrance = FeedbackOrbEntrance.bead;
+
+  /// 打开宿主设置页；每次改选都写回根 State 并由重建把新值交给组件。
+  Future<void> _openHostSettings(BuildContext context) {
+    return showHostFeedbackSettings(
+      context,
+      settings: HostFeedbackSettings(
+        launcherStyle: _launcherStyle,
+        wakeVisual: _wakeVisual,
+        orbEntrance: _orbEntrance,
+      ),
+      onChanged: (HostFeedbackSettings next) {
+        setState(() {
+          _launcherStyle = next.launcherStyle;
+          _wakeVisual = next.wakeVisual;
+          _orbEntrance = next.orbEntrance;
+        });
+      },
+    );
+  }
+
   void _syncPageLabel(Route<dynamic>? route) {
     final String? name = route?.settings.name;
     // 对话框等匿名路由（name == null）不改变 pageLabel。
@@ -89,6 +116,12 @@ class _FeedbackExampleAppState extends State<FeedbackExampleApp> {
         logProvider: () => _diagnostics.provide(),
       ),
       controller: _feedback,
+      // v0.11.0 宿主托管：三项由宿主设置页改选并重建，hideSettings 让面板
+      // 设置页只剩服务器设置。
+      launcherStyle: _launcherStyle,
+      wakeVisual: _wakeVisual,
+      orbEntrance: _orbEntrance,
+      hideSettings: true,
       // pageLabel 需要跟随路由变化：用 ValueListenableBuilder 局部重建配置。
       child: ValueListenableBuilder<String>(
         valueListenable: _pageLabel,
@@ -102,8 +135,10 @@ class _FeedbackExampleAppState extends State<FeedbackExampleApp> {
             navigatorObservers: <NavigatorObserver>[_routeObserver],
             initialRoute: HomePage.routeName,
             routes: <String, WidgetBuilder>{
-              HomePage.routeName: (BuildContext context) =>
-                  HomePage(controller: _feedback),
+              HomePage.routeName: (BuildContext context) => HomePage(
+                controller: _feedback,
+                onOpenHostSettings: () => _openHostSettings(context),
+              ),
               DetailsPage.routeName: (BuildContext context) =>
                   const DetailsPage(),
             },
