@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:feedback_widget/src/orb.dart';
+import 'package:feedback_widget/src/orb_entrance.dart';
 import 'package:feedback_widget/src/orb_liquid.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -121,6 +122,8 @@ Future<_Pixels> _render(
   double handleMix = 0,
   double mist = 0,
   double idleMix = 0,
+  FeedbackOrbEntrance? entrance,
+  double entranceProgress = 1,
 }) async {
   final ui.FragmentProgram program = await _loadOrbLensProgram();
   final ui.FragmentShader shader = program.fragmentShader();
@@ -139,6 +142,10 @@ Future<_Pixels> _render(
       handleMix: handleMix,
       mist: mist,
       idleMix: idleMix,
+      gestureGlass: entrance != null,
+      entrance: entrance ?? FeedbackOrbEntrance.bead,
+      entranceProgress: entranceProgress,
+      entranceAxis: const Offset(.9, 0),
       localSize: const Size(512, 512));
   for (int i = 0; i < values.length; i++) {
     shader.setFloat(i, values[i]);
@@ -165,6 +172,63 @@ Future<_Pixels> _render(
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  testWidgets(
+      'each entrance draws its own silhouette and settles into identical glass',
+      (tester) async {
+    await tester.runAsync(() async {
+      final image = await _image(
+          (canvas) => canvas.drawColor(const Color(0xFF425789), BlendMode.src));
+      try {
+        final resting = await _render(image,
+            radius: 100, entrance: FeedbackOrbEntrance.bead);
+        for (final effect in FeedbackOrbEntrance.values) {
+          final t = effect == FeedbackOrbEntrance.reveal
+              ? .45
+              : effect == FeedbackOrbEntrance.drop
+                  ? .36
+                  : .12;
+          final radius = effect == FeedbackOrbEntrance.bead
+              ? 100 * (.12 + .905 * orbSmoothstep(0, .75, t))
+              : 100.0;
+          final active = await _render(image,
+              radius: radius, entrance: effect, entranceProgress: t);
+          int alpha(double x, double y) =>
+              active.channel(256 + 100 * x, 256 + 100 * y, 3);
+          final (inside, outside) = switch (effect) {
+            FeedbackOrbEntrance.bead => (Offset.zero, const Offset(0, .5)),
+            FeedbackOrbEntrance.join => (const Offset(.83, 0), Offset.zero),
+            FeedbackOrbEntrance.reveal => (
+                const Offset(-.65, -.3),
+                const Offset(.65, .3)
+              ),
+            FeedbackOrbEntrance.dent => (Offset.zero, const Offset(.90, 0)),
+            FeedbackOrbEntrance.turn => (
+                const Offset(.15, .70),
+                const Offset(.5, 0)
+              ),
+            FeedbackOrbEntrance.drop => (
+                const Offset(.66, -.79),
+                const Offset(-.55, .42)
+              ),
+            FeedbackOrbEntrance.corners => (
+                const Offset(.57, .57),
+                Offset.zero
+              ),
+          };
+          expect(alpha(inside.dx, inside.dy), greaterThan(200),
+              reason: effect.label);
+          expect(alpha(outside.dx, outside.dy), lessThan(25),
+              reason: effect.label);
+          final settled = await _render(image, radius: 100, entrance: effect);
+          expect(settled.data, orderedEquals(resting.data),
+              reason: effect.label);
+        }
+      } finally {
+        image.dispose();
+      }
+    });
+  });
 
   testWidgets(
       'R11 dark idle keeps the clear background and a subdued local edge for sphere and capsule',
@@ -806,7 +870,7 @@ void main() {
   });
 
   test(
-      '23 float contract appends R7 material after unchanged R3 slots; GLES condition retained',
+      'Gesture glass appends a switch after the original 23 slots; GLES condition retained',
       () {
     final String source = readComponentSource('shaders/orb_lens.frag');
     final List<String> slots = <String>[
@@ -838,7 +902,12 @@ void main() {
       'uHalfSize',
       'uHandleMix',
       'uMist',
-      'uIdleMix'
+      'uIdleMix',
+      'uGestureGlass',
+      'uEntranceId',
+      'uEntranceProgress',
+      'uEntranceAxis',
+      'uEntranceAxis'
     ]);
     expect(
         orbLensUniformValues(
@@ -852,6 +921,7 @@ void main() {
             wobble: -.3,
             opacity: .8,
             dark: true,
+            gestureGlass: true,
             localSize: const Size(166.4, 166.4)),
         <double>[
           800,
@@ -876,7 +946,12 @@ void main() {
           52,
           0,
           0,
-          0
+          0,
+          1,
+          0,
+          1,
+          .89,
+          -.22,
         ]);
     expect(
         orbLensUniformValues(
@@ -885,8 +960,8 @@ void main() {
                 pixelRatio: 1,
                 center: Offset.zero,
                 radiusPx: 52)
-            .last,
-        0);
+            .sublist(23),
+        [0, 0, 1, .89, -.22]);
     expect(
         source,
         contains(

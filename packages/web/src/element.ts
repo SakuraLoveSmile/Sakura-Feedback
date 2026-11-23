@@ -53,7 +53,9 @@ import {
 import { loginErrorMessage, webClientLabel } from './auth';
 import { STYLES } from './styles';
 import { OrbLiquid, liquidBoundary, progress, type LiquidSnapshot } from './orb-liquid';
-import { WAKE_GESTURES, WakeGestures, parseWakePreference, wakePreferenceKey, type WakeGestureId } from './wake-gestures';
+import { orbEntrances, type OrbEntrance, decodeEntrance, entranceAxis, beadGrowth, orbEntranceKey, entranceOutline } from './orb-entrance';
+import { WAKE_GESTURES, WakeGestures, parseWakePreference, wakePreferenceKey, type WakeGestureId, type WakePoint } from './wake-gestures';
+import { createWakePaint } from './wake-paint';
 import { OrbLens } from './orb-lens';
 import { constrainOrbIdleHit, interpolateOrbIdle, orbIdleBoundary, orbIdlePreferenceKey, parseOrbIdlePreference, type OrbIdleStyle, type OrbIdleVisual } from './orb-idle';
 import {
@@ -76,6 +78,7 @@ import {
   REGION_KEY_STEP,
   cropFrozenRegion,
   initialRegionSelection,
+  lassoBoundingRect,
   moveRegion,
   normalizeRegion,
   regionFromDrag,
@@ -325,7 +328,12 @@ interface RegionSession {
   dragging:
     | { mode: 'move' | 'new'; startX: number; startY: number; startSel: RegionRect }
     | { mode: 'resize'; handle: RegionHandle; startX: number; startY: number; startSel: RegionRect }
+    | { mode: 'lasso'; startX: number; startY: number; startSel: RegionRect }
     | null;
+  /** 光束唤醒：圈选优先，出框前不渲染方框与工具条。 */
+  lassoFirst: boolean;
+  selReady: boolean;
+  lassoPoints: { x: number; y: number }[] | null;
 }
 
 type Phase =
@@ -596,6 +604,7 @@ export class FeedbackWidget extends HTMLElement {
       'launcher-bottom',
       'launcher-mode',
       'capture-mode',
+      'wake-shortcut',
       'hidden',
       'inert',
       'aria-disabled',
@@ -838,7 +847,17 @@ export class FeedbackWidget extends HTMLElement {
   private releaseVisual: LiquidSnapshot | null = null;
   private lastLiquidVisual: LiquidSnapshot | null = null;
   private orbCollapsed = false;
-  private orbIdleStyle: OrbIdleStyle = 'handle';
+  private savedOrbIdleStyle: OrbIdleStyle | null = null;
+  private summonedOrb: {x: number; y: number; diameter: number; startedAt: number; effect: OrbEntrance; axis: WakePoint} | null = null;
+
+  private get orbIdleStyle(): OrbIdleStyle {
+    return this.savedOrbIdleStyle ?? (this.launcherMode === 'beam' && this.wakeEnabled.length > 0 ? 'hidden' : 'handle');
+  }
+
+  private get gestureStandby(): boolean {
+    return this.effectiveLauncherMode() === 'orb' && this.launcherMode === 'beam' &&
+      this.orbIdleStyle === 'hidden' && this.wakeEnabled.length > 0;
+  }
   private orbIdlePreferenceApp: string | null = null;
   private orbIdleSessionOnly = false;
   private orbIdleInputs = new Map<OrbIdleStyle, HTMLInputElement>();
@@ -861,14 +880,43 @@ export class FeedbackWidget extends HTMLElement {
   private wakeAvailability!: HTMLParagraphElement;
   private wakePreferenceHint!: HTMLParagraphElement;
   private wakeHint!: HTMLDivElement;
+  /** 宿主 launcher-mode=beam 时终端用户可在光束/灵感球之间切换（按 appId 记忆）。 */
+  private launcherStyle: 'beam' | 'orb' = 'beam';
+  private launcherStyleApp: string | null = null;
+  private launcherStyleSessionOnly = false;
+  private launcherStyleInputs = new Map<'beam' | 'orb', HTMLInputElement>();
+  private launcherStyleHint!: HTMLParagraphElement;
+  private launcherStyleSection!: HTMLElement;
+  private wakeVisual: 'ripple' | 'aurora' = 'ripple';
+  private wakeVisualApp: string | null = null;
+  private wakeVisualSessionOnly = false;
+  private wakeVisualInputs = new Map<'ripple' | 'aurora', HTMLInputElement>();
+  private wakeVisualHint!: HTMLParagraphElement;
+  private wakeVisualSection!: HTMLElement;
+  private entrance: OrbEntrance = orbEntrances[0];
+  private entranceApp: string | null = null;
+  private entranceSessionOnly = false;
+  private entranceSelect!: HTMLSelectElement;
+  private entranceHint!: HTMLElement;
+  private orbIdleSection!: HTMLElement;
+  /** 光束覆盖层的视觉层与无障碍隐藏入口。 */
+  private beamLayer!: HTMLDivElement;
+  private lassoLayer!: SVGSVGElement;
+  private lassoPath!: SVGPolylineElement;
+  private lassoHint!: HTMLDivElement;
+  private releaseWakePaint?: () => void;
+  private beamFrame: number | null = null;
+  private beamA11yBtn!: HTMLButtonElement;
+  private wakeShortcutHandler: ((ev: KeyboardEvent) => void) | null = null;
   private readonly wakeGestures = new WakeGestures({
     enabled: () => this.wakeEnabled,
-    allowed: () => this.canWakeOrb(),
+    allowed: () => this.canWake(),
     excluded: event => [...event.composedPath(), ...Array.from(event.changedTouches).map(t => t.target)].some(node => node instanceof Element && (this.isOwnFeedbackUi(node) || node.closest('input, textarea, select, button, a, label, summary, [contenteditable]:not([contenteditable="false"]), [role="button"], [role="link"]'))),
     hint: visible => { if (this.wakeHint) this.wakeHint.hidden = !visible; },
-    trigger: () => {
-      if (!this.canWakeOrb()) return;
-      this.wakeOrb();
+    trigger: (point, fingertips) => {
+      if (!this.canWake()) return;
+      if (this.beamActive()) void this.startBeamWake(point, fingertips);
+      else this.wakeOrb(point, fingertips);
     },
   });
   private orbCanvas!: HTMLCanvasElement;
@@ -1242,20 +1290,21 @@ export class FeedbackWidget extends HTMLElement {
     this.reflect('launcher-bottom', v);
   }
 
-  get launcherMode(): 'tab' | 'orb' {
-    return this.getAttribute('launcher-mode') === 'orb' ? 'orb' : 'tab';
+  get launcherMode(): 'beam' | 'tab' | 'orb' {
+    const value = this.getAttribute('launcher-mode');
+    return value === 'tab' || value === 'orb' || value === 'beam' ? value : 'beam';
   }
-  set launcherMode(v: 'tab' | 'orb') {
-    if (v === 'tab') this.removeAttribute('launcher-mode');
-    else this.setAttribute('launcher-mode', 'orb');
+  set launcherMode(v: 'beam' | 'tab' | 'orb') {
+    if (v === 'beam') this.removeAttribute('launcher-mode');
+    else this.setAttribute('launcher-mode', v);
   }
 
   get captureMode(): 'off' | 'viewport' {
-    return this.getAttribute('capture-mode') === 'viewport' ? 'viewport' : 'off';
+    return this.getAttribute('capture-mode') === 'off' ? 'off' : 'viewport';
   }
   set captureMode(v: 'off' | 'viewport') {
-    if (v === 'off') this.removeAttribute('capture-mode');
-    else this.setAttribute('capture-mode', 'viewport');
+    if (v === 'viewport') this.removeAttribute('capture-mode');
+    else this.setAttribute('capture-mode', 'off');
   }
 
   private reflect(name: string, value: string | null): void {
@@ -1394,10 +1443,17 @@ export class FeedbackWidget extends HTMLElement {
       this.keydownHandler = null;
     }
 
-    // 关闭后焦点恢复到呼出入口
-    if (this.launcherMode === 'orb') {
+    // 关闭后焦点恢复到呼出入口；beam 模式没有可见入口，回到视觉隐藏的无障碍按钮。
+    const mode = this.effectiveLauncherMode();
+    if (mode === 'orb') {
       this.syncOrbIdle(true);
-      if (this.canUseOrbLauncher()) this.orb.focus();
+      if (this.canUseOrbLauncher()) (this.orbIdleHidden() ? this.beamA11yBtn : this.orb).focus();
+    } else if (mode === 'beam') {
+      try {
+        this.beamA11yBtn.focus();
+      } catch {
+        /* 无聚焦目标时忽略 */
+      }
     } else {
       this.launcher.focus();
     }
@@ -1474,7 +1530,9 @@ export class FeedbackWidget extends HTMLElement {
    * - 捕获失败沿用现有失败提示（草稿与旧图保留，绝不静默回退成整屏截图）。
    */
   private async startRegionCapture(opts: {
-    releasePoint: { x: number; y: number };
+    releasePoint?: { x: number; y: number };
+    lassoFirst?: boolean;
+    fingertips?: readonly WakePoint[];
   }): Promise<void> {
     if (this.captureInFlight) return this.captureInFlight;
     if (this.phase === 'submitting' || this.polling) return;
@@ -1487,7 +1545,7 @@ export class FeedbackWidget extends HTMLElement {
       this.syncUi();
       return;
     }
-    const p = this.runCapture({ releasePoint: opts.releasePoint, regionFlow: true });
+    const p = this.runCapture({ ...opts, regionFlow: true });
     this.captureInFlight = p;
     try {
       await p;
@@ -1905,6 +1963,8 @@ export class FeedbackWidget extends HTMLElement {
   private async runCapture(opts: {
     releasePoint?: { x: number; y: number };
     regionFlow?: boolean;
+    fingertips?: readonly WakePoint[];
+    lassoFirst?: boolean;
   }): Promise<void> {
     const seq = ++this.captureSeq;
     const epoch = this.identityEpoch;
@@ -2024,7 +2084,7 @@ export class FeedbackWidget extends HTMLElement {
 
     // T1 局部选区路径：捕获成功 → 打开覆盖层（不写草稿、不开面板，确认后才进入填写）。
     if (frozen && opts.regionFlow) {
-      this.openRegionFlow(frozen);
+      this.openRegionFlow(frozen, opts.lassoFirst === true, opts.fingertips);
       this.syncUi();
       return;
     }
@@ -2089,7 +2149,7 @@ export class FeedbackWidget extends HTMLElement {
   // ---------- T1 局部选区覆盖层（拖球 → 松手 → 调整选区 → 确认） ----------
 
   /** 打开覆盖层：144px选区优先围绕最后可见球心展开，provider落点保持真实指针坐标。 */
-  private openRegionFlow(frozen: FrozenCapture): void {
+  private openRegionFlow(frozen: FrozenCapture, lassoFirst = false, fingertips: readonly WakePoint[] = []): void {
     if (this.regionSession) this.dismissRegionFlow({ focusOrb: false });
     const viewport: RegionViewport = {
       width: Math.max(1, frozen.viewportWidth),
@@ -2104,7 +2164,10 @@ export class FeedbackWidget extends HTMLElement {
     const center = this.releaseVisual
       ? { x: this.releaseVisual.x / overlay.width, y: this.releaseVisual.y / overlay.height }
       : frozen.releasePoint ?? { x: 0.5, y: 0.5 };
-    const sel = initialRegionSelection(center, viewport);
+    const sel = lassoFirst
+      ? { x: 0, y: 0, width: 0, height: 0 }
+      : initialRegionSelection(center, viewport);
+    const zero = { x: 0, y: 0, width: 0, height: 0 };
     const session: RegionSession = {
       epoch: this.identityEpoch,
       frozen,
@@ -2117,27 +2180,139 @@ export class FeedbackWidget extends HTMLElement {
       confirming: false,
       phase: 'selection',
       pointerId: null,
-      startedAt: performance.now() - (this.releaseVisual ? 0 : 550),
-      orbShape: this.releaseVisual ? { ...this.releaseVisual } : null,
-      orbRect: this.releaseVisual ? { x:this.releaseVisual.x-this.releaseVisual.radius, y:this.releaseVisual.y-this.releaseVisual.radius, width:2*this.releaseVisual.radius, height:2*this.releaseVisual.radius } : { x:sel.x*overlay.width/viewport.width,y:sel.y*overlay.height/viewport.height,width:sel.width*overlay.width/viewport.width,height:sel.height*overlay.height/viewport.height },
+      startedAt: lassoFirst ? performance.now() : performance.now() - (this.releaseVisual ? 0 : 550),
+      orbShape: lassoFirst ? null : this.releaseVisual ? { ...this.releaseVisual } : null,
+      orbRect: lassoFirst ? zero : this.releaseVisual ? { x:this.releaseVisual.x-this.releaseVisual.radius, y:this.releaseVisual.y-this.releaseVisual.radius, width:2*this.releaseVisual.radius, height:2*this.releaseVisual.radius } : { x:sel.x*overlay.width/viewport.width,y:sel.y*overlay.height/viewport.height,width:sel.width*overlay.width/viewport.width,height:sel.height*overlay.height/viewport.height },
       dragging: null,
+      lassoFirst,
+      selReady: !lassoFirst,
+      lassoPoints: null,
     };
     this.regionSession = session;
     this.releaseVisual = null;
     this.orb.classList.add('is-hidden');
     this.regionBg.src = session.url;
     this.regionOverlay.classList.remove('is-handoff');
+    this.regionOverlay.classList.toggle('is-lasso-arming', lassoFirst);
+    this.regionOverlay.classList.toggle('is-lasso-pending', lassoFirst);
     this.regionUseBtn.disabled = this.regionAllBtn.disabled = false;
     this.wakeGestures.reset();
     this.regionOverlay.hidden = false;
     this.regionErrorEl.hidden = true;
     this.regionErrorEl.textContent = '';
+    this.lassoPath.setAttribute('points', '');
+    this.lassoHint.hidden = true;
+    this.stopBeam();
     // 面板未打开时组件自身的 keydownHandler 不在监听，覆盖层必须自己接管按键
     this.regionKeyHandler = (ev) => this.onRegionKeydown(ev);
     document.addEventListener('keydown', this.regionKeyHandler, true);
-    this.renderRegion();
-    this.regionFrame.focus();
-    this.animateSelection(session);
+    if (lassoFirst) {
+      if (this.prefersReducedMotion()) {
+        this.armBeam(session);
+      } else {
+        this.beamLayer.style.opacity = '1';
+        this.animateBeam(session, fingertips);
+      }
+    } else {
+      this.renderRegion();
+      this.regionFrame.focus();
+      this.animateSelection(session);
+    }
+  }
+
+  private animateBeam(s: RegionSession, fingertips: readonly WakePoint[]): void {
+    const point = s.frozen.releasePoint ?? { x: .5, y: .5 };
+    const water = this.wakeVisual === 'ripple';
+    const duration = water ? 2000 : 720;
+    const paint = createWakePaint(this.wakeVisual, this.beamLayer, s.overlay, this.regionBg, {
+      x: point.x * s.overlay.width, y: point.y * s.overlay.height,
+    }, fingertips.map(p => ({ x: p.x * s.overlay.width, y: p.y * s.overlay.height })));
+    this.releaseWakePaint = paint.dispose;
+    let armed = false;
+    const tick = () => {
+      if (!this.validRegion(s) || s.selReady) return;
+      const elapsed = performance.now() - s.startedAt;
+      const dim = Math.min(1, elapsed / (water ? 430 : 158)) * 0.26;
+      this.regionDim.style.opacity = dim.toFixed(3);
+      if (!armed && elapsed >= 720) {
+        armed = true;
+        this.armBeam(s);
+      }
+      if (elapsed >= duration) {
+        this.stopBeam();
+        return;
+      }
+      paint.draw(Math.max(0, elapsed / duration), dim);
+      this.beamFrame = window.requestAnimationFrame(tick);
+    };
+    tick();
+  }
+
+  private stopBeam(): void {
+    if (this.beamFrame !== null) window.cancelAnimationFrame(this.beamFrame);
+    this.beamFrame = null;
+    this.releaseWakePaint?.();
+    this.releaseWakePaint = undefined;
+    this.beamLayer.style.opacity = '0';
+    this.beamLayer.replaceChildren();
+  }
+
+  /** 圈选就绪；空闲时水波仍可自然退去。 */
+  private armBeam(s: RegionSession): void {
+    if (!this.validRegion(s) || s.selReady) return;
+    this.regionOverlay.classList.remove('is-lasso-arming');
+    this.regionDim.style.opacity = '0.26';
+    this.lassoHint.hidden = false;
+    this.regionFrame.style.opacity = '0';
+    this.regionCancelBtn.style.opacity = '1';
+    try {
+      this.regionCancelBtn.focus({ preventScroll: true });
+    } catch {
+      /* happy-dom 等环境无 focus 选项时忽略 */
+    }
+  }
+
+  private renderLasso(s: RegionSession): void {
+    const points = s.lassoPoints ?? [];
+    const { kx, ky } = this.regionScale(s);
+    this.lassoPath.setAttribute('points', points.map(point => `${(point.x * kx).toFixed(1)},${(point.y * ky).toFixed(1)}`).join(' '));
+  }
+
+  /** 圈选松手：包围盒（先不加边距）动画展开为加边距方框。 */
+  private commitLasso(s: RegionSession): void {
+    const points = s.lassoPoints ?? [];
+    s.lassoPoints = null;
+    if (points.length < 2) return;
+    const raw = lassoBoundingRect(points, s.viewport, { pad: 0, min: 1 });
+    const padded = lassoBoundingRect(points, s.viewport);
+    const { kx, ky } = this.regionScale(s);
+    s.sel = padded;
+    s.orbRect = { x: raw.x * kx, y: raw.y * ky, width: raw.width * kx, height: raw.height * ky };
+    s.startedAt = performance.now();
+    s.selReady = true;
+    this.regionOverlay.classList.remove('is-lasso-pending');
+    this.lassoPath.setAttribute('points', '');
+    this.lassoHint.hidden = true;
+    this.animateSelection(s);
+    try {
+      this.regionFrame.focus({ preventScroll: true });
+    } catch {
+      /* 忽略 */
+    }
+  }
+
+  /** lostpointercapture：圈选未完成时视为取消；普通拖拽沿用原有结束路径。 */
+  private onRegionLostCapture(ev: PointerEvent): void {
+    const s = this.regionSession;
+    if (!s || s.pointerId !== ev.pointerId) return;
+    if (s.dragging?.mode !== 'lasso') {
+      this.onRegionPointerEnd(ev);
+      return;
+    }
+    s.dragging = null;
+    s.pointerId = null;
+    s.lassoPoints = null;
+    this.lassoPath.setAttribute('points', '');
   }
 
   /** 覆盖层显示尺寸 ↔ 捕获视口逻辑像素的换算（位图铺满覆盖层显示）。 */
@@ -2179,6 +2354,7 @@ export class FeedbackWidget extends HTMLElement {
   private renderRegion(elapsed = 550): void {
     const s = this.regionSession;
     if (!s || s.phase !== 'selection') return;
+    if (s.lassoFirst && !s.selReady) return;
     const { kx, ky } = this.regionScale(s);
     const end = { x: s.sel.x*kx, y: s.sel.y*ky, width: s.sel.width*kx, height: s.sel.height*ky };
     const p = progress(elapsed, 0, 400);
@@ -2192,7 +2368,7 @@ export class FeedbackWidget extends HTMLElement {
     this.renderSelectionContour(s,end,p,elapsed);
     if (this.orbLens && s.orbShape && elapsed < 260) {
       this.orbCanvas.hidden = false;
-      this.orbLens.draw(s.orbShape,s.orbShape.radius,s.orbShape,1-progress(elapsed,0,260),this.orbMaterialIsDark());
+      this.orbLens.draw(s.orbShape,s.orbShape.radius,s.orbShape,1-progress(elapsed,0,260),this.orbMaterialIsDark(),s.orbShape.gestureGlass ? {gestureGlass:true} : undefined);
     } else this.orbCanvas.hidden = true;
     this.regionCancelBtn.style.opacity = String(progress(elapsed,120,400));
     this.regionTools.style.opacity = String(progress(elapsed,350,550));
@@ -2275,9 +2451,23 @@ export class FeedbackWidget extends HTMLElement {
     if (target && typeof target.closest === 'function' && target.closest('.fb-region-tools, .fb-region-cancel')) {
       return; // 工具栏按钮不进入框选
     }
+    if (s.lassoFirst && !s.selReady && this.regionOverlay.classList.contains('is-lasso-arming')) return;
     this.finishSelectionEntrance(s);
     s.pointerId = ev.pointerId;
     const pt = this.regionPoint(s, ev);
+    if (s.lassoFirst && !s.selReady) {
+      this.stopBeam();
+      s.dragging = { mode: 'lasso', startX: pt.x, startY: pt.y, startSel: { ...s.sel } };
+      s.lassoPoints = [pt];
+      try {
+        this.regionOverlay.setPointerCapture(ev.pointerId);
+      } catch {
+        /* happy-dom / 旧浏览器无 pointer capture */
+      }
+      this.renderLasso(s);
+      ev.preventDefault();
+      return;
+    }
     const handleEl =
       target && typeof target.closest === 'function'
         ? (target.closest('[data-handle]') as HTMLElement | null)
@@ -2305,7 +2495,13 @@ export class FeedbackWidget extends HTMLElement {
     if (!s || s.confirming || !s.dragging || s.pointerId !== ev.pointerId) return;
     const d = s.dragging;
     const pt = this.regionPoint(s, ev);
-    if (d.mode === 'move') {
+    if (d.mode === 'lasso') {
+      const last = s.lassoPoints?.[s.lassoPoints.length - 1];
+      if (!last || Math.hypot(pt.x - last.x, pt.y - last.y) >= 4) {
+        (s.lassoPoints ??= []).push(pt);
+        this.renderLasso(s);
+      }
+    } else if (d.mode === 'move') {
       s.sel = moveRegion(d.startSel, pt.x - d.startX, pt.y - d.startY, s.viewport);
     } else if (d.mode === 'resize') {
       s.sel = resizeRegion(d.startSel, d.handle, pt.x - d.startX, pt.y - d.startY, s.viewport);
@@ -2318,12 +2514,17 @@ export class FeedbackWidget extends HTMLElement {
   private onRegionPointerEnd(ev: PointerEvent): void {
     const s = this.regionSession;
     if (!s || !s.dragging || s.pointerId !== ev.pointerId) return;
+    const wasLasso = s.dragging.mode === 'lasso';
     s.dragging = null;
     s.pointerId = null;
     try {
       this.regionOverlay.releasePointerCapture(ev.pointerId);
     } catch {
       /* 指针捕获可能已自动释放 */
+    }
+    if (wasLasso) {
+      this.commitLasso(s);
+      return;
     }
     this.renderRegion();
   }
@@ -2341,6 +2542,7 @@ export class FeedbackWidget extends HTMLElement {
       return;
     }
     s.confirming = true;
+    this.stopBeam();
     this.finishSelectionEntrance(s);
     this.renderRegion();
     this.regionUseBtn.disabled = this.regionAllBtn.disabled = true;
@@ -2498,6 +2700,11 @@ export class FeedbackWidget extends HTMLElement {
     this.handoffUrl = null;
     this.regionBg.style.removeProperty('filter');
     this.regionDim.style.opacity = '0';
+    this.regionOverlay.classList.remove('is-lasso-arming', 'is-lasso-pending');
+    this.stopBeam();
+    this.lassoPath.setAttribute('points', '');
+    this.lassoHint.hidden = true;
+    this.regionFrame.style.removeProperty('opacity');
     if (!this.openState) this.orb.classList.remove('is-hidden');
     if (this.regionKeyHandler) {
       document.removeEventListener('keydown', this.regionKeyHandler, true);
@@ -2513,11 +2720,19 @@ export class FeedbackWidget extends HTMLElement {
     this.regionErrorEl.hidden = true;
     this.regionErrorEl.textContent = '';
     this.syncOrbIdle(true);
-    if (opts.focusOrb !== false && this.canUseOrbLauncher()) {
-      try {
-        this.orb.focus();
-      } catch {
-        /* 灵感球不可聚焦时忽略 */
+    if (opts.focusOrb !== false) {
+      if (this.effectiveLauncherMode() === 'beam' || this.gestureStandby) {
+        try {
+          this.beamA11yBtn.focus();
+        } catch {
+          /* 无聚焦目标时忽略 */
+        }
+      } else if (this.canUseOrbLauncher()) {
+        try {
+          this.orb.focus();
+        } catch {
+          /* 灵感球不可聚焦时忽略 */
+        }
       }
     }
   }
@@ -2526,6 +2741,17 @@ export class FeedbackWidget extends HTMLElement {
   private onRegionKeydown(ev: KeyboardEvent): void {
     const s = this.regionSession;
     if (!s) return;
+    if (s.lassoFirst && !s.selReady && s.phase === 'selection') {
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        ev.stopPropagation();
+        this.cancelRegion();
+      } else if (ev.key === 'Enter') {
+        ev.preventDefault();
+        void this.confirmRegion(false);
+      }
+      return;
+    }
     if (s.phase === 'handoff') {
       if (ev.key === 'Escape') { ev.preventDefault(); ev.stopImmediatePropagation(); this.close(); }
       else if (this.panel.inert) { ev.preventDefault(); ev.stopImmediatePropagation(); }
@@ -2710,7 +2936,13 @@ export class FeedbackWidget extends HTMLElement {
     this.loadServerOverride();
     this.loadWakePreference();
     this.loadOrbIdlePreference();
+    this.loadLauncherStylePreference();
+    this.loadWakeVisualPreference();
+    this.loadEntrancePreference();
+    this.syncLauncherMode();
     this.wakeGestures.connect();
+    if (!this.wakeShortcutHandler) this.wakeShortcutHandler = (ev) => this.onWakeShortcut(ev);
+    document.addEventListener('keydown', this.wakeShortcutHandler, true);
 
     // 断开重连：图片字节保留在实例草稿中，重连时重建自己的预览 URL
     for (const img of this.draft.images) {
@@ -2770,6 +3002,11 @@ export class FeedbackWidget extends HTMLElement {
     this.orbAvailabilityObserver?.disconnect();
     this.orbAvailabilityObserver = null;
     this.wakeGestures.disconnect();
+    if (this.wakeShortcutHandler) {
+      document.removeEventListener('keydown', this.wakeShortcutHandler, true);
+      this.wakeShortcutHandler = null;
+    }
+    if (this.beamLayer) this.stopBeam();
     this.surfaceCleanup?.();
     this.surfaceCleanup = null;
     this.releaseLens();
@@ -2841,6 +3078,9 @@ export class FeedbackWidget extends HTMLElement {
       const previousEffectiveApiBase = this.effectiveApiBase;
       this.loadWakePreference();
       this.loadOrbIdlePreference();
+      this.loadEntrancePreference();
+      this.loadLauncherStylePreference();
+      this.loadWakeVisualPreference();
       this.settingsOpen = false;
       this.settingsConfirmOpen = false;
       this.pendingServerTarget = undefined;
@@ -2870,6 +3110,7 @@ export class FeedbackWidget extends HTMLElement {
       this.clearOrbRelease(true);
       this.releaseLens();
     }
+    if (oldVal !== newVal && name === 'launcher-mode') this.syncLauncherMode();
     if (this.isConnected && (name === 'launcher-mode' || name === 'show-launcher')) this.prepareLens();
     if (name === 'capture-mode' && oldVal !== newVal) {
       this.wakeGestures.reset();
@@ -3048,7 +3289,7 @@ export class FeedbackWidget extends HTMLElement {
   private canUseOrbLauncher(): boolean {
     // 0.8.5：「隐藏」只隐藏待机（收起）态，入口本身仍可用——唤醒手势依赖这里返回 true。
     // 待机显隐由 is-idle-hidden 单独处理，不再复用 is-unavailable 的「入口不可用」语义。
-    if (!this.isConnected || !this.showLauncher || this.launcherMode !== 'orb' || !this.orbSurfaceActive || document.visibilityState === 'hidden' || this.closest('[hidden], [inert], [aria-disabled="true"]') || this.openState || this.regionSession || this.isCapturing || this.captureInFlight) return false;
+    if (!this.isConnected || !this.showLauncher || this.effectiveLauncherMode() !== 'orb' || !this.orbSurfaceActive || document.visibilityState === 'hidden' || this.closest('[hidden], [inert], [aria-disabled="true"]') || this.openState || this.regionSession || this.isCapturing || this.captureInFlight) return false;
     for (const node of this.orbHostElements()) {
       const style = window.getComputedStyle(node);
       if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
@@ -3109,12 +3350,18 @@ export class FeedbackWidget extends HTMLElement {
    * 唤醒后完整球照常可见、可点击/拖动，再次闲置 5 秒才会收起并隐藏。
    */
   private orbIdleHidden(): boolean {
-    return this.orbCollapsed && this.orbIdleStyle === 'hidden';
+    return this.orbIdleStyle === 'hidden' &&
+      (this.orbCollapsed || (this.gestureStandby && !this.summonedOrb));
   }
 
   /** `.fb-orb` 的 display:none 只能隐藏球本体；canvas/outline 是兄弟节点，由 drawLiquid() 一并收起。 */
   private syncOrbIdleHidden(): void {
     this.orb.classList.toggle('is-idle-hidden',this.orbIdleHidden());
+    if (this.beamA11yBtn) {
+      const orbEntry = this.gestureStandby && this.orbIdleHidden() && this.canUseOrbLauncher();
+      this.beamA11yBtn.hidden = !(this.beamActive() || orbEntry) || this.openState || !!this.regionSession;
+      this.beamA11yBtn.setAttribute('aria-label', orbEntry ? '唤醒灵感球' : '打开反馈（双指长按屏幕或按 Ctrl+Shift+F）');
+    }
   }
 
   private setOrbCollapsed(collapsed: boolean, animate=true): void {
@@ -3125,7 +3372,7 @@ export class FeedbackWidget extends HTMLElement {
     this.orb.dataset.idleStyle=this.orbIdleStyle;
     // 同一次收起里的 changed===false 早退也必须同步，避免样式切到 hidden 后 class 残留/缺失。
     this.syncOrbIdleHidden();
-    if (this.orbIdleHidden()) this.releaseLens();
+    if (this.orbIdleHidden() && this.orbLens) this.releaseLens();
     this.syncOrbAriaLabel();
     if (!changed && animate) return;
     const target=this.orbIdleTarget(collapsed);
@@ -3149,6 +3396,7 @@ export class FeedbackWidget extends HTMLElement {
 
   private syncOrbIdle(reset = false): void {
     if (!this.orb) return;
+    if (reset || !this.canUseOrbLauncher()) this.clearSummonedOrb();
     if (this.orbIdleIdentityEpoch!==this.identityEpoch) {
       this.orbIdleIdentityEpoch=this.identityEpoch;
       this.cancelOrbIdleTimer();
@@ -3180,21 +3428,46 @@ export class FeedbackWidget extends HTMLElement {
       this.cancelOrbIdleTimer();
       return;
     }
-    if (this.orbCollapsed || this.orbIdleTimer !== null) return;
+    if (this.orbIdleHidden() || this.orbCollapsed || this.orbIdleTimer !== null) return;
     const generation = this.orbIdleGeneration, epoch = this.identityEpoch;
     this.orbIdleTimer = setTimeout(() => {
       if (generation !== this.orbIdleGeneration) return;
       this.orbIdleTimer = null;
       if (epoch !== this.identityEpoch || !this.canUseOrbLauncher() || this.orbPointerId !== null || this.isDragging || this.orbHovered || this.orbHasKeyboardFocus() || this.phase === 'submitting' || this.polling) return;
-      this.setOrbCollapsed(true);
+      const summoned = !!this.summonedOrb;
+      this.clearSummonedOrb();
+      this.setOrbCollapsed(true, !summoned);
       if (!this.orbLens) this.prepareLens();
     },5000);
   }
 
-  private wakeOrb(): void {
+  private clearSummonedOrb(): void {
+    if (!this.summonedOrb) return;
+    this.summonedOrb = null;
+    this.orb.style.removeProperty('--fb-orb-summoned-size');
+    for (const key of ['left','right','top','bottom','width','height','min-width','min-height']) {
+      this.orb.style.removeProperty(key);
+    }
+  }
+
+  private wakeOrb(point?: WakePoint, fingertips: readonly WakePoint[] = []): void {
     if (!this.canUseOrbLauncher()) return;
-    this.syncOrbIdle(true);
+    this.cancelOrbIdleTimer();
+    if (point) {
+      this.clearOrbIdleMorph();
+      const shortSide = Math.min(window.innerWidth, window.innerHeight);
+      const diameter = Math.min(shortSide, Math.max(96, Math.min(160, shortSide * .34)));
+      this.summonedOrb = { ...point, diameter, effect:this.entrance, axis:entranceAxis(fingertips,diameter),
+        startedAt: this.prefersReducedMotion() ? -Infinity : performance.now() };
+      Object.assign(this.orb.style, {left: `${point.x-diameter/2}px`, top: `${point.y-diameter/2}px`,
+        right: 'auto', bottom: 'auto', width: `${diameter}px`, height: `${diameter}px`,
+        minWidth: `${diameter}px`, minHeight: `${diameter}px`});
+    }
+    this.orbIdleAvailable = true;
+    this.setOrbCollapsed(false, !point);
+    this.syncOrbIdle();
     this.prepareLens();
+    if (point) this.kickLiquid();
   }
 
   private observeOrbAvailability(): void {
@@ -3305,7 +3578,7 @@ export class FeedbackWidget extends HTMLElement {
 
   private canShowOrbLens(): boolean {
     if (!this.canUseOrbLauncher()) return false;
-    if (!this.isConnected || !this.orbSurfaceActive || this.lensContextLost || !this.showLauncher || this.launcherMode !== 'orb' || this.openState || this.isCapturing || this.regionSession || this.orb.classList.contains('is-hidden') || this.closest('[hidden]') || document.visibilityState === 'hidden' || window.matchMedia?.('(forced-colors: active)').matches) return false;
+    if (!this.isConnected || !this.orbSurfaceActive || this.lensContextLost || !this.showLauncher || this.effectiveLauncherMode() !== 'orb' || this.openState || this.isCapturing || this.regionSession || this.orb.classList.contains('is-hidden') || this.closest('[hidden]') || document.visibilityState === 'hidden' || window.matchMedia?.('(forced-colors: active)').matches) return false;
     const orbStyle = window.getComputedStyle(this.orb);
     const hostStyle = window.getComputedStyle(this);
     return ![orbStyle,hostStyle].some(style => style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse');
@@ -3451,21 +3724,29 @@ export class FeedbackWidget extends HTMLElement {
     if (this.isCapturing || this.regionSession || this.openState) { this.orbCanvas.hidden = true; this.hideOrbOutline(); return; }
     if (this.isDragging) this.orb.style.transform = `translate3d(${this.liquid.x}px, ${this.liquid.y}px, 0)`;
     const dock = this.isDragging ? this.orbDock : (() => { const r=this.orb.getBoundingClientRect(); return { x:r.left+r.width/2,y:r.top+r.height/2 }; })();
-    const radius = this.isDragging ? this.dragLiquidRadius() : 28;
+    const summoned = this.summonedOrb;
+    const t = summoned && !this.prefersReducedMotion() ? Math.max(0,Math.min(1,(performance.now()-summoned.startedAt)/summoned.effect.duration)) : 1;
+    const growth = summoned?.effect.id === 'bead' ? beadGrowth(t) : 1;
+    const radius = summoned ? summoned.diameter/2 * growth * this.liquid.radius/52 :
+      this.isDragging ? this.dragLiquidRadius() : 28;
+    const shape = summoned ? {dirX:this.liquid.dirX, dirY:this.liquid.dirY, deform:this.liquid.deform*1.45, wobble:this.liquid.wobble} : this.liquid;
     const visual=this.currentOrbIdleVisual();
-    const center={x:this.isDragging?dock.x+this.liquid.x:visual.x,y:dock.y+(this.isDragging?this.liquid.y:0)};
-    if (!this.isDragging) {
+    const center = this.isDragging ? {x:dock.x+this.liquid.x,y:dock.y+this.liquid.y} :
+      {x:summoned?.x ?? visual.x,y:summoned?.y ?? dock.y};
+    if (summoned) this.orb.style.setProperty('--fb-orb-summoned-size', `${radius*2}px`);
+    if (!this.isDragging && !summoned) {
       Object.assign(this.orb.style,{left:`${visual.hitX-visual.hitWidth/2}px`,right:'auto',width:`${visual.hitWidth}px`,minWidth:`${visual.hitWidth}px`});
     }
-    const clip=this.isDragging?'inset(0 0 0 0)':`inset(0 ${visual.clipRight*100}% 0 ${visual.clipLeft*100}%)`;
+    const clip=this.isDragging || summoned?'inset(0 0 0 0)':`inset(0 ${visual.clipRight*100}% 0 ${visual.clipLeft*100}%)`;
     for (const layer of [this.orbCanvas,this.orbOutline]) layer.style.clipPath=clip;
-    if (this.isDragging) this.lastLiquidVisual = { ...center, radius, dirX:this.liquid.dirX, dirY:this.liquid.dirY, deform:this.liquid.deform, wobble:this.liquid.wobble };
+    if (this.isDragging) this.lastLiquidVisual = { ...center, radius, dirX:shape.dirX, dirY:shape.dirY, deform:shape.deform, wobble:shape.wobble, gestureGlass: !!summoned };
     this.orbCanvas.hidden = false;
     this.hideOrbOutline();
-    if (this.orbLens) this.orbLens.draw(center,radius,this.liquid,1,this.orbMaterialIsDark(),this.isDragging?undefined:{halfSize:{x:visual.halfX,y:visual.halfY},handleMix:visual.handleMix,mist:.74,idleMix:1});
+    if (this.orbLens) this.orbLens.draw(center,radius,shape,1,this.orbMaterialIsDark(),summoned ? {gestureGlass:true, entranceId:orbEntrances.indexOf(summoned.effect),
+      entranceProgress:t, entranceAxis:summoned.axis} : this.isDragging?undefined:{halfSize:{x:visual.halfX,y:visual.halfY},handleMix:visual.handleMix,mist:.74,idleMix:1});
     else {
       const forced=window.matchMedia?.('(forced-colors: active)').matches ?? false;
-      const softIdle = !forced && !this.isDragging;
+      const softIdle = !forced && !this.isDragging && !summoned;
       const lightIdle = softIdle && !this.orbMaterialIsDark();
       const darkIdle = softIdle && !lightIdle;
       this.orbOutlinePath.setAttribute('fill',darkIdle?'rgb(132,137,153)':'none');
@@ -3486,10 +3767,10 @@ export class FeedbackWidget extends HTMLElement {
       Object.assign(this.orbOutline.style,{display:'',left:`${center.x-size/2}px`,top:`${center.y-size/2}px`,width:`${size}px`,height:`${size}px`});
       this.orbOutline.setAttribute('viewBox',`0 0 ${size} ${size}`);
       for (let i=0;i<128;i++) {
-        const theta=i*Math.PI*2/128, r=this.isDragging?radius*liquidBoundary(theta,this.liquid):orbIdleBoundary(theta,radius,this.liquid,visual);
+        const theta=i*Math.PI*2/128, r=this.isDragging || summoned ? radius*liquidBoundary(theta,shape):orbIdleBoundary(theta,radius,this.liquid,visual);
         points.push(`${size/2+r*Math.cos(theta)},${size/2+r*Math.sin(theta)}`);
       }
-      const contour=`M${points.join(' L')}Z`;
+      const contour=summoned && t<1 ? entranceOutline(summoned.effect,t,radius,summoned.axis) : `M${points.join(' L')}Z`;
       this.orbOutlinePath.setAttribute('d',contour);
       this.orbOutlineHalo.setAttribute('d',contour);
       // Clip after both blurs: the narrow capsule's two halos must never tint its interior.
@@ -3509,7 +3790,7 @@ export class FeedbackWidget extends HTMLElement {
       if (!this.isConnected || this.isCapturing || this.regionSession || this.openState) return;
       this.liquid.advance((now-this.liquidTime)/1000,this.isDragging);
       this.liquidTime = now; this.drawLiquid();
-      if (this.isDragging || !this.liquid.settled) this.liquidFrame = window.requestAnimationFrame(tick);
+      if (this.isDragging || !this.liquid.settled || (this.summonedOrb && now-this.summonedOrb.startedAt < this.summonedOrb.effect.duration)) this.liquidFrame = window.requestAnimationFrame(tick);
     };
     this.liquidFrame = window.requestAnimationFrame(tick);
   }
@@ -3536,6 +3817,7 @@ export class FeedbackWidget extends HTMLElement {
       this.cancelOrbIdleTimer();
       this.clearOrbIdleMorph();
       this.wakeGestures.reset();
+      if (this.summonedOrb) this.summonedOrb.startedAt = -Infinity;
       startX = ev.clientX;
       startY = ev.clientY;
       isPointerDown = true;
@@ -3548,6 +3830,7 @@ export class FeedbackWidget extends HTMLElement {
       if (!this.orbLens) this.prepareLens();
       this.clearOrbUnpress();
       this.orb.classList.add('is-pressed');
+      if (this.summonedOrb) this.kickLiquid();
       try {
         this.orb.setPointerCapture(ev.pointerId);
       } catch {
@@ -4145,11 +4428,23 @@ export class FeedbackWidget extends HTMLElement {
     this.regionErrorEl.setAttribute('role', 'alert');
 
     this.regionDim = el('div','fb-region-dim');
+    this.beamLayer = el('div', 'fb-beam');
+    this.beamLayer.setAttribute('aria-hidden','true');
+    this.lassoLayer = document.createElementNS('http://www.w3.org/2000/svg','svg');
+    this.lassoLayer.classList.add('fb-lasso-layer');
+    this.lassoLayer.setAttribute('aria-hidden','true');
+    this.lassoPath = document.createElementNS('http://www.w3.org/2000/svg','polyline');
+    this.lassoPath.classList.add('fb-lasso');
+    this.lassoPath.setAttribute('fill','none');
+    this.lassoLayer.append(this.lassoPath);
+    this.lassoHint = el('div','fb-lasso-hint','画个圈，只需圈出问题位置');
+    this.lassoHint.hidden = true;
+    this.lassoHint.setAttribute('role','status');
     this.flyingShot = el('img','fb-flying-shot');
     this.flyingShot.alt = '';
     this.flyingShot.setAttribute('aria-hidden','true');
     this.flyingShot.hidden = true;
-    this.regionOverlay.append(this.regionBg, this.regionDim, this.regionEntrance, this.regionFrame, this.regionTools, this.regionCancelBtn, this.regionErrorEl);
+    this.regionOverlay.append(this.regionBg, this.regionDim, this.beamLayer, this.regionEntrance, this.lassoLayer, this.regionFrame, this.regionTools, this.regionCancelBtn, this.lassoHint, this.regionErrorEl);
 
     this.regionUseBtn.addEventListener('click', () => void this.confirmRegion(true));
     this.regionAllBtn.addEventListener('click', () => void this.confirmRegion(false));
@@ -4159,7 +4454,7 @@ export class FeedbackWidget extends HTMLElement {
     this.regionOverlay.addEventListener('pointermove', (ev) => this.onRegionPointerMove(ev));
     this.regionOverlay.addEventListener('pointerup', (ev) => this.onRegionPointerEnd(ev));
     this.regionOverlay.addEventListener('pointercancel', (ev) => this.onRegionPointerEnd(ev));
-    this.regionOverlay.addEventListener('lostpointercapture', (ev) => this.onRegionPointerEnd(ev));
+    this.regionOverlay.addEventListener('lostpointercapture', (ev) => this.onRegionLostCapture(ev));
 
     // 日志文本预览弹窗
     this.logPreviewModal = el('div', 'fb-log-preview-modal');
@@ -4185,12 +4480,17 @@ export class FeedbackWidget extends HTMLElement {
       }
     });
 
+    this.beamA11yBtn = el('button', 'fb-beam-a11y', '打开反馈');
+    this.beamA11yBtn.type = 'button';
+    this.beamA11yBtn.setAttribute('aria-label', '打开反馈（双指长按屏幕或按 Ctrl+Shift+F）');
+    this.beamA11yBtn.addEventListener('click', () => this.activateWakeShortcut());
     this.root.append(
       style,
       this.launcher,
       this.orb,
       this.orbCanvas,
       this.orbOutline,
+      this.beamA11yBtn,
       this.panel,
       this.zoomModal,
       this.logPreviewModal,
@@ -4207,10 +4507,191 @@ export class FeedbackWidget extends HTMLElement {
    * 提供地址输入、保存、取消、恢复默认与当前有效地址展示；
    * 地址变化且有草稿 / 未确认提交时先展开内联确认块。
    */
+  /** 生效入口模式：宿主显式 tab/orb 优先；宿主要求 beam 时由用户偏好决定光束或灵感球。 */
+  private effectiveLauncherMode(): 'beam' | 'tab' | 'orb' {
+    const host = this.launcherMode;
+    return host === 'beam' ? this.launcherStyle : host;
+  }
+
+  private syncLauncherMode(): void {
+    const mode = this.effectiveLauncherMode();
+    this.dataset.fbMode = mode;
+    if (this.wakeHint) {
+      this.wakeHint.textContent = mode === 'orb' ? '松开手指唤醒灵感球' : '松开手指开始圈选';
+    }
+  }
+
+  private syncLauncherStyleSettings(): void {
+    const hostBeam = this.launcherMode === 'beam';
+    if (this.launcherStyleSection) this.launcherStyleSection.hidden = !hostBeam;
+    if (this.orbIdleSection) {
+      this.orbIdleSection.hidden = this.effectiveLauncherMode() !== 'orb';
+    }
+    for (const [style, input] of this.launcherStyleInputs) {
+      input.checked = this.launcherStyle === style;
+    }
+    if (this.launcherStyleHint) {
+      this.launcherStyleHint.hidden = !this.launcherStyleSessionOnly;
+    }
+    this.syncWakeVisualSettings();
+  }
+
+  private launcherStylePreferenceKey(appId: string): string {
+    return `feedback:launcher-style:v1:${encodeURIComponent(appId)}`;
+  }
+
+  private loadLauncherStylePreference(): void {
+    const app = this.appId ?? '';
+    if (this.launcherStyleApp === app) return;
+    this.launcherStyleApp = app;
+    this.launcherStyleSessionOnly = false;
+    try {
+      const stored = localStorage.getItem(this.launcherStylePreferenceKey(app));
+      this.launcherStyle = stored === 'orb' ? 'orb' : 'beam';
+    } catch {
+      this.launcherStyle = 'beam';
+      this.launcherStyleSessionOnly = true;
+    }
+    this.syncLauncherMode();
+    this.syncLauncherStyleSettings();
+  }
+
+  private selectLauncherStyle(style: 'beam' | 'orb'): void {
+    this.launcherStyle = style;
+    this.syncLauncherMode();
+    try {
+      localStorage.setItem(this.launcherStylePreferenceKey(this.appId ?? ''), style);
+      this.launcherStyleSessionOnly = false;
+    } catch {
+      this.launcherStyleSessionOnly = true;
+    }
+    this.syncLauncherStyleSettings();
+    this.wakeGestures.reset();
+    if (this.isConnected) this.prepareLens();
+    this.syncOrbIdle(true);
+  }
+
+  private wakeVisualPreferenceKey(appId: string): string {
+    return `feedback:wake-visual:v1:${encodeURIComponent(appId)}`;
+  }
+
+  private loadWakeVisualPreference(): void {
+    const app = this.appId ?? '';
+    if (this.wakeVisualApp === app) return;
+    this.wakeVisualApp = app;
+    this.wakeVisualSessionOnly = false;
+    try {
+      const stored = localStorage.getItem(this.wakeVisualPreferenceKey(app));
+      this.wakeVisual = stored === 'aurora' ? 'aurora' : 'ripple';
+    } catch {
+      this.wakeVisual = 'ripple';
+      this.wakeVisualSessionOnly = true;
+    }
+    this.syncWakeVisualSettings();
+  }
+
+  private selectWakeVisual(visual: 'ripple' | 'aurora'): void {
+    this.wakeVisual = visual;
+    try {
+      localStorage.setItem(this.wakeVisualPreferenceKey(this.appId ?? ''), visual);
+      this.wakeVisualSessionOnly = false;
+    } catch {
+      this.wakeVisualSessionOnly = true;
+    }
+    this.syncWakeVisualSettings();
+  }
+
+  private syncWakeVisualSettings(): void {
+    if (this.wakeVisualSection) {
+      this.wakeVisualSection.hidden = this.effectiveLauncherMode() !== 'beam';
+    }
+    for (const [visual, input] of this.wakeVisualInputs) {
+      input.checked = this.wakeVisual === visual;
+    }
+    if (this.wakeVisualHint) this.wakeVisualHint.hidden = !this.wakeVisualSessionOnly;
+  }
+
+  private beamActive(): boolean {
+    return this.effectiveLauncherMode() === 'beam' &&
+      this.showLauncher &&
+      this.isConnected &&
+      document.visibilityState !== 'hidden' &&
+      !this.closest('[hidden], [inert], [aria-disabled="true"]') &&
+      !this.openState &&
+      !this.regionSession &&
+      !this.isCapturing &&
+      !this.captureInFlight;
+  }
+
+  /** 唤醒手势可用性不再依赖 capture-mode：关闭截图时只打开纯面板。 */
+  private canWake(): boolean {
+    return this.beamActive() || this.canUseOrbLauncher();
+  }
+
+  private async startBeamWake(point?: WakePoint, fingertips: readonly WakePoint[] = []): Promise<void> {
+    if (!this.beamActive()) return;
+    if (this.captureMode === 'off' || this.isDraftDirty()) {
+      this.open();
+      return;
+    }
+    // 在冻结前归一化。只有手势中点进入既有截图元数据，双指各自的位置只供本次绘制。
+    const normalize = (p: WakePoint): WakePoint => ({
+      x: Math.max(0, Math.min(1, p.x / (window.innerWidth || 1))),
+      y: Math.max(0, Math.min(1, p.y / (window.innerHeight || 1))),
+    });
+    await this.startRegionCapture({
+      releasePoint: point && normalize(point),
+      lassoFirst: true,
+      fingertips: fingertips.map(normalize),
+    });
+  }
+
+  /** 快捷键语法：`primary+shift+f`、`ctrl+alt+k`；`off` 关闭；缺省 primary+shift+f。 */
+  private wakeShortcutMatches(ev: KeyboardEvent): boolean {
+    const raw = (this.getAttribute('wake-shortcut') ?? '').trim().toLowerCase();
+    if (raw === 'off') return false;
+    const spec = raw || 'primary+shift+f';
+    const parts = spec.split('+').map(part => part.trim()).filter(Boolean);
+    const key = parts.pop();
+    if (!key || !/^[a-z0-9]$|^f([1-9]|1[0-2])$/.test(key)) return false;
+    const want = { primary: false, meta: false, ctrl: false, alt: false, shift: false };
+    for (const part of parts) {
+      if (part === 'primary' || part === 'meta' || part === 'ctrl' || part === 'alt' || part === 'shift') want[part] = true;
+      else return false;
+    }
+    const pressed = { meta: ev.metaKey, ctrl: ev.ctrlKey, alt: ev.altKey, shift: ev.shiftKey };
+    if (pressed.alt !== want.alt || pressed.shift !== want.shift) return false;
+    if (want.primary) {
+      if (pressed.meta === pressed.ctrl) return false;
+    } else if (pressed.meta !== want.meta || pressed.ctrl !== want.ctrl) return false;
+    const pressedKey = ev.key.toLowerCase();
+    const codeKey = ev.code.toLowerCase().replace(/^key|^digit/, '');
+    return pressedKey === key || codeKey === key;
+  }
+
+  private activateWakeShortcut(): void {
+    if (this.beamActive()) void this.startBeamWake();
+    else if (this.gestureStandby && this.canWakeOrb()) {
+      this.wakeOrb({x: window.innerWidth/2, y: window.innerHeight/2});
+      this.orb.focus();
+    }
+  }
+
+  private onWakeShortcut(ev: KeyboardEvent): void {
+    if (ev.isComposing || ev.repeat || !(this.beamActive() || (this.gestureStandby && this.canWakeOrb()))) return;
+    if (this.openState || this.regionSession || this.isCapturing || this.editorHandle) return;
+    const target = ev.target instanceof Element ? ev.target as HTMLElement : null;
+    if (target && (target.isContentEditable || target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])'))) return;
+    if (!this.wakeShortcutMatches(ev)) return;
+    ev.preventDefault();
+    ev.stopImmediatePropagation();
+    this.activateWakeShortcut();
+  }
+
   private canWakeOrb(): boolean {
     // 0.8.5：待机隐藏不等于入口不可用——canUseOrbLauncher() 仍为 true，手势可继续唤醒完整球。
-    // 仍需 capture-mode=viewport（surfaceSignature 一致）且用户已启用至少一个手势。
-    return this.canUseOrbLauncher() && this.surfaceSignature === this.displaySignature() && this.captureMode === 'viewport' && this.orbPointerId === null && !this.isDragging && this.phase !== 'submitting' && !this.polling;
+    // 0.10：触发与截图能力解耦（capture-mode=off 时只打开纯面板）。
+    return this.canUseOrbLauncher() && this.surfaceSignature === this.displaySignature() && this.orbPointerId === null && !this.isDragging && this.phase !== 'submitting' && !this.polling;
   }
 
   private loadOrbIdlePreference(): void {
@@ -4219,8 +4700,8 @@ export class FeedbackWidget extends HTMLElement {
     this.orbIdlePreferenceApp = app;
     this.orbIdleSessionOnly = false;
     // Synchronous reads/writes are ordered and cannot overwrite a newer user choice.
-    try { this.orbIdleStyle = parseOrbIdlePreference(localStorage.getItem(orbIdlePreferenceKey(app))); }
-    catch { this.orbIdleStyle = 'handle'; this.orbIdleSessionOnly = true; }
+    try { this.savedOrbIdleStyle = parseOrbIdlePreference(localStorage.getItem(orbIdlePreferenceKey(app)), null); }
+    catch { this.savedOrbIdleStyle = null; this.orbIdleSessionOnly = true; }
     this.orb.dataset.idleStyle = this.orbIdleStyle;
     this.syncOrbIdleSettings();
     // 立即按新偏好同步待机外观：启动恢复 / appId 切换后「隐藏」的待机显隐必须马上对齐，
@@ -4228,9 +4709,113 @@ export class FeedbackWidget extends HTMLElement {
     this.syncOrbIdle(true);
   }
 
+  /** 宿主 beam 时终端用户可在「光束唤醒 / 灵感球」之间选择。 */
+  private buildLauncherStyleSettings(): HTMLElement {
+    const group = el('section','fb-launcher-style');
+    const title = el('h3','fb-settings-title','入口样式');
+    title.id = 'fb-launcher-style-title';
+    group.setAttribute('aria-labelledby', title.id);
+    group.append(title, el('p','fb-footnote','用下方选好的手势唤醒。光束直接进入圈选；灵感球从手指之间浮现，点一下反馈，拖到问题处松手选区。'));
+    for (const style of ['beam','orb'] as const) {
+      const row = el('label','fb-wake-option');
+      const input = el('input');
+      input.type = 'radio';
+      input.name = 'fb-launcher-style';
+      input.dataset.launcherStyle = style;
+      const text = el('span','fb-wake-option-text');
+      text.append(
+        el('span','fb-wake-option-title', style === 'beam' ? '光束唤醒' : '灵感球'),
+        el('span','fb-footnote', style === 'beam' ? '默认：无驻留入口，按需唤醒' : '从手势位置出现，可拖到问题处选区'),
+      );
+      row.append(input, text);
+      group.append(row);
+      this.launcherStyleInputs.set(style, input);
+      input.addEventListener('change', () => {
+        if (input.checked) this.selectLauncherStyle(style);
+      });
+    }
+    this.launcherStyleHint = el('p','fb-footnote','仅本次生效');
+    this.launcherStyleHint.setAttribute('role','status');
+    group.append(this.launcherStyleHint);
+    this.launcherStyleSection = group;
+    return group;
+  }
+
+  /** 光束唤醒时选择唤醒动效：水波纹（默认）/ 波光。 */
+  private buildWakeVisualSettings(): HTMLElement {
+    const group = el('section','fb-wake-visual');
+    const title = el('h3','fb-settings-title','唤醒动效');
+    title.id = 'fb-wake-visual-title';
+    group.setAttribute('aria-labelledby', title.id);
+    group.append(title);
+    for (const visual of ['ripple','aurora'] as const) {
+      const row = el('label','fb-wake-option');
+      const input = el('input');
+      input.type = 'radio';
+      input.name = 'fb-wake-visual';
+      input.dataset.wakeVisual = visual;
+      const text = el('span','fb-wake-option-text');
+      text.append(
+        el('span','fb-wake-option-title', visual === 'ripple' ? '水波纹' : '波光'),
+        el('span','fb-footnote', visual === 'ripple' ? '默认。水波经过时，画面会轻轻折动。' : '彩光从两指下泛起，在屏幕边缘淡出。'),
+      );
+      row.append(input, text);
+      group.append(row);
+      this.wakeVisualInputs.set(visual, input);
+      input.addEventListener('change', () => {
+        if (input.checked) this.selectWakeVisual(visual);
+      });
+    }
+    this.wakeVisualHint = el('p','fb-footnote','仅本次生效');
+    this.wakeVisualHint.setAttribute('role','status');
+    group.append(this.wakeVisualHint);
+    this.wakeVisualSection = group;
+    return group;
+  }
+
+  private loadEntrancePreference(): void {
+    const app = this.appId ?? '';
+    if (app === this.entranceApp) return;
+    this.entranceApp = app;
+    try {
+      this.entrance = decodeEntrance(localStorage.getItem(orbEntranceKey(app)));
+      this.entranceSessionOnly = false;
+    } catch {
+      this.entrance = orbEntrances[0];
+      this.entranceSessionOnly = true;
+    }
+    this.syncEntranceSettings();
+  }
+
+  private syncEntranceSettings(): void {
+    if (this.entranceSelect) this.entranceSelect.value = this.entrance.id;
+    if (this.entranceHint) this.entranceHint.hidden = !this.entranceSessionOnly;
+  }
+
   private buildOrbIdleSettings(): HTMLElement {
     const group = el('fieldset','fb-orb-idle-settings');
+    this.orbIdleSection = group;
     group.append(el('legend','fb-settings-title','灵感球'));
+    const label = el('label','fb-orb-entrance','唤醒效果');
+    const select = this.entranceSelect = el('select');
+    for (const effect of orbEntrances) {
+      const option = el('option',undefined,effect.label);
+      option.value = effect.id;
+      select.append(option);
+    }
+    select.addEventListener('change', () => {
+      this.entrance = decodeEntrance(select.value);
+      try {
+        localStorage.setItem(orbEntranceKey(this.appId ?? ''),this.entrance.id);
+        this.entranceSessionOnly = false;
+      } catch { this.entranceSessionOnly = true; }
+      this.syncEntranceSettings();
+    });
+    this.entranceHint = el('p','fb-orb-entrance-hint','仅本次生效');
+    this.entranceHint.setAttribute('role','status');
+    label.append(select);
+    group.append(label,this.entranceHint);
+    this.syncEntranceSettings();
     const cards = el('div','fb-orb-idle-options');
     // 0.8.2：第三种待机样式「隐藏」——0.8.5 起只隐藏待机（收起）状态，唤醒后完整球照常可用。
     for (const [style,title] of [['handle','小把手'],['edge','球体贴边'],['hidden','隐藏']] as const) {
@@ -4241,7 +4826,7 @@ export class FeedbackWidget extends HTMLElement {
       this.orbIdleInputs.set(style,input);
       input.addEventListener('change',() => {
         if (!input.checked) return;
-        this.orbIdleStyle = style;
+        this.savedOrbIdleStyle = style;
         this.orb.dataset.idleStyle = style;
         try { localStorage.setItem(orbIdlePreferenceKey(this.appId ?? ''),JSON.stringify({version:1,style})); this.orbIdleSessionOnly=false; }
         catch { this.orbIdleSessionOnly=true; }
@@ -4250,7 +4835,7 @@ export class FeedbackWidget extends HTMLElement {
     }
     this.orbIdlePreferenceHint = el('p','fb-orb-idle-pref-hint','仅本次生效');
     this.orbIdlePreferenceHint.setAttribute('role','status');
-    group.append(cards,el('p','fb-footnote','闲置5秒后收起；选择「隐藏」后待机不显示灵感球，可用已开启的唤醒手势唤醒，或从宿主入口打开反馈面板改回'),this.orbIdlePreferenceHint);
+    group.append(cards,el('p','fb-footnote','选择「隐藏」后待机不显示灵感球。用已开启的唤醒手势呼出，闲置5秒后收起。可以从宿主入口打开设置改回。'),this.orbIdlePreferenceHint);
     return group;
   }
 
@@ -4289,12 +4874,13 @@ export class FeedbackWidget extends HTMLElement {
       text.append(el('span','fb-wake-option-title',gesture.title),el('span','fb-footnote',gesture.description));
       row.append(input,text); group.append(row); this.wakeInputs.set(gesture.id,input);
       input.addEventListener('change',() => {
-        if (this.captureMode !== 'viewport') { this.syncWakeSettings(); return; }
         this.wakeGestures.reset();
         this.wakeEnabled = WAKE_GESTURES.map(g=>g.id).filter(id=>this.wakeInputs.get(id)!.checked);
         try { localStorage.setItem(wakePreferenceKey(this.appId ?? ''),JSON.stringify({version:1,enabled:this.wakeEnabled})); this.wakePreferenceSessionOnly=false; }
         catch { this.wakePreferenceSessionOnly=true; }
         this.syncWakeSettings();
+        this.syncOrbIdleSettings();
+        this.syncOrbIdle(true);
       });
     }
     group.append(note,exclusions,this.wakeAvailability,this.wakePreferenceHint);
@@ -4303,10 +4889,10 @@ export class FeedbackWidget extends HTMLElement {
 
   private syncWakeSettings(): void {
     if (!this.wakeAvailability) return;
-    const unavailable = this.captureMode !== 'viewport';
-    this.wakeAvailability.hidden = !unavailable;
+    // 0.10：唤醒与截图能力解耦；关闭截图时手势只打开纯面板。
+    this.wakeAvailability.hidden = true;
     this.wakePreferenceHint.hidden = !this.wakePreferenceSessionOnly;
-    for (const [id,input] of this.wakeInputs) { input.checked=this.wakeEnabled.includes(id); input.disabled=unavailable; }
+    for (const [id,input] of this.wakeInputs) { input.checked=this.wakeEnabled.includes(id); input.disabled=false; }
   }
 
   private buildSettingsView(): HTMLDivElement {
@@ -4314,7 +4900,7 @@ export class FeedbackWidget extends HTMLElement {
     this.settingsView.hidden = true;
     this.settingsView.setAttribute('role', 'group');
     this.settingsView.setAttribute('aria-label', '设置');
-    this.settingsView.append(this.buildOrbIdleSettings(),this.buildWakeSettings());
+    this.settingsView.append(this.buildLauncherStyleSettings(),this.buildWakeVisualSettings(),this.buildOrbIdleSettings(),this.buildWakeSettings());
 
     const title = el('h3', 'fb-settings-title', 'Feedback 服务器');
 

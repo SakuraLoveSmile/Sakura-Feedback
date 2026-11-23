@@ -6,6 +6,7 @@ import 'package:flutter/animation.dart' show Cubic, Curves;
 import 'package:flutter/painting.dart';
 import 'package:flutter/rendering.dart' show CustomPainter;
 
+import 'orb_entrance.dart';
 import 'orb_liquid.dart';
 
 /// 灵感球静止时的基础直径，单位为逻辑像素。
@@ -459,6 +460,10 @@ List<double> orbLensUniformValues({
   double handleMix = 0,
   double mist = 0,
   double idleMix = 0,
+  bool gestureGlass = false,
+  FeedbackOrbEntrance entrance = FeedbackOrbEntrance.bead,
+  double entranceProgress = 1,
+  Offset entranceAxis = const Offset(.89, -.22),
 }) =>
     <double>[
       imageSize.width,
@@ -484,6 +489,11 @@ List<double> orbLensUniformValues({
       handleMix,
       mist,
       idleMix,
+      gestureGlass ? 1 : 0,
+      entrance.index.toDouble(),
+      entranceProgress,
+      entranceAxis.dx,
+      entranceAxis.dy,
     ];
 
 /// Draws the unclipped liquid contour in a box with at least 1.6R padding.
@@ -503,9 +513,17 @@ class OrbLiquidLensPainter extends CustomPainter {
       this.halfSize,
       this.handleMix = 0,
       this.mist = 0,
+      this.gestureGlass = false,
+      this.entrance = FeedbackOrbEntrance.bead,
+      this.entranceProgress = 1,
+      this.entranceAxis = const Offset(.89, -.22),
       this.idleMix = 0});
   final ui.Image image;
   final ui.FragmentShader shader;
+  final bool gestureGlass;
+  final FeedbackOrbEntrance entrance;
+  final double entranceProgress;
+  final Offset entranceAxis;
   final Offset offset;
   final double scale;
   final Offset center;
@@ -537,7 +555,11 @@ class OrbLiquidLensPainter extends CustomPainter {
         halfSize: halfSize,
         handleMix: handleMix,
         mist: mist,
-        idleMix: idleMix);
+        idleMix: idleMix,
+        gestureGlass: gestureGlass,
+        entrance: entrance,
+        entranceProgress: entranceProgress,
+        entranceAxis: entranceAxis);
     for (int i = 0; i < uniforms.length; i++) {
       shader.setFloat(i, uniforms[i]);
     }
@@ -561,7 +583,13 @@ class OrbLiquidOutlinePainter extends CustomPainter {
       this.handleMix = 0,
       this.idleMix = 0,
       this.dark = false,
+      this.entrance = FeedbackOrbEntrance.bead,
+      this.entranceProgress = 1,
+      this.entranceAxis = const Offset(.89, -.22),
       this.highContrast = false});
+  final FeedbackOrbEntrance entrance;
+  final double entranceProgress;
+  final Offset entranceAxis;
   final double radius;
   final Offset direction;
   final double deform;
@@ -576,6 +604,19 @@ class OrbLiquidOutlinePainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final Offset center = size.center(Offset.zero);
+    if (entranceProgress < 1) {
+      canvas.save();
+      canvas.translate(center.dx, center.dy);
+      canvas.scale(radius);
+      canvas.drawPath(
+          _entranceOutline(),
+          Paint()
+            ..color = color
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = (highContrast ? 2 : 1.2) / radius);
+      canvas.restore();
+      return;
+    }
     final Path path = Path();
     for (int i = 0; i <= 192; i++) {
       final double a = i * 2 * math.pi / 192;
@@ -705,6 +746,81 @@ class OrbLiquidOutlinePainter extends CustomPainter {
           ..color = color
           ..style = PaintingStyle.stroke
           ..strokeWidth = 1.2);
+  }
+
+  // Texture-free outlines share the timing and gesture coordinates of the shader.
+  Path _entranceOutline() {
+    final path = Path();
+    final ms = entranceProgress * entrance.milliseconds;
+    double phase(double start, double end) => orbSmoothstep(start, end, ms);
+    Rect circle(double r, [Offset c = Offset.zero]) =>
+        Rect.fromCircle(center: c, radius: r);
+    switch (entrance) {
+      case FeedbackOrbEntrance.bead:
+        final flat = 1 + .44 * (1 - phase(0, 180));
+        return path..addOval(Rect.fromLTRB(-flat, -1 / flat, flat, 1 / flat));
+      case FeedbackOrbEntrance.join:
+        final gather = phase(0, 272), gap = entranceAxis * (1 - gather);
+        final r = .17 + .85 * gather - .02 * phase(272, 320);
+        return Path.combine(PathOperation.union,
+            Path()..addOval(circle(r, gap)), Path()..addOval(circle(r, -gap)));
+      case FeedbackOrbEntrance.reveal:
+        final half = math.acos((1 - 2.5 * phase(0, 250)).clamp(-1.0, 1.0));
+        return path..addArc(circle(1), math.atan2(-.54, -.84) - half, 2 * half);
+      case FeedbackOrbEntrance.dent:
+        final r = .75 + .268 * phase(92, 281) - .018 * phase(282, 335);
+        return path..addOval(circle(r));
+      case FeedbackOrbEntrance.turn:
+        final angle = .036 + (math.pi / 2 - .036) * phase(0, 285);
+        final lean = -.22 * math.cos(angle);
+        for (int i = 0; i <= 96; i++) {
+          final a = i * math.pi / 48;
+          final x = math.cos(a) * math.sin(angle), y = math.sin(a);
+          final dx = x * math.cos(lean) - y * math.sin(lean),
+              dy = x * math.sin(lean) + y * math.cos(lean);
+          if (i == 0) {
+            path.moveTo(dx, dy);
+          } else {
+            path.lineTo(dx, dy);
+          }
+        }
+        return path..close();
+      case FeedbackOrbEntrance.drop:
+        final r = .13 + .89 * phase(0, 269) - .02 * phase(270, 340);
+        final lift = 1.04 * phase(0, 123) * (1 - phase(123, 328));
+        for (int i = 0; i < 128; i++) {
+          final a = i * math.pi / 64, x = math.cos(a), y = math.sin(a);
+          final back = math.max(0.0, -.64 * x + .7684 * y);
+          final extent = r +
+              math.max(0, lift - r) *
+                  back *
+                  back *
+                  math.exp(-3.4 * (.7684 * x + .64 * y).abs());
+          final dx = .64 * lift + x * extent, dy = -.7684 * lift + y * extent;
+          if (i == 0) {
+            path.moveTo(dx, dy);
+          } else {
+            path.lineTo(dx, dy);
+          }
+        }
+        return path..close();
+      case FeedbackOrbEntrance.corners:
+        final unfold = phase(40, 245), r = .63 + .37 * phase(0, 242);
+        final corner = r * (.16 + .84 * unfold * unfold),
+            end = (r - corner) * .6 * (1 - unfold);
+        for (final x in [-1, 1]) {
+          for (final y in [-1, 1]) {
+            path.moveTo(x * end, y * r);
+            for (int i = 0; i <= 16; i++) {
+              final a = math.pi * i / 32;
+              path.lineTo(x * (r - corner + corner * math.sin(a)),
+                  y * (r - corner + corner * math.cos(a)));
+            }
+            path.lineTo(x * r, y * end);
+          }
+        }
+        return path;
+    }
   }
 
   @override

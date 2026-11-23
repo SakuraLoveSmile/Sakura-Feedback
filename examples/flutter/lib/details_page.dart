@@ -26,8 +26,8 @@ class DetailsPage extends StatelessWidget {
                   size: 48, color: Colors.green),
               const SizedBox(height: 16),
               const Text(
-                '这是第二个路由。右下角灵感球仍然在，'
-                '点它 / 拖它就能在当前页面截图并反馈。',
+                '这是第二个路由。双指长按或快捷键仍可唤醒同一套光束与圈选，'
+                '在当前页面截图并反馈。',
                 textAlign: TextAlign.center,
                 style: TextStyle(fontSize: 16),
               ),

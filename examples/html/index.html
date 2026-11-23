@@ -106,8 +106,10 @@
     <script src="./feedback-web.umd.js"></script>
 
     <!--
-      3) 声明元素。launcher-mode / capture-mode 必须显式写：
-         组件默认是 tab / off（升级不改变旧宿主行为）。
+      3) 声明元素。0.10 起组件默认就是「光束唤醒 + 视口截图」：
+         launcher-mode=beam（双指长按或 ⌘/Ctrl+Shift+F 唤醒 → 圈选，无常驻入口）、
+         capture-mode=viewport。本示例不写这两项，直接演示默认形态；
+         想改用灵感球请显式写 launcher-mode="orb"。
     -->
     <feedback-widget
       id="widget"
@@ -116,8 +118,6 @@
       app-version="1.0.0"
       page-label="home"
       side="right"
-      launcher-mode="orb"
-      capture-mode="viewport"
     ></feedback-widget>
 
     <script>

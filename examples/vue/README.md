@@ -112,16 +112,17 @@ export default defineConfig({
 
 ## 属性默认值与显式覆盖
 
-组件默认是 `launcher-mode="tab"`、`capture-mode="off"`（升级不改变旧宿主行为）。
-本示例要演示灵感球 + 自动截图，所以**显式**写在元素上：
+组件默认是 `launcher-mode="beam"`、`capture-mode="viewport"`（0.10 起；光束唤醒 =
+双指长按或 ⌘/Ctrl+Shift+F → 圈选，无常驻入口）。本示例要演示可选的灵感球，所以
+**显式**写在元素上：
 
 ```html
 <feedback-widget
   ref="widget"
   api-base="http://localhost:8787"
   app-id="com.example.demo-vue"
-  launcher-mode="orb"        <!-- 默认 tab -->
-  capture-mode="viewport"    <!-- 默认 off -->
+  launcher-mode="orb"        <!-- 默认 beam -->
+  capture-mode="viewport"    <!-- 默认 viewport -->
   :theme="theme"             <!-- 默认 system，与站点主题联动 -->
 />
 ```

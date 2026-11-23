@@ -15,10 +15,9 @@ Future<void> showHostDialog(BuildContext context) {
   return showDialog<void>(
     context: context,
     // 组件挂在应用 Navigator 之上，而 showDialog 默认走 rootNavigator：
-    // 在本示例里 root 就是承载组件的那层外层 Navigator（见 lib/main.dart），
-    // 对话框会被推到组件**上方**——既压住灵感球，也不会进入截图。
-    // 宿主要"自己的"对话框就显式用 useRootNavigator: false，
-    // 落到应用自己的 Navigator 里，才算宿主内容。
+    // 默认情况下对话框会被推到组件**上方**，不进入截图。
+    // 本示例显式 useRootNavigator: false，让对话框落在应用自己的 Navigator 里，
+    // 从而属于宿主内容、会被圈选截图拍到。
     useRootNavigator: false,
     builder: (BuildContext context) {
       return AlertDialog(
@@ -28,7 +27,7 @@ Future<void> showHostDialog(BuildContext context) {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
             const Text(
-              '这个对话框属于宿主 UI。此时点/拖灵感球截图，'
+              '这个对话框属于宿主 UI。此时双指长按圈选截图，'
               '对话框会出现在截图里，反馈面板自己不会。',
               style: TextStyle(fontSize: 13),
             ),

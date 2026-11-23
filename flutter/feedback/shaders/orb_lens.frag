@@ -19,8 +19,14 @@ uniform vec2 uHalfSize;
 uniform float uHandleMix;
 uniform float uMist;
 uniform float uIdleMix;
+uniform float uGestureGlass;
+// Per-summon choice and gesture axis, shared with the WebGL material.
+uniform float uEntranceId;
+uniform float uEntranceProgress;
+uniform vec2 uEntranceAxis;
 uniform sampler2D uBg;
 out vec4 fragColor;
+#include "orb_gesture_glass.glsl"
 
 // GLSL pow(x, 2) is undefined for negative x on several runtime backends.
 // Multiplication preserves the reference Gaussian on both sides of its peak.
@@ -100,6 +106,15 @@ void main() {
     float surfaceAngle = atan(lensOffset.y,lensOffset.x+.00001);
     float aa = mix(1.1/uRadius,.65/min(uHalfSize.x,uHalfSize.y),uIdleMix);
     float inside = 1.0-smoothstep(1.0-aa,1.0+aa,r);
+    if (uGestureGlass > .5) {
+        EntranceGlass field = entranceGlass(delta,uRadius,r,uEntranceId,uEntranceProgress,uEntranceAxis);
+        float edge = (field.radial-1.0)*field.edgeRadius;
+        inside = 1.0-smoothstep(-1.1,1.1,edge);
+        vec2 source = uCenter + field.sampleDelta;
+        vec4 sampled = inside > 0.0 ? sampleClearLens(source) : vec4(0.0);
+        fragColor = entranceSurface(field, sampled, inside) * uOpacity;
+        return;
+    }
     float rr = clamp(r,0.0,1.0);
     float darkIdle = uIdleMix*uDark;
     float bend = mix(1.0/uMagnification+.54*pow(rr,7.0),.61+.46*pow(rr,7.0),darkIdle);

@@ -2,13 +2,15 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <title>E2E 宿主页 · 默认 capture-mode（off）+ 侧边标签手动截图</title>
+    <title>E2E 宿主页 · capture-mode off（显式）+ 侧边标签手动截图</title>
     <!--
       e2e 专用宿主页（不是产品代码）。
 
       存在的理由（本次修复的缺口）：
-        宿主**故意不声明** `capture-mode`，走组件默认值 `off`——这是绝大多数真实
-        宿主的形态。`off` 的语义是「关闭**自动**截图」，不是「关掉截图能力」：
+        宿主**显式声明** `launcher-mode="tab"` 与 `capture-mode="off"`，模拟升级前
+        的存量宿主。0.10 起组件默认改为 launcher-mode=beam、capture-mode=viewport，
+        本页保留旧形态只能靠显式属性。
+        `off` 的语义是「关闭**自动**截图」，不是「关掉截图能力」：
         用户必须在面板里能用「截取当前页面」手动补拍。
         修复前：截图操作区整体长在「仅有截图才显示」的预览里，`off` 宿主既不会
         自动截图、又没有首次截图入口；先输入文字后连 `captureAndOpen()` 也被草稿
@@ -23,7 +25,7 @@
       面板固定在右侧 440px（x 从 1280-16-440=824 起），两个敏感区都在其左侧，
       因此「面板不在截图里」与「敏感区被遮挡」两类断言互不干扰。
 
-      侧边组件默认形态：未声明 launcher-mode → 贴边标签（tab）；未声明 side → right。
+      侧边组件形态：显式 launcher-mode="tab" → 贴边标签；未声明 side → right。
     -->
     <style>
       html,
@@ -155,13 +157,15 @@
     </script>
 
     <script src="/sdk/feedback-web.umd.js"></script>
-    <!-- 注意：这里**没有** launcher-mode / capture-mode / side 属性（默认形态） -->
+    <!-- 显式声明旧宿主形态（贴边标签 + 关闭自动截图）；side 仍不声明（默认 right） -->
     <feedback-widget
       id="widget"
       api-base="http://localhost:8787"
       app-id="com.example.demo-e2e"
       app-version="3.1.4"
       page-label="e2e-manual"
+      launcher-mode="tab"
+      capture-mode="off"
     ></feedback-widget>
   </body>
 </html>

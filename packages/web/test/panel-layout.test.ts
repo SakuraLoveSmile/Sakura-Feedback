@@ -333,12 +333,17 @@ describe('冻结视觉规格（styles.ts 字符串断言）', () => {
     expect(reducedOrb).not.toMatch(/\.fb-orb \{[^}]*transform: none !important/);
   });
 
-  it('渐变光效只出现在灵感球（编辑器棋盘格背景除外）', () => {
+  it('渐变仅用于灵感球、编辑器棋盘格与唤醒水纹的角度蒙版', () => {
     const blocks = STYLES.split('}').filter((b) => /gradient\(/.test(b));
     expect(blocks.length).toBeGreaterThan(0);
     for (const block of blocks) {
       const selector = (block.split('{')[0] ?? '').trim();
-      expect(selector).toMatch(/fb-orb|fb-editor-(canvas|preview)/);
+      if (selector === '.fb-beam.is-water-fallback') {
+        expect(block).toContain('mask-image:var(--fb-water-arcs)');
+        expect(block).not.toMatch(/background(?:-image)?\s*:/);
+      } else {
+        expect(selector).toMatch(/fb-orb|fb-editor-(canvas|preview)/);
+      }
     }
   });
 

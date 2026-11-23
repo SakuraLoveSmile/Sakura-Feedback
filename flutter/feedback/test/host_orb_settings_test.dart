@@ -120,8 +120,7 @@ void main() {
     debugDisableOrbLensCapture = false;
   });
 
-  testWidgets('宿主给出的 hidden 只隐藏待机态：完整球先显示，闲置后隐藏，面板仍可打开并改回',
-      (tester) async {
+  testWidgets('宿主给出的 hidden 只隐藏待机态：完整球先显示，闲置后隐藏，面板仍可打开并改回', (tester) async {
     host.style = FeedbackOrbIdleStyle.hidden;
     await host.mount(tester);
 
@@ -176,8 +175,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('宿主属性从 handle 改为 hidden 再改回：完整球保留，闲置后隐藏，改回后恢复',
-      (tester) async {
+  testWidgets('宿主属性从 handle 改为 hidden 再改回：完整球保留，闲置后隐藏，改回后恢复', (tester) async {
     host.style = FeedbackOrbIdleStyle.handle;
     await host.mount(tester);
     expect(_orb, findsOneWidget);
@@ -200,13 +198,11 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('宿主托管的 hidden 不妨碍已开启的唤醒手势，改回 handle 后恢复',
-      (tester) async {
+  testWidgets('宿主托管的 hidden 不妨碍已开启的唤醒手势，改回 handle 后恢复', (tester) async {
     host.captureMode = FeedbackCaptureMode.viewport;
     host.style = FeedbackOrbIdleStyle.hidden;
     host.gestures = <FeedbackWakeGesture>{FeedbackWakeGesture.twoFingerHold};
     await host.mount(tester);
-    final Rect dock = tester.getRect(_orb);
     expect(_orb, findsOneWidget);
 
     // 闲置 5 秒进入待机隐藏：不渲染任何收起入口，但唤醒能力仍在线。
@@ -222,8 +218,8 @@ void main() {
       final TestGesture second =
           await tester.startGesture(const Offset(220, 300));
       await tester.pump(const Duration(milliseconds: 700));
-      expect(find.byKey(const Key('feedback-wake-release-hint')),
-          findsOneWidget);
+      expect(
+          find.byKey(const Key('feedback-wake-release-hint')), findsOneWidget);
       await first.up();
       await second.up();
     }
@@ -231,9 +227,8 @@ void main() {
     await holdAndLift();
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 420));
-    expect(_orb, findsOneWidget,
-        reason: '宿主托管的 hidden 不取消已开启的唤醒手势');
-    expect(tester.getRect(_orb), dock, reason: '唤醒后完整球回到原停车位');
+    expect(_orb, findsOneWidget, reason: '宿主托管的 hidden 不取消已开启的唤醒手势');
+    expect(tester.getCenter(_orb), const Offset(190, 300));
     expect(host.controller.isOpen, isFalse);
     expect(
       await host.preferences.read(wakeGestureStorageKey(host.appId)),
@@ -279,7 +274,9 @@ void main() {
 
     // 面板内取消勾选会回调宿主；宿主回传空集合后不再识别。
     await host.openSettings(tester);
-    await tester.tap(find.byKey(const Key('feedback-wake-two-finger-hold')));
+    final holdSetting = find.byKey(const Key('feedback-wake-two-finger-hold'));
+    await tester.ensureVisible(holdSetting);
+    await tester.tap(holdSetting);
     await tester.pump();
     expect(host.gestureChanges, hasLength(1));
     expect(host.gestureChanges.single, isEmpty);

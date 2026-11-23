@@ -35,7 +35,8 @@
     </section>
   </main>
   <script src="/sdk/feedback-web.umd.cjs"></script>
-  <feedback-widget app-id="capture-styles-regression" app-name="截图回归" capture-mode="off" show-launcher="false" theme="light"></feedback-widget>
+  <!-- 截图回归夹具：显式 tab + off 保持确定性（不依赖 0.10 的新默认 beam + viewport） -->
+  <feedback-widget app-id="capture-styles-regression" app-name="截图回归" launcher-mode="tab" capture-mode="off" show-launcher="false" theme="light"></feedback-widget>
   <script>
     const widget = document.querySelector('feedback-widget');
     const results = document.querySelector('#results');

@@ -1,4 +1,3 @@
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:feedback_example/details_page.dart';
@@ -8,7 +7,26 @@ import 'package:feedback_example/main.dart';
 import 'package:feedback_widget/feedback_widget.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+/// 光束唤醒快捷键（默认 primary+shift+f；测试环境 primary = Ctrl）。
+Future<void> wakeBeam(WidgetTester tester) async {
+  await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+  await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+  await tester.sendKeyEvent(LogicalKeyboardKey.keyF);
+  await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+  await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+  await tester.pump();
+}
+
+/// 等待圈选覆盖层出现，按 Enter 交付整个窗口（先截图后开面板）。
+Future<void> captureWholeWindow(WidgetTester tester) async {
+  await pumpUntil(tester,
+      () => find.byKey(const Key('feedback-capture-lasso')).evaluate().isNotEmpty);
+  await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+  await tester.pump();
+}
 
 /// 等待条件成立：pump 前进帧 + runAsync 给真实异步（图像栅格化与编码）时间。
 Future<void> pumpUntil(WidgetTester tester, bool Function() cond) async {
@@ -61,27 +79,38 @@ int countColor(ByteData rgba, int width, int height, Color color) {
 }
 
 void main() {
-  testWidgets('示例应用冒烟测试：灵感球呼出反馈面板（先截图后开面板）', (tester) async {
+  testWidgets('示例应用冒烟测试：光束唤醒圈选后打开反馈面板（先截图后开面板）', (tester) async {
     await tester.binding.setSurfaceSize(const Size(1200, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
     await tester.pumpWidget(const FeedbackExampleApp());
     await tester.pump();
 
-    // 示例使用灵感球（orb）模式：orb 渲染、fab 不渲染。
-    expect(find.byKey(const Key('feedback-orb')), findsOneWidget);
+    // 示例使用 0.10 默认的光束唤醒：没有常驻 orb/fab，只有无障碍占位。
+    expect(find.byKey(const Key('feedback-orb')), findsNothing);
     expect(find.byKey(const Key('feedback-fab')), findsNothing);
+    expect(find.byKey(const Key('feedback-beam-a11y-slot')), findsOneWidget);
 
-    // captureMode=viewport：呼出走"先截图后开面板"——截图完成后才挂载
-    // 面板，需以轮询等待（真实异步的图像栅格化与编码）。
-    await tester.tap(find.byKey(const Key('feedback-orb')));
+    // captureMode=viewport：唤醒后先进入圈选，Enter 交付整个窗口后打开面板。
+    await wakeBeam(tester);
+    await captureWholeWindow(tester);
     await pumpUntil(tester,
         () => find.byKey(const Key('feedback-input')).evaluate().isNotEmpty);
+    // 等交接动画结束（面板从下方滑入），再做输入与点击。
+    await tester.pump(const Duration(milliseconds: 1500));
+    await tester.pump();
     // 令牌仓库（flutter_secure_storage）在单测环境不可用：面板容错后回落为
     // 「未登录也可继续编辑」的撰写视图；登录表单在点击「登录并提交」后
     // 就地展开（不再打开任何窗口）。
     expect(find.byKey(const Key('feedback-login-username')), findsNothing);
     await tester.enterText(find.byKey(const Key('feedback-input')), '示例冒烟');
+    await tester.pump();
+    await pumpUntil(tester, () {
+      final Finder submit = find.byKey(const Key('feedback-submit'));
+      return submit.evaluate().isNotEmpty &&
+          tester.widget<FilledButton>(submit).onPressed != null;
+    });
+    await tester.ensureVisible(find.byKey(const Key('feedback-submit')));
     await tester.pump();
     await tester.tap(find.byKey(const Key('feedback-submit')));
     await tester.pump();
@@ -103,7 +132,8 @@ void main() {
         tester.state(find.byType(FeedbackWidget));
 
     // 先打开面板并挂载 FeedbackPanel，用于验证导航不重建面板状态。
-    await tester.tap(find.byKey(const Key('feedback-orb')));
+    await wakeBeam(tester);
+    await captureWholeWindow(tester);
     await pumpUntil(
       tester,
       () => find.byKey(const Key('feedback-input')).evaluate().isNotEmpty,
@@ -121,8 +151,8 @@ void main() {
     expect(find.byType(DetailsPage), findsOneWidget);
     expect(find.byType(HomePage), findsNothing);
 
-    // 关键断言：导航之后灵感球仍在场，且组件实例与控制器实例都没被重建。
-    expect(find.byKey(const Key('feedback-orb')), findsOneWidget,
+    // 关键断言：导航之后光束无障碍入口仍在场，且组件实例与控制器实例都没被重建。
+    expect(find.byKey(const Key('feedback-beam-a11y-slot')), findsOneWidget,
         reason: '组件在 Navigator 之上，push 路由后入口仍在');
     expect(
         identical(
@@ -150,7 +180,7 @@ void main() {
     await tester.tap(find.text('返回第一页'));
     await tester.pumpAndSettle();
     expect(find.byType(HomePage), findsOneWidget);
-    expect(find.byKey(const Key('feedback-orb')), findsOneWidget);
+    expect(find.byKey(const Key('feedback-beam-a11y-slot')), findsOneWidget);
   });
 
   testWidgets('截图范围：宿主对话框入图、反馈面板不入图（结构性 + 像素级）', (tester) async {
@@ -166,8 +196,9 @@ void main() {
     expect(
         find.byKey(const Key('feedback-example-dialog-swatch')), findsOneWidget);
 
-    // 对话框打开时呼出灵感球：先截图后开面板。
-    await tester.tap(find.byKey(const Key('feedback-orb')));
+    // 对话框打开时快捷键唤醒光束：圈选整个窗口后先截图后开面板。
+    await wakeBeam(tester);
+    await captureWholeWindow(tester);
     await pumpUntil(
         tester, () => find.byType(FeedbackPanel).evaluate().isNotEmpty);
     await tester.pump();

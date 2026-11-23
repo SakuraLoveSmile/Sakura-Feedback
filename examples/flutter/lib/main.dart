@@ -14,11 +14,13 @@ void main() => runApp(const FeedbackExampleApp());
 /// 1. 控制器由**应用根**拥有，只在根的 `dispose()` 里释放——任何路由都能用同一个实例；
 /// 2. 组件**包在 MaterialApp 外侧**：截图边界提升到根 Navigator/Overlay 之上，
 ///    `useRootNavigator: true` 的根弹窗（`showDialog` / `showModalBottomSheet`
-///    默认）也进入截图；面板与灵感球仍在截图边界之外。
+///    默认）也进入截图；面板与圈选覆盖层仍在截图边界之外。
 ///    （旧的 `MaterialApp.builder` 包裹方式仍可运行，但根弹窗不入图——
 ///    截图只覆盖应用自己的 Navigator 子树。）
-/// 3. 配置显式声明 `launcherMode: orb` 与 `captureMode: viewport`
-///    （组件默认是 `tab` / `off`，升级不会改变旧宿主行为）。
+/// 3. 配置**不声明** `launcherMode` / `captureMode`，直接使用 0.10 的新默认：
+///    `FeedbackLauncherMode.beam`（双指长按或快捷键唤醒 → 圈选）+ `viewport`。
+///    没有常驻入口；想用灵感球请在配置里显式写 `launcherMode: FeedbackLauncherMode.orb`
+///    （见 `orb_preview.dart`）。
 class FeedbackExampleApp extends StatefulWidget {
   const FeedbackExampleApp({super.key});
 
@@ -81,9 +83,8 @@ class _FeedbackExampleAppState extends State<FeedbackExampleApp> {
         appVersion: '1.0.0',
         pageLabel: _pageLabel.value,
         side: FeedbackSide.right,
-        // 显式声明：灵感球（可拖拽落点）+ 呼出时截取当前应用视口。
-        launcherMode: FeedbackLauncherMode.orb,
-        captureMode: FeedbackCaptureMode.viewport,
+        // 不声明 launcherMode / captureMode：使用默认的光束唤醒 + 视口截图
+        // （launcherMode 默认 beam，captureMode 默认 viewport）。灵感球改为显式可选。
         // v12 诊断日志三步接入之③：把记录器产出接给 logProvider。
         logProvider: () => _diagnostics.provide(),
       ),

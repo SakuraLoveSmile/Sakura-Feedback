@@ -18,6 +18,7 @@ const List<Offset> _points = <Offset>[
 class _Harness {
   FeedbackWakeGestureRecognizer? recognizer;
   final List<Offset> wakes = <Offset>[];
+  List<Offset> lastFingertips = const [];
   bool hint = false;
   bool available = true;
   Set<FeedbackWakeGesture> enabled = _all;
@@ -36,7 +37,10 @@ class _Harness {
               value
                 ..isAvailable = (() => available)
                 ..onReleaseHint = ((bool value) => hint = value)
-                ..onWake = wakes.add
+                ..onWake = (center, fingertips) {
+                  wakes.add(center);
+                  lastFingertips = fingertips;
+                }
                 ..enabled = enabled;
             },
           ),
@@ -119,6 +123,7 @@ void main() {
     await tester.pump(const Duration(seconds: 2));
     await fingers[1].up();
     expect(h.wakes, <Offset>[const Offset(192, 300)]);
+    expect(h.lastFingertips, const [Offset(164, 300), Offset(220, 300)]);
     expect(h.hint, isFalse);
     await tester.pump(const Duration(seconds: 2));
     expect(h.wakes, hasLength(1));
@@ -544,6 +549,10 @@ void main() {
       () {
     expect(wakeGestureStorageKey('a b/中'),
         'feedback:wake-gestures:v1:a%20b%2F%E4%B8%AD');
+    expect(decodeWakeGestures(null),
+        <FeedbackWakeGesture>{FeedbackWakeGesture.twoFingerHold});
+    expect(decodeWakeGestures('{"version":1,"enabled":[]}'),
+        <FeedbackWakeGesture>{});
     expect(
         decodeWakeGestures(
             '{"version":1,"enabled":["unknown","two-finger-hold","two-finger-hold",42]}'),
@@ -592,7 +601,7 @@ void main() {
     store.readGate = null;
     prefs.rebind(appId: 'b', store: store);
     await Future<void>.delayed(Duration.zero);
-    expect(prefs.enabled, isEmpty);
+    expect(prefs.enabled, kDefaultWakeGestures);
     store.gates[2].complete();
     await Future<void>.delayed(Duration.zero);
     expect(store.writes, hasLength(3),

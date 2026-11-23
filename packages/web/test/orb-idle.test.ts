@@ -54,6 +54,25 @@ beforeEach(()=>{
 });
 afterEach(()=>{cleanup();vi.useRealTimers();});
 
+describe('orb entrance preference',()=>{
+  it('restores independent choices on live app changes and keeps gestures separate',()=>{
+    const key = (id:string) => 'feedback:orb-entrance:v1:'+encodeURIComponent(id);
+    localStorage.setItem(key(APP_ID),'unknown');
+    localStorage.setItem(key('second app'),'turn');
+    enableGestures(['two-finger-hold']);
+    const m=mount();
+    settings(m);
+    const select=m.root.querySelector<HTMLSelectElement>('.fb-orb-entrance select')!;
+    expect(select.value).toBe('bead');
+    expect([...select.options].map(o=>o.value)).toEqual(['bead','join','reveal','dent','turn','drop','corners']);
+    select.value='drop'; select.dispatchEvent(new Event('change'));
+    expect(localStorage.getItem(key(APP_ID))).toBe('drop');
+    m.widget.appId='second app'; expect(select.value).toBe('turn');
+    m.widget.appId=APP_ID; expect(select.value).toBe('drop');
+    expect(JSON.parse(localStorage.getItem(wakePreferenceKey(APP_ID))!).enabled).toEqual(['two-finger-hold']);
+  });
+});
+
 describe('local idle style preference',()=>{
   it.each([null,'bad','{}','{"version":0,"style":"edge"}','{"version":1,"style":"unknown"}'])('invalid %s uses handle',value=>{
     expect(parseOrbIdlePreference(value)).toBe('handle');
@@ -519,6 +538,7 @@ describe('third idle style: hidden',()=>{
   });
 
   it('without wake gestures the hidden standby stays hidden, while the host entry can open and switch styles back',async()=>{
+    localStorage.setItem(wakePreferenceKey(APP_ID),JSON.stringify({version:1,enabled:[]}));
     const m=mount({'capture-mode':'viewport'});
     settings(m); radio(m,'hidden').click();
     expect(JSON.parse(localStorage.getItem(orbIdlePreferenceKey(APP_ID))!)).toEqual({version:1,style:'hidden'});

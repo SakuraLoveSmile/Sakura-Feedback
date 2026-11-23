@@ -211,14 +211,17 @@ void main() {
         final Offset releaseGlobal = entry.boundary.topLeft + releaseLocal;
         Offset? visibleLocal;
         if (!dragged) {
+          // Wake away from the drop target so the follow-up pointer actually drags.
+          final wakeCenter = releaseGlobal - const Offset(70, 90);
           final TestGesture first =
-              await tester.startGesture(releaseGlobal - const Offset(20, 0));
+              await tester.startGesture(wakeCenter - const Offset(20, 0));
           final TestGesture second =
-              await tester.startGesture(releaseGlobal + const Offset(20, 0));
+              await tester.startGesture(wakeCenter + const Offset(20, 0));
           await tester.pump(const Duration(milliseconds: 700));
           await first.up();
           await second.up();
           await tester.pump();
+          expect(tester.getCenter(find.byKey(const Key('feedback-orb'))), wakeCenter);
           expect(find.byType(CaptureSelectionOverlay), findsNothing,
               reason:
                   'R5 wake never captures; the subsequent drag is explicit');

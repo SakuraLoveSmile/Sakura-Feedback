@@ -1,6 +1,6 @@
 /** First-preview directional shape. All values are logical pixels. */
 export interface LiquidShape { dirX: number; dirY: number; deform: number; wobble: number }
-export interface LiquidSnapshot extends LiquidShape { x: number; y: number; radius: number }
+export interface LiquidSnapshot extends LiquidShape { x: number; y: number; radius: number; gestureGlass?: boolean }
 export const smoothstep = (p: number): number => {
   const t = Math.max(0, Math.min(1, p));
   return t * t * (3 - 2 * t);

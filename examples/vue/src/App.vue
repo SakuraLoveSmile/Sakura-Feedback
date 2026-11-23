@@ -121,9 +121,9 @@ onBeforeUnmount(() => {
     </div>
     <p style="font-size: 13px; color: #64748b; margin: 0 0 20px 0">
       注意：<code>openFeedback()</code> 内部只调 <code>open()</code>，不会截图；要"截图 + 打开"请用
-      <code>captureAndOpen()</code>。示例元素已显式声明
-      <code>launcher-mode="orb"</code> 与 <code>capture-mode="viewport"</code>（组件默认是
-      <code>tab</code> / <code>off</code>，升级不改变旧宿主行为）。
+      <code>captureAndOpen()</code>。0.10 起组件默认是 <code>beam</code> / <code>viewport</code>；
+      本示例显式声明 <code>launcher-mode="orb"</code> 与 <code>capture-mode="viewport"</code>
+      来演示可选的灵感球形态。
     </p>
 
     <div
@@ -151,7 +151,7 @@ onBeforeUnmount(() => {
     </p>
 
     <!-- 直接在模板里使用自定义元素；vite.config.ts 已声明 isCustomElement。
-         launcher-mode / capture-mode 的组件默认值是 tab / off，这里显式覆盖。
+         组件默认是 beam + viewport（0.10），这里显式覆盖为灵感球形态。
          theme 与站点主题联动（system 跟随系统）。 -->
     <feedback-widget
       ref="widget"

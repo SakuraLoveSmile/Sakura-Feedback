@@ -42,11 +42,10 @@
 - **pageLabel 跟随路由**：`pageLabel` 必须由宿主显式传入（组件绝不自动抓取页面
   信息）。示例用一个 `NavigatorObserver` 把当前命名路由同步进 `ValueNotifier`，
   再交给组件的 `FeedbackConfig.pageLabel`；匿名路由（对话框）不会改变它。
-- **显式声明截图模式**：配置里写明了
-  `launcherMode: FeedbackLauncherMode.orb` 与
-  `captureMode: FeedbackCaptureMode.viewport`
-  ——组件默认是 `FeedbackLauncherMode.tab` / `FeedbackCaptureMode.off`，
-  升级不会改变旧宿主行为，要灵感球和自动截图必须显式写。
+- **默认唤醒形态**：配置**不声明** `launcherMode` / `captureMode`，直接使用 0.10
+  新默认 `FeedbackLauncherMode.beam`（双指长按或 ⌘/Ctrl+Shift+F → 圈选）+ `viewport`；
+  没有常驻入口。想演示可选的灵感球，见 `lib/orb_preview.dart`（显式写
+  `launcherMode: FeedbackLauncherMode.orb`）。
 
 ### 为什么 builder 里还套了一层外层 Navigator
 

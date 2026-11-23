@@ -51,11 +51,12 @@ pnpm --filter @feedback/example-html serve        # http://127.0.0.1:8080/
 <feedback-widget
   api-base="http://localhost:8787"
   app-id="com.example.demo-html"
-  launcher-mode="orb"        <!-- 默认是 tab，必须显式写 -->
-  capture-mode="viewport"    <!-- 默认是 off，必须显式写 -->
+  side="right"              <!-- 不写 launcher-mode / capture-mode：0.10 默认 beam + viewport -->
 ></feedback-widget>
 ```
 
+- 不写 `launcher-mode` / `capture-mode` 时走 0.10 默认：双指长按（或 ⌘/Ctrl+Shift+F）
+  唤醒光束 → 圈选 → 视口截图；想改用灵感球请显式加 `launcher-mode="orb"`。
 - `open()`：只打开面板，**不截图**；`captureAndOpen()`：截图并打开。
   `openFeedback()` 内部只调 `open()`，即使传 `captureMode: 'viewport'`
   也不会立即截图（需要截图请调元素上的 `captureAndOpen()`）。

@@ -14,6 +14,9 @@ import 'config.dart';
 import 'idempotency.dart';
 import 'image_editor.dart';
 import 'images.dart';
+import 'launcher_style.dart';
+import 'orb_entrance.dart';
+import 'wake_visual.dart';
 import 'platform.dart';
 import 'server_pref.dart';
 import 'status_style.dart';
@@ -204,6 +207,16 @@ class FeedbackPanel extends StatefulWidget {
     this.orbIdleStyle = FeedbackOrbIdleStyle.handle,
     this.orbIdleSessionOnly = false,
     this.onOrbIdleStyleChanged,
+    this.launcherMode = FeedbackLauncherMode.beam,
+    this.launcherStyle = FeedbackLauncherStyle.beam,
+    this.launcherStyleSessionOnly = false,
+    this.onLauncherStyleChanged,
+    this.wakeVisual = FeedbackWakeVisual.ripple,
+    this.wakeVisualSessionOnly = false,
+    this.onWakeVisualChanged,
+    this.entrance = FeedbackOrbEntrance.bead,
+    this.onEntranceChanged,
+    this.entranceSessionOnly = false,
     this.onEffectiveApiBaseChange,
     this.onUnreadCountChange,
     this.visible,
@@ -215,6 +228,30 @@ class FeedbackPanel extends StatefulWidget {
   /// 未读数变化回调（通知宿主未读数量；组件内部入口不再绘制数字角标，
   /// 宿主可自行决定是否展示提示）。
   final ValueChanged<int>? onUnreadCountChange;
+
+  /// 生效入口模式（宿主 beam 时由用户偏好决定光束或灵感球）。
+  final FeedbackLauncherMode launcherMode;
+
+  /// 终端用户选择的入口样式。
+  final FeedbackLauncherStyle launcherStyle;
+
+  /// 入口样式仅在本次会话生效（持久化失败）。
+  final bool launcherStyleSessionOnly;
+
+  /// 入口样式变更回调。
+  final ValueChanged<FeedbackLauncherStyle>? onLauncherStyleChanged;
+
+  /// 终端用户选择的唤醒动效（水波纹 / 波光）。
+  final FeedbackWakeVisual wakeVisual;
+
+  /// 唤醒动效仅在本次会话生效（持久化失败）。
+  final bool wakeVisualSessionOnly;
+
+  /// 唤醒动效变更回调。
+  final ValueChanged<FeedbackWakeVisual>? onWakeVisualChanged;
+  final FeedbackOrbEntrance entrance;
+  final ValueChanged<FeedbackOrbEntrance>? onEntranceChanged;
+  final bool entranceSessionOnly;
 
   /// 请求关闭面板（关闭按钮触发）。
   final VoidCallback? onRequestClose;
@@ -3138,10 +3175,108 @@ class FeedbackPanelState extends State<FeedbackPanel>
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
           if (scrollHeader) _buildHeader(context, inset: false),
-          if (widget.onOrbIdleStyleChanged != null) ...<Widget>[
-            Text('灵感球', style: theme.textTheme.titleSmall),
+          if (widget.config.launcherMode == FeedbackLauncherMode.beam) ...<Widget>[
+            Text('入口样式', style: theme.textTheme.titleSmall),
             const SizedBox(height: 4),
-            Text('闲置 5 秒后收起；选择「隐藏」后待机时不显示灵感球，可用已开启的唤醒手势唤醒，或从宿主入口打开面板改回。',
+            Text('用下方选好的手势唤醒。光束直接进入圈选；灵感球从手指之间浮现，点一下反馈，拖到问题处松手选区。',
+                style: theme.textTheme.bodySmall),
+            const SizedBox(height: 8),
+            for (final FeedbackLauncherStyle style
+                in FeedbackLauncherStyle.values)
+              Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Semantics(
+                      checked: widget.launcherStyle == style,
+                      inMutuallyExclusiveGroup: true,
+                      child: Material(
+                          color: widget.launcherStyle == style
+                              ? theme.colorScheme.primaryContainer
+                              : theme.colorScheme.surfaceContainerLow,
+                          borderRadius: BorderRadius.circular(12),
+                          child: ListTile(
+                              key: Key('feedback-launcher-style-${style.name}'),
+                              minVerticalPadding: 8,
+                              leading: Icon(
+                                  widget.launcherStyle == style
+                                      ? Icons.radio_button_checked
+                                      : Icons.radio_button_off,
+                                  color: theme.colorScheme.primary),
+                              title: Text(
+                                  style == FeedbackLauncherStyle.beam
+                                      ? '光束唤醒'
+                                      : '灵感球'),
+                              onTap: () => widget.onLauncherStyleChanged?.call(style))))),
+            if (widget.launcherStyleSessionOnly)
+              Text('仅本次生效，偏好未保存',
+                  key: const Key('feedback-launcher-style-session-only'),
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: theme.colorScheme.primary)),
+            const SizedBox(height: 16),
+          ],
+          if (widget.config.launcherMode == FeedbackLauncherMode.beam &&
+              widget.launcherStyle == FeedbackLauncherStyle.beam) ...<Widget>[
+            Text('唤醒动效', style: theme.textTheme.titleSmall),
+            const SizedBox(height: 4),
+            Text('水波经过时，画面会轻轻折动。波光从两指下泛起，在屏幕边缘淡出。',
+                style: theme.textTheme.bodySmall),
+            const SizedBox(height: 8),
+            for (final FeedbackWakeVisual visual
+                in FeedbackWakeVisual.values)
+              Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Semantics(
+                      checked: widget.wakeVisual == visual,
+                      inMutuallyExclusiveGroup: true,
+                      child: Material(
+                          color: widget.wakeVisual == visual
+                              ? theme.colorScheme.primaryContainer
+                              : theme.colorScheme.surfaceContainerLow,
+                          borderRadius: BorderRadius.circular(12),
+                          child: ListTile(
+                              key: Key('feedback-wake-visual-${visual.name}'),
+                              minVerticalPadding: 8,
+                              leading: Icon(
+                                  widget.wakeVisual == visual
+                                      ? Icons.radio_button_checked
+                                      : Icons.radio_button_off,
+                                  color: theme.colorScheme.primary),
+                              title: Text(switch (visual) {
+                                FeedbackWakeVisual.ripple => '水波纹（默认）',
+                                FeedbackWakeVisual.aurora => '波光',
+                              }),
+                              onTap: () =>
+                                  widget.onWakeVisualChanged?.call(visual))))),
+            if (widget.wakeVisualSessionOnly)
+              Text('仅本次生效，偏好未保存',
+                  key: const Key('feedback-wake-visual-session-only'),
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: theme.colorScheme.primary)),
+            const SizedBox(height: 16),
+          ],
+          if (widget.onOrbIdleStyleChanged != null &&
+              widget.launcherMode == FeedbackLauncherMode.orb)
+            Padding(padding: const EdgeInsets.only(bottom: 8),
+              child: Text('灵感球', style: theme.textTheme.titleSmall)),
+          if (widget.launcherMode == FeedbackLauncherMode.orb &&
+              widget.onEntranceChanged != null) ...<Widget>[
+            InputDecorator(
+              decoration: const InputDecoration(labelText: '唤醒效果', border: OutlineInputBorder()),
+              child: DropdownButtonHideUnderline(child: DropdownButton<FeedbackOrbEntrance>(
+                key: const Key('feedback-orb-entrance'),
+                isExpanded: true,
+                value: widget.entrance,
+                items: [for (final effect in FeedbackOrbEntrance.values)
+                  DropdownMenuItem(value: effect, child: Text(effect.label))],
+                onChanged: (value) { if (value != null) widget.onEntranceChanged!(value); },
+              )),
+            ),
+            if (widget.entranceSessionOnly) Text('仅本次生效，偏好未保存', style: theme.textTheme.bodySmall),
+            const SizedBox(height: 16),
+          ],
+          if (widget.onOrbIdleStyleChanged != null &&
+              widget.launcherMode == FeedbackLauncherMode.orb) ...<Widget>[
+            const SizedBox(height: 4),
+            Text('选择「隐藏」后待机时不显示灵感球。用已开启的唤醒手势呼出，闲置 5 秒后收起。可以从宿主入口打开设置改回。',
                 style: theme.textTheme.bodySmall),
             const SizedBox(height: 8),
             for (final FeedbackOrbIdleStyle style
@@ -3181,14 +3316,14 @@ class FeedbackPanelState extends State<FeedbackPanel>
           if (widget.onWakeGesturesChanged != null) ...<Widget>[
             Text('唤醒方式', style: theme.textTheme.titleSmall),
             const SizedBox(height: 4),
-            Text('可同时开启，仅在当前应用内生效；悬浮入口仍可使用。',
+            Text('可同时开启，仅在当前应用内生效；未开启自动截图时手势只打开面板。',
                 style: theme.textTheme.bodySmall
                     ?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
-            if (widget.config.captureMode != FeedbackCaptureMode.viewport)
+            if (widget.config.launcherMode == FeedbackLauncherMode.beam)
               Padding(
                 padding: const EdgeInsets.only(top: 8),
-                child: Text('应用未开启截图，手势暂不可用',
-                    key: const Key('feedback-wake-disabled'),
+                child: Text('快捷键：Ctrl/⌘ + Shift + F（输入框聚焦时不触发）',
+                    key: const Key('feedback-wake-shortcut'),
                     style: theme.textTheme.bodySmall),
               ),
             for (final FeedbackWakeGesture gesture
@@ -3203,19 +3338,16 @@ class FeedbackPanelState extends State<FeedbackPanel>
                   subtitle: Text(gesture.description,
                       style: theme.textTheme.bodySmall),
                   value: widget.wakeGestures.contains(gesture),
-                  onChanged: widget.config.captureMode !=
-                          FeedbackCaptureMode.viewport
-                      ? null
-                      : (bool? checked) {
-                          final Set<FeedbackWakeGesture> next =
-                              Set<FeedbackWakeGesture>.of(widget.wakeGestures);
-                          if (checked == true) {
-                            next.add(gesture);
-                          } else {
-                            next.remove(gesture);
-                          }
-                          widget.onWakeGesturesChanged!(next);
-                        },
+                  onChanged: (bool? checked) {
+                    final Set<FeedbackWakeGesture> next =
+                        Set<FeedbackWakeGesture>.of(widget.wakeGestures);
+                    if (checked == true) {
+                      next.add(gesture);
+                    } else {
+                      next.remove(gesture);
+                    }
+                    widget.onWakeGesturesChanged!(next);
+                  },
                 ),
               ),
             if (widget.wakeGesturesSessionOnly)

@@ -43,6 +43,10 @@ export const REGION_DEFAULT_WIDTH = 144;
 export const REGION_DEFAULT_HEIGHT = 144;
 /** 键盘调整选区的步长（逻辑像素）。 */
 export const REGION_KEY_STEP = 6;
+/** 圈选轨迹：包围盒外扩边距、最小边长、采样间距（与 Flutter 端同值）。 */
+export const LASSO_PAD = 8;
+export const LASSO_MIN = 64;
+export const LASSO_SAMPLE = 4;
 
 /** 八个缩放控制点方位。 */
 export type RegionHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
@@ -129,6 +133,73 @@ export function resizeRegion(
   if (handle.includes('s')) bottom = Math.min(vh, Math.max(bottom + dy, top + minH));
 
   return clampRegion({ x: left, y: top, width: right - left, height: bottom - top }, viewport);
+}
+
+/** 圈选轨迹点（捕获视口逻辑像素）。 */
+export interface LassoPoint {
+  x: number;
+  y: number;
+}
+
+/** 丢弃与上一点距离不足 [minDist] 的采样点；非有限坐标直接忽略。 */
+export function simplifyPath(
+  points: readonly LassoPoint[],
+  minDist = LASSO_SAMPLE,
+): LassoPoint[] {
+  const out: LassoPoint[] = [];
+  for (const point of points) {
+    if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) continue;
+    const previous = out[out.length - 1];
+    if (previous && Math.hypot(point.x - previous.x, point.y - previous.y) < minDist) continue;
+    out.push({ x: point.x, y: point.y });
+  }
+  return out;
+}
+
+/**
+ * 圈选轨迹 → 选区：取包围盒、四周外扩 [pad]，不足 [min] 时以中心撑开，
+ * 最后夹回捕获视口。无有效点时返回以左上角为起点的最小选区。
+ */
+export function lassoBoundingRect(
+  points: readonly LassoPoint[],
+  viewport: RegionViewport,
+  options: { pad?: number; min?: number } = {},
+): RegionRect {
+  const pad = Math.max(0, options.pad ?? LASSO_PAD);
+  const min = Math.max(1, options.min ?? LASSO_MIN);
+  const finite = points.filter(
+    (point) => Number.isFinite(point.x) && Number.isFinite(point.y),
+  );
+  if (!finite.length) {
+    return clampRegion({ x: 0, y: 0, width: min, height: min }, viewport);
+  }
+  let left = Infinity;
+  let top = Infinity;
+  let right = -Infinity;
+  let bottom = -Infinity;
+  for (const point of finite) {
+    left = Math.min(left, point.x);
+    top = Math.min(top, point.y);
+    right = Math.max(right, point.x);
+    bottom = Math.max(bottom, point.y);
+  }
+  left -= pad;
+  top -= pad;
+  right += pad;
+  bottom += pad;
+  let width = right - left;
+  let height = bottom - top;
+  if (width < min) {
+    const centerX = (left + right) / 2;
+    left = centerX - min / 2;
+    width = min;
+  }
+  if (height < min) {
+    const centerY = (top + bottom) / 2;
+    top = centerY - min / 2;
+    height = min;
+  }
+  return clampRegion({ x: left, y: top, width, height }, viewport);
 }
 
 /** 由拖拽起点 / 终点归一化出选区（允许反向拖拽；小于 48×48 时撑到最小）。 */

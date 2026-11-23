@@ -34,7 +34,7 @@ describe('native touch wake recognition',()=>{
     vi.advanceTimersByTime(699); expect(hint).not.toHaveBeenCalledWith(true);
     vi.advanceTimersByTime(1); expect(hint).toHaveBeenLastCalledWith(true); expect(trigger).not.toHaveBeenCalled();
     touch('touchend',[b],[a]); expect(trigger).not.toHaveBeenCalled();
-    touch('touchend',[],[b]); expect(trigger).toHaveBeenCalledExactlyOnceWith({x:145,y:250});
+    touch('touchend',[],[b]); expect(trigger).toHaveBeenCalledExactlyOnceWith({x:145,y:250}, [{x:130,y:250},{x:160,y:250}]);
     touch('touchend',[],[b]); expect(trigger).toHaveBeenCalledTimes(1);
   });
   it('three fingers arriving before scroll reserve only their own sequence and use the final centroid',()=>{
@@ -45,12 +45,12 @@ describe('native touch wake recognition',()=>{
     const up=[point(1,135,175),point(2,165,170),point(3,195,160)];
     expect(touch('touchmove',up).defaultPrevented).toBe(true);
     expect(hint).toHaveBeenLastCalledWith(true); expect(trigger).not.toHaveBeenCalled();
-    touch('touchend',[],up); expect(trigger).toHaveBeenCalledExactlyOnceWith({x:165,y:505/3});
+    touch('touchend',[],up); expect(trigger).toHaveBeenCalledExactlyOnceWith({x:165,y:505/3}, []);
   });
   it('two-finger double tap requires two contacts in both rounds; round gap is measured at the next down',()=>{
     enabled=['two-finger-double-tap'];
     tap(); vi.advanceTimersByTime(290); tap(110,255);
-    expect(trigger).toHaveBeenCalledExactlyOnceWith({x:125,y:255});
+    expect(trigger).toHaveBeenCalledExactlyOnceWith({x:125,y:255}, [{x:110,y:255},{x:140,y:255}]);
     vi.advanceTimersByTime(1000);
     const a=point(1); touch('touchstart',[a]); touch('touchend',[],[a]);
     touch('touchstart',[a]); touch('touchend',[],[a]); expect(trigger).toHaveBeenCalledTimes(1);
@@ -71,7 +71,7 @@ describe('native touch wake recognition',()=>{
     enabled=['three-finger-swipe-up']; touch('touchstart',[point(1),point(2),point(3)]);
     touch('touchmove',[point(1,145,245),point(2,175,245),point(3,205,245)]);
     const moved=[point(1,150,150),point(2,180,150),point(3,210,150)];
-    touch('touchmove',moved); touch('touchend',[],moved); expect(trigger).toHaveBeenCalledExactlyOnceWith({x:180,y:150});
+    touch('touchmove',moved); touch('touchend',[],moved); expect(trigger).toHaveBeenCalledExactlyOnceWith({x:180,y:150}, []);
   });
   it('cannot reserve a non-cancelable third contact after the browser has already won scrolling',()=>{
     enabled=['three-finger-swipe-up'];
@@ -144,7 +144,9 @@ describe('native touch wake recognition',()=>{
 describe('wake preferences',()=>{
   it('filters duplicates, unknown IDs, malformed input and unsupported versions',()=>{
     expect(wakePreferenceKey('com/a b')).toBe('feedback:wake-gestures:v1:com%2Fa%20b');
+    expect(parseWakePreference(null)).toEqual(['two-finger-hold']);
+    expect(parseWakePreference('{"version":1,"enabled":[]}')).toEqual([]);
     expect(parseWakePreference('{"version":1,"enabled":["two-finger-hold","unknown","two-finger-hold"]}')).toEqual(['two-finger-hold']);
-    for(const raw of [null,'invalid','{"version":2,"enabled":["two-finger-hold"]}','{"version":1,"enabled":false}']) expect(parseWakePreference(raw)).toEqual([]);
+    for(const raw of ['invalid','{"version":2,"enabled":["two-finger-hold"]}','{"version":1,"enabled":false}']) expect(parseWakePreference(raw)).toEqual([]);
   });
 });

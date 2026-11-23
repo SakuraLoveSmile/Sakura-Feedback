@@ -1,6 +1,11 @@
+import gestureGlass from '../../../flutter/feedback/shaders/orb_gesture_glass.glsl?raw';
 import type { LiquidShape } from './orb-liquid';
 
 export interface OrbLensMaterial {
+  gestureGlass?: boolean;
+  entranceId?: number;
+  entranceProgress?: number;
+  entranceAxis?: {x: number; y: number};
   halfSize?: { x: number; y: number };
   handleMix?: number;
   mist?: number;
@@ -12,7 +17,10 @@ const FRAGMENT = `
 precision highp float;
 uniform sampler2D uBg;
 uniform vec2 uImageSize, uOffset, uCenter, uDirection, uLocalSize, uHalfSize;
-uniform float uScale, uRadius, uMagnification, uRimStrength, uOpacity, uHasImage, uDrawScale, uDeform, uWobble, uDark, uHandleMix, uMist, uIdleMix;
+uniform float uScale, uRadius, uMagnification, uRimStrength, uOpacity, uHasImage, uDrawScale, uDeform, uWobble, uDark, uHandleMix, uMist, uIdleMix, uGestureGlass;
+uniform float uEntranceId, uEntranceProgress;
+uniform vec2 uEntranceAxis;
+${gestureGlass}
 float sq(float x) { return x*x; }
 float safeUv(float point, float scale, float size) {
   return clamp(point*scale/size,.5/size,1.-.5/size);
@@ -148,6 +156,19 @@ void main(){
   float theta=length(offset)<.00001?0.:atan(offset.y,offset.x);
   float aa=mix(1.1/uRadius,.65/min(uHalfSize.x,uHalfSize.y),uHandleMix);
   float inside=1.-smoothstep(1.-aa,1.+aa,r);
+  if (uGestureGlass>.5) {
+    EntranceGlass field=entranceGlass(delta,uRadius,r,uEntranceId,uEntranceProgress,uEntranceAxis);
+    inside=1.-smoothstep(-1.1,1.1,(field.radial-1.)*field.edgeRadius);
+    vec2 source=uCenter+field.sampleDelta;
+    vec4 sampled=vec4(0.);
+    if (inside>0. && uHasImage>.5) {
+      vec2 uv=vec2(safeUv(source.x,uScale,uImageSize.x),safeUv(source.y,uScale,uImageSize.y));
+      vec4 color=texture2D(uBg,uv);
+      sampled=vec4(color.rgb*color.a,color.a);
+    }
+    gl_FragColor=entranceSurface(field,sampled,inside)*uOpacity;
+    return;
+  }
   vec2 source=vec2(sourcePoint(p.x,offset.x,r),sourcePoint(p.y,offset.y,r));
   vec2 ray=normalize(offset+vec2(.001));
   float dispersion=dispersionWidth(r);
@@ -256,6 +277,10 @@ export class OrbLens {
     gl.uniform1f(this.uniform('uHandleMix'), material.handleMix ?? 0);
     gl.uniform1f(this.uniform('uMist'), material.mist ?? 0);
     gl.uniform1f(this.uniform('uIdleMix'), material.idleMix ?? 0);
+    gl.uniform1f(this.uniform('uGestureGlass'), material.gestureGlass ? 1 : 0);
+    gl.uniform1f(this.uniform('uEntranceId'), material.entranceId ?? 0);
+    gl.uniform1f(this.uniform('uEntranceProgress'), material.entranceProgress ?? 1);
+    gl.uniform2f(this.uniform('uEntranceAxis'), material.entranceAxis?.x ?? .89, material.entranceAxis?.y ?? -.22);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
   }
 

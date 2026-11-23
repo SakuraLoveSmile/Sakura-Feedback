@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import '../src/index';
 import {
   mount,
+  mountRaw,
   cleanup,
   setTextarea,
   completeLogin,
@@ -30,23 +31,27 @@ describe('灵感球与视口截图组件测试', () => {
   });
 
   it('launcherMode 与 captureMode 属性及默认值', () => {
-    const m = mount();
-    expect(m.widget.launcherMode).toBe('tab');
-    expect(m.widget.captureMode).toBe('off');
+    const m = mountRaw();
+    expect(m.widget.launcherMode).toBe('beam');
+    expect(m.widget.captureMode).toBe('viewport');
 
     m.widget.launcherMode = 'orb';
     expect(m.widget.getAttribute('launcher-mode')).toBe('orb');
     expect(m.widget.launcherMode).toBe('orb');
 
     m.widget.captureMode = 'viewport';
-    expect(m.widget.getAttribute('capture-mode')).toBe('viewport');
+    expect(m.widget.hasAttribute('capture-mode')).toBe(false);
     expect(m.widget.captureMode).toBe('viewport');
 
     m.widget.launcherMode = 'tab';
-    expect(m.widget.hasAttribute('launcher-mode')).toBe(false);
+    expect(m.widget.getAttribute('launcher-mode')).toBe('tab');
 
     m.widget.captureMode = 'off';
-    expect(m.widget.hasAttribute('capture-mode')).toBe(false);
+    expect(m.widget.getAttribute('capture-mode')).toBe('off');
+    expect(m.widget.captureMode).toBe('off');
+
+    m.widget.launcherMode = 'beam';
+    expect(m.widget.hasAttribute('launcher-mode')).toBe(false);
   });
 
   it('灵感球拖拽交互：移动超过 8px 判定为拖拽，松手记录 releasePoint 并进入局部选区', async () => {

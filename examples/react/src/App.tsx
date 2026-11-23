@@ -72,10 +72,11 @@ export function App() {
         <button onClick={callHostApi}>调用宿主接口（写入诊断）</button>
       </div>
       <p style={{ margin: '0 0 20px 0', fontSize: 13, color: '#64748b' }}>
-        下面显式写了 <code>launcher-mode=&quot;orb&quot;</code> 与{' '}
-        <code>capture-mode=&quot;viewport&quot;</code>：
-        组件自身的默认值是 <code>tab</code> / <code>off</code>（升级不改变旧宿主行为），
-        所以要灵感球与自动截图必须显式声明。截图范围是**当前应用视口**，拖拽落点只标记问题位置。
+        0.10 起组件默认是 <code>beam</code> / <code>viewport</code>（双指长按或
+        ⌘/Ctrl+Shift+F 唤醒 → 圈选，无常驻入口）。本示例显式写{' '}
+        <code>launcher-mode=&quot;orb&quot;</code> 与{' '}
+        <code>capture-mode=&quot;viewport&quot;</code>，演示可选的灵感球形态；
+        截图范围是**当前应用视口**，拖拽落点只标记问题位置。
       </p>
 
       <div
@@ -98,8 +99,7 @@ export function App() {
 
       <p style={{ color: '#059669' }}>{last ? `最近提交：${last}` : ''}</p>
 
-      {/* launcher-mode / capture-mode 的组件默认值是 tab / off（升级不改变旧宿主
-          行为），所以这里显式覆盖成灵感球 + 呼出时截取当前应用视口。 */}
+      {/* 组件默认是 beam + viewport（0.10）；这里显式覆盖成可选灵感球形态。 */}
       <feedback-widget
         ref={setWidget}
         api-base="http://localhost:8787"

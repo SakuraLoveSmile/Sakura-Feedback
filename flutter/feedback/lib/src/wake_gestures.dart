@@ -21,9 +21,15 @@ enum FeedbackWakeGesture {
 String wakeGestureStorageKey(String appId) =>
     'feedback:wake-gestures:v1:${Uri.encodeComponent(appId)}';
 
+/// 从未保存过偏好时的默认手势：双指长按。已保存的空集合视为用户显式关闭。
+const Set<FeedbackWakeGesture> kDefaultWakeGestures = <FeedbackWakeGesture>{
+  FeedbackWakeGesture.twoFingerHold,
+};
+
 Set<FeedbackWakeGesture> decodeWakeGestures(String? value) {
+  if (value == null) return Set<FeedbackWakeGesture>.of(kDefaultWakeGestures);
   try {
-    final Object? json = value == null ? null : jsonDecode(value);
+    final Object? json = jsonDecode(value);
     if (json is! Map<String, dynamic> ||
         json['version'] != 1 ||
         json['enabled'] is! List<Object?>) {
@@ -167,7 +173,7 @@ class FeedbackWakeGestureRecognizer extends OneSequenceGestureRecognizer {
 
   bool Function()? isAvailable;
   ValueChanged<bool>? onReleaseHint;
-  ValueChanged<Offset>? onWake;
+  void Function(Offset center, List<Offset> fingertips)? onWake;
   final Map<int, _WakeTouch> _touches = <int, _WakeTouch>{};
   final Set<int> _down = <int>{};
   final Set<int> _accepted = <int>{};
@@ -334,6 +340,16 @@ class FeedbackWakeGestureRecognizer extends OneSequenceGestureRecognizer {
               sum + touch.position - touch.start) /
       _touches.length.toDouble();
 
+  void _finishWake() {
+    final Offset center = _centroid;
+    final List<Offset> fingertips = _touches.length == 2
+        ? _touches.values.map((touch) => touch.position).toList(growable: false)
+        : const [];
+    _firstTapCenter = null;
+    _reset();
+    onWake?.call(center, fingertips);
+  }
+
   void _reserve() {
     resolve(GestureDisposition.accepted);
   }
@@ -438,10 +454,7 @@ class FeedbackWakeGestureRecognizer extends OneSequenceGestureRecognizer {
     stopTrackingPointer(event.pointer);
     if (_down.isNotEmpty) return;
     if (!_failed && _ready && _touches.keys.every(_accepted.contains)) {
-      final Offset point = _centroid;
-      _firstTapCenter = null;
-      _reset();
-      onWake?.call(point);
+      _finishWake();
     } else if (!_failed &&
         _tap &&
         _touches.length == 2 &&
@@ -452,9 +465,7 @@ class FeedbackWakeGestureRecognizer extends OneSequenceGestureRecognizer {
           cancel();
           return;
         }
-        _firstTapCenter = null;
-        _reset();
-        onWake?.call(point);
+        _finishWake();
       } else {
         final Offset point = _centroid;
         _reset();

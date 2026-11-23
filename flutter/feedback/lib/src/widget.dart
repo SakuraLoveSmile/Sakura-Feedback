@@ -31,6 +31,9 @@ import 'capture_mask.dart';
 import 'capture_selection.dart';
 import 'config.dart';
 import 'controller.dart';
+import 'launcher_style.dart';
+import 'orb_entrance.dart';
+import 'wake_visual.dart';
 import 'orb.dart';
 import 'orb_liquid.dart';
 import 'panel.dart';
@@ -112,6 +115,7 @@ class _FrozenCapture {
     required this.viewport,
     required this.baseInfo,
     required this.containsUndrawable,
+    this.wakeOrigins = const [],
   });
 
   /// 已遮挡的冻结位图（调用方负责 [dispose]）。
@@ -125,6 +129,9 @@ class _FrozenCapture {
 
   /// 基础元数据（viewport / capturedAt / releasePoint，pixel 字段为 null）。
   final FeedbackCaptureInfo baseInfo;
+
+  /// 仅供唤醒绘制，坐标位于冻结视口内，不进入截图元数据。
+  final List<Offset> wakeOrigins;
 
   /// 捕获边界内存在不可绘制内容。
   final bool containsUndrawable;
@@ -141,6 +148,7 @@ class _FrozenCapture {
       scale: scale,
       viewport: viewport,
       baseInfo: baseInfo,
+      wakeOrigins: wakeOrigins,
       containsUndrawable: containsUndrawable);
 }
 
@@ -246,10 +254,19 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   late FeedbackServerPrefStore _wakePrefStore;
   late final FeedbackWakePreferences _wakePreferences;
   late final FeedbackOrbIdlePreferences _idlePreferences;
+  late final FeedbackLauncherStylePreferences _launcherStylePreferences;
+  late final FeedbackWakeVisualPreferences _wakeVisualPreferences;
+  late final FeedbackOrbEntrancePreferences _entrancePreferences;
+  FeedbackOrbEntrance _activeEntrance = FeedbackOrbEntrance.bead;
+  Offset _entranceAxis = const Offset(.89, -.22);
+  final FocusNode _beamFocusNode = FocusNode(debugLabel: 'feedback-beam-a11y');
   Timer? _orbIdleTimer;
   int _orbIdleGeneration = 0;
   bool _orbCollapsed = false;
   bool _orbWasAvailable = false;
+  Offset? _summonedCenter;
+  late final AnimationController _orbEntrance = AnimationController(
+      vsync: this);
   Offset _orbIdleDockCenter = Offset.zero;
   bool _snappingOrbMorph = false;
   late final AnimationController _orbMorph = AnimationController(
@@ -271,11 +288,32 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   /// 生效的灵感球待机样式：宿主提供时以宿主值为准（v0.8.4），否则用组件
   /// 自己持久化的偏好。
   FeedbackOrbIdleStyle get _orbIdleStyle =>
-      widget.orbIdleStyle ?? _idlePreferences.style;
+      widget.orbIdleStyle ??
+      _idlePreferences.savedStyle ??
+      (widget.config.launcherMode == FeedbackLauncherMode.beam &&
+              _wakeGestures.isNotEmpty
+          ? FeedbackOrbIdleStyle.hidden
+          : FeedbackOrbIdleStyle.handle);
+
+  bool get _gestureStandby =>
+      _effectiveLauncherMode == FeedbackLauncherMode.orb &&
+      widget.config.launcherMode == FeedbackLauncherMode.beam &&
+      _orbIdleStyle == FeedbackOrbIdleStyle.hidden &&
+      _wakeGestures.isNotEmpty;
 
   /// 生效的唤醒手势：宿主提供时以宿主值为准（v0.8.4）。
   Set<FeedbackWakeGesture> get _wakeGestures =>
       widget.wakeGestures ?? _wakePreferences.enabled;
+
+  /// 生效入口模式：宿主 tab/orb 优先；宿主 beam 时由终端用户偏好决定。
+  FeedbackLauncherMode get _effectiveLauncherMode {
+    if (widget.config.launcherMode != FeedbackLauncherMode.beam) {
+      return widget.config.launcherMode;
+    }
+    return _launcherStylePreferences.style == FeedbackLauncherStyle.orb
+        ? FeedbackLauncherMode.orb
+        : FeedbackLauncherMode.beam;
+  }
 
   /// 「仅本次生效」只描述组件自身持久化失败；宿主托管时由宿主负责保存。
   bool get _orbIdleSessionOnly =>
@@ -292,18 +330,16 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   /// launcher slot，见 [_orbIdleHidden]。
   bool get _launcherVisible => widget.config.showLauncher;
 
-  /// 待机（收起）状态下不渲染入口：仅灵感球模式 + 待机样式「隐藏」+ 已收起 /
-  /// 正在收起。完整球（初始、刚唤醒、面板关闭后）仍按 [_launcherVisible] 正常
-  /// 渲染；`launcherMode == tab` 的悬浮按钮与灵感球无关，不受影响。
+  /// 手势待机在触发前保持隐藏。显式停靠的宿主在收起后隐藏。
   bool get _orbIdleHidden =>
-      widget.config.launcherMode == FeedbackLauncherMode.orb &&
+      _effectiveLauncherMode == FeedbackLauncherMode.orb &&
       _orbIdleStyle == FeedbackOrbIdleStyle.hidden &&
-      _orbMorphVisible;
+      (_orbMorphVisible || (_gestureStandby && _summonedCenter == null));
 
   bool get _orbAvailable =>
       _appResumed &&
       _launcherVisible &&
-      widget.config.launcherMode == FeedbackLauncherMode.orb &&
+      _effectiveLauncherMode == FeedbackLauncherMode.orb &&
       !_controller.isOpen &&
       _selectionCapture == null &&
       !_temporarilyHideForCapture &&
@@ -328,6 +364,8 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
 
   void _resetOrbIdle() {
     _cancelOrbIdle();
+    _summonedCenter = null;
+    _orbEntrance.stop();
     _orbCollapsed = false;
     _snapOrbMorph(0);
     _orbWasAvailable = false;
@@ -336,6 +374,10 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   void _syncOrbIdle() {
     final bool available = _orbAvailable;
     if (!available || !_orbWasAvailable) {
+      if (!available) {
+        _summonedCenter = null;
+        _orbEntrance.stop();
+      }
       _cancelOrbIdle();
       _orbCollapsed = false;
       _snapOrbMorph(0);
@@ -345,7 +387,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
       _cancelOrbIdle();
       return;
     }
-    if (_orbCollapsed || _orbIdleTimer != null) return;
+    if (_orbIdleHidden || _orbCollapsed || _orbIdleTimer != null) return;
     final int generation = _orbIdleGeneration;
     _orbIdleTimer = Timer(const Duration(seconds: 5), () {
       _orbIdleTimer = null;
@@ -355,13 +397,64 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
           !_orbCanIdle) {
         return;
       }
-      setState(() => _orbCollapsed = true);
+      final wasSummoned = _summonedCenter != null;
+      setState(() {
+        _summonedCenter = null;
+        _orbCollapsed = true;
+      });
+      if (wasSummoned) {
+        _snapOrbMorph(1);
+        return;
+      }
       if (_orbGlowReduced) {
         _snapOrbMorph(1);
       } else {
         _orbMorph.forward();
       }
     });
+  }
+
+  void _summonOrb(Offset local, [List<Offset> fingertips = const []]) {
+    if (!_orbAvailable) return;
+    _cancelOrbIdle();
+    _snapOrbMorph(0);
+    _resetLiquid();
+    _activeEntrance = _entrancePreferences.visual;
+    _orbEntrance.duration = Duration(milliseconds: _activeEntrance.milliseconds);
+    _entranceAxis = const Offset(.89, -.22);
+    if (fingertips.length == 2 && _lastViewport != null) {
+      final delta = fingertips.last - fingertips.first;
+      if (delta.distance > .001) {
+        final diameter = _summonedDiameter(_lastViewport!.shortestSide);
+        _entranceAxis = delta / delta.distance * (delta.distance / diameter).clamp(.2, .92);
+      }
+    }
+    setState(() {
+      _summonedCenter = local;
+      _orbCollapsed = false;
+      _orbWasAvailable = true;
+    });
+    if (_orbGlowReduced) {
+      _orbEntrance.value = 1;
+    } else {
+      _orbEntrance.forward(from: 0);
+    }
+  }
+
+  double _summonedDiameter(double shortSide) =>
+      math.min(shortSide, (shortSide * .34).clamp(96.0, 160.0));
+
+  void _activateWakeShortcut() {
+    if (_effectiveLauncherMode == FeedbackLauncherMode.beam) {
+      unawaited(_startBeam(null));
+    } else if (_gestureStandby && _wakeAvailable) {
+      final size = _lastViewport;
+      if (size == null) return;
+      _summonOrb(size.center(Offset.zero));
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _summonedCenter != null) _orbFocusNode.requestFocus();
+      });
+    }
   }
 
   void _wakeOrb() {
@@ -382,6 +475,18 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   }
 
   void _idlePreferencesChanged() => _applyOrbIdleStyleChange();
+
+  void _wakeVisualPreferencesChanged() {
+    if (!mounted || _disposed) return;
+    setState(() {});
+  }
+
+  void _launcherStylePreferencesChanged() {
+    if (!mounted || _disposed) return;
+    _wakeRecognizer?.cancel();
+    setState(() => _resetOrbReleaseState());
+    _syncWakeRecognizer();
+  }
 
   /// 生效的待机样式变化（组件偏好或宿主托管值）：无论切到「隐藏」还是改回
   /// 其他样式，都从完整球重新开始 5 秒计时（切到「隐藏」也不例外：先恢复
@@ -413,8 +518,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
       mounted &&
       _appResumed &&
       _launcherVisible &&
-      widget.config.launcherMode == FeedbackLauncherMode.orb &&
-      widget.config.captureMode == FeedbackCaptureMode.viewport &&
+      _effectiveLauncherMode != FeedbackLauncherMode.tab &&
       !_controller.isOpen &&
       _selectionCapture == null &&
       !_temporarilyHideForCapture &&
@@ -448,9 +552,51 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     _wakeRecognizer?.enabled = _wakeGestures;
   }
 
-  void _onWake(Offset releaseGlobal) {
+  void _onWake(Offset releaseGlobal, List<Offset> fingertips) {
     if (!_wakeAvailable) return;
-    _wakeOrb();
+    switch (_effectiveLauncherMode) {
+      case FeedbackLauncherMode.orb:
+        final boundary = _repaintBoundaryKey.currentContext?.findRenderObject();
+        if (boundary is RenderBox && boundary.hasSize) {
+          _summonOrb(boundary.globalToLocal(releaseGlobal),
+              fingertips.map((p) => boundary.globalToLocal(p)).toList());
+        }
+      case FeedbackLauncherMode.beam:
+        unawaited(_startBeam(releaseGlobal, fingertips));
+      case FeedbackLauncherMode.tab:
+        break;
+    }
+  }
+
+  /// 光束唤醒：冻结视口 → 覆盖层播放极光并等待圈选；截图关闭时只开面板。
+  Future<void> _startBeam(Offset? releaseGlobal,
+      [List<Offset> fingertips = const []]) async {
+    if (!_wakeAvailable || _controller.isOpen) return;
+    if (widget.config.captureMode == FeedbackCaptureMode.off ||
+        _panelHasDraftContent()) {
+      await _captureAndOpen();
+      return;
+    }
+    await _captureForSelection(releaseGlobal: releaseGlobal, fingertips: fingertips);
+  }
+
+  /// 全应用快捷键：仅在光束模式下拦截，输入框聚焦时不触发。
+  bool _beamShortcutMatches(KeyEvent event) {
+    if (event is! KeyDownEvent) return false;
+    if (_effectiveLauncherMode != FeedbackLauncherMode.beam && !(_gestureStandby && _wakeAvailable)) return false;
+    if (_controller.isOpen ||
+        _selectionCapture != null ||
+        _handoff != null ||
+        _temporarilyHideForCapture ||
+        _capturePendingSeq != null) {
+      return false;
+    }
+    if (FocusManager.instance.primaryFocus?.context?.findRenderObject()
+        is RenderEditable) {
+      return false;
+    }
+    return widget.config.wakeShortcut
+        .matches(HardwareKeyboard.instance, event.logicalKey);
   }
 
   /// 上一次观察到的面板开关状态：只有 open→closed 的真实翻转才把焦点还给
@@ -520,6 +666,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   Offset _selectionDirection = const Offset(1, 0);
   double _selectionDeform = 0;
   double _selectionWobble = 0;
+  bool _selectionGestureGlass = false;
   double _selectionRadius = 52;
   double _orbRenderedRadius = 28;
   final OrbLiquid _liquid = OrbLiquid();
@@ -698,6 +845,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   /// 悬停无需手工恢复：恢复帧的 MouseTracker 会按指针实际位置重新补发
   /// onEnter。调用方负责触发重建。
   void _resetOrbReleaseState() {
+    _orbPointer = null;
     _resetOrbIdle();
     _resetLiquid();
     _orbPressTransition = false;
@@ -730,6 +878,18 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
         appId: widget.config.appId, store: _wakePrefStore)
       ..addListener(_idlePreferencesChanged);
     unawaited(_idlePreferences.load());
+    _launcherStylePreferences = FeedbackLauncherStylePreferences(
+        appId: widget.config.appId, store: _wakePrefStore)
+      ..addListener(_launcherStylePreferencesChanged);
+    unawaited(_launcherStylePreferences.load());
+    _wakeVisualPreferences = FeedbackWakeVisualPreferences(
+        appId: widget.config.appId, store: _wakePrefStore)
+      ..addListener(_wakeVisualPreferencesChanged);
+    unawaited(_wakeVisualPreferences.load());
+    _entrancePreferences = FeedbackOrbEntrancePreferences(
+        appId: widget.config.appId, store: _wakePrefStore)
+      ..addListener(_wakeVisualPreferencesChanged);
+    unawaited(_entrancePreferences.load());
     HardwareKeyboard.instance.addHandler(_handleGlobalKeyEvent);
     GestureBinding.instance.pointerRouter.addGlobalRoute(_globalPointerRoute);
     _bindController(_controller);
@@ -745,6 +905,10 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
       // 补点亮，避免抑制导致「焦点在球上却永远无环」。
       if (mounted && !_orbFocusVisible && _orbFocusNode.hasPrimaryFocus) {
         setState(() => _orbFocusVisible = true);
+      }
+      if (_beamShortcutMatches(event)) {
+        _activateWakeShortcut();
+        return true;
       }
     }
     return false;
@@ -799,7 +963,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
       _launcherVisible &&
       !_orbIdleHidden &&
       !MediaQuery.highContrastOf(context) &&
-      widget.config.launcherMode == FeedbackLauncherMode.orb;
+      _effectiveLauncherMode == FeedbackLauncherMode.orb;
 
   void _invalidateLensTheme() {
     // Decoration only: never invalidate the frozen selection, draft, release
@@ -1044,6 +1208,11 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
           appId: widget.config.appId, store: _wakePrefStore);
       _idlePreferences.rebind(
           appId: widget.config.appId, store: _wakePrefStore);
+      _launcherStylePreferences.rebind(
+          appId: widget.config.appId, store: _wakePrefStore);
+      _entrancePreferences.rebind(appId: widget.config.appId, store: _wakePrefStore);
+      _wakeVisualPreferences.rebind(
+          appId: widget.config.appId, store: _wakePrefStore);
     }
     if (oldWidget.config.captureMode != widget.config.captureMode) {
       _invalidateCaptureSession();
@@ -1083,9 +1252,12 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
       // 换入的控制器可能已打开：入口随即 hidden，抢占进行中的回弹。
       if (_controller.isOpen) _resetOrbReleaseState();
     }
+    final bool wasOrbMode = oldWidget.config.launcherMode ==
+            FeedbackLauncherMode.orb ||
+        (oldWidget.config.launcherMode == FeedbackLauncherMode.beam &&
+            _launcherStylePreferences.style == FeedbackLauncherStyle.orb);
     if ((oldWidget.config.showLauncher && !_launcherVisible) ||
-        (oldWidget.config.launcherMode == FeedbackLauncherMode.orb &&
-            widget.config.launcherMode != FeedbackLauncherMode.orb)) {
+        (wasOrbMode && _effectiveLauncherMode != FeedbackLauncherMode.orb)) {
       // 入口变为 hidden（关闭入口或离开 orb 模式）：抢占进行中的回弹，恢复
       // 可见后从静态起点开始。本次 didUpdateWidget 后必然重建（待机样式变化
       // 另外由 _applyOrbIdleStyleChange 处理）。
@@ -1148,10 +1320,12 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
         final int seq = _captureSeq;
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!_captureSessionValid(seq) || _controller.isOpen) return;
-          if (!_launcherVisible ||
-              widget.config.launcherMode != FeedbackLauncherMode.orb) {
+          if (!_launcherVisible) return;
+          if (_effectiveLauncherMode == FeedbackLauncherMode.beam || _gestureStandby) {
+            _beamFocusNode.requestFocus();
             return;
           }
+          if (_effectiveLauncherMode != FeedbackLauncherMode.orb) return;
           if (!_orbLastInputKeyboard) _orbSuppressRingOnce = true;
           _orbFocusNode.requestFocus();
         });
@@ -1260,12 +1434,17 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     _cancelLensRefresh();
     _cancelOrbIdle();
     _idlePreferences.dispose();
+    _launcherStylePreferences.dispose();
+    _entrancePreferences.dispose();
+    _wakeVisualPreferences.dispose();
+    _beamFocusNode.dispose();
     _wakeRecognizer?.cancel();
     _wakePreferences.dispose();
     _orbPointer = null;
     WidgetsBinding.instance.removeObserver(this);
     _lensGeneration++;
     _lensPendingCaptureGeneration = null;
+    _orbEntrance.dispose();
     _orbMorph.dispose();
     _liquidTicker.dispose();
     _handoffAnimation.dispose();
@@ -1521,6 +1700,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     int? seq,
     bool Function()? isCurrent,
     Offset? releasePoint,
+    List<Offset> normalizedFingertips = const [],
   }) async {
     final bool Function() current =
         isCurrent ?? () => _captureSessionValid(seq!);
@@ -1602,6 +1782,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
         result,
         scale: scale,
         viewport: size,
+        wakeOrigins: [for (final p in normalizedFingertips) Offset(p.dx * size.width, p.dy * size.height)],
         baseInfo: baseInfo,
         containsUndrawable: containsUndrawable,
       );
@@ -1807,18 +1988,25 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   /// 边界（T1.4）：图片已达上限且无可替换截图 → 先提示整理附件、
   /// 不发起捕获；捕获失败 → 打开面板提示可重试（保留旧草稿旧图，
   /// 绝不静默回退成整屏截图）；会话 / 身份失效 → 进行中流程作废。
-  Future<void> _captureForSelection({required Offset releaseGlobal}) async {
+  Future<void> _captureForSelection(
+      {required Offset? releaseGlobal, List<Offset> fingertips = const []}) async {
     // 落点相对**原始捕获视口**归一化（截图边界优先，退回屏幕尺寸）。
     final RenderRepaintBoundary? boundary = _repaintBoundaryKey.currentContext
         ?.findRenderObject() as RenderRepaintBoundary?;
     final Size reference = (boundary != null && boundary.attached)
         ? boundary.size
         : MediaQuery.sizeOf(context);
-    final Offset local =
-        boundary?.globalToLocal(releaseGlobal) ?? releaseGlobal;
-    final double rx = reference.width > 0 ? local.dx / reference.width : .5;
-    final double ry = reference.height > 0 ? local.dy / reference.height : .5;
-    final Offset releasePoint = Offset(rx.clamp(0.0, 1.0), ry.clamp(0.0, 1.0));
+    Offset normalize(Offset global) {
+      final Offset local = boundary != null && boundary.attached
+          ? boundary.globalToLocal(global) : global;
+      return Offset(
+        reference.width > 0 ? (local.dx / reference.width).clamp(0.0, 1.0) : .5,
+        reference.height > 0 ? (local.dy / reference.height).clamp(0.0, 1.0) : .5,
+      );
+    }
+    final Offset releasePoint = releaseGlobal == null
+        ? const Offset(.5, .5) : normalize(releaseGlobal);
+    final normalizedFingertips = fingertips.map(normalize).toList(growable: false);
 
     // 1) 图片上限：已达上限且无可替换截图（capture 槽位）→ 提示整理附件。
     final FeedbackPanelState? panel = _panelKey.currentState;
@@ -1835,7 +2023,8 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     final int seq = _captureSeq;
     setState(() => _temporarilyHideForCapture = true);
     final _FrozenCapture? frozen =
-        await _captureFrozen(seq: seq, releasePoint: releasePoint);
+        await _captureFrozen(seq: seq, releasePoint: releasePoint,
+            normalizedFingertips: normalizedFingertips);
     if (!_captureSessionValid(seq)) {
       frozen?.dispose();
       return;
@@ -2180,6 +2369,9 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
         final double? right = isLeft ? null : (config.position?.dx ?? 20.0);
         _orbIdleDockCenter =
             Offset(isLeft ? left! + 28 : width - right! - 28, dockTop + 28);
+        final summoned = _summonedCenter;
+        final shortSide = math.min(width, height);
+        final summonedDiameter = _summonedDiameter(shortSide);
         final _OrbMorphGeometry? orbMorph = _orbMorphVisible
             ? _OrbMorphGeometry(
                 left: isLeft,
@@ -2308,27 +2500,42 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
                 // tab 模式的 FAB 与灵感球待机样式无关。
                 if (!open &&
                     _launcherVisible &&
-                    !_orbIdleHidden &&
+                    (!_orbIdleHidden || _gestureStandby) &&
                     !_temporarilyHideForCapture &&
                     _selectionCapture == null)
-                  Positioned(
-                    key: const Key('feedback-launcher-slot'),
-                    bottom: config.launcherMode == FeedbackLauncherMode.orb
-                        ? orbBottom
-                        : bottom,
-                    left: isLeft && orbMorph != null ? orbMorph.hit.left : left,
-                    right: !isLeft && orbMorph != null
-                        ? width - orbMorph.hit.right
-                        : right,
-                    child: Builder(
-                      builder: (BuildContext context) => config.launcherMode ==
-                              FeedbackLauncherMode.orb
-                          ? (orbMorph != null
-                              ? _buildCollapsedOrb(context, config, orbMorph)
-                              : _buildOrb(context, config))
-                          : _buildFab(context, config),
-                    ),
-                  ),
+                  _effectiveLauncherMode == FeedbackLauncherMode.beam || _orbIdleHidden
+                      ? Positioned(
+                          key: const Key('feedback-beam-a11y-slot'),
+                          right: 12,
+                          bottom: 80,
+                          width: 48,
+                          height: 48,
+                          child: _buildBeamA11y(),
+                        )
+                      : Positioned(
+                          key: const Key('feedback-launcher-slot'),
+                          top: summoned == null ? null : summoned.dy - summonedDiameter / 2,
+                          bottom: summoned != null ? null :
+                              _effectiveLauncherMode == FeedbackLauncherMode.orb
+                                  ? orbBottom
+                                  : bottom,
+                          left: summoned != null ? summoned.dx - summonedDiameter / 2 : isLeft && orbMorph != null
+                              ? orbMorph.hit.left
+                              : left,
+                          right: summoned != null ? null : !isLeft && orbMorph != null
+                              ? width - orbMorph.hit.right
+                              : right,
+                          child: Builder(
+                            builder: (BuildContext context) =>
+                                _effectiveLauncherMode ==
+                                        FeedbackLauncherMode.orb
+                                    ? (orbMorph != null
+                                        ? _buildCollapsedOrb(
+                                            context, config, orbMorph)
+                                        : _buildOrb(context, config, summonedDiameter))
+                                    : _buildFab(context, config),
+                          ),
+                        ),
                 // T1：拖动灵感球后的局部选区覆盖层——置于最上层，
                 // 冻结位图不透明铺满，灵感球 / 面板 / 启动入口都被其覆盖。
                 if (_selectionCapture != null)
@@ -2340,6 +2547,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
                       viewport: _selectionCapture!.viewport,
                       safeInsets: _captureSelectionSafeInsets(),
                       releasePoint: _selectionCapture!.baseInfo.releasePoint,
+                      wakeOrigins: _selectionCapture!.wakeOrigins,
                       busy: _selectionBusy,
                       error: _selectionError,
                       orbCenter: _selectionOrbCenter,
@@ -2349,6 +2557,10 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
                       deform: _selectionDeform,
                       wobble: _selectionWobble,
                       orbRadius: _selectionRadius,
+                      gestureGlass: _selectionGestureGlass,
+                      lassoFirst:
+                          _effectiveLauncherMode == FeedbackLauncherMode.beam,
+                      wakeVisual: _wakeVisualPreferences.visual,
                       onUseRegion: (Rect region) {
                         unawaited(_deliverSelection(selection: region));
                       },
@@ -2359,8 +2571,8 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
                     ),
                   ),
                 if (_wakeReleaseHint)
-                  const Positioned(
-                    key: Key('feedback-wake-release-hint'),
+                  Positioned(
+                    key: const Key('feedback-wake-release-hint'),
                     left: 16,
                     right: 16,
                     top: 24,
@@ -2372,8 +2584,12 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
                           child: Padding(
                             padding: EdgeInsets.symmetric(
                                 horizontal: 16, vertical: 12),
-                            child: Text('松开手指唤醒灵感球',
-                                style: TextStyle(color: Colors.white)),
+                            child: Text(
+                                _effectiveLauncherMode ==
+                                        FeedbackLauncherMode.beam
+                                    ? '松开手指开始圈选'
+                                    : '松开手指唤醒灵感球',
+                                style: const TextStyle(color: Colors.white)),
                           ),
                         ),
                       ),
@@ -2434,6 +2650,27 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     final double overlap = bottom - keyboardTop;
     return overlap > 0 ? overlap : 0.0;
   }
+
+  Widget _buildBeamA11y() => Semantics(
+        button: true,
+        container: true,
+        label: _gestureStandby ? '唤醒灵感球' : '打开反馈（双指长按屏幕或按 Ctrl+Shift+F）',
+        onTap: _activateWakeShortcut,
+        child: Focus(
+          focusNode: _beamFocusNode,
+          onKeyEvent: (FocusNode node, KeyEvent event) {
+            if (event is KeyDownEvent &&
+                (event.logicalKey == LogicalKeyboardKey.enter ||
+                    event.logicalKey == LogicalKeyboardKey.numpadEnter ||
+                    event.logicalKey == LogicalKeyboardKey.space)) {
+              _activateWakeShortcut();
+              return KeyEventResult.handled;
+            }
+            return KeyEventResult.ignored;
+          },
+          child: const SizedBox.expand(),
+        ),
+      );
 
   Widget _buildFab(BuildContext context, FeedbackConfig config) {
     // F1：入口不再绘制未读数字角标；未读数仍通过 controller 与
@@ -2545,17 +2782,23 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
                     ])))));
   }
 
-  Widget _buildOrb(BuildContext context, FeedbackConfig config) {
+  Widget _buildOrb(
+      BuildContext context, FeedbackConfig config, double summonedDiameter) {
     // F1：灵感球不再绘制未读数字角标；未读数保留在 Semantics value 与
     // controller 中，供宿主/读屏使用。
     final bool reduceMotion =
         _orbGlowReduced || MediaQuery.disableAnimationsOf(context);
-    final double diameter =
-        _isDragging ? kFeedbackOrbDraggingDiameter : kFeedbackOrbIdleDiameter;
+    final summoned = _summonedCenter != null;
+    final double diameter = summoned
+        ? summonedDiameter
+        : _isDragging
+            ? kFeedbackOrbDraggingDiameter
+            : kFeedbackOrbIdleDiameter;
     final double target = reduceMotion ? 1 : _orbTargetStateScale;
     final Widget orbBox = AnimatedContainer(
       key: const Key('feedback-orb-body'),
-      duration: reduceMotion ? Duration.zero : kFeedbackOrbSizeDuration,
+      duration:
+          reduceMotion || summoned ? Duration.zero : kFeedbackOrbSizeDuration,
       curve: kFeedbackOrbStateCurve,
       width: diameter,
       height: diameter,
@@ -2571,41 +2814,61 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
               : kFeedbackOrbStateCurve,
           onEnd: () => _orbPressTransition = false,
           builder: (BuildContext context, double stateScale, Widget? child) =>
-              LayoutBuilder(
-                  builder: (BuildContext context, BoxConstraints box) {
-                final double side = box.maxWidth;
-                final double radius =
-                    side / 2 * stateScale * (_liquid.radius / 52);
-                _orbRenderedRadius = radius;
-                // Expansion preserves the original dock center. The pointer's hit
-                // offset is retained while only the rendered center has inertia.
-                final Offset expansion = Offset(
-                    (config.side == FeedbackSide.left ? -1 : 1) *
-                        (side - 56) /
-                        2,
-                    (side - 56) / 2);
-                return Transform.translate(
-                    offset: _liquid.position + expansion,
-                    child: Stack(
-                        key: _orbLensAnchorKey,
-                        clipBehavior: Clip.none,
-                        fit: StackFit.expand,
-                        children: <Widget>[
-                          Positioned(
-                              left: side / 2 - radius * 1.6,
-                              top: side / 2 - radius * 1.6,
-                              width: radius * 3.2,
-                              height: radius * 3.2,
-                              child: KeyedSubtree(
-                                  key: const Key('feedback-orb-lens'),
-                                  child: _buildOrbLensLayer(radius,
-                                      fixedCenter: _isDragging
-                                          ? null
-                                          : _orbIdleDockCenter,
-                                      mist: _isDragging ? 0 : .74,
-                                      idleMix: _isDragging ? 0 : 1))),
-                        ]));
-              })),
+              AnimatedBuilder(
+                  animation: _orbEntrance,
+                  builder: (_, __) => LayoutBuilder(
+                          builder: (BuildContext context, BoxConstraints box) {
+                        final double side = box.maxWidth;
+                        final t = summoned && !reduceMotion ? _orbEntrance.value : 1.0;
+                        final growth = summoned && _activeEntrance == FeedbackOrbEntrance.bead
+                            ? .12 +
+                                .905 * orbSmoothstep(0, .75, t) -
+                                .025 * orbSmoothstep(.75, 1, t)
+                            : 1.0;
+                        final double radius = side /
+                            2 *
+                            stateScale *
+                            growth *
+                            (_liquid.radius / 52);
+                        _orbRenderedRadius = radius;
+                        // Expansion preserves the original dock center. The pointer's hit
+                        // offset is retained while only the rendered center has inertia.
+                        final Offset expansion = summoned
+                            ? Offset.zero
+                            : Offset(
+                                (config.side == FeedbackSide.left ? -1 : 1) *
+                                    (side - 56) /
+                                    2,
+                                (side - 56) / 2);
+                        return Transform.translate(
+                            offset: _liquid.position + expansion,
+                            child: Stack(
+                                key: _orbLensAnchorKey,
+                                clipBehavior: Clip.none,
+                                fit: StackFit.expand,
+                                children: <Widget>[
+                                  Positioned(
+                                      left: side / 2 - radius * 1.6,
+                                      top: side / 2 - radius * 1.6,
+                                      width: radius * 3.2,
+                                      height: radius * 3.2,
+                                      child: KeyedSubtree(
+                                          key: const Key('feedback-orb-lens'),
+                                          child: _buildOrbLensLayer(radius,
+                                              fixedCenter: _isDragging
+                                                  ? null
+                                                  : _summonedCenter ??
+                                                      _orbIdleDockCenter,
+                                              gestureGlass: summoned,
+                                              entranceProgress: t,
+                                              mist: summoned || _isDragging
+                                                  ? 0
+                                                  : .74,
+                                              idleMix: summoned || _isDragging
+                                                  ? 0
+                                                  : 1))),
+                                ]));
+                      }))),
     );
 
     // 焦点环：等价 CSS outline 2px + offset 2px，描边覆盖 R+2…R+4。
@@ -2625,11 +2888,13 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
             child: IgnorePointer(child: LayoutBuilder(
               builder: (BuildContext context, BoxConstraints ringBox) {
                 final double side = ringBox.maxWidth + 2 * ringInset;
-                final Offset expansion = Offset(
-                    (config.side == FeedbackSide.left ? -1 : 1) *
-                        (side - 56) /
-                        2,
-                    (side - 56) / 2);
+                final Offset expansion = summoned
+                    ? Offset.zero
+                    : Offset(
+                        (config.side == FeedbackSide.left ? -1 : 1) *
+                            (side - 56) /
+                            2,
+                        (side - 56) / 2);
                 return Transform.translate(
                     offset: _liquid.position + expansion,
                     child: DecoratedBox(
@@ -2706,6 +2971,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
                 return;
               }
               _wakeRecognizer?.cancel();
+              if (_summonedCenter != null) _orbEntrance.value = 1;
               _orbPointer = event.pointer;
               _orbPointerStart = event.position;
 
@@ -2741,7 +3007,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
             onPointerUp: (PointerUpEvent event) {
               if (event.pointer != _orbPointer) return;
               _orbPointer = null;
-              if (_orbPointerStart == null || !_lensVisible) return;
+              if (_orbPointerStart == null || !_orbAvailable) return;
               final bool dragged = _isDragging;
               final RenderRepaintBoundary? boundary =
                   _repaintBoundaryKey.currentContext?.findRenderObject()
@@ -2750,7 +3016,8 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
                   (_orbDockGlobal ?? event.position) + _liquid.position;
               _selectionOrbCenter = boundary?.globalToLocal(visualGlobal);
               _selectionDirection = _liquid.direction;
-              _selectionDeform = _liquid.shaderDeform;
+              _selectionGestureGlass = summoned;
+              _selectionDeform = _liquid.shaderDeform * (summoned ? 1.45 : 1);
               _selectionWobble = _liquid.wobble;
               _selectionRadius = _orbRenderedRadius;
               setState(() {
@@ -2785,6 +3052,8 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
           Size? halfSize,
           double handleMix = 0,
           double mist = 0,
+          bool gestureGlass = false,
+          double entranceProgress = 1,
           double idleMix = 0}) =>
       ValueListenableBuilder<_OrbLensSnapshot?>(
           valueListenable: _lensSnapshot,
@@ -2794,6 +3063,9 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
               return IgnorePointer(
                   child: CustomPaint(
                       painter: OrbLiquidOutlinePainter(
+                          entrance: _activeEntrance,
+                          entranceProgress: entranceProgress,
+                          entranceAxis: _entranceAxis,
                           radius: radius,
                           halfSize: halfSize,
                           handleMix: handleMix,
@@ -2801,7 +3073,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
                           dark: Theme.of(context).brightness == Brightness.dark,
                           highContrast: MediaQuery.highContrastOf(context),
                           direction: _liquid.direction,
-                          deform: _liquid.shaderDeform,
+                          deform: _liquid.shaderDeform * (gestureGlass ? 1.45 : 1),
                           wobble: _liquid.wobble,
                           color: MediaQuery.highContrastOf(context)
                               ? Theme.of(context).colorScheme.onSurface
@@ -2836,6 +3108,10 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
                         painter: OrbLiquidLensPainter(
                             image: snapshot.image,
                             shader: snapshot.shader,
+                            gestureGlass: gestureGlass,
+                            entrance: _activeEntrance,
+                            entranceProgress: entranceProgress,
+                            entranceAxis: _entranceAxis,
                             offset: center - Offset(radius * 1.6, radius * 1.6),
                             scale: snapshot.pixelRatio,
                             center: center,
@@ -2845,7 +3121,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
                             mist: mist,
                             idleMix: idleMix,
                             direction: _liquid.direction,
-                            deform: _liquid.shaderDeform,
+                            deform: _liquid.shaderDeform * (gestureGlass ? 1.45 : 1),
                             wobble: _liquid.wobble,
                             dark: Theme.of(context).brightness ==
                                 Brightness.dark))));
@@ -2883,6 +3159,16 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
           // 宿主只给值不给回调时隐藏面板内对应的设置区，避免无效操作。
           orbIdleStyle: _orbIdleStyle,
           orbIdleSessionOnly: _orbIdleSessionOnly,
+          launcherMode: _effectiveLauncherMode,
+          launcherStyle: _launcherStylePreferences.style,
+          launcherStyleSessionOnly: _launcherStylePreferences.sessionOnly,
+          onLauncherStyleChanged: _launcherStylePreferences.select,
+          wakeVisual: _wakeVisualPreferences.visual,
+          wakeVisualSessionOnly: _wakeVisualPreferences.sessionOnly,
+          onWakeVisualChanged: _wakeVisualPreferences.select,
+          entrance: _entrancePreferences.visual,
+          onEntranceChanged: _entrancePreferences.select,
+          entranceSessionOnly: _entrancePreferences.sessionOnly,
           onOrbIdleStyleChanged: widget.orbIdleStyle != null
               ? widget.onOrbIdleStyleChanged
               : _idlePreferences.select,

@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>E2E 宿主页 · 光束唤醒（圈选）+ 视口截图</title>
+    <!--
+      e2e 专用宿主页（不是产品代码）：0.10 起组件默认形态的宿主。
+
+      **刻意不声明** launcher-mode / capture-mode，走组件新默认：
+        launcher-mode=beam    → 没有任何常驻入口，双指长按 700ms（或 ⌘/Ctrl+Shift+F）唤醒
+        capture-mode=viewport → 唤醒后先冻结视口画面，再「画个圈」圈出问题位置
+
+      版面（1280x800 视口，dpr=1 → CSS 坐标 == 截图输出像素坐标）：
+        顶部：演示站点标题与导航（纯文本，无脚本）
+        #hero-summary      (64,120)-(616,260)   数据概览卡片
+        #hero-chart        (656,120)-(1216,420) 纯品红 #ff00ff 图表区 ← 圈选目标
+        #hero-list         (64,300)-(616,500)   待处理事项列表
+        右侧与底部留白，圈选轨迹、压暗层与提示胶囊都不会与图表区像素混淆。
+
+      页面不设置任何常驻入口，因此「截图里不含组件 UI」天然成立；窗口滚动条隐藏，
+      保证 run_beam_shots_web.py 的截图与冻结位图同尺寸。
+    -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: #f5f6f8;
+      }
+      body {
+        position: relative;
+        width: 1280px;
+        height: 800px;
+        overflow: hidden;
+        font-family: system-ui, -apple-system, 'PingFang SC', sans-serif;
+        color: #1d1d1f;
+      }
+      ::-webkit-scrollbar {
+        display: none;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 18px 32px;
+        background: #ffffff;
+        border-bottom: 1px solid #e5e7eb;
+      }
+      header h1 {
+        margin: 0;
+        font-size: 20px;
+        font-weight: 600;
+      }
+      header nav {
+        display: flex;
+        gap: 20px;
+        font-size: 14px;
+        color: #6b7280;
+      }
+      header nav span:first-child {
+        color: #1d1d1f;
+        font-weight: 500;
+      }
+      main {
+        display: grid;
+        grid-template-columns: 552px 560px;
+        grid-template-rows: 140px 200px;
+        column-gap: 40px;
+        row-gap: 40px;
+        padding: 40px 64px;
+      }
+      .card {
+        position: relative;
+        background: #ffffff;
+        border: 1px solid #e5e7eb;
+        border-radius: 14px;
+        padding: 20px 24px;
+        box-sizing: border-box;
+      }
+      .card h2 {
+        margin: 0 0 6px 0;
+        font-size: 15px;
+        font-weight: 600;
+      }
+      .card p {
+        margin: 0 0 10px 0;
+        font-size: 13px;
+        line-height: 1.6;
+        color: #6b7280;
+      }
+      .metric {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+      }
+      .metric strong {
+        font-size: 34px;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+      }
+      .metric em {
+        font-style: normal;
+        font-size: 13px;
+        color: #059669;
+      }
+      #hero-chart {
+        grid-column: 2;
+        grid-row: 1 / span 2;
+        background: #ff00ff;
+        border-color: #ff00ff;
+        color: #ffffff;
+      }
+      #hero-chart h2,
+      #hero-chart p {
+        color: #ffffff;
+      }
+      #hero-chart .bars {
+        position: absolute;
+        left: 24px;
+        right: 24px;
+        bottom: 24px;
+        height: 46%;
+        display: flex;
+        align-items: flex-end;
+        gap: 14px;
+      }
+      #hero-chart .bars i {
+        flex: 1;
+        background: #ffffff33;
+        border-radius: 6px 6px 0 0;
+      }
+      #hero-list ul {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        font-size: 13px;
+        color: #374151;
+      }
+      #hero-list li {
+        display: flex;
+        justify-content: space-between;
+        padding: 9px 0;
+        border-bottom: 1px solid #f0f1f3;
+      }
+      #hero-list li:last-child {
+        border-bottom: 0;
+      }
+      #hero-list li span:last-child {
+        color: #9ca3af;
+      }
+      #hint-strip {
+        position: absolute;
+        left: 64px;
+        bottom: 24px;
+        font-size: 12px;
+        color: #9ca3af;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>订单分析工作台</h1>
+      <nav>
+        <span>概览</span>
+        <span>订单</span>
+        <span>客户</span>
+        <span>设置</span>
+      </nav>
+    </header>
+
+    <main>
+      <section id="hero-summary" class="card">
+        <h2>本周成交</h2>
+        <div class="metric">
+          <strong>¥ 128,640</strong>
+          <em>较上周 +12.4%</em>
+        </div>
+        <p>高客单价订单占比继续上升；有三个供应商的到货时间需要跟进。</p>
+      </section>
+
+      <section id="hero-chart" class="card">
+        <h2>订单趋势</h2>
+        <p>按天汇总的成交金额，悬浮可查看明细；图表区域即本页的「问题位置」。</p>
+        <div class="bars">
+          <i style="height: 38%"></i>
+          <i style="height: 52%"></i>
+          <i style="height: 46%"></i>
+          <i style="height: 71%"></i>
+          <i style="height: 64%"></i>
+          <i style="height: 88%"></i>
+          <i style="height: 76%"></i>
+        </div>
+      </section>
+
+      <section id="hero-list" class="card">
+        <h2>待处理</h2>
+        <ul>
+          <li><span>核对 10 月对账单</span><span>今天</span></li>
+          <li><span>回复客户「星辰贸易」的询价</span><span>明天</span></li>
+          <li><span>整理供应商到货延迟记录</span><span>本周</span></li>
+        </ul>
+      </section>
+    </main>
+
+    <p id="hint-strip">本页不设常驻反馈入口：双指长按屏幕，或按 ⌘/Ctrl + Shift + F，画个圈就能反馈。</p>
+
+    <script>
+      // 测试脚手架（仅 e2e）：只暴露读取入口与面板开关，不改变组件行为。
+      window.__beam = {
+        messages: [],
+        widget: () => document.querySelector('feedback-widget'),
+        shadow() {
+          return this.widget().shadowRoot;
+        },
+        q(selector) {
+          return this.shadow().querySelector(selector);
+        },
+        overlay: () => window.__beam.q('.fb-region-overlay'),
+        panelOpen() {
+          return !!window.__beam.q('.fb-panel.is-open');
+        },
+        statusText() {
+          const el = window.__beam.q('.fb-status');
+          return el ? el.textContent : '';
+        },
+        thumbSrc() {
+          const img = window.__beam.q('.fb-screenshot-thumb');
+          return img ? img.getAttribute('src') : null;
+        },
+        // 覆盖层几何：合成触摸用 client 坐标 / 视口坐标（相对窗口），
+        // 圈选轨迹的 points 则是相对冻结位图（覆盖层）的坐标。
+        viewportSize() {
+          const r = window.__beam.overlay().getBoundingClientRect();
+          return { width: r.width, height: r.height };
+        },
+        // 轨迹包围盒（视口坐标，含组件外扩边距），用于断言「选区覆盖圈出的区域」。
+        lassoBounds() {
+          const points = (window.__beam.q('.fb-lasso').getAttribute('points') || '')
+            .trim()
+            .split(/\s+/)
+            .filter(Boolean)
+            .map((pair) => pair.split(',').map(Number));
+          if (!points.length) return null;
+          const xs = points.map(([x]) => x);
+          const ys = points.map(([, y]) => y);
+          const left = Math.min(...xs);
+          const top = Math.min(...ys);
+          return { x: left, y: top, width: Math.max(...xs) - left, height: Math.max(...ys) - top };
+        },
+      };
+      window.addEventListener('message', (ev) => {
+        window.__beam.messages.push({
+          origin: ev.origin,
+          type: ev.data && ev.data.type,
+          nonce: ev.data && ev.data.nonce,
+          token: ev.data && ev.data.accessToken,
+        });
+      });
+    </script>
+
+    <script src="/sdk/feedback-web.umd.js"></script>
+    <!-- 不声明 launcher-mode / capture-mode：本页演示 0.10 默认的 beam + viewport -->
+    <feedback-widget
+      id="widget"
+      api-base="http://localhost:8787"
+      app-id="com.example.demo-e2e"
+      app-version="3.1.4"
+      page-label="e2e-beam"
+    ></feedback-widget>
+  </body>
+</html>

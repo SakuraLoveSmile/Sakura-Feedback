@@ -791,7 +791,7 @@ def _fresh_login_context(deps, label):
     rec = NetRecorder(ctx)
     page = ctx.new_page()
     page.goto(f"{deps['pages']}/login.html", wait_until="networkidle")
-    # 该宿主页用 tab 入口（capture-mode=off）：面板默认关闭，先呼出再输入
+    # 该宿主页显式声明 tab 入口（capture-mode=off）：面板默认关闭，先呼出再输入
     mode = page.evaluate("() => document.querySelector('feedback-widget')?.getAttribute('launcher-mode')")
     page.locator(".fb-orb" if mode == "orb" else ".fb-fab").click()
     page.locator(".fb-panel").wait_for(state="visible", timeout=30000)
@@ -1106,10 +1106,11 @@ def p8_slow_session_close_reopen(deps):
     ctx.close()
 
 
-# ---------------- P6：默认 off 模式的**手动**截图入口 ----------------
+# ---------------- P6：capture-mode=off 模式的**手动**截图入口 ----------------
 #
 # 修复前的缺口（用户报告）：截图操作区整体长在「仅有截图才显示」的预览里，
-# 默认 capture-mode="off" 的宿主（绝大多数存量宿主）既不会自动截图、
+# capture-mode="off" 的宿主（升级前的存量宿主；0.10 起默认已是 viewport，
+# manual.html 显式声明 off 保留这一形态）既不会自动截图、
 # 又没有首次截图入口；先输入文字后，呼出式的 captureAndOpen() 也会被草稿拦下。
 #
 # 本路径全部用真实鼠标 / 键盘操作真实的侧边标签与面板按钮，不做任何组件 mock：
@@ -1141,9 +1142,11 @@ def p6_manual_capture(deps):
                      side: w.getAttribute('side')}; }"""
     )
     png_probe.dump("P6 宿主声明的入口属性", attrs)
-    check("P6 宿主未声明 capture-mode / launcher-mode（默认 off + 贴边标签）",
-          attrs["capture"] is None and attrs["launcher"] is None, json.dumps(attrs, ensure_ascii=False))
-    check("P6 侧边标签入口可见（默认 launcher-mode=tab）", page.locator(".fb-fab").is_visible())
+    # 0.10 起默认是 beam + viewport，旧宿主形态只能显式声明；夹具必须真的写出来。
+    check("P6 宿主显式声明 launcher-mode=tab / capture-mode=off（旧宿主形态）",
+          attrs["launcher"] == "tab" and attrs["capture"] == "off",
+          json.dumps(attrs, ensure_ascii=False))
+    check("P6 侧边标签入口可见（launcher-mode=tab）", page.locator(".fb-fab").is_visible())
     check("P6 灵感球在 tab 模式下隐藏", not page.locator(".fb-orb").is_visible())
     launcher_box = page.locator(".fb-fab").bounding_box()
     png_probe.dump("P6 侧边标签矩形", launcher_box)

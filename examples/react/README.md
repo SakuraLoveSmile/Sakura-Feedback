@@ -88,15 +88,16 @@ effect（mount → unmount → mount），本示例是安全的：
 
 ## 属性默认值与显式覆盖
 
-组件默认是 `launcher-mode="tab"`、`capture-mode="off"`（这样升级不会改变旧宿主
-行为）。本示例要演示灵感球 + 自动截图，所以**显式**写了这两项：
+组件默认是 `launcher-mode="beam"`、`capture-mode="viewport"`（0.10 起；光束唤醒 =
+双指长按或 ⌘/Ctrl+Shift+F → 圈选，无常驻入口）。本示例要演示可选的灵感球，所以
+**显式**写了这两项：
 
 ```tsx
 <feedback-widget
   api-base="http://localhost:8787"
   app-id="com.example.demo-react"
-  launcher-mode="orb"        {/* 默认 tab */}
-  capture-mode="viewport"    {/* 默认 off */}
+  launcher-mode="orb"        {/* 默认 beam */}
+  capture-mode="viewport"    {/* 默认 viewport */}
 />
 ```
 

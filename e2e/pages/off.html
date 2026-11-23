@@ -2,15 +2,16 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <title>E2E 宿主页 · 默认 capture-mode（off）</title>
+    <title>E2E 宿主页 · 旧式宿主（显式 tab + capture-mode off）</title>
     <!--
       e2e 专用宿主页（不是产品代码）。
 
-      存在的理由：**故意不声明 `capture-mode`**，走组件的默认值 `off`。
-      这是绝大多数真实宿主的形态（升级不改变旧宿主行为 → 默认关闭截图）。
-      组件默认值见 packages/web/README.md 属性表：launcher-mode=tab、capture-mode=off。
+      存在的理由：模拟 0.10 之前的存量宿主形态——**显式**声明
+      `launcher-mode="tab"` 与 `capture-mode="off"`（不自动截图）。
+      0.10 起组件默认值改为 launcher-mode=beam、capture-mode=viewport，
+      本页保留旧行为只能靠显式属性；断言意图不变。
 
-      断言目标：默认模式下呼出面板时，**截图区必须真的不可见**，
+      断言目标：capture-mode=off 宿主呼出面板时，**截图区必须真的不可见**，
       且不得出现 `.fb-screenshot-thumb` 的空 src 破图占位。
       历史缺陷：`.fb-screenshot-wrap { display: flex }` 会盖掉浏览器默认的
       `[hidden] { display: none }`，导致 `hidden = true` 完全失效。
@@ -39,6 +40,7 @@
   </head>
   <body>
     <div id="plain">DEFAULT-CAPTURE-MODE-HOST</div>
+    <!-- 标记文本保持原样：脚本按 DEFAULT-CAPTURE-MODE-HOST 定位本页。 -->
 
     <script>
       // 测试脚手架（仅 e2e）：与 mask.html 同一套读取入口（本页无任何敏感区）。
@@ -64,13 +66,15 @@
     </script>
 
     <script src="/sdk/feedback-web.umd.js"></script>
-    <!-- 注意：这里**没有** launcher-mode / capture-mode 属性 -->
+    <!-- 显式声明旧宿主形态：贴边标签 + 关闭自动截图（0.10 默认已是 beam + viewport） -->
     <feedback-widget
       id="widget"
       api-base="http://localhost:8787"
       app-id="com.example.demo-e2e"
       app-version="3.1.4"
       page-label="e2e-off"
+      launcher-mode="tab"
+      capture-mode="off"
     ></feedback-widget>
   </body>
 </html>

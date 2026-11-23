@@ -10,18 +10,19 @@ P1 灵感球拖动 → 落点记录/使用 → 截图就是宿主视口（灵感
 P2 遮罩：[data-feedback-capture-mask] 与 input[type=password] 在最终 PNG 上的像素级验证
 P3 遮挡失败规则：可见敏感区无法遮挡 → 整次截图失败（旧草稿/旧截图保留 + 用户被告知）
 P4 面板内登录：不打开窗口、确认文案、登录后额度显示；api-base 切换后的凭据隔离
-P5 截图区可见性：默认 capture-mode=off 下截图区真的隐藏、且面板里必须有「截取当前页面」入口；
+P5 截图区可见性：capture-mode=off 下截图区真的隐藏、且面板里必须有「截取当前页面」入口；
    viewport 模式「移除截图」后回到首个入口并保留文字（[hidden] 级联回归）
-P6 默认 off 模式的手动截图：侧边标签打开不自动截图（blob URL 计数为 0）→ 先写文字 →
+   （0.10 起默认是 beam + viewport；off.html 显式声明 tab + off 保留旧宿主形态）
+P6 capture-mode=off 的手动截图：侧边标签打开不自动截图（blob URL 计数为 0）→ 先写文字 →
    点「截取当前页面」→ 有效 PNG / 敏感区遮挡 / 不含组件 UI → 放大 / 重拍 → multipart 提交落库
 P7 窄屏(390x844)+键盘：入口可点不溢出、无空白破图占位、Enter 激活截图、焦点不掉到隐藏控件
 
 外部服务全部使用 e2e/mock-external.mjs 模拟。
 
 ---------------- 对既有场景做的期望更新（都是「例子/组件已按文档演进、脚本没跟上」）----------------
-1) 入口选择器：examples/react 与 examples/vue 现在显式声明
-   `launcher-mode="orb" capture-mode="viewport"`（各自 README 与源码注释都写明「组件默认是
-   tab/off，这里显式覆盖」）。orb 模式下贴边标签由 `:host([launcher-mode="orb"])
+1) 入口选择器：examples/react 与 examples/vue 显式声明
+   `launcher-mode="orb" capture-mode="viewport"`（0.10 起组件默认是 beam/viewport，
+   示例要在默认之外演示灵感球，故显式覆盖）。orb 模式下贴边标签由 `:host([launcher-mode="orb"])
    .fb-tab-launcher{display:none}`（packages/web/src/styles.ts:260）隐藏，所以原来对
    `.fb-fab` 的 `is_visible()` 断言必然为假。改为按 `launcher-mode` 解析真实可见入口
    （`launcher()`），焦点恢复断言也用同一个入口的 class。

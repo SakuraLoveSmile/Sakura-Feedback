@@ -270,8 +270,8 @@ describe('焦点环几何', () => {
   });
 
   it('外径 = 视觉直径 + 8，且 :focus-visible 点亮、不再叠加 outline', () => {
-    expect(STYLES).toContain('width: calc(56px * var(--fb-orb-state-scale) + 8px);');
-    expect(STYLES).toContain('height: calc(56px * var(--fb-orb-state-scale) + 8px);');
+    expect(STYLES).toContain('width: calc(var(--fb-orb-summoned-size, 56px * var(--fb-orb-state-scale)) + 8px);');
+    expect(STYLES).toContain('height: calc(var(--fb-orb-summoned-size, 56px * var(--fb-orb-state-scale)) + 8px);');
     expect(STYLES).toMatch(/\.fb-orb-focus-ring \{[\s\S]*?box-sizing: border-box;/);
     expect(STYLES).toMatch(/\.fb-orb-focus-ring \{[\s\S]*?border: 2px solid var\(--fb-accent\);/);
     expect(STYLES).toMatch(/\.fb-orb:focus-visible \.fb-orb-focus-ring \{\s*opacity: 1;/);

@@ -151,7 +151,8 @@ password 上方带  ratio 1.0（纯白）且 maskColorPixels = 0
 > 依据：`packages/web/README.md`、`docs/api.md`、`packages/web/src/element.ts`、`styles.ts` 的行为与文案。
 
 1. **入口选择器（T1/T2/T3/T9/T10）**：`examples/react`、`examples/vue` 现在显式声明
-   `launcher-mode="orb"`（默认是 `tab`，示例里显式覆盖）。orb 模式下贴边标签被
+   `launcher-mode="orb"`（撰写时默认是 `tab`，示例里显式覆盖；注：0.10.0 起组件默认已是
+   `launcher-mode=beam` / `capture-mode=viewport`，orb 示例仍显式声明这两项）。orb 模式下贴边标签被
    `:host([launcher-mode="orb"]) .fb-tab-launcher{display:none}`（`styles.ts:260`）隐藏，
    所以原脚本对 `.fb-fab` 的 `is_visible()` 断言**必然为假**（这就是修改前 T1 第一个断言失败的原因）。
    改为按 `launcher-mode` 解析真实入口，并新增一条显式断言「贴边标签在 orb 模式下按文档隐藏」。

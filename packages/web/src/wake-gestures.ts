@@ -5,18 +5,21 @@ export const WAKE_GESTURES = [
   { id: 'two-finger-double-tap', title: '双指双击', description: '用两指连续轻点两次' },
 ] as const;
 export type WakeGestureId = typeof WAKE_GESTURES[number]['id'];
-type Point = { x: number; y: number };
-type Finger = { start: Point; last: Point };
+export type WakePoint = { x: number; y: number };
+type Finger = { start: WakePoint; last: WakePoint };
 type Round = { start: number; fingers: Map<number, Finger>; fullAt: number; firstUp: number | null; latched: boolean };
-const distance = (a: Point, b: Point) => Math.hypot(a.x-b.x, a.y-b.y);
-const center = (fingers: Map<number, Finger>, start = false): Point => {
+const distance = (a: WakePoint, b: WakePoint) => Math.hypot(a.x-b.x, a.y-b.y);
+const center = (fingers: Map<number, Finger>, start = false): WakePoint => {
   const points = [...fingers.values()].map(f => start ? f.start : f.last);
   return { x: points.reduce((sum,p) => sum+p.x,0)/points.length, y: points.reduce((sum,p) => sum+p.y,0)/points.length };
 };
+/** 从未保存过偏好时的默认手势：双指长按。已保存的空数组视为用户显式关闭。 */
+export const DEFAULT_WAKE_GESTURES: readonly WakeGestureId[] = ['two-finger-hold'];
 export function wakePreferenceKey(appId: string): string { return `feedback:wake-gestures:v1:${encodeURIComponent(appId)}`; }
 export function parseWakePreference(value: string | null): WakeGestureId[] {
+  if (value === null) return [...DEFAULT_WAKE_GESTURES];
   try {
-    const data: unknown = JSON.parse(value ?? 'null');
+    const data: unknown = JSON.parse(value);
     if (!data || typeof data !== 'object' || !('version' in data) || data.version !== 1 || !('enabled' in data) || !Array.isArray(data.enabled)) return [];
     const enabled = data.enabled;
     return WAKE_GESTURES.map(g => g.id).filter(id => enabled.includes(id));
@@ -25,12 +28,12 @@ export function parseWakePreference(value: string | null): WakeGestureId[] {
 
 export class WakeGestures {
   private round: Round | null = null;
-  private previousTap: { time: number; point: Point } | null = null;
+  private previousTap: { time: number; point: WakePoint } | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private contacts = 0;
   private blocked = false;
   private reserved = false;
-  private suppress: { until: number; point: Point } | null = null;
+  private suppress: { until: number; point: WakePoint } | null = null;
   private attached = false;
 
   constructor(private readonly options: {
@@ -38,7 +41,7 @@ export class WakeGestures {
     allowed: () => boolean;
     excluded: (event: TouchEvent) => boolean;
     hint: (visible: boolean) => void;
-    trigger: (point: Point) => void;
+    trigger: (point: WakePoint, fingertips: readonly WakePoint[]) => void;
   }) {}
 
   connect(): void {
@@ -87,10 +90,12 @@ export class WakeGestures {
     this.timer = null;
     this.options.hint(true);
   }
-  private finish(point: Point, now: number): void {
+  private finish(round: Round, now: number): void {
+    const point = center(round.fingers);
+    const fingertips = round.fingers.size === 2 ? [...round.fingers.values()].map(f => f.last) : [];
     this.suppress={point,until:now+800};
     this.reset(); this.blocked=false;
-    this.options.trigger(point);
+    this.options.trigger(point, fingertips);
   }
   private touch = (base: Event): void => {
     const event = base as TouchEvent, now = performance.now();
@@ -152,8 +157,7 @@ export class WakeGestures {
     if (event.type !== 'touchend') return;
     if (r.latched) {
       if (this.contacts) return;
-      const point=center(r.fingers);
-      this.finish(point,now);
+      this.finish(r,now);
       return;
     }
     if (r.firstUp === null) r.firstUp=now;
@@ -163,7 +167,7 @@ export class WakeGestures {
     if (previous && distance(previous.point,point)<=32) {
       r.latched=true;
       if (event.cancelable) event.preventDefault();
-      this.finish(point,now);
+      this.finish(r,now);
     } else {
       this.round=null; this.reserved=false; this.previousTap={time:now,point}; this.schedule(301);
     }

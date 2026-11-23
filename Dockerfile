@@ -20,6 +20,7 @@ COPY tsconfig.base.json ./
 COPY apps/server apps/server
 COPY apps/admin apps/admin
 COPY packages packages
+COPY flutter/feedback/shaders/water_field.glsl flutter/feedback/shaders/orb_gesture_glass.glsl flutter/feedback/shaders/
 
 # admin 依赖 @feedback/web 的构建产物（exports 指向 dist/），必须先构建 web 包
 RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \

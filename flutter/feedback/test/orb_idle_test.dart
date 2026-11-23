@@ -471,7 +471,7 @@ void main() {
   });
 
   for (final FeedbackWakeGesture type in FeedbackWakeGesture.values) {
-    testWidgets('${type.id} only wakes at dock, retaining draft and attachment',
+    testWidgets('${type.id} wakes at the release centroid, retaining draft and attachment',
         (tester) async {
       host.reduced = true;
       host.captureMode = FeedbackCaptureMode.viewport;
@@ -486,7 +486,6 @@ void main() {
       host.controller.close();
       await tester.pump();
       await tester.pump();
-      final Rect dock = tester.getRect(liquidOrb);
       await idle(tester);
       expect(collapsed, findsOneWidget);
       Future<List<TestGesture>> down(int count) async {
@@ -529,7 +528,9 @@ void main() {
       }
       await tester.pump();
       expect(collapsed, findsNothing);
-      expect(tester.getRect(liquidOrb), dock);
+      expect(tester.getCenter(liquidOrb), type == FeedbackWakeGesture.threeFingerSwipeUp
+          ? const Offset(220, 228) : const Offset(190, 300));
+      expect(tester.getSize(liquidOrb), const Size.square(160));
       expect(host.controller.isOpen, isFalse);
       expect(find.byType(CaptureSelectionOverlay), findsNothing);
       expect(panel.screenshotBytes, same(bytes));
@@ -684,7 +685,6 @@ void main() {
         encodeWakeGestures(
             <FeedbackWakeGesture>{FeedbackWakeGesture.twoFingerHold}));
     await host.mount(tester);
-    final Rect dock = tester.getRect(liquidOrb);
     await idle(tester);
     expect(find.byKey(const Key('feedback-launcher-slot')), findsNothing,
         reason: '待机隐藏后没有入口');
@@ -712,7 +712,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 420));
     expect(liquidOrb, findsOneWidget, reason: '已开启的唤醒手势可唤醒完整球');
     expect(find.byKey(const Key('feedback-launcher-slot')), findsOneWidget);
-    expect(tester.getRect(liquidOrb), dock, reason: '唤醒后完整球回到原停车位');
+    expect(tester.getCenter(liquidOrb), const Offset(190, 300));
     expect(host.controller.isOpen, isFalse,
         reason: '手势只唤醒完整球，不直接打开面板');
     expect(find.byType(CaptureSelectionOverlay), findsNothing);
@@ -738,6 +738,8 @@ void main() {
     host.captureMode = FeedbackCaptureMode.viewport;
     await host.preferences.write(orbIdleStorageKey(host.appId),
         encodeOrbIdleStyle(FeedbackOrbIdleStyle.hidden));
+    await host.preferences.write(wakeGestureStorageKey(host.appId),
+        encodeWakeGestures(<FeedbackWakeGesture>{}));
     await host.mount(tester);
     await idle(tester);
     expect(find.byKey(const Key('feedback-launcher-slot')), findsNothing);

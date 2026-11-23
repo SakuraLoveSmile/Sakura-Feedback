@@ -25,7 +25,8 @@ export interface Mounted {
   zoomModal: HTMLDivElement;
 }
 
-export function mount(attrs: Record<string, string> = {}): Mounted {
+/** 不注入任何模式默认值的原始挂载（默认值断言用）。 */
+export function mountRaw(attrs: Record<string, string> = {}): Mounted {
   const widget = document.createElement('feedback-widget') as FeedbackWidget;
   widget.setAttribute('api-base', API_BASE);
   widget.setAttribute('app-id', APP_ID);
@@ -58,8 +59,17 @@ export function mount(attrs: Record<string, string> = {}): Mounted {
   return m;
 }
 
-export function setTextarea(m: Mounted, text: string): void {
-  m.textarea.value = text;
+/** 旧版默认（tab + 不截图）挂载：保留既有用例意图，显式模式仍可覆盖。 */
+export function mount(attrs: Record<string, string> = {}): Mounted {
+  return mountRaw({ 'launcher-mode': 'tab', 'capture-mode': 'off', ...attrs });
+}
+
+/** 光束模式（新默认）挂载：无驻留入口 + 视口截图。 */
+export function mountBeam(attrs: Record<string, string> = {}): Mounted {
+  return mountRaw({ 'launcher-mode': 'beam', 'capture-mode': 'viewport', ...attrs });
+}
+
+export function setTextarea(m: Mounted, text: string): void {  m.textarea.value = text;
   m.textarea.dispatchEvent(new Event('input', { bubbles: true }));
 }
 

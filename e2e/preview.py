@@ -17,7 +17,7 @@
 
 浏览器打开这几个页面（同一个服务，无需改配置）：
 
-  http://localhost:5189/manual.html   默认宿主（未声明 capture-mode / launcher-mode）
+  http://localhost:5189/manual.html   旧宿主形态（显式 tab + capture-mode="off"）
                                       ← 本次修复的手动截图入口就在这里：贴边标签 → 面板
                                         →「截取当前页面」；页面里有遮罩区与密码框可验遮挡
   http://localhost:5187/              React 示例：灵感球 + capture-mode="viewport"（呼出即截图）
@@ -124,14 +124,15 @@ def main():
             assert rb.wait_http(o, 20), f"{o} 未起来"
 
         lines = [
-            f"    {origin}/manual.html   默认宿主（tab + off）← 本次修复的手动截图入口",
+            f"    {origin}/manual.html   旧宿主形态（显式 tab + off）← 手动截图入口",
             "                           贴边标签 → 面板底部「截取当前页面」→ 预览 / 放大 / 重新截图 / 移除",
         ]
         lines += [f"    {o}/{'':<12} {l}（示例产物）" for _, _, _, l, o in examples]
         lines += [
             f"    {origin}/orb.html      对照：灵感球 + viewport（呼出即自动截图）",
             f"    {origin}/mask.html     遮挡演示（把灵感球拖到洋红遮罩区 / 青色密码框）",
-            f"    {origin}/off.html      默认模式极简页",
+            f"    {origin}/off.html      极简页（显式 tab + off）",
+            f"    {origin}/beam.html     0.10 默认形态：光束唤醒 + 双指长按 → 圈选",
         ]
         if skipped:
             lines.append(f"    （跳过示例：{'、'.join(skipped)}）")

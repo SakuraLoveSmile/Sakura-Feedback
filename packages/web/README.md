@@ -5,6 +5,11 @@
 > 📘 **完整接入指南：[`docs/integration.md`](../../docs/integration.md)**
 > —— 从服务端配置、组件安装、挂载悬浮球到登录/截图/反馈/归档的端到端步骤。
 > 本 README 是属性 / 方法 / 事件 / 截图与遮挡的**权威参考**。
+>
+> **0.10 默认形态**：光束唤醒（`launcher-mode=beam`，无常驻入口）+ 视口截图
+> （`capture-mode=viewport`）。双指长按或 ⌘/Ctrl+Shift+F 唤出（默认水波纹，可在设置切波光）→ 画圈选区 → 面板；
+> 旧式贴边标签需显式 `launcher-mode="tab" capture-mode="off"`，灵感球需显式
+> `launcher-mode="orb"`（或在光束模式下由用户从「设置 → 入口样式」切换）。
 
 **宿主日志必须接入**：通过 `logProvider` 提供真实、脱敏的应用诊断日志，并通过[完整接入指南第 5.6 节](../../docs/integration.md#56-诊断日志接入v12)的接入验收；仅记录组件自身请求或使用固定示例日志不算完成。采集失败、暂无事件或用户移除日志仍允许提交。
 
@@ -39,8 +44,9 @@ import { FeedbackWidget, openFeedback } from '@feedback/web';
 | `theme` | `theme` | 否 | `system` \| `light` \| `dark`（默认 `system`） |
 | `show-launcher` | `showLauncher` | 否 | 是否显示贴边入口（默认 `true`） |
 | `launcher-bottom` | `launcherBottom` | 否 | 入口垂直位置（默认 `25%`） |
-| `launcher-mode` | `launcherMode` | 否 | `tab`（贴边标签）\| `orb`（灵感球，默认 `tab`） |
-| `capture-mode` | `captureMode` | 否 | `off` \| `viewport`：呼出时是否**自动**截取当前视口（默认 `off`）。`off` 只关闭**自动**截图——面板里始终有手动的「截取当前页面」 |
+| `launcher-mode` | `launcherMode` | 否 | `beam`（光束唤醒，**默认**；无常驻入口，双指长按或快捷键唤出后圈选）\| `tab`（贴边标签）\| `orb`（灵感球）。宿主为 `beam` 时用户可在「设置 → 入口样式」切到灵感球（本机偏好） |
+| `capture-mode` | `captureMode` | 否 | `off` \| `viewport`：呼出时是否**自动**截取当前视口（默认 `viewport`）。`off` 只关闭**自动**截图——面板里始终有手动的「截取当前页面」；光束模式下 `off` 时手势只打开面板 |
+| `wake-shortcut` | `wakeShortcut` | 否 | 光束模式快捷键：`primary+shift+f`（默认；macOS ⌘ / 其他 Ctrl）或 `off`；输入框聚焦 / 面板 / 选区中不触发 |
 | — | `effectiveApiBase` | — | **只读**：当前实际使用的服务地址（用户本机覆盖优先于 `api-base`；未覆盖时等于 `api-base`） |
 | — | `logProvider` | 否 | `FeedbackLogProvider?`（`() => FeedbackLogFile \| FeedbackLogFile[] \| null \| undefined` 或其 Promise，`FeedbackLogFile = { filename, blob }`）。仅 property：打开面板且尚未采集过时自动调用一次（3 秒超时、至多 3 份、单份 ≤1MiB、扩展名 `.log/.txt/.json/.jsonl`、非空）。替换 / 置空后下一次呼出面板生效；**不清空草稿** |
 
@@ -107,7 +113,7 @@ import { FeedbackWidget, openFeedback } from '@feedback/web';
 
 交互固定为 **拖球 → 松手 → 调整选区并查看结果 → 确认 → 填写反馈**：
 
-1. 灵感球静止 56px、拖动中展开到 104px；Web 与 Flutter 均通过已遮挡的宿主纹理绘制背景折射、局部高光与液态形变；键盘焦点可见时，环贴合当前视觉直径（每侧 2px 间隙 + 2px `--fb-accent`，外径 = 视觉直径 + 8）；`prefers-reduced-motion` 下取消扫光、呼吸与缩放。位移 >8px 才进入拖动；点击或 Space / Enter 仍按 `capture-mode` 打开反馈；关闭面板后焦点回到球（指针关闭不点亮焦点环）；松手后球回到原停靠位置，截图定位不改停靠位。扫光、呼吸、方向拉伸、glow lag 与回弹曲线均为设计推断，非官方逐项参数。
+1. 在设置中选用灵感球并启用手势后，首次使用默认隐藏。用已开启的手势在页面中唤出球，玻璃球从各指中点长出，拖动时沿运动方向拉长。点击或按 Space / Enter 打开反馈，拖动超过 8px 后松手进入选区。已选的待机样式按应用保存，宿主显式设置 `orb` 时默认显示 56px 的停靠球。尺寸和折射见[灵感球设计契约](../../docs/orb-spec.md)。
 2. 松手后先执行**与面板截图完全相同的遮挡捕获**（隐藏自身 UI → 统计可见敏感区 → `captureViewport` / `captureProvider` → 统一校验），得到一张**已遮挡的冻结全视口位图**，随后显示选区覆盖层（位图作背景），**不直接写草稿、不直接开面板**。
 3. 初始选区：宽 `min(400px, 视口宽×80%)`、高 `min(260px, 视口高×40%)`，中心为松手位置，靠边时整体移回可见区域；支持拖动移动、八个控制点缩放、覆盖层内重新框选，**最小 48×48 逻辑像素**。
 4. 三个操作：**使用此区域**（裁剪冻结位图，只提交选区内容——球、选区边框、遮罩、工具栏一律不入图）、**截取整个窗口**（整张冻结位图，省略 `region`）、**取消**（丢弃冻结画面，不覆盖原草稿、不报失败，焦点回到灵感球）。键盘：方向键移动、Shift+方向键缩放、回车确认、Esc 取消，Tab 焦点锁在覆盖层内。

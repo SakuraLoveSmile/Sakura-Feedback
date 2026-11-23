@@ -5,7 +5,8 @@
     <title>E2E 宿主页 · 登录握手</title>
     <!--
       e2e 专用宿主页（不是产品代码）：登录握手正/负例的宿主。
-      组件用 tab 模式 + capture-mode=off，避免截图干扰握手断言。
+      组件显式声明 launcher-mode="tab" + capture-mode="off"，避免截图干扰握手断言
+      （0.10 起默认是 beam + viewport，旧行为必须显式保留）。
 
       页面自己（而不是被测试组件）在 window 上挂 message 记录器：
       只有记录器收到了某条消息，才能说「消息确实送达宿主页、被组件忽略」。
@@ -107,6 +108,8 @@
       app-version="3.1.4"
       page-label="e2e-login"
       side="right"
+      launcher-mode="tab"
+      capture-mode="off"
     ></feedback-widget>
   </body>
 </html>

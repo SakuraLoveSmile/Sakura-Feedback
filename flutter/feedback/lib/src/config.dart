@@ -1,5 +1,9 @@
 import 'dart:ui' show Offset;
 
+import 'package:flutter/foundation.dart' show immutable;
+import 'package:flutter/services.dart'
+    show HardwareKeyboard, LogicalKeyboardKey;
+
 import 'api_client.dart'
     show FeedbackFilePicker, FeedbackImagePicker, FeedbackLogProvider;
 import 'server_pref.dart' show idnHostToAscii;
@@ -15,11 +19,72 @@ enum FeedbackSide {
 
 /// 呼出入口展现模式。
 enum FeedbackLauncherMode {
+  /// 光束唤醒（默认）：双指长按或快捷键 → 按压点波光 → 压暗 → 圈选。
+  beam,
+
   /// 经典侧边悬浮按钮。
   tab,
 
   /// 灵感球（支持拖拽指出问题与视口截图）。
   orb,
+}
+
+/// 唤醒快捷键组合；默认 Primary（macOS ⌘ / 其他 Ctrl）+ Shift + F。
+@immutable
+class FeedbackWakeShortcut {
+  /// 构造快捷键。
+  const FeedbackWakeShortcut({
+    this.enabled = true,
+    this.primary = true,
+    this.shift = true,
+    this.alt = false,
+    this.meta = false,
+    this.ctrl = false,
+    this.key = LogicalKeyboardKey.keyF,
+  });
+
+  /// 关闭快捷键。
+  const FeedbackWakeShortcut.off()
+      : enabled = false,
+        primary = false,
+        shift = false,
+        alt = false,
+        meta = false,
+        ctrl = false,
+        key = LogicalKeyboardKey.keyF;
+
+  /// 是否启用。
+  final bool enabled;
+
+  /// 平台主修饰键（macOS ⌘ / 其他 Ctrl）。
+  final bool primary;
+
+  /// ⌘。
+  final bool meta;
+
+  /// Ctrl。
+  final bool ctrl;
+
+  /// Shift。
+  final bool shift;
+
+  /// Alt。
+  final bool alt;
+
+  /// 字母 / 数字 / 功能键。
+  final LogicalKeyboardKey key;
+
+  /// 是否匹配当前按键状态。
+  bool matches(HardwareKeyboard state, LogicalKeyboardKey pressed) {
+    if (!enabled || pressed != key) return false;
+    if (state.isAltPressed != alt || state.isShiftPressed != shift) {
+      return false;
+    }
+    final bool metaPressed = state.isMetaPressed;
+    final bool ctrlPressed = state.isControlPressed;
+    if (primary) return metaPressed != ctrlPressed;
+    return metaPressed == meta && ctrlPressed == ctrl;
+  }
 }
 
 /// 截图捕获模式。
@@ -63,8 +128,9 @@ class FeedbackConfig {
     this.theme = FeedbackThemeMode.system,
     this.showLauncher = true,
     this.launcherBottom = '25%',
-    this.launcherMode = FeedbackLauncherMode.tab,
-    this.captureMode = FeedbackCaptureMode.off,
+    this.launcherMode = FeedbackLauncherMode.beam,
+    this.captureMode = FeedbackCaptureMode.viewport,
+    this.wakeShortcut = const FeedbackWakeShortcut(),
     this.logProvider,
     this.filePicker,
     this.imagePicker,
@@ -108,11 +174,14 @@ class FeedbackConfig {
   /// 侧边入口距可用区域底部的位置，默认 '25%'，支持百分比或像素值。
   final String launcherBottom;
 
-  /// 呼出入口展现模式，默认经典标签 [FeedbackLauncherMode.tab]。
+  /// 呼出入口展现模式，默认光束唤醒 [FeedbackLauncherMode.beam]。
   final FeedbackLauncherMode launcherMode;
 
-  /// 截图捕获模式，默认关闭 [FeedbackCaptureMode.off]。
+  /// 截图捕获模式，默认视口截图 [FeedbackCaptureMode.viewport]。
   final FeedbackCaptureMode captureMode;
+
+  /// 唤醒快捷键（仅光束模式生效），默认 Primary+Shift+F。
+  final FeedbackWakeShortcut wakeShortcut;
 
   /// 自动日志采集提供者（可选）。
   final FeedbackLogProvider? logProvider;
@@ -146,6 +215,7 @@ class FeedbackConfig {
       launcherBottom: launcherBottom,
       launcherMode: launcherMode,
       captureMode: captureMode,
+      wakeShortcut: wakeShortcut,
       logProvider: logProvider,
       filePicker: filePicker,
       imagePicker: imagePicker,

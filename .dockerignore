@@ -8,5 +8,7 @@ data
 *.db
 *.db-*
 flutter
+!flutter/feedback/shaders/water_field.glsl
+!flutter/feedback/shaders/orb_gesture_glass.glsl
 examples/flutter
 .env

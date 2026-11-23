@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:feedback_widget/feedback_widget.dart';
 import 'package:feedback_widget/src/capture_selection.dart';
 import 'package:feedback_widget/src/test_env.dart';
+import 'package:feedback_widget/src/launcher_style.dart';
 import 'package:feedback_widget/src/wake_gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -25,6 +26,8 @@ class _WakeHost {
   double dpr = 1;
   Widget child = const SizedBox.expand(child: ColoredBox(color: Colors.blue));
   bool scopedHalf = false;
+  bool reducedMotion = false;
+  FeedbackLauncherMode launcherMode = FeedbackLauncherMode.orb;
 
   Future<void> enable(Set<FeedbackWakeGesture> gestures) =>
       prefs.write(wakeGestureStorageKey(appId), encodeWakeGestures(gestures));
@@ -42,7 +45,7 @@ class _WakeHost {
           config: FeedbackConfig(apiBase, appId,
               pageLabel: pageLabel,
               captureMode: captureMode,
-              launcherMode: FeedbackLauncherMode.orb),
+              launcherMode: launcherMode),
           controller: controller,
           tokenStore: MemoryTokenStore('tok'),
           serverPrefStore: prefs,
@@ -50,7 +53,8 @@ class _WakeHost {
           child: this.child,
         );
         return MediaQuery(
-          data: MediaQuery.of(context).copyWith(devicePixelRatio: dpr),
+          data: MediaQuery.of(context).copyWith(
+              devicePixelRatio: dpr, disableAnimations: reducedMotion),
           child: Padding(
               padding: padding,
               child: scopedHalf
@@ -162,6 +166,36 @@ void main() {
     debugDisableOrbLensCapture = false;
   });
 
+  for (final reduced in [false, true]) {
+    testWidgets(
+        'gesture entry is hidden, grows at the touch centroid, then clears (reduced=$reduced)',
+        (tester) async {
+      host.launcherMode = FeedbackLauncherMode.beam;
+      host.reducedMotion = reduced;
+      await host.prefs.write(launcherStyleStorageKey(host.appId), 'orb');
+      await host.enable({FeedbackWakeGesture.twoFingerHold});
+      await host.mount(tester);
+      final orb = find.byKey(const Key('feedback-orb'));
+      final lens = find.byKey(const Key('feedback-orb-lens'));
+      expect(orb, findsNothing);
+      await _hold(tester);
+      await tester.pump();
+      expect(tester.getCenter(orb), const Offset(190, 300));
+      final first = tester.getSize(lens).width;
+      await tester.pump(const Duration(milliseconds: 100));
+      final middle = tester.getSize(lens).width;
+      await tester.pump(const Duration(milliseconds: 280));
+      final full = tester.getSize(lens).width;
+      expect(first, reduced ? full : lessThan(full * .2));
+      expect(middle, reduced ? full : inExclusiveRange(first, full));
+      expect(tester.getCenter(lens), const Offset(190, 300));
+      expect(host.controller.isOpen, isFalse);
+      await tester.pump(const Duration(seconds: 5));
+      expect(orb, findsNothing);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
   for (final FeedbackWakeGesture gesture in FeedbackWakeGesture.values) {
     testWidgets(
         '${gesture.id} restores at root before first panel, then selects and delivers real attachment',
@@ -258,11 +292,12 @@ void main() {
   testWidgets(
       'settings select multiple gestures immediately and independently of server save, persist and reload',
       (tester) async {
+    await host.enable(<FeedbackWakeGesture>{});
     await host.mount(tester, size: const Size(320, 780));
     await host.settings(tester);
     expect(find.byTooltip('设置'), findsOneWidget);
     expect(find.text('唤醒方式'), findsOneWidget);
-    expect(find.text('可同时开启，仅在当前应用内生效；悬浮入口仍可使用。'), findsOneWidget);
+    expect(find.text('可同时开启，仅在当前应用内生效；未开启自动截图时手势只打开面板。'), findsOneWidget);
     for (final FeedbackWakeGesture gesture in FeedbackWakeGesture.values) {
       final Finder row = find.byKey(Key('feedback-wake-${gesture.id}'));
       await tester.ensureVisible(row);
@@ -298,6 +333,7 @@ void main() {
     testWidgets(
         'confirmed drag after wake ${fullWindow ? 'window' : 'region'} leaves closed settings for compose and preserves the draft',
         (tester) async {
+      await host.enable(<FeedbackWakeGesture>{});
       await host.mount(tester);
       final FeedbackPanelState panel =
           await captureAndWait(tester, host.controller);
@@ -483,7 +519,7 @@ void main() {
   }
 
   testWidgets(
-      'capture-off settings are disabled and stored choices never override host authorization',
+      'capture-off keeps wake settings enabled and only expands the launcher',
       (tester) async {
     await host.enable(FeedbackWakeGesture.values.toSet());
     host.captureMode = FeedbackCaptureMode.off;
@@ -491,12 +527,14 @@ void main() {
     await _hold(tester);
     await tester.pump();
     expect(find.byType(CaptureSelectionOverlay), findsNothing);
+    expect(find.byKey(const Key('feedback-orb-collapsed')), findsNothing);
     await host.settings(tester);
-    expect(find.text('应用未开启截图，手势暂不可用'), findsOneWidget);
+    expect(find.text('应用未开启截图，手势暂不可用'), findsNothing);
     for (final FeedbackWakeGesture gesture in FeedbackWakeGesture.values) {
       final CheckboxListTile row =
           tester.widget(find.byKey(Key('feedback-wake-${gesture.id}')));
-      expect(row.onChanged, isNull);
+      expect(row.onChanged, isNotNull);
+      expect(row.value, isTrue);
     }
   });
 

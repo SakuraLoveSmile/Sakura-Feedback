@@ -42,7 +42,26 @@ beforeEach(()=>{
 afterEach(()=>{cleanup();vi.useRealTimers();});
 
 describe('root wake preference and settings behavior',()=>{
-  it('default off; root-restored gesture waits for all fingers up, only wakes at the original dock and starts a fresh idle interval',async()=>{
+  it('selectable gesture launcher starts hidden and clears the temporary hit area on timeout', async () => {
+    localStorage.setItem('feedback:launcher-style:v1:'+APP_ID,'orb');
+    enabled(APP_ID,['two-finger-hold']);
+    const m=mount({'launcher-mode':'beam'});
+    expect(m.orb.classList.contains('is-idle-hidden')).toBe(true);
+    hold(); await settle();
+    expect(m.orb.classList.contains('is-idle-hidden')).toBe(false);
+    expect(m.orb.style.top).toBe('120px');
+    vi.advanceTimersByTime(5000);
+    expect(m.orb.classList.contains('is-idle-hidden')).toBe(true);
+    expect(m.orb.style.top).toBe('');
+  });
+
+  it('no stored preference defaults to two-finger hold',async()=>{
+    const m=mount({'capture-mode':'viewport'}),capture=provider(m);
+    vi.advanceTimersByTime(5000); hold(); await settle();
+    expect(capture).not.toHaveBeenCalled(); expect(m.orb.classList.contains('is-collapsed')).toBe(false);
+  });
+  it('explicit empty preference stays off; root-restored gesture waits for all fingers up, wakes at the gesture centroid and starts a fresh idle interval',async()=>{
+    localStorage.setItem(wakePreferenceKey(APP_ID),JSON.stringify({version:1,enabled:[]}));
     const initial=mount({'capture-mode':'viewport'}), off=provider(initial);
     vi.advanceTimersByTime(5000); hold(); await settle();
     expect(off).not.toHaveBeenCalled(); expect(initial.orb.classList.contains('is-collapsed')).toBe(true); initial.widget.remove();
@@ -57,6 +76,9 @@ describe('root wake preference and settings behavior',()=>{
     expect(m.panel.classList.contains('is-open')).toBe(false); expect(m.screenshotWrap.hidden).toBe(true);
     expect(m.root.querySelector<HTMLElement>('.fb-wake-hint')!.hidden).toBe(true);
     expect(m.widget.launcherBottom).toBe('31%'); expect(m.orb.style.transform).toBe('');
+    const radius=parseFloat(m.orb.style.width)/2;
+    expect(parseFloat(m.orb.style.left)+radius).toBe(140);
+    expect(parseFloat(m.orb.style.top)+radius).toBe(200);
     vi.advanceTimersByTime(4900); expect(m.orb.classList.contains('is-collapsed')).toBe(false);
     vi.advanceTimersByTime(100); expect(m.orb.classList.contains('is-collapsed')).toBe(true);
   });
@@ -90,6 +112,7 @@ describe('root wake preference and settings behavior',()=>{
     vi.advanceTimersByTime(1); expect(m.orb.classList.contains('is-collapsed')).toBe(true);
   });
   it('settings are independent from server saving, persist per app, survive remount and server address changes',async()=>{
+    enabled(APP_ID,[]); enabled('other',[]);
     const m=mount({'capture-mode':'viewport'}); settings(m);
     expect(m.root.querySelector('.fb-settings-btn')!.getAttribute('aria-label')).toBe('设置');
     checkbox(m).click(); checkbox(m,'three-finger-swipe-up').click();
@@ -101,14 +124,16 @@ describe('root wake preference and settings behavior',()=>{
     m.widget.remove(); const next=mount({'capture-mode':'viewport'}); expect(checkbox(next).checked).toBe(true);
     const capture=provider(next); vi.advanceTimersByTime(5000); hold(); await settle(); expect(capture).not.toHaveBeenCalled(); expect(next.orb.classList.contains('is-collapsed')).toBe(false);
   });
-  it('off mode disables options and displays authorization reason; restored choices cannot bypass it',async()=>{
+  it('capture-off still wakes the launcher without capturing; settings stay available',async()=>{
     enabled(); const m=mount(); const capture=provider(m); settings(m);
-    expect(checkbox(m).disabled).toBe(true); expect(m.root.querySelector('.fb-wake-availability')!.textContent).toBe('应用未开启截图，手势暂不可用');
-    checkbox(m).click(); expect(checkbox(m).checked).toBe(true);
-    m.widget.close(); m.orb.blur(); vi.advanceTimersByTime(5000); hold(); await settle(); expect(capture).not.toHaveBeenCalled(); expect(m.orb.classList.contains('is-collapsed')).toBe(true);
+    expect(checkbox(m).disabled).toBe(false);
+    expect(checkbox(m).checked).toBe(true);
+    expect(m.root.querySelector<HTMLElement>('.fb-wake-availability')!.hidden).toBe(true);
+    m.widget.close(); m.orb.blur(); vi.advanceTimersByTime(5000); hold(); await settle(); expect(capture).not.toHaveBeenCalled(); expect(m.orb.classList.contains('is-collapsed')).toBe(false);
     m.widget.captureMode='viewport'; expect(checkbox(m).disabled).toBe(false); hold(); await settle(); expect(capture).not.toHaveBeenCalled(); expect(m.orb.classList.contains('is-collapsed')).toBe(false);
   });
   it('storage write failure remains effective this session and reconnect cannot overwrite the choice',async()=>{
+    enabled(APP_ID,[]);
     const m=mount({'capture-mode':'viewport'}); settings(m);
     vi.spyOn(window.localStorage,'setItem').mockImplementation(()=>{throw new Error('blocked');});
     checkbox(m).click(); expect(m.root.querySelector<HTMLElement>('.fb-wake-pref-hint')!.hidden).toBe(false);

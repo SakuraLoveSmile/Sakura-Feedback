@@ -28,14 +28,15 @@ class HomePage extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.center,
             children: <Widget>[
               const Text(
-                '右下角为灵感球，拖动到界面任意位置松手即可截图并反馈。',
+                '双指长按 700ms 可唤醒反馈。在设置里选「灵感球」，'
+                '用你选的手势唤出球，拖到问题处松手即可选区。',
                 textAlign: TextAlign.center,
                 style: TextStyle(fontSize: 16),
               ),
               const SizedBox(height: 8),
               const Text(
                 '组件挂在 Navigator 之上：切到第二个路由、或打开宿主对话框，'
-                '灵感球都还在场，草稿与登录状态也不会因导航丢失。',
+                '同一手势仍可在当前页面唤醒，草稿与登录状态也不会因导航丢失。',
                 textAlign: TextAlign.center,
                 style: TextStyle(color: Colors.grey),
               ),

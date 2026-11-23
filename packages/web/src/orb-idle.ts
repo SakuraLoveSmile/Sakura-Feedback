@@ -64,7 +64,9 @@ export function orbIdlePreferenceKey(appId: string): string {
   return `feedback:orb-idle:v1:${encodeURIComponent(appId)}`;
 }
 
-export function parseOrbIdlePreference(value: string | null): OrbIdleStyle {
+export function parseOrbIdlePreference(value: string | null, fallback?: 'handle'): OrbIdleStyle;
+export function parseOrbIdlePreference(value: string | null, fallback: null): OrbIdleStyle | null;
+export function parseOrbIdlePreference(value: string | null, fallback: 'handle' | null = 'handle'): OrbIdleStyle | null {
   try {
     const data: unknown = JSON.parse(value ?? 'null');
     if (
@@ -78,5 +80,5 @@ export function parseOrbIdlePreference(value: string | null): OrbIdleStyle {
       return data.style;
     }
   } catch { /* Invalid local values use the default. */ }
-  return 'handle';
+  return fallback;
 }

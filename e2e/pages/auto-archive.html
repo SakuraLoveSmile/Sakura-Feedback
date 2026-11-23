@@ -62,9 +62,12 @@
       window.__fbEvents = [];
 
       const params = new URLSearchParams(window.location.search);
-      // 组件默认 launcher-mode=tab / capture-mode=off：本页不声明这两个属性
+      // 显式声明旧宿主形态（贴边标签 + 关闭自动截图）；0.10 默认为 beam + viewport。
+      // 属性在挂载前写入，避免「先连接后改属性」的时序差异。
       const el = document.createElement('feedback-widget');
       el.id = 'fb';
+      el.setAttribute('launcher-mode', 'tab');
+      el.setAttribute('capture-mode', 'off');
       el.setAttribute('api-base', params.get('apiBase') || '');
       el.setAttribute('app-id', params.get('appId') || 'com.e2e.unregistered');
       el.setAttribute('app-name', params.get('appName') || 'E2E 未登记软件');
