@@ -126,3 +126,26 @@
 - 管理页仍固定灵感球，未切换为 auto 的贴边标签（需产品决定，见对话）。
 - `apps/admin/dist` 是构建产物（`.gitignore` 忽略），生产管理页要按发布流程更新；本轮未发布、未部署。
 - 未提交 git。
+## 9. 发布 v0.13.0（2026-11-23）
+
+- 版本收口：`package.json`、`apps/server`、`apps/admin`、`packages/web`、`flutter/feedback/pubspec.yaml` 统一为 **0.13.0**；`CHANGELOG.md` 的 `[未发布]` 段改为 `[0.13.0] — 2026-11-23`。
+- 本地门禁：`pnpm install --frozen-lockfile`、`pnpm -r build`、`pnpm -r typecheck`、`pnpm -r lint` 通过；服务端 469、Web 732 项测试通过；`e2e/check-release-notes.py` 与 `e2e/check-update-sh.py` 通过；Flutter 组件 analyze 无问题、704 项测试通过，示例 40 项通过。
+- 提交：`b6c2ad7`（组件）、`49244c7`（e2e）、`8663956`（文档与 CHANGELOG）、`8ea335b`（chore(release) v0.13.0）、`91268b2`（注册顺序补充）；合并 `e1d52c5`。`main` CI 45130726654 success。
+- 签名标签 `v0.13.0` 指向 `e1d52c5`，GPG Good signature；Release 流水线 45131154199 全部 job 成功，[v0.13.0](https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/tag/v0.13.0) 已公开、Latest。
+- 资产七份齐全，`shasum -a 256 -c SHA256SUMS` 三份产物 OK；`release-manifest.json`：version/tag/commit 为 0.13.0/v0.13.0/`e1d52c5`，channel stable，schema **15**，digest `sha256:692e14a9…`；GHCR `v0.13.0` 与 `latest` 同一 digest。
+
+## 10. 生产升级（2026-11-23 15:33）
+
+- 目标 `blog-prod:/opt/1panel/docker/compose/feedback`（compose 项目 feedback，容器 feedback-feedback-1）；从 v0.12.0（digest `e4bd5240…`）升级到 **v0.13.0**。
+- 预拉与核对：`docker pull …:v0.13.0` 得到 digest `692e14a9…`，与发布清单一致；镜像标签 `org.opencontainers.image.version=v0.13.0`、revision `e1d52c5`，容器内 `/app/server/package.json` 为 0.13.0。
+- 备份：`backups/fb-rel-013-pre-v0.13.0-20261123-153325/`（700），含 `docker-compose.yml.pre`、`.env`、停机库 `feedback-stopped.db`（sha256 `5ebc393c…`）、停机整目录 `feedback-data-stopped-v0.12.0.tgz`（`29d40975…`，4.8M）与 `SHA256SUMS`、停机时 data 目录清单。
+- 切换：停机后 data 无 WAL/SHM 残留，照搬上一轮做法改 compose 镜像为 `:v0.13.0@sha256:692e14a9…` 后 `docker compose up -d`，约 6 秒 healthy，RestartCount 0；脚本内置「60 秒不 healthy 自动回退 v0.12.0」，本次未触发。
+- 数据：升级前后 schema 15、integrity ok、20 张表 **1784 行**，逐表行数完全一致（feedbacks 32、feedback_audit 107、sessions 1508 等）。本轮无数据库迁移。
+- 公网核验（`https://feedback.xn--fhqths51enha.cn`）：`/healthz`、`/api/features`、`/api/changelog/studytool`、`/admin/` 均 200，未登录 `/api/admin/apps` 401；管理页 6 个资产（index.html 与 5 个 JS/CSS）与 Release 的 `feedback-admin-dist.zip` 逐字节一致；线上 `feedback-widget-36fin6si.js` 含新代码标记（`pointer: fine`、`fb-entry-hint`）。
+- 回退：compose 改回 `:v0.12.0@sha256:e4bd5240…` 后 `docker compose up -d`（schema 同为 15，无需恢复数据；如需可解 tar 或换 `feedback-stopped.db`）。
+
+### 发布后仍待处理
+
+- 生产 `data/update-check.json` 仍是旧结果，24 小时自动检查或后台「检查更新」后显示 0.13.0。
+- 浏览器需强刷新 `/admin/` 才会载入新资产。
+- **各 Web 宿主（含 blog）要自己升级到 `feedback-web-0.13.0.tgz` 才拿得到新入口行为**；本次只发布了组件包与管理页，未改动任何宿主站点。
