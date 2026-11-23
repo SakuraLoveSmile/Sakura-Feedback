@@ -652,6 +652,7 @@ def scenarios(page, ctx, shot, browser, shots):
         # 只是标题是原文首行而不是 AI 整理结果。
         post_json(f"http://127.0.0.1:{AI_PORT}/__mock/state", {"aiFail": True})
         text_ai = "同步功能经常失败，请排查网络重试逻辑"
+        page.get_by_role("button", name="再记一条", exact=True).click()
         page.locator(".fb-textarea").fill(text_ai)
         posts_before_ai = posts.count()
         page.locator(".fb-submit").click()
@@ -671,7 +672,7 @@ def scenarios(page, ctx, shot, browser, shots):
         post_json(f"http://127.0.0.1:{AI_PORT}/__mock/state", {"aiFail": False})
 
         step("T7b 提交未到达服务 → 保留草稿 → 修复网络后重试 → 归档（同 key 同字节）")
-        page.locator(".fb-status-card .fb-card-actions button").last.click()  # 再记一条
+        page.get_by_role("button", name="再记一条", exact=True).click()
         page.keyboard.press("Escape")
         page.locator(".fb-panel").wait_for(state="hidden", timeout=5000)
         open_panel(page)  # capture-mode=viewport：呼出时重新截图，让重试带截图字节
@@ -744,7 +745,7 @@ def scenarios(page, ctx, shot, browser, shots):
         # T8 结束时面板仍开着（归档态），先关闭避免入口变成 toggle。
         # 注意 Esc 只在焦点位于组件内部时生效（element.ts:1785 的 inside 判定），
         # 先把焦点点回面板再按 Esc（Esc 仅在焦点位于组件内部时生效）。
-        page.locator(".fb-textarea").click()
+        page.get_by_role("button", name="再记一条", exact=True).focus()
         page.keyboard.press("Escape")
         page.locator(".fb-panel").wait_for(state="hidden", timeout=5000)
         page.set_viewport_size({"width": 390, "height": 844})

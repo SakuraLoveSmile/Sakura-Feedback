@@ -223,7 +223,9 @@ def new_page(deps, url, console_log=None):
     if console_log is not None:
         page.on("console", lambda m: console_log.append(f"[{m.type}] {m.text}"))
         page.on("pageerror", lambda e: console_log.append(f"[pageerror] {e}"))
-    page.goto(url, wait_until="networkidle")
+    # Glass texture refreshes may keep requesting the fixture iframe and image.
+    page.goto(url, wait_until="load")
+    page.evaluate("customElements.whenDefined('feedback-widget')")
     return page
 
 
@@ -250,9 +252,23 @@ def drag_orb(page, drag_to=None, timeout=60000, expect="panel") -> dict:
         dragging = page.evaluate(
             "() => !!document.querySelector('feedback-widget').shadowRoot.querySelector('.fb-orb.is-dragging')"
         )
+        if dragging and expect == "region":
+            # The selection opens around the last rendered liquid orb. Hold the
+            # pointer still until the rendered center catches up with the drop.
+            page.wait_for_function("""([x,y]) => {
+                const r=document.querySelector('feedback-widget').shadowRoot;
+                const lens=[...r.querySelectorAll('.fb-orb-lens')].find(el=>el.getBoundingClientRect().width>0);
+                if (!lens) return false;
+                const b=lens.getBoundingClientRect();
+                return Math.hypot(b.x+b.width/2-x,b.y+b.height/2-y)<1.5;
+            }""",arg=list(drag_to),timeout=5000)
     page.mouse.up()
     if drag_to and expect == "region":
         page.locator(".fb-region-overlay").wait_for(state="visible", timeout=timeout)
+        page.wait_for_function("""() => {
+            const tools=document.querySelector('feedback-widget').shadowRoot.querySelector('.fb-region-tools');
+            return tools && tools.style.opacity==='1';
+        }""",timeout=5000)
     else:
         page.locator(".fb-panel").wait_for(state="visible", timeout=timeout)
     return {"orbBox": box, "dragging": dragging}
@@ -425,8 +441,8 @@ def p1_orb_drag(deps):
     check("P1 覆盖层打开时面板尚未打开（草稿未写入）", not page.locator(".fb-panel").is_visible())
     frame = page.locator(".fb-region-frame").bounding_box()
     check(
-        "P1 初始选区 = min(400,80vw)×min(260,40vh) = 400×260",
-        frame is not None and round(frame["width"]) == 400 and round(frame["height"]) == 260,
+        "P1 初始选区为 144×144",
+        frame is not None and round(frame["width"]) == 144 and round(frame["height"]) == 144,
         str(frame),
     )
     if frame:
@@ -1044,8 +1060,8 @@ def p8_slow_session_close_reopen(deps):
     page.locator(".fb-login-panel").wait_for(state="visible", timeout=15000)
     login_in_panel(page, deps, user=deps["panel_user2"], pw=deps["panel_pass2"])
     page.wait_for_selector(".fb-task-link", timeout=90000)
-    # 回到撰写视图：额度行只在撰写视图渲染（「再记一条」是卡片区最后一个按钮）。
-    page.locator(".fb-status-card .fb-card-actions button").last.click()
+    # 回执上的「再记一条」回到撰写视图，额度行位于该视图。
+    page.get_by_role("button", name="再记一条", exact=True).click()
     page.wait_for_timeout(500)
 
     # 只让**第一次**会话查询变慢（2.5s）：页面侧慢网络，不改服务端。
@@ -1674,6 +1690,7 @@ def p10_server_override(deps):
         check("P10 A 服务签发令牌", bool(token_a), str(token_a))
 
         # ---- 未关闭面板即可进入设置；异址 + 草稿 → 确认块 ----
+        page.get_by_role("button", name="再记一条", exact=True).click()
         page.locator(".fb-textarea").fill("切服前的草稿")
         page.locator(".fb-settings-btn").click()
         page.locator(".fb-settings").wait_for(state="visible", timeout=15000)
@@ -1842,10 +1859,10 @@ def p1r_region_flow(deps):
     drag_orb(page, drag_to=(640, 400), expect="region")
     fb = frame_box(page)
     check(
-        "P1R 中央：初始选区400×260、中心=(640,400)",
+        "P1R 中央：初始选区144×144、中心=(640,400)",
         fb is not None
-        and round(fb["width"]) == 400
-        and round(fb["height"]) == 260
+        and round(fb["width"]) == 144
+        and round(fb["height"]) == 144
         and abs(fb["x"] + fb["width"] / 2 - 640) <= 2
         and abs(fb["y"] + fb["height"] / 2 - 400) <= 2,
         str(fb),
@@ -1854,8 +1871,8 @@ def p1r_region_flow(deps):
         check("P1R 覆盖层选区帧可测量", False, ".fb-region-frame bounding_box() 为 None")
         page.close()
         return
-    handles = page.locator(".fb-region-handle").count()
-    check("P1R 选区带八个缩放控制点", handles == 8, f"handles={handles}")
+    handles = page.locator(".fb-region-handle").evaluate_all("els => els.map(el => el.dataset.handle).sort()")
+    check("P1R 选区四角可缩放", handles == ["ne","nw","se","sw"], str(handles))
 
     # 移动：框内按下拖动
     cx, cy = fb["x"] + fb["width"] / 2, fb["y"] + fb["height"] / 2
@@ -1919,8 +1936,8 @@ def p1r_region_flow(deps):
         check(
             f"P1R {name}({tx2},{ty2}) 选区整体在视口内且为初始尺寸",
             f is not None
-            and round(f["width"]) == 400
-            and round(f["height"]) == 260
+            and round(f["width"]) == 144
+            and round(f["height"]) == 144
             and f["x"] >= -1
             and f["y"] >= -1
             and f["x"] + f["width"] <= 1281
