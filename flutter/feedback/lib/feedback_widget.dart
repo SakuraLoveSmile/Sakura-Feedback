@@ -55,6 +55,7 @@ export 'src/images.dart'
 export 'src/launcher_style.dart' show FeedbackLauncherStyle;
 export 'src/wake_visual.dart' show FeedbackWakeVisual;
 export 'src/orb_entrance.dart' show FeedbackOrbEntrance;
+export 'src/orb_reflection.dart' show FeedbackOrbReflectionPreferences;
 export 'src/orb_idle.dart' show FeedbackOrbIdleStyle;
 export 'src/wake_gestures.dart' show FeedbackWakeGesture;
 export 'src/capture_mask.dart' show FeedbackCaptureMask;

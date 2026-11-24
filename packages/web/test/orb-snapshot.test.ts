@@ -55,6 +55,43 @@ beforeEach(()=>{
 afterEach(()=>{ restoreGeometry?.(); restoreGeometry=null; cleanup(); vi.useRealTimers(); });
 
 describe('decorative lens capture privacy and lifetime',()=>{
+  it('remembers edge reflection per app while the liquid lens keeps its live masked texture',async()=>{
+    const mounted = mount({'launcher-mode':'orb'});
+    const toggle = (root: ShadowRoot) => root.querySelector<HTMLInputElement>('input[name=orb-reflection]')!;
+    await settle();
+    expect(toggle(mounted.root).checked).toBe(true);
+    toggle(mounted.root).click();
+    expect(draws.at(-1)![5]?.edgeReflection).toBe(false);
+    await nextCapture();
+    expect(uploads).toHaveLength(2);
+    expect(dispose).not.toHaveBeenCalled();
+    mounted.widget.remove();
+
+    const reopened = mount({'launcher-mode':'orb'});
+    await settle();
+    expect(toggle(reopened.root).checked).toBe(false);
+    expect(uploads).toHaveLength(3);
+    expect(draws.at(-1)![5]?.edgeReflection).toBe(false);
+    const provider = vi.fn(() => new Promise<never>(() => {}));
+    reopened.widget.captureProvider = provider;
+    pointer(reopened.orb,'pointerdown');
+    pointer(reopened.orb,'pointermove',180,140);
+    pointer(reopened.orb,'pointerup',240,190);
+    expect(provider).toHaveBeenCalledTimes(1);
+    reopened.widget.cancelCapture();
+    reopened.widget.setAttribute('app-id','another.app');
+    await settle();
+    expect(toggle(reopened.root).checked).toBe(true);
+    reopened.widget.setAttribute('app-id', APP_ID);
+    await settle();
+    expect(toggle(reopened.root).checked).toBe(false);
+    const count = renders.mock.calls.length;
+    toggle(reopened.root).click();
+    await nextCapture();
+    expect(draws.at(-1)![5]?.edgeReflection).toBe(true);
+    expect(renders).toHaveBeenCalledTimes(count + 1);
+  });
+
   it('only uploads the masked built-in image; provider is called once at actual release',async()=>{
     addNode('<div data-feedback-capture-mask>private account</div>','100,100,120,24');
     const m=mount({'launcher-mode':'orb'}); await settle();
@@ -265,7 +302,7 @@ describe('R7 safe-texture ownership',()=>{
   }
   function expectHandle(dark=false) {
     // R11 changes only the dark handle; ownership and masked sampling stay fixed.
-    expect(draws.at(-1)![5]).toEqual({halfSize:dark?{x:5,y:24}:{x:6,y:28},handleMix:1,mist:.74,idleMix:1});
+    expect(draws.at(-1)![5]).toEqual({halfSize:dark?{x:5,y:24}:{x:6,y:28},handleMix:1,mist:.74,idleMix:1,edgeReflection:true});
   }
   it.each(['full','handle','edge'].flatMap(style=>['explicit','system'].map(trigger=>({style,trigger}))))('R7 theme $trigger refreshes one masked background for the visible $style and wake keeps the new pixels',async({style,trigger})=>{
     vi.spyOn(window,'innerWidth','get').mockReturnValue(390);
@@ -356,7 +393,7 @@ describe('R7 safe-texture ownership',()=>{
     const canvas=m.root.querySelector<HTMLCanvasElement>('canvas.fb-orb-lens')!;
     expect(canvas.hidden).toBe(false); expect(canvas.width).toBeGreaterThan(1);
     pointer(m.orb,'pointerdown'); pointer(m.orb,'pointerup'); m.orb.click(); await settled();
-    expect(draws.at(-1)![5]).toEqual({halfSize:{x:28,y:28},handleMix:0,mist:.74,idleMix:1});
+    expect(draws.at(-1)![5]).toEqual({halfSize:{x:28,y:28},handleMix:0,mist:.74,idleMix:1,edgeReflection:true});
     expect(m.panel.classList.contains('is-open')).toBe(false);
     background.setAttribute('data-fake-color','rgb(255,255,0)');
     vi.advanceTimersByTime(5000); await settled(); expectHandle();
@@ -404,7 +441,7 @@ describe('R7 safe-texture ownership',()=>{
     expect(renders).toHaveBeenCalledTimes(2);
     expect(uploads).toHaveLength(1); expect(closes[0]).toHaveBeenCalledTimes(1);
     expect(canvas.hidden).toBe(false); expect(m.provider).not.toHaveBeenCalled();
-    expect(draws.at(-1)![5]).toEqual({halfSize:{x:28,y:28},handleMix:0,mist:.74,idleMix:1});
+    expect(draws.at(-1)![5]).toEqual({halfSize:{x:28,y:28},handleMix:0,mist:.74,idleMix:1,edgeReflection:true});
   });
 });
 
@@ -565,7 +602,7 @@ describe('R3 neutral glass and component theme',()=>{
     pointer(m.orb,'pointerdown'); pointer(m.orb,'pointermove',180,140); pointer(m.orb,'pointerup',180,140); await settle();
     expect(m.root.querySelector<HTMLElement>('.fb-region-overlay')!.hidden).toBe(false);
     expect(draws.at(-1)![4]).toBe(true);
-    expect(draws.at(-1)![5]).toBeUndefined(); // selection keeps the R3 clear material defaults
+    expect(draws.at(-1)![5]).toEqual({gestureGlass:false,edgeReflection:true}); // docked orb keeps its clear material
     const frozen=m.root.querySelector<HTMLImageElement>('.fb-region-bg')!.src;
     const captures=renders.mock.calls.length,clears=clear.mock.calls.length,urls=vi.mocked(URL.createObjectURL).mock.calls.length;
     now=80; change(false);

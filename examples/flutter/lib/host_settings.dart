@@ -42,6 +42,7 @@ class HostFeedbackSettings {
 Future<void> showHostFeedbackSettings(
   BuildContext context, {
   required HostFeedbackSettings settings,
+  required FeedbackOrbReflectionPreferences reflection,
   required ValueChanged<HostFeedbackSettings> onChanged,
 }) {
   return showModalBottomSheet<void>(
@@ -51,6 +52,7 @@ Future<void> showHostFeedbackSettings(
     builder: (BuildContext context) {
       return _HostFeedbackSettingsSheet(
         initial: settings,
+        reflection: reflection,
         onChanged: onChanged,
       );
     },
@@ -61,10 +63,12 @@ Future<void> showHostFeedbackSettings(
 class _HostFeedbackSettingsSheet extends StatefulWidget {
   const _HostFeedbackSettingsSheet({
     required this.initial,
+    required this.reflection,
     required this.onChanged,
   });
 
   final HostFeedbackSettings initial;
+  final FeedbackOrbReflectionPreferences reflection;
   final ValueChanged<HostFeedbackSettings> onChanged;
 
   @override
@@ -153,6 +157,19 @@ class _HostFeedbackSettingsSheetState
                   ),
               ],
             ),
+            if (_current.launcherStyle == FeedbackLauncherStyle.orb)
+              ListenableBuilder(
+                listenable: widget.reflection,
+                builder: (context, _) => SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('边缘反射'),
+                  subtitle: Text(widget.reflection.sessionOnly
+                      ? '在球体边缘显示倒影 · 仅本次生效'
+                      : '在球体边缘显示倒影'),
+                  value: widget.reflection.enabled,
+                  onChanged: widget.reflection.ready ? widget.reflection.select : null,
+                ),
+              ),
             const SizedBox(height: 24),
             Align(
               alignment: Alignment.centerRight,

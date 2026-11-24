@@ -65,6 +65,11 @@ describe('WebGL lens resource and coordinate contract',()=>{
     expect(values.get('uMagnification')).toEqual([1.62]); expect(values.get('uRimStrength')).toEqual([.64]);
     expect(values.get('uDark')).toEqual([0]);
     expect(values.get('uHasImage')).toEqual([1]);
+    expect(values.get('uEdgeReflection')).toEqual([1]);
+    lens.draw({x:200,y:150},52,liquid,1,false,{gestureGlass:true,edgeReflection:false});
+    expect(values.get('uEdgeReflection')).toEqual([0]);
+    expect(values.get('uHasImage')).toEqual([1]);
+    expect(values.get('uGestureGlass')).toEqual([1]);
     expect(calls.get('pixelStorei')).toHaveBeenCalledWith(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL,gl.NONE);
     expect(calls.get('pixelStorei')).toHaveBeenCalledWith(gl.UNPACK_FLIP_Y_WEBGL,false);
     expect(calls.get('blendFunc')).toHaveBeenCalledWith(gl.ONE,gl.ONE_MINUS_SRC_ALPHA);
@@ -120,7 +125,7 @@ function shaderMath(source:string, values:Map<string,unknown>, channel:number):S
       .replace('return vec4(rgb,alpha);','return [rgb,alpha];');
     return `function ${name}(${args}) {${body}}`;
   }).join('\n');
-  const uniforms=['uMagnification','uRimStrength','uHasImage','uOpacity','uDark','uRadius','uHalfSize','uHandleMix','uMist','uIdleMix'];
+  const uniforms=['uMagnification','uRimStrength','uHasImage','uOpacity','uDark','uRadius','uHalfSize','uHandleMix','uMist','uIdleMix','uEdgeReflection'];
   const mix=(a:number,b:number,t:number)=>a+(b-a)*t;
   const clamp=(x:number,a:number,b:number)=>Math.max(a,Math.min(b,x));
   return Function(...uniforms,'pow','exp','cos','sin','sqrt','max','mix','clamp','smoothstep',`${functions}\nreturn {${names.join(',')}};`)(

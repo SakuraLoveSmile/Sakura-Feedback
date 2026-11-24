@@ -2,7 +2,9 @@
 // near the rim. The reflected strip therefore follows the sampled content.
 float gestureGlassBend(float r) {
     float fold = smoothstep(.60, 1.0, r);
-    return .92 - .60 * fold * fold;
+    // Without the mirrored band the source radius stays increasing all the
+    // way to the silhouette. Both profiles share the same central lens.
+    return .92 + mix(.08, -.60, uEdgeReflection) * fold * fold;
 }
 
 // Compose in premultiplied space so a transparent/missing host texture
@@ -12,7 +14,7 @@ vec4 gestureGlassSurface(vec4 sampleColor, float r, vec2 ray, float radius, floa
     float light = .5 + .5 * dot(ray, vec2(.60, .80));
     float rim = exp(-pow(abs(edgePx + .9) / 1.2, 2.0));
     float shoulder = exp(-pow(abs(r - .91) / .055, 2.0));
-    float reflection = inside * (rim * (.24 + .54 * light) + shoulder * .12 * light);
+    float reflection = inside * (rim * .24 + uEdgeReflection * (rim * .54 + shoulder * .12) * light);
     float shade = inside * rim * (.18 + .28 * (1.0-light));
     float shadow = (1.0-inside) * .20 * exp(-pow(max(edgePx,0.0) / 2.6, 2.0));
     vec4 body = sampleColor * inside;

@@ -20,6 +20,7 @@ function mask(element: HTMLElement, radius: number, stops: string): void {
 }
 
 const spectrum = 'conic-gradient(from 90deg at center, #3d370c 0deg, #40251b 45deg, #3e2040 90deg, #252848 135deg, #103744 175deg, #1a3248 215deg, #343744 268deg, #3e3424 310deg, #3d370c 360deg)';
+const highlights = 'conic-gradient(from 90deg at center, #f1c37b 0deg, #f1ae92 45deg, #d5a8da 90deg, #acb5e2 135deg, #82ccd3 175deg, #94bcdf 215deg, #b9b6de 268deg, #dfc4ab 310deg, #f1c37b 360deg)';
 const haloProfile = 'transparent 0%, #00000003 16%, #00000024 34%, #000000a3 52%, black 65%, #000000de 74%, #00000059 86%, #0000000f 95%, transparent 100%';
 
 function aurora(
@@ -27,6 +28,8 @@ function aurora(
 ): (t: number) => void {
   const halo = layer(parent, 'fb-wake-spectrum');
   halo.style.backgroundImage = spectrum;
+  const tint = layer(parent, 'fb-wake-highlights');
+  tint.style.backgroundImage = highlights;
   const start = shortSide * .06;
   return t => {
     const radius = start + (far * 1.60 - start) * (1 - (1 - t) ** 1.5);
@@ -37,8 +40,12 @@ function aurora(
       masks.push(`radial-gradient(ellipse 70% 70% at center, transparent 54%, rgba(0,0,0,${(edge * .24).toFixed(3)}) 74%, rgba(0,0,0,${edge.toFixed(3)}) 100%)`);
     }
     // 同一层颜色穿过合并后的蒙版，两指波面相交时不会过曝。
-    halo.style.setProperty('--fb-wave-mask', masks.join(', '));
-    halo.style.opacity = (smooth(t / .13) * (1 - smooth((t - .68) / .32))).toFixed(3);
+    const maskImage = masks.join(', ');
+    const opacity = (smooth(t / .13) * (1 - smooth((t - .68) / .32))).toFixed(3);
+    for (const band of [halo, tint]) {
+      band.style.setProperty('--fb-wave-mask', maskImage);
+      band.style.opacity = opacity;
+    }
   };
 }
 
@@ -48,25 +55,26 @@ function ripple(
   const { width, height } = viewport;
   const unit = Math.min(Math.min(width, height) / 361, 1.6);
   const slopes = [layer(parent, 'fb-ripple-wave'), layer(parent, 'fb-ripple-wave')];
-  for (const slope of slopes) slope.style.backgroundRepeat = 'no-repeat';
+  for (const wave of slopes) {
+    wave.style.backgroundImage = `url("${frozenUrl}")`;
+    wave.style.backgroundRepeat = 'no-repeat';
+  }
   return (t, radius) => {
     if (radius <= 0) return;
     const amplitude = smooth(t / .065) * (1 - smooth((t - .275) / .625));
-    const halfWidth = Math.min(radius * .18, Math.max(3 * unit, Math.min(radius * .10, 25 * unit)));
-    const dim = (.26 * Math.min(1, t * 2000 / 430)).toFixed(3);
+    const halfWidth = Math.min(radius * .20, Math.max(2.4 * unit, Math.min(radius * .05, 12 * unit)));
+    const bend = amplitude * Math.min(halfWidth * .78, 6.5 * unit);
     parent.style.setProperty('--fb-water-angle', (t * 120).toFixed(2) + 'deg');
     slopes.forEach((wave, i) => {
       const outerSlope = i === 0;
-      const crest = radius + halfWidth * (outerSlope ? .63 : -.30);
-      const scale = 1 + amplitude * halfWidth * (outerSlope ? -.25 : .44) / radius;
+      const crest = radius + halfWidth * (outerSlope ? 1 : -1);
+      const scale = crest / (crest + (outerSlope ? bend : -bend));
       const stop = (offset: number) => Math.max(0, crest + offset * halfWidth).toFixed(2) + 'px';
-      const shade = `radial-gradient(circle at var(--fb-wake-origin), #25365400 ${stop(-1)}, #25365470 ${stop(-.40)}, #4f8bbb62 ${stop(-.16)}, #f5ecd088 ${stop(.06)}, #d8eaf445 ${stop(.31)}, #d8eaf400 ${stop(1)})`;
       // 同一波峰的内外两坡采样同一张已遮挡的冻结图，折射方向相反。
-      wave.style.backgroundImage = `${shade}, linear-gradient(rgb(99 93 146 / ${dim}), rgb(99 93 146 / ${dim})), url("${frozenUrl}")`;
-      wave.style.backgroundSize = `100% 100%, 100% 100%, ${width * scale}px ${height * scale}px`;
-      wave.style.backgroundPosition = `0 0, 0 0, ${x * (1 - scale)}px ${y * (1 - scale)}px`;
-      mask(wave, crest + halfWidth, `transparent ${stop(-1)}, #0000004d ${stop(-.63)}, black ${stop(-.24)}, black ${stop(0)}, #000000e0 ${stop(.33)}, #00000040 ${stop(.72)}, transparent ${stop(1)}`);
-      wave.style.opacity = (amplitude * (outerSlope ? .66 : 1)).toFixed(3);
+      wave.style.backgroundSize = `${width * scale}px ${height * scale}px`;
+      wave.style.backgroundPosition = `${x * (1 - scale)}px ${y * (1 - scale)}px`;
+      mask(wave, crest + halfWidth, `transparent ${stop(-1)}, #0008 ${stop(-.60)}, black ${stop(0)}, #0008 ${stop(.60)}, transparent ${stop(1)}`);
+      wave.style.opacity = (amplitude * (outerSlope ? .9 : 1)).toFixed(3);
     });
   };
 }
@@ -77,7 +85,6 @@ export function createWakePaint(
   { x, y }: WakePoint, fingertips: readonly WakePoint[],
 ) {
   parent.replaceChildren();
-  parent.classList.toggle('is-aurora', visual === 'aurora');
   parent.style.setProperty('--fb-wake-origin', `${x}px ${y}px`);
   const shortSide = Math.min(width, height);
   if (visual === 'aurora') {
@@ -97,7 +104,7 @@ export function createWakePaint(
   let surface: ReturnType<typeof createWaterSurface> = null;
   let attempted = false;
   return {
-    draw(t: number, dim: number) {
+    draw(t: number) {
       const travel = Math.min(1, t / .9);
       const radius = far * (.38 * travel + .62 * smooth(travel));
       if (!attempted && image.complete && image.naturalWidth > 0) {
@@ -109,7 +116,7 @@ export function createWakePaint(
         }
       }
       if (surface) {
-        if (surface.draw(t * 2, dim, radius)) return;
+        if (surface.draw(t * 2, radius)) return;
         surface.dispose();
         surface = null;
         drawFallback = fallback();

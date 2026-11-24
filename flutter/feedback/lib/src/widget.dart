@@ -29,10 +29,12 @@ import 'api_client.dart'
         FeedbackLogProvider;
 import 'capture_mask.dart';
 import 'capture_selection.dart';
+import 'beam_aurora.dart' show kBeamDimColor, kBeamDimOpacity;
 import 'config.dart';
 import 'controller.dart';
 import 'launcher_style.dart';
 import 'orb_entrance.dart';
+import 'orb_reflection.dart';
 import 'wake_visual.dart';
 import 'orb.dart';
 import 'orb_liquid.dart';
@@ -185,6 +187,8 @@ class FeedbackWidget extends StatefulWidget {
     this.onWakeVisualChanged,
     this.orbEntrance,
     this.onOrbEntranceChanged,
+    this.orbReflectionEnabled,
+    this.onOrbReflectionChanged,
     this.hideSettings = false,
     this.orbIdleStyle,
     this.onOrbIdleStyleChanged,
@@ -231,6 +235,10 @@ class FeedbackWidget extends StatefulWidget {
 
   /// 面板中改选入场动画后的回调。只提供 [orbEntrance] 时隐藏该项。
   final ValueChanged<FeedbackOrbEntrance>? onOrbEntranceChanged;
+
+  /// 是否显示灵感球边缘的倒影。球心始终使用液态玻璃折射。
+  final bool? orbReflectionEnabled;
+  final ValueChanged<bool>? onOrbReflectionChanged;
 
   /// 设置页只显示服务器设置。默认为 false，按各项托管状态显示反馈设置。
   final bool hideSettings;
@@ -288,6 +296,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
   late final FeedbackLauncherStylePreferences _launcherStylePreferences;
   late final FeedbackWakeVisualPreferences _wakeVisualPreferences;
   late final FeedbackOrbEntrancePreferences _entrancePreferences;
+  late final FeedbackOrbReflectionPreferences _reflectionPreferences;
   FeedbackOrbEntrance _activeEntrance = FeedbackOrbEntrance.bead;
   Offset _entranceAxis = const Offset(.89, -.22);
   final FocusNode _beamFocusNode = FocusNode(debugLabel: 'feedback-beam-a11y');
@@ -341,6 +350,8 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
       widget.wakeVisual ?? _wakeVisualPreferences.visual;
   FeedbackOrbEntrance get _entrance =>
       widget.orbEntrance ?? _entrancePreferences.visual;
+  bool get _reflectionEnabled =>
+      widget.orbReflectionEnabled ?? _reflectionPreferences.enabled;
 
   /// 宿主托管值优先；未托管时，仅默认模式读取本机入口偏好。
   FeedbackLauncherMode _launcherModeFor(FeedbackWidget host) {
@@ -930,6 +941,10 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
         appId: widget.config.appId, store: _wakePrefStore)
       ..addListener(_wakeVisualPreferencesChanged);
     unawaited(_entrancePreferences.load());
+    _reflectionPreferences = FeedbackOrbReflectionPreferences(
+        appId: widget.config.appId, store: _wakePrefStore)
+      ..addListener(_wakeVisualPreferencesChanged);
+    if (widget.orbReflectionEnabled == null) unawaited(_reflectionPreferences.load());
     HardwareKeyboard.instance.addHandler(_handleGlobalKeyEvent);
     GestureBinding.instance.pointerRouter.addGlobalRoute(_globalPointerRoute);
     _bindController(_controller);
@@ -1252,8 +1267,11 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
       _launcherStylePreferences.rebind(
           appId: widget.config.appId, store: _wakePrefStore);
       _entrancePreferences.rebind(appId: widget.config.appId, store: _wakePrefStore);
+      _reflectionPreferences.rebind(appId: widget.config.appId, store: _wakePrefStore);
       _wakeVisualPreferences.rebind(
           appId: widget.config.appId, store: _wakePrefStore);
+    } else if (oldWidget.orbReflectionEnabled != null && widget.orbReflectionEnabled == null) {
+      _reflectionPreferences.rebind(appId: widget.config.appId, store: _wakePrefStore);
     }
     if (oldWidget.config.captureMode != widget.config.captureMode) {
       _invalidateCaptureSession();
@@ -1471,6 +1489,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
     _idlePreferences.dispose();
     _launcherStylePreferences.dispose();
     _entrancePreferences.dispose();
+    _reflectionPreferences.dispose();
     _wakeVisualPreferences.dispose();
     _beamFocusNode.dispose();
     _wakeRecognizer?.cancel();
@@ -2349,7 +2368,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
               sigmaX: 3 * orbSmoothstep(0, 350, ms),
               sigmaY: 3 * orbSmoothstep(0, 350, ms)),
           child: RawImage(image: flow.background, fit: BoxFit.fill)),
-      const ColoredBox(color: Color(0x42635D92)),
+      ColoredBox(color: kBeamDimColor.withValues(alpha: kBeamDimOpacity)),
     ]));
   }
 
@@ -2627,8 +2646,12 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
                       wakeOrigins: _selectionCapture!.wakeOrigins,
                       busy: _selectionBusy,
                       error: _selectionError,
+                      onRedraw: () {
+                        if (_selectionError != null) setState(() => _selectionError = null);
+                      },
                       orbCenter: _selectionOrbCenter,
                       orbShader: _selectionShader,
+                      edgeReflection: _reflectionEnabled,
                       scale: _selectionCapture!.scale,
                       direction: _selectionDirection,
                       deform: _selectionDeform,
@@ -3154,10 +3177,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
                           wobble: _liquid.wobble,
                           color: MediaQuery.highContrastOf(context)
                               ? Theme.of(context).colorScheme.onSurface
-                              : Theme.of(context)
-                                  .colorScheme
-                                  .onSurface
-                                  .withValues(alpha: .4))));
+                              : Theme.of(context).colorScheme.onSurface.withValues(alpha: .4))));
             }
             final RenderRepaintBoundary? boundary =
                 _repaintBoundaryKey.currentContext?.findRenderObject()
@@ -3186,6 +3206,7 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
                             image: snapshot.image,
                             shader: snapshot.shader,
                             gestureGlass: gestureGlass,
+                            edgeReflection: _reflectionEnabled,
                             entrance: _activeEntrance,
                             entranceProgress: entranceProgress,
                             entranceAxis: _entranceAxis,
@@ -3252,6 +3273,12 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
               ? widget.onWakeVisualChanged
               : _wakeVisualPreferences.select,
           entrance: _entrance,
+          orbReflectionEnabled: _reflectionEnabled,
+          onOrbReflectionChanged: widget.orbReflectionEnabled != null
+              ? widget.onOrbReflectionChanged
+              : _reflectionPreferences.select,
+          reflectionSessionOnly:
+              widget.orbReflectionEnabled == null && _reflectionPreferences.sessionOnly,
           onEntranceChanged: widget.orbEntrance != null
               ? widget.onOrbEntranceChanged
               : _entrancePreferences.select,

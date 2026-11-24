@@ -123,6 +123,7 @@ Future<_Pixels> _render(
   double mist = 0,
   double idleMix = 0,
   FeedbackOrbEntrance? entrance,
+  bool edgeReflection = true,
   double entranceProgress = 1,
 }) async {
   final ui.FragmentProgram program = await _loadOrbLensProgram();
@@ -143,6 +144,7 @@ Future<_Pixels> _render(
       mist: mist,
       idleMix: idleMix,
       gestureGlass: entrance != null,
+      edgeReflection: edgeReflection,
       entrance: entrance ?? FeedbackOrbEntrance.bead,
       entranceProgress: entranceProgress,
       entranceAxis: const Offset(.9, 0),
@@ -172,6 +174,34 @@ Future<_Pixels> _render(
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  testWidgets('关闭边缘反射保留球心放大，只移除球缘折返的倒影', (tester) async {
+    await tester.runAsync(() async {
+      final image = await _image((canvas) {
+        canvas.drawColor(const Color(0xFFFF0000), BlendMode.src);
+        canvas.drawRect(const Rect.fromLTWH(390, 0, 122, 512),
+            Paint()..color = const Color(0xFF0000FF));
+        canvas.drawRect(const Rect.fromLTWH(336, 0, 6, 512),
+            Paint()..color = const Color(0xFF00FF00));
+      });
+      try {
+        final on = await _render(image, entrance: FeedbackOrbEntrance.bead);
+        final off = await _render(image, entrance: FeedbackOrbEntrance.bead, edgeReflection: false);
+        // The green stripe is displaced outward by the same central lens in both frames.
+        for (final pixels in [on, off]) {
+          expect(pixels.channel(346, 256, 1), greaterThan(240));
+          expect(pixels.channel(346, 256, 3), 255);
+        }
+        // At the far rim the enabled lens folds back to red. With reflections
+        // disabled it samples the blue outer area while still drawing glass.
+        expect(on.channel(451, 256, 0), greaterThan(200));
+        expect(off.channel(451, 256, 2), greaterThan(200));
+        expect(off.channel(451, 256, 0), lessThan(60));
+      } finally {
+        image.dispose();
+      }
+    });
+  });
 
   testWidgets(
       'each entrance draws its own silhouette and settles into identical glass',
@@ -907,7 +937,8 @@ void main() {
       'uEntranceId',
       'uEntranceProgress',
       'uEntranceAxis',
-      'uEntranceAxis'
+      'uEntranceAxis',
+      'uEdgeReflection',
     ]);
     expect(
         orbLensUniformValues(
@@ -922,6 +953,7 @@ void main() {
             opacity: .8,
             dark: true,
             gestureGlass: true,
+            edgeReflection: false,
             localSize: const Size(166.4, 166.4)),
         <double>[
           800,
@@ -952,6 +984,7 @@ void main() {
           1,
           .89,
           -.22,
+          0,
         ]);
     expect(
         orbLensUniformValues(
@@ -961,7 +994,7 @@ void main() {
                 center: Offset.zero,
                 radiusPx: 52)
             .sublist(23),
-        [0, 0, 1, .89, -.22]);
+        [0, 0, 1, .89, -.22, 1]);
     expect(
         source,
         contains(

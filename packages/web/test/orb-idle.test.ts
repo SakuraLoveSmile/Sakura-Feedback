@@ -464,7 +464,7 @@ describe('third idle style: hidden',()=>{
     expect(values).toEqual(['handle','edge','hidden']);
     const titles=[...m.root.querySelectorAll<HTMLElement>('.fb-orb-idle-option')].map(option=>option.textContent);
     expect(titles).toEqual(['小把手','球体贴边','隐藏']);
-    const footnote=m.root.querySelector<HTMLElement>('.fb-orb-idle-settings .fb-footnote')!;
+    const footnote=m.root.querySelector<HTMLElement>('.fb-orb-idle-options + .fb-footnote')!;
     expect(footnote.textContent).toContain('闲置5秒后收起');
     expect(footnote.textContent).toContain('待机不显示灵感球');
     expect(footnote.textContent).toContain('唤醒手势');

@@ -333,7 +333,7 @@ describe('冻结视觉规格（styles.ts 字符串断言）', () => {
     expect(reducedOrb).not.toMatch(/\.fb-orb \{[^}]*transform: none !important/);
   });
 
-  it('渐变仅用于灵感球、编辑器棋盘格与唤醒水纹的角度蒙版', () => {
+  it('渐变限定为灵感球、棋盘格及水波蒙版', () => {
     const blocks = STYLES.split('}').filter((b) => /gradient\(/.test(b));
     expect(blocks.length).toBeGreaterThan(0);
     for (const block of blocks) {
@@ -345,6 +345,12 @@ describe('冻结视觉规格（styles.ts 字符串断言）', () => {
         expect(selector).toMatch(/fb-orb|fb-editor-(canvas|preview)/);
       }
     }
+  });
+
+  it('圈选提示的文字直接显示在截图上', () => {
+    const hint = /\.fb-lasso-hint \{([^}]+)\}/.exec(STYLES)![1]!;
+    expect(hint).not.toMatch(/background|box-shadow/);
+    expect(hint).toContain('text-shadow:');
   });
 
   it('点击目标 ≥44px：提交按钮与次要按钮；编辑器工具/按钮同样 44px', () => {
@@ -367,10 +373,11 @@ describe('冻结视觉规格（styles.ts 字符串断言）', () => {
     expect(STYLES).toContain('.fb-editor-save-hint');
   });
 
-  it('选区覆盖层：冻结位图、独立紫色遮罩、四角与独立关闭', () => {
+  it('选区覆盖层：冻结位图、独立中性遮罩、四角与独立关闭', () => {
     expect(STYLES).toContain('.fb-region-overlay');
     expect(STYLES).toMatch(/\.fb-region-bg \{[^}]*object-fit: fill/);
-    expect(STYLES).toContain('background:#635d92');
+    expect(STYLES).toContain('--fb-selection-scrim:#161616');
+    expect(STYLES).toContain('background:var(--fb-selection-scrim)');
     expect(STYLES).toContain('.fb-region-dim');
     expect(STYLES).toMatch(/\.fb-region-handle\[data-handle="nw"\]/);
     expect(STYLES).toMatch(/\.fb-region-handle\[data-handle="se"\]/);

@@ -3,20 +3,23 @@ import 'package:flutter/foundation.dart';
 
 import 'server_pref.dart';
 
-class LocalChoicePreferences<T extends Enum> extends ChangeNotifier {
+class LocalChoicePreferences<T extends Object> extends ChangeNotifier {
   LocalChoicePreferences(
       {required String appId,
       required FeedbackServerPrefStore store,
       required this.values,
+      required this.encode,
       required this.storageKey})
       : _appId = appId,
         _store = store;
   String _appId;
   FeedbackServerPrefStore _store;
   final List<T> values;
+  final String Function(T) encode;
   final String Function(String) storageKey;
   late T _visual = values.first;
   bool sessionOnly = false;
+  bool ready = false;
   int _identity = 0;
   int _revision = 0;
   bool _disposed = false;
@@ -38,13 +41,14 @@ class LocalChoicePreferences<T extends Enum> extends ChangeNotifier {
       if (!current()) return;
       final String? raw = await store.read(key);
       if (!current()) return;
-      _visual = values.firstWhere((v) => v.name == raw?.trim(),
+      _visual = values.firstWhere((v) => encode(v) == raw?.trim(),
           orElse: () => values.first);
       sessionOnly = false;
     } catch (_) {
       if (!current()) return;
       sessionOnly = true;
     }
+    ready = true;
     notifyListeners();
   }
 
@@ -54,6 +58,7 @@ class LocalChoicePreferences<T extends Enum> extends ChangeNotifier {
     _appId = appId;
     _store = store;
     _visual = values.first;
+    ready = false;
     sessionOnly = false;
     unawaited(load());
   }
@@ -63,7 +68,8 @@ class LocalChoicePreferences<T extends Enum> extends ChangeNotifier {
     final String key = storageKey(_appId);
     final FeedbackServerPrefStore store = _store;
     _visual = visual;
-    final String value = visual.name;
+    final String value = encode(visual);
+    ready = true;
     notifyListeners();
     final Map<String, Future<void>> tails =
         _writeTails.putIfAbsent(store, () => <String, Future<void>>{});

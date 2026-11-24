@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:feedback_widget/feedback_widget.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -62,11 +64,23 @@ class _FeedbackExampleAppState extends State<FeedbackExampleApp> {
   FeedbackLauncherStyle _launcherStyle = FeedbackLauncherStyle.beam;
   FeedbackWakeVisual _wakeVisual = FeedbackWakeVisual.ripple;
   FeedbackOrbEntrance _orbEntrance = FeedbackOrbEntrance.bead;
+  static const _appId = 'com.example.demo';
+  final _orbReflection = FeedbackOrbReflectionPreferences(appId: _appId);
+
+  @override
+  void initState() {
+    super.initState();
+    _orbReflection.addListener(_reflectionChanged);
+    unawaited(_orbReflection.load());
+  }
+
+  void _reflectionChanged() => setState(() {});
 
   /// 打开宿主设置页；每次改选都写回根 State 并由重建把新值交给组件。
   Future<void> _openHostSettings(BuildContext context) {
     return showHostFeedbackSettings(
       context,
+      reflection: _orbReflection,
       settings: HostFeedbackSettings(
         launcherStyle: _launcherStyle,
         wakeVisual: _wakeVisual,
@@ -93,6 +107,7 @@ class _FeedbackExampleAppState extends State<FeedbackExampleApp> {
   void dispose() {
     // 根 State 负责释放根持有的资源。
     _pageLabel.dispose();
+    _orbReflection.dispose();
     _feedback.dispose();
     _http.close();
     super.dispose();
@@ -106,7 +121,7 @@ class _FeedbackExampleAppState extends State<FeedbackExampleApp> {
       config: FeedbackConfig(
         // 改为你自己的 Feedback 服务地址与服务端登记的 appId。
         'http://localhost:8787',
-        'com.example.demo',
+        _appId,
         appVersion: '1.0.0',
         pageLabel: _pageLabel.value,
         side: FeedbackSide.right,
@@ -121,6 +136,7 @@ class _FeedbackExampleAppState extends State<FeedbackExampleApp> {
       launcherStyle: _launcherStyle,
       wakeVisual: _wakeVisual,
       orbEntrance: _orbEntrance,
+      orbReflectionEnabled: _orbReflection.enabled,
       hideSettings: true,
       // pageLabel 需要跟随路由变化：用 ValueListenableBuilder 局部重建配置。
       child: ValueListenableBuilder<String>(

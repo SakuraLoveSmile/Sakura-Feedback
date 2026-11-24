@@ -50,6 +50,7 @@ class LiquidHarness {
   bool reduced = false;
   ThemeData? theme;
   bool showLauncher = true;
+  bool? orbReflectionEnabled;
   FeedbackSide side = FeedbackSide.right;
   FeedbackCaptureMode captureMode = FeedbackCaptureMode.off;
   FeedbackLauncherMode launcherMode = FeedbackLauncherMode.orb;
@@ -83,6 +84,7 @@ class LiquidHarness {
                       captureMode: captureMode,
                       side: side),
                   controller: controller,
+                  orbReflectionEnabled: orbReflectionEnabled,
                   tokenStore: tokens,
                   serverPrefStore: preferences,
                   httpClient: client,

@@ -12,11 +12,11 @@ await 真实截图再冻结画面；REDUCED 场景用 ⌘/Ctrl+Shift+F 快捷键
 在 prefers-reduced-motion: reduce 下函数立即进入「压暗 + 圈选待命」，可稳定截图。
 
 7 帧：
-  1 beam-wake-250ms        冻结画面 + 水波纹从双指按压点扩散约 250ms（压暗渐入 / 未进入待命）
-  2 lasso-hint             圈选就绪，水波继续消退：压暗 0.26 + 圈选提示 + 选区框不出现
-  3 lasso-stroke           圈选中途：轨迹 .fb-lasso 非空、提示仍在
+  1 beam-wake-250ms        冻结画面 + 水波纹从双指按压点扩散约 250ms（原色页面 / 未进入待命）
+  2 lasso-hint             圈选就绪，水波继续消退：截图保持原色 + 圈选提示 + 选区框不出现
+  3 lasso-stroke           圈选中途：轨迹 .fb-lasso 非空、截图保持原色，提示隐藏
   4 lasso-committed        松手后包围盒展开为选区框（轨迹清空、提示隐藏）
-  5 panel-after-use        点「使用此区域」→ 面板带截图打开
+  5 panel-after-use        点「确认」→ 面板带截图打开
   6 reduced-motion-idle    reduced-motion 下快捷键唤醒：光束层 display:none，直接待命
   7 aurora-option          预置 wake-visual=aurora 后同一手势渲染波光（可选项真实生效）
 """
@@ -70,10 +70,10 @@ WAKE_HOLD_JS = """async (holdMs) => {
   const startedAt = performance.now();
   while (performance.now() - startedAt < 15000) {
     if (!window.__beam.overlay().hidden) {
-      // 覆盖层先以 is-lasso-arming 出现，下一帧 rAF 才由 animateBeam 写入压暗/光束：
-      // 以「第一次看到压暗 > 0」的帧作为光束动画 t=0，供调用方按真实进度取样。
-      const dim = window.__beam.q('.fb-region-dim');
-      const sample = () => Number.parseFloat(dim.style.opacity || '0') > 0;
+      // Observe the first rendered wave; the water leaves the page undimmed at first.
+      const sample = () => Number(window.__waterSamples?.seconds) > 0 ||
+        Number(window.__beam.q('.fb-ripple-wave')?.style.opacity) > 0 ||
+        Number(window.__beam.q('.fb-wake-spectrum')?.style.opacity) > 0;
       if (sample()) {
         return {armed: true, elapsedMs: Math.round(performance.now() - startedAt), beamReady: true};
       }
@@ -89,8 +89,7 @@ WAKE_HOLD_JS = """async (holdMs) => {
       return {
         armed: true,
         beamReady: sample(),
-        elapsedMs: Math.round(performance.now() - startedAt),
-        dim: dim.style.opacity || ''
+        elapsedMs: Math.round(performance.now() - startedAt)
       };
     }
     await raf();
@@ -117,6 +116,7 @@ WATER_PROBE_JS = r"""(() => {
     if (!beam?.classList.contains('fb-beam') || samples.later) return result;
     const program = this.getParameter(this.CURRENT_PROGRAM);
     const t = this.getUniform(program, this.getUniformLocation(program, 'seconds'));
+    samples.seconds = t;
     const stage = t > .015 && t < .22 ? 'early'
       : samples.early && t >= Math.max(.26, samples.early.t + .15) && t < .65 ? 'later' : null;
     if (stage && !samples[stage]) {
@@ -184,6 +184,7 @@ STATE_JS = """() => {
     beamOpacity: Number.parseFloat(getComputedStyle(window.__beam.q('.fb-beam')).opacity),
     beamDisplay: getComputedStyle(window.__beam.q('.fb-beam')).display,
     dimOpacity: Number.parseFloat(window.__beam.q('.fb-region-dim').style.opacity || '0'),
+    cancelHidden: getComputedStyle(window.__beam.q('.fb-region-cancel')).visibility === 'hidden',
     hintHidden: hint.hidden,
     hintText: (hint.textContent || '').trim(),
     lassoPoints: (lasso.getAttribute('points') || '').length,
@@ -451,11 +452,10 @@ def main() -> int:
                         armed_elapsed < BEAM_SAMPLE_MS - 60,
                         {"armedElapsedMs": armed_elapsed, "sampleMs": BEAM_SAMPLE_MS},
                     )
-                    # Capture time precedes animation start. Sample a rendered frame on
-                    # the 430ms dim curve rather than subtracting that capture latency.
+                    # Sample the drawn wave independently of the delayed selection dim.
                     page.wait_for_function(
-                        "threshold => Number(window.__beam.q('.fb-region-dim').style.opacity) >= threshold",
-                        arg=0.26 * BEAM_SAMPLE_MS / 430,
+                        "threshold => window.__waterSamples.seconds >= threshold",
+                        arg=BEAM_SAMPLE_MS / 1000,
                         timeout=2000,
                     )
                     measured = page.evaluate(BEAM_MEASURE_JS)
@@ -464,13 +464,13 @@ def main() -> int:
                     record(
                         "1-beam-wake-250ms",
                         "1-beam-wake-250ms.png",
-                        "冻结画面 + 水波纹从双指按压点扩散约 250ms：压暗渐入中，仍在波纹阶段（未进入圈选待命）",
+                        "原色冻结画面，水波纹从双指按压点向外扩散约 250ms，仍在波纹阶段",
                         dict(measured, armedElapsedMs=armed_elapsed),
                         [
                             ("覆盖层可见且处于光束阶段", (not measured["overlayHidden"]) and measured["arming"], measured),
                             ("早期水波出现在偏心触点附近，采样已遮挡底图", measured["gpu"] and measured.get("waterSamples", {}).get("early", {}).get("safe") and measured["waterSamples"]["early"]["first"] < 75 and measured["waterSamples"]["early"]["last"] < 130 and measured["rippleCount"] == 0 and measured["beamOpacity"] > .2, measured),
                             ("波心位于双指中点 (384,290)", measured["center"] == [384, 290], measured["center"]),
-                            ("压暗随波光渐入（>0.05，未超过稳态 0.26）且圈选提示未出现", 0.05 < measured["dimOpacity"] <= 0.265 and measured["hintHidden"], {"dim": measured["dimOpacity"], "hintHidden": measured["hintHidden"]}),
+                            ("水波经过原色页面且圈选提示未出现", measured["dimOpacity"] == 0 and measured["hintHidden"], {"dim": measured["dimOpacity"], "hintHidden": measured["hintHidden"]}),
                             ("当前模式为 beam 且面板未打开", measured["mode"] == "beam" and not measured["panelOpen"], {"mode": measured["mode"], "panelOpen": measured["panelOpen"]}),
                             ("无 pageerror/console error", not errors, errors),
                         ],
@@ -491,11 +491,11 @@ def main() -> int:
                     record(
                         "2-lasso-hint",
                         "2-lasso-hint.png",
-                        "压暗 0.26 + 「画个圈，只需圈出问题位置」提示；选区框与工具栏保持不可见",
+                        "截图保持原色 + 「圈出问题位置」提示；选区框与工具栏保持不可见",
                         state,
                         [
-                            ("压暗 0.26，水波余波期间可以圈选", abs(state["dimOpacity"] - 0.26) < 0.01 and state["beamOpacity"] > .9, {"dim": state["dimOpacity"], "beam": state["beamOpacity"]}),
-                            ("提示可见且文案一致", (not state["hintHidden"]) and state["hintText"] == "画个圈，只需圈出问题位置", {"hidden": state["hintHidden"], "text": state["hintText"]}),
+                            ("截图保持原色，水波余波期间可以圈选", state["dimOpacity"] == 0 and state["beamOpacity"] > .9, {"dim": state["dimOpacity"], "beam": state["beamOpacity"]}),
+                            ("提示可见且文案一致", (not state["hintHidden"]) and state["hintText"] == "圈出问题位置", {"hidden": state["hintHidden"], "text": state["hintText"]}),
                             ("未圈选前选区框隐藏、无轨迹", state["frameOpacity"] == "0" and state["lassoPoints"] == 0, {"frameOpacity": state["frameOpacity"], "points": state["lassoPoints"]}),
                         ],
                     )
@@ -508,11 +508,11 @@ def main() -> int:
                     record(
                         "3-lasso-stroke",
                         "3-lasso-stroke.png",
-                        "按住拖动中的轨迹（.fb-lasso 非空），提示仍在，尚未形成选区框",
+                        "按住拖动中的轨迹（.fb-lasso 非空），提示让开，截图保持原色，尚未形成选区框",
                         mid,
                         [
                             ("轨迹非空，水波已退出", mid["lassoPoints"] > 0 and mid["beamOpacity"] < .02, mid),
-                            ("提示仍在且选区框未成形", (not mid["hintHidden"]) and mid["frameOpacity"] == "0", {"hintHidden": mid["hintHidden"], "frameOpacity": mid["frameOpacity"]}),
+                            ("提示隐藏且选区框未成形", mid["hintHidden"] and mid["cancelHidden"] and mid["dimOpacity"] == 0 and mid["frameOpacity"] == "0", {"hintHidden": mid["hintHidden"], "frameOpacity": mid["frameOpacity"]}),
                         ],
                     )
 
@@ -534,8 +534,8 @@ def main() -> int:
                         committed,
                         [
                             ("轨迹清空、提示隐藏", committed["lassoPoints"] == 0 and committed["hintHidden"], {"points": committed["lassoPoints"], "hintHidden": committed["hintHidden"]}),
-                            ("选区框可见且有尺寸标注", float(committed["frameOpacity"] or 0) > 0.9 and bool(committed["frameSize"]), {"opacity": committed["frameOpacity"], "size": committed["frameSize"]}),
-                            ("「使用此区域」可见", committed["useVisible"] and committed["useText"] == "使用此区域", {"visible": committed["useVisible"], "text": committed["useText"]}),
+                            ("选区框可见且有尺寸标注", float(committed["frameOpacity"] or 0) > 0.9 and bool(committed["frameSize"]) and abs(committed["dimOpacity"] - .26) < .01, {"opacity": committed["frameOpacity"], "size": committed["frameSize"]}),
+                            ("「确认」可见", committed["useVisible"] and committed["useText"] == "确认", {"visible": committed["useVisible"], "text": committed["useText"]}),
                             # 选区 = 轨迹包围盒外扩 8px：宽高都应明显大于原始轨迹（图表区约 560×300），
                             # 且选区包含全部轨迹点（松手前从 DOM 采样，先于组件清空 points）。
                             (
@@ -556,7 +556,7 @@ def main() -> int:
                     record(
                         "5-panel-after-use",
                         "5-panel-after-use.png",
-                        "点「使用此区域」→ 面板打开并带一张裁剪后的截图（blob:）",
+                        "点「确认」→ 面板打开并带一张裁剪后的截图（blob:）",
                         panel,
                         [
                             ("面板已打开且覆盖层关闭", panel["panelOpen"] and not panel["panelHidden"], {"open": panel["panelOpen"], "hidden": panel["panelHidden"]}),
@@ -583,7 +583,7 @@ def main() -> int:
                         reduced,
                         [
                             ("光束层 display:none（跳过动画）", reduced["beamDisplay"] == "none", reduced["beamDisplay"]),
-                            ("直接进入待命：压暗 0.26 + 提示可见", abs(reduced["dimOpacity"] - 0.26) < 0.01 and not reduced["hintHidden"], {"dim": reduced["dimOpacity"], "hintHidden": reduced["hintHidden"]}),
+                            ("直接进入待命：截图保持原色 + 提示可见", reduced["dimOpacity"] == 0 and not reduced["hintHidden"], {"dim": reduced["dimOpacity"], "hintHidden": reduced["hintHidden"]}),
                             ("无 pageerror/console error", not reduced_errors, reduced_errors),
                         ],
                     )

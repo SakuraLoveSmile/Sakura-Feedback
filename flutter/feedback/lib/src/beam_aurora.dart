@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 import 'wake_paint.dart';
 
 const Duration kBeamAuroraDuration = Duration(milliseconds: 720);
-const Color kBeamDimColor = Color(0xFF635D92);
+const Color kBeamDimColor = Color(0xFF161616);
 const double kBeamDimOpacity = 0.26;
 
 /// 从触点向屏幕边缘铺开的虹彩光晕，中央透明，两侧柔和消隐。
@@ -20,18 +20,19 @@ class BeamAuroraPainter extends CustomPainter {
   final List<Offset> fingertips;
 
   // SweepGradient 从正右方向开始顺时针采色，首尾相接。这里存的是加到原像素的光量，暗色文字能保留轮廓。
+  static const _stops = [
+    0.0,
+    .125,
+    .25,
+    .375,
+    175 / 360,
+    215 / 360,
+    268 / 360,
+    310 / 360,
+    1.0
+  ];
   static const _spectrum = SweepGradient(
-    stops: [
-      0,
-      45 / 360,
-      .25,
-      135 / 360,
-      175 / 360,
-      215 / 360,
-      268 / 360,
-      310 / 360,
-      1
-    ],
+    stops: _stops,
     colors: [
       Color(0xFF3D370C),
       Color(0xFF40251B),
@@ -44,6 +45,19 @@ class BeamAuroraPainter extends CustomPainter {
       Color(0xFF3D370C),
     ],
   );
+
+  // The same halo limits bright channels to these tints when additive light would wash out.
+  static const _highlights = SweepGradient(stops: _stops, colors: [
+    Color(0xFFF1C37B),
+    Color(0xFFF1AE92),
+    Color(0xFFD5A8DA),
+    Color(0xFFACB5E2),
+    Color(0xFF82CCD3),
+    Color(0xFF94BCDF),
+    Color(0xFFB9B6DE),
+    Color(0xFFDFC4AB),
+    Color(0xFFF1C37B),
+  ]);
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -61,6 +75,7 @@ class BeamAuroraPainter extends CustomPainter {
       fingertips.isEmpty ? [origin] : fingertips,
       radius,
       spectrum: _spectrum,
+      highlights: _highlights,
       edgeStrength: .42 * wakeSmooth((t - .40) / .34),
       opacity: wakeSmooth(t / .13) * (1 - wakeSmooth((t - .68) / .32)),
     );

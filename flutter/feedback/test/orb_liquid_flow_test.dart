@@ -246,25 +246,31 @@ void main() {
     final Finder secondary =
         find.byKey(const Key('feedback-capture-whole-window'));
     final ButtonStyle primaryStyle =
-        tester.widget<FilledButton>(primary).style!;
+        tester.widget<TextButton>(primary).style!;
     final ButtonStyle secondaryStyle =
         tester.widget<TextButton>(secondary).style!;
-    expect(primaryStyle.backgroundColor!.resolve(<WidgetState>{}),
-        const Color(0xFF0071E3));
-    expect(
-        primaryStyle.foregroundColor!.resolve(<WidgetState>{}), Colors.white);
-    final ColorScheme scheme = Theme.of(tester.element(secondary)).colorScheme;
-    final Material card =
-        tester.widget(find.byKey(const Key('feedback-capture-toolbar')));
-    expect(card.color, scheme.surface);
-    expect(secondaryStyle.foregroundColor!.resolve(<WidgetState>{}),
-        scheme.onSurfaceVariant);
+    expect(primaryStyle.backgroundColor!.resolve(<WidgetState>{}), Colors.white);
+    expect(primaryStyle.foregroundColor!.resolve(<WidgetState>{}), const Color(0xFF202020));
+    expect(secondaryStyle.foregroundColor!.resolve(<WidgetState>{}), Colors.white);
+    final Material surface = tester.widget(find.byKey(const Key('feedback-capture-tools')));
+    expect(surface.type, MaterialType.transparency);
     expect(tester.getSize(primary).height, greaterThanOrEqualTo(44));
     expect(tester.getSize(secondary).height, greaterThanOrEqualTo(44));
-    final BuildContext label = tester.element(find.text('使用此区域'));
-    expect(DefaultTextStyle.of(label).style.color, Colors.white);
-    expect(DefaultTextStyle.of(tester.element(find.text('整个窗口'))).style.color,
-        scheme.onSurfaceVariant);
+    expect(find.text('整图'), findsOneWidget);
+    expect(find.text('确认'), findsOneWidget);
+    final frozen = tester.widget<CaptureSelectionOverlay>(find.byType(CaptureSelectionOverlay)).image;
+    await tester.tap(find.text('重画'));
+    await tester.pump();
+    expect(find.text('圈出问题位置'), findsOneWidget);
+    expect(tester.widget<RawImage>(find.descendant(of: find.byType(CaptureSelectionOverlay),
+        matching: find.byType(RawImage))).image, same(frozen));
+    final stroke = await tester.startGesture(const Offset(90, 100));
+    await stroke.moveTo(const Offset(180, 140));
+    await stroke.moveTo(const Offset(120, 170));
+    await stroke.up();
+    await tester.pumpAndSettle();
+    expect(find.text('确认'), findsOneWidget);
+
   });
 
   for (final bool detach in <bool>[true, false]) {
@@ -399,13 +405,14 @@ void main() {
             tester.getRect(find.byKey(const Key('feedback-capture-cancel')));
         expect(tools.overlaps(close), isFalse);
         for (final String action in <String>[
+          'feedback-capture-redraw',
           'feedback-capture-whole-window',
           'feedback-capture-use-region'
         ]) {
           final Finder button = find.byKey(Key(action));
           await tester.ensureVisible(button);
           await tester.pumpAndSettle();
-          expect(tester.getSize(button).height, 44);
+          expect(tester.getSize(button).height, greaterThanOrEqualTo(44));
           expect(button.hitTestable(), findsOneWidget,
               reason:
                   'each action stays reachable even when the compact card scrolls');

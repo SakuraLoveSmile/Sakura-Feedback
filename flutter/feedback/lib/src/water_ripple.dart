@@ -3,7 +3,6 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
-import 'beam_aurora.dart' show kBeamDimColor;
 import 'wake_paint.dart' show wakeSmooth;
 
 const kWaterRippleDuration = Duration(seconds: 2);
@@ -31,14 +30,12 @@ class WaterRipplePainter extends CustomPainter {
     required this.progress,
     required this.origin,
     required this.image,
-    required this.dimOpacity,
     this.shader,
   });
 
   final double progress;
   final Offset origin;
   final ui.Image image;
-  final double dimOpacity;
   final ui.FragmentShader? shader;
 
   @override
@@ -57,10 +54,9 @@ class WaterRipplePainter extends CustomPainter {
         ..setFloat(2, origin.dx)
         ..setFloat(3, origin.dy)
         ..setFloat(4, t * 2)
-        ..setFloat(5, dimOpacity)
-        ..setFloat(6, image.width.toDouble())
-        ..setFloat(7, image.height.toDouble())
-        ..setFloat(8, radius)
+        ..setFloat(5, image.width.toDouble())
+        ..setFloat(6, image.height.toDouble())
+        ..setFloat(7, radius)
         ..setImageSampler(0, image);
       canvas.drawRect(Offset.zero & size, Paint()..shader = effect);
       return;
@@ -69,7 +65,8 @@ class WaterRipplePainter extends CustomPainter {
     final amplitude = wakeSmooth(t / .065) * (1 - wakeSmooth((t - .275) / .625));
     if (amplitude <= 0) return;
     final unit = math.min(size.shortestSide / 361, 1.6);
-    final width = math.min(radius * .18, (radius * .10).clamp(3 * unit, 25 * unit));
+    final width = math.min(radius * .2, (radius * .05).clamp(2.4 * unit, 12 * unit));
+    final bend = amplitude * math.min(width * .78, 6.5 * unit);
     final Rect circle =
         Rect.fromCircle(center: origin, radius: radius + 2 * width);
     final Shader arcs = SweepGradient(
@@ -89,15 +86,14 @@ class WaterRipplePainter extends CustomPainter {
       ],
       stops: const [0, .085, .19, .31, .415, .5, .585, .69, .81, .915, 1],
     ).createShader(circle);
-    _paintWave(canvas, size, radius + width * .63, width, amplitude * .66,
-        1 - amplitude * width * .25 / radius, arcs);
-    _paintWave(canvas, size, radius - width * .30, width, amplitude,
-        1 + amplitude * width * .44 / radius, arcs);
+    _paintWave(canvas, size, radius + width, width, amplitude * .9, bend, arcs);
+    _paintWave(canvas, size, radius - width, width, amplitude, -bend, arcs);
   }
 
   void _paintWave(Canvas canvas, Size size, double radius, double width,
-      double alpha, double scale, Shader arcs) {
+      double alpha, double bend, Shader arcs) {
     final double outer = radius + width;
+    final double scale = radius / (radius + bend);
     final Rect bounds = Rect.fromCircle(center: origin, radius: outer)
         .inflate(2)
         .intersect(Offset.zero & size);
@@ -114,46 +110,27 @@ class WaterRipplePainter extends CustomPainter {
         Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble()),
         Rect.fromLTWH(origin.dx * (1 - scale), origin.dy * (1 - scale),
             size.width * scale, size.height * scale),
-        Paint()..filterQuality = FilterQuality.low);
-    canvas.drawRect(
-        cover, Paint()..color = kBeamDimColor.withValues(alpha: dimOpacity));
-    canvas.drawRect(
-        cover,
         Paint()
-          ..shader = ui.Gradient.radial(origin, outer, const [
-            Color(0x00253654),
-            Color(0x70253654),
-            Color(0x624F8BBB),
-            Color(0x88F5ECD0),
-            Color(0x45D8EAF4),
-            Color(0x00D8EAF4),
-          ], [
-            stop(-1),
-            stop(-.40),
-            stop(-.16),
-            stop(.06),
-            stop(.31),
-            stop(1)
-          ]));
+          ..filterQuality = FilterQuality.low
+          ..colorFilter = ColorFilter.mode(
+            bend > 0 ? const Color(0x09000000) : const Color(0x09FFFFFF),
+            BlendMode.srcATop,
+          ));
     canvas.drawRect(
         cover,
         Paint()
           ..blendMode = BlendMode.dstIn
           ..shader = ui.Gradient.radial(origin, outer, const [
             Color(0x00FFFFFF),
-            Color(0x4DFFFFFF),
+            Color(0x88FFFFFF),
             Color(0xFFFFFFFF),
-            Color(0xFFFFFFFF),
-            Color(0xE0FFFFFF),
-            Color(0x40FFFFFF),
+            Color(0x88FFFFFF),
             Color(0x00FFFFFF),
           ], [
             stop(-1),
-            stop(-.63),
-            stop(-.24),
+            stop(-.60),
             stop(0),
-            stop(.33),
-            stop(.72),
+            stop(.60),
             stop(1)
           ]));
     canvas.drawRect(
@@ -170,6 +147,5 @@ class WaterRipplePainter extends CustomPainter {
       oldDelegate.shader != shader ||
       oldDelegate.progress != progress ||
       oldDelegate.origin != origin ||
-      oldDelegate.image != image ||
-      oldDelegate.dimOpacity != dimOpacity;
+      oldDelegate.image != image;
 }

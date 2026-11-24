@@ -851,6 +851,8 @@ MaterialApp(
 | 灵感球待机样式 | `FeedbackOrbIdleStyle? orbIdleStyle` | `onOrbIdleStyleChanged` | 灵感球 |
 | 唤醒方式 | `Set<FeedbackWakeGesture>? wakeGestures` | `onWakeGesturesChanged` | 应用内手势 |
 
+支持反射开关的组件还提供 `bool? orbReflectionEnabled` 和 `onOrbReflectionChanged`。宿主可在灵感球设置中显示「边缘反射」，默认开启。关闭后只移除球缘倒映并减弱边缘反光，球心折射和液态变形持续生效。示例使用 `FeedbackOrbReflectionPreferences` 按 `appId` 记住选择，启动后将读到的值传回组件。省略宿主值时，可在组件面板中改选。Web 的同名开关位于反馈面板的灵感球设置中。
+
 - **只传值**时，组件直接使用宿主值，并隐藏面板里的对应设置项。例如传入 `FeedbackLauncherStyle.orb` 后，唤醒会使用灵感球，面板也会隐藏光束专属的「唤醒动效」。
 - **值和回调一起传**时，面板显示适用于当前入口的选项。用户改选会调用宿主回调，例如 `onWakeVisualChanged: settings.setWakeVisual`。宿主负责保存并重建组件以应用新值，组件保留这项原有的本机偏好。
 - **省略值**时，该项沿用 0.10.0 的行为，由组件按 `appId` 读取和保存本机偏好。未托管入口样式时，`config.launcherMode` 显式指定的 `tab` / `orb` 仍固定入口，默认的 `beam` 允许用户选择入口样式。灵感球待机样式 `hidden` 仍可由已开启的手势唤醒。这条是兼容路径；新接入和后续升级按上面的接入要求逐项托管。

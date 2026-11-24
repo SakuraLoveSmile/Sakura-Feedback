@@ -331,8 +331,8 @@ interface RegionSession {
     | { mode: 'resize'; handle: RegionHandle; startX: number; startY: number; startSel: RegionRect }
     | { mode: 'lasso'; startX: number; startY: number; startSel: RegionRect }
     | null;
-  /** 光束唤醒：圈选优先，出框前不渲染方框与工具条。 */
-  lassoFirst: boolean;
+  /** 光束和灵感球可在同一张冻结截图上重画。 */
+  editor: boolean;
   selReady: boolean;
   lassoPoints: { x: number; y: number }[] | null;
 }
@@ -455,6 +455,16 @@ function el<K extends keyof HTMLElementTagNameMap>(
   if (cls) node.className = cls;
   if (text !== undefined) node.textContent = text;
   return node;
+}
+
+function selectionActionIcon(d: string): SVGSVGElement {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('aria-hidden', 'true');
+  const path = document.createElementNS(svg.namespaceURI!, 'path');
+  path.setAttribute('d', d);
+  svg.append(path);
+  return svg;
 }
 
 function svgFeedbackIcon(cls: string): SVGSVGElement {
@@ -931,6 +941,10 @@ export class FeedbackWidget extends HTMLElement {
   private entranceSessionOnly = false;
   private entranceSelect!: HTMLSelectElement;
   private entranceHint!: HTMLElement;
+  private orbReflectionEnabled = true;
+  private orbReflectionSessionOnly = false;
+  private orbReflectionInput!: HTMLInputElement;
+  private orbReflectionHint!: HTMLElement;
   private orbIdleSection!: HTMLElement;
   /** 光束覆盖层的视觉层与无障碍隐藏入口。 */
   private beamLayer!: HTMLDivElement;
@@ -999,6 +1013,7 @@ export class FeedbackWidget extends HTMLElement {
   private regionBg!: HTMLImageElement;
   private regionFrame!: HTMLDivElement;
   private regionToolbar!: HTMLDivElement;
+  private regionRedrawBtn!: HTMLButtonElement;
   private regionTools!: HTMLDivElement;
   private safeInsetsProbe!: HTMLDivElement;
   private regionDim!: HTMLDivElement;
@@ -2394,18 +2409,34 @@ export class FeedbackWidget extends HTMLElement {
       orbShape: lassoFirst ? null : this.releaseVisual ? { ...this.releaseVisual } : null,
       orbRect: lassoFirst ? zero : this.releaseVisual ? { x:this.releaseVisual.x-this.releaseVisual.radius, y:this.releaseVisual.y-this.releaseVisual.radius, width:2*this.releaseVisual.radius, height:2*this.releaseVisual.radius } : { x:sel.x*overlay.width/viewport.width,y:sel.y*overlay.height/viewport.height,width:sel.width*overlay.width/viewport.width,height:sel.height*overlay.height/viewport.height },
       dragging: null,
-      lassoFirst: lassoFirst && !preset,
+      editor: !preset,
       selReady: !!preset || !lassoFirst,
       lassoPoints: null,
     };
     this.regionSession = session;
     this.releaseVisual = null;
     this.orb.classList.add('is-hidden');
+    delete this.lassoHint.dataset.ink;
     this.regionBg.src = session.url;
-    this.regionOverlay.classList.remove('is-handoff');
+    this.regionDim.style.opacity = '0';
+    const editor = session.editor;
+    this.regionOverlay.classList.remove('is-handoff', 'is-drawing', 'tools-at-top', 'tools-floating', 'is-pointer-selection');
+    this.regionOverlay.classList.toggle('is-editor', editor);
+    this.regionOverlay.classList.toggle('is-pointer-selection', !!session.orbShape);
+    this.regionTools.removeAttribute('style');
+    this.regionRedrawBtn.hidden = !editor;
+    this.regionUseBtn.textContent = editor ? '确认' : '使用此区域';
+    this.regionAllBtn.textContent = editor ? '整图' : '整个窗口';
+    if (editor) {
+      this.regionAllBtn.prepend(selectionActionIcon('M8 4H4v4m12-4h4v4M4 16v4h4m12-4v4h-4M8 9h8v6H8z'));
+      this.regionUseBtn.prepend(selectionActionIcon('m5 12 4.5 4.5L19 7'));
+      this.regionTools.prepend(this.regionErrorEl);
+    } else {
+      this.regionOverlay.append(this.regionErrorEl);
+    }
     this.regionOverlay.classList.toggle('is-lasso-arming', lassoFirst);
     this.regionOverlay.classList.toggle('is-lasso-pending', lassoFirst);
-    this.regionUseBtn.disabled = this.regionAllBtn.disabled = false;
+    this.regionRedrawBtn.disabled = this.regionUseBtn.disabled = this.regionAllBtn.disabled = false;
     this.wakeGestures.reset();
     this.regionOverlay.hidden = false;
     this.regionErrorEl.hidden = true;
@@ -2434,6 +2465,7 @@ export class FeedbackWidget extends HTMLElement {
     const point = s.frozen.releasePoint ?? { x: .5, y: .5 };
     const water = this.wakeVisual === 'ripple';
     const duration = water ? 2000 : 720;
+    this.regionOverlay.insertBefore(this.beamLayer, water ? this.regionDim : this.regionEntrance);
     const paint = createWakePaint(this.wakeVisual, this.beamLayer, s.overlay, this.regionBg, {
       x: point.x * s.overlay.width, y: point.y * s.overlay.height,
     }, fingertips.map(p => ({ x: p.x * s.overlay.width, y: p.y * s.overlay.height })));
@@ -2442,8 +2474,6 @@ export class FeedbackWidget extends HTMLElement {
     const tick = () => {
       if (!this.validRegion(s) || s.selReady) return;
       const elapsed = performance.now() - s.startedAt;
-      const dim = Math.min(1, elapsed / (water ? 430 : 158)) * 0.26;
-      this.regionDim.style.opacity = dim.toFixed(3);
       if (!armed && elapsed >= 720) {
         armed = true;
         this.armBeam(s);
@@ -2452,7 +2482,7 @@ export class FeedbackWidget extends HTMLElement {
         this.stopBeam();
         return;
       }
-      paint.draw(Math.max(0, elapsed / duration), dim);
+      paint.draw(Math.max(0, elapsed / duration));
       this.beamFrame = window.requestAnimationFrame(tick);
     };
     tick();
@@ -2467,11 +2497,35 @@ export class FeedbackWidget extends HTMLElement {
     this.beamLayer.replaceChildren();
   }
 
+  private matchHintToScreenshot(): void {
+    const s = this.regionSession;
+    const image = this.regionBg;
+    if (!s?.editor || image.src !== s.url || !image.naturalWidth) return;
+    const sample = document.createElement('canvas');
+    sample.width = 9;
+    sample.height = 1;
+    const ctx = sample.getContext('2d');
+    if (!ctx) return;
+    const sx = image.naturalWidth / s.overlay.width, sy = image.naturalHeight / s.overlay.height;
+    const width = Math.min(120, s.overlay.width) * sx;
+    const inset = parseFloat(getComputedStyle(this.lassoHint).paddingBottom) || 0;
+    const y = Math.max(0, image.naturalHeight - (inset + 12) * sy);
+    try {
+      ctx.drawImage(image, (image.naturalWidth - width) / 2, y, width, 4 * sy, 0, 0, 9, 1);
+      const pixels = ctx.getImageData(0, 0, 9, 1).data;
+      const lumas = Array.from({ length: 9 }, (_, i) =>
+        .2126 * pixels[i * 4]! + .7152 * pixels[i * 4 + 1]! + .0722 * pixels[i * 4 + 2]!);
+      this.lassoHint.dataset.ink = lumas.sort((a, b) => a - b)[4]! < 128 ? 'light' : 'dark';
+    } catch {
+      // If the capture provider disallows pixel reads, the hint uses the component theme.
+    }
+  }
+
   /** 圈选就绪；空闲时水波仍可自然退去。 */
   private armBeam(s: RegionSession): void {
     if (!this.validRegion(s) || s.selReady) return;
     this.regionOverlay.classList.remove('is-lasso-arming');
-    this.regionDim.style.opacity = '0.26';
+    this.regionDim.style.opacity = '0';
     this.lassoHint.hidden = false;
     this.regionFrame.style.opacity = '0';
     this.regionCancelBtn.style.opacity = '1';
@@ -2485,13 +2539,37 @@ export class FeedbackWidget extends HTMLElement {
   private renderLasso(s: RegionSession): void {
     const points = s.lassoPoints ?? [];
     const { kx, ky } = this.regionScale(s);
-    this.lassoPath.setAttribute('points', points.map(point => `${(point.x * kx).toFixed(1)},${(point.y * ky).toFixed(1)}`).join(' '));
+    const outline = points.map(point =>
+      `${(point.x * kx).toFixed(1)},${(point.y * ky).toFixed(1)}`).join(' ');
+    this.lassoPath.setAttribute('points', outline);
+    this.regionOverlay.classList.toggle('is-drawing', points.length > 0);
+    this.lassoHint.hidden = points.length > 0;
+  }
+
+  private redrawLasso(): void {
+    const s = this.regionSession;
+    if (!s?.editor || !s.selReady || s.phase !== 'selection' || s.confirming || s.pointerId !== null) return;
+    this.finishSelectionEntrance(s);
+    s.orbShape = null;
+    this.regionEntrance.style.display = 'none';
+    this.regionDim.style.visibility = '';
+    this.orbCanvas.hidden = true;
+    s.selReady = false;
+    s.lassoPoints = null;
+    delete this.regionFrame.dataset.size;
+    this.regionErrorEl.hidden = true;
+    this.regionErrorEl.textContent = '';
+    this.regionOverlay.classList.remove('tools-at-top');
+    this.regionOverlay.classList.add('is-lasso-pending');
+    this.renderLasso(s);
+    this.armBeam(s);
   }
 
   /** 圈选松手：包围盒（先不加边距）动画展开为加边距方框。 */
   private commitLasso(s: RegionSession): void {
     const points = s.lassoPoints ?? [];
     s.lassoPoints = null;
+    this.renderLasso(s);
     if (points.length < 2) return;
     const raw = lassoBoundingRect(points, s.viewport, { pad: 0, min: 1 });
     const padded = lassoBoundingRect(points, s.viewport);
@@ -2501,7 +2579,6 @@ export class FeedbackWidget extends HTMLElement {
     s.startedAt = performance.now();
     s.selReady = true;
     this.regionOverlay.classList.remove('is-lasso-pending');
-    this.lassoPath.setAttribute('points', '');
     this.lassoHint.hidden = true;
     this.animateSelection(s);
     try {
@@ -2522,7 +2599,7 @@ export class FeedbackWidget extends HTMLElement {
     s.dragging = null;
     s.pointerId = null;
     s.lassoPoints = null;
-    this.lassoPath.setAttribute('points', '');
+    this.renderLasso(s);
   }
 
   /** 覆盖层显示尺寸 ↔ 捕获视口逻辑像素的换算（位图铺满覆盖层显示）。 */
@@ -2564,21 +2641,24 @@ export class FeedbackWidget extends HTMLElement {
   private renderRegion(elapsed = 550): void {
     const s = this.regionSession;
     if (!s || s.phase !== 'selection') return;
-    if (s.lassoFirst && !s.selReady) return;
+    if (s.editor && !s.selReady) return;
     const { kx, ky } = this.regionScale(s);
     const end = { x: s.sel.x*kx, y: s.sel.y*ky, width: s.sel.width*kx, height: s.sel.height*ky };
     const p = progress(elapsed, 0, 400);
     const rect = Object.fromEntries((['x','y','width','height'] as const).map(k => [k, s.orbRect[k] + (end[k]-s.orbRect[k])*p])) as unknown as RegionRect;
-    Object.assign(this.regionFrame.style, { left: `${rect.x}px`, top: `${rect.y}px`, width: `${rect.width}px`, height: `${rect.height}px`, borderRadius: `${s.orbRect.width/2+(12-s.orbRect.width/2)*p}px`, opacity: String(progress(elapsed,50,300)) });
+    const finalRadius = s.editor ? 2 : 12;
+    const radius = s.orbShape ? s.orbRect.width / 2 + (finalRadius - s.orbRect.width / 2) * p : finalRadius;
+    Object.assign(this.regionFrame.style, { left: `${rect.x}px`, top: `${rect.y}px`, width: `${rect.width}px`, height: `${rect.height}px`, borderRadius: `${radius}px`, opacity: String(progress(elapsed,50,300)) });
     this.regionFrame.dataset.size = `${Math.round(s.sel.width)}×${Math.round(s.sel.height)}`;
     this.regionFrame.setAttribute('aria-description', `选区 ${Math.round(s.sel.width)}×${Math.round(s.sel.height)} px`);
     // The independent shadow follows the rounded morph as well as its timing;
     // a rectangular cutout would expose bright corners outside the initial ball.
-    Object.assign(this.regionDim.style, { left:`${rect.x}px`, top:`${rect.y}px`, width:`${rect.width}px`, height:`${rect.height}px`, borderRadius:`${s.orbRect.width/2+(12-s.orbRect.width/2)*p}px`, opacity:String(.26*progress(elapsed,0,350)) });
+    Object.assign(this.regionDim.style, { left:`${rect.x}px`, top:`${rect.y}px`, width:`${rect.width}px`, height:`${rect.height}px`, borderRadius:`${radius}px`, opacity:String(.26*progress(elapsed,0,350)) });
     this.renderSelectionContour(s,end,p,elapsed);
     if (this.orbLens && s.orbShape && elapsed < 260) {
       this.orbCanvas.hidden = false;
-      this.orbLens.draw(s.orbShape,s.orbShape.radius,s.orbShape,1-progress(elapsed,0,260),this.orbMaterialIsDark(),s.orbShape.gestureGlass ? {gestureGlass:true} : undefined);
+      this.orbLens.draw(s.orbShape,s.orbShape.radius,s.orbShape,1-progress(elapsed,0,260),this.orbMaterialIsDark(),
+        {gestureGlass: !!s.orbShape.gestureGlass, edgeReflection: this.orbReflectionEnabled});
     } else this.orbCanvas.hidden = true;
     this.regionCancelBtn.style.opacity = String(progress(elapsed,120,400));
     this.regionTools.style.opacity = String(progress(elapsed,350,550));
@@ -2586,6 +2666,22 @@ export class FeedbackWidget extends HTMLElement {
     const safe = window.getComputedStyle(this.safeInsetsProbe);
     const left = Math.max(16,parseFloat(safe.paddingLeft)||0), right = Math.max(16,parseFloat(safe.paddingRight)||0);
     const top = Math.max(16,parseFloat(safe.paddingTop)||0), bottom = Math.max(16,parseFloat(safe.paddingBottom)||0);
+    if (s.editor) {
+      const lowerGap = s.overlay.height - end.y - end.height - bottom;
+      const upperGap = end.y - top;
+      const edgeSpace = (this.regionToolbar.offsetHeight || 44) + this.regionErrorEl.offsetHeight + 32;
+      const floating = Math.max(upperGap, lowerGap) < edgeSpace;
+      const atTop = lowerGap < edgeSpace && !floating;
+      if (!floating && this.regionOverlay.classList.contains('tools-floating')) {
+        for (const property of ['top', 'left', 'width', 'max-height']) this.regionTools.style.removeProperty(property);
+      }
+      this.regionOverlay.classList.toggle('tools-floating', floating);
+      this.regionOverlay.classList.toggle('tools-at-top', atTop);
+      if (!floating) {
+        this.regionTools.dataset.placement = atTop ? 'top' : 'bottom';
+        return;
+      }
+    }
     this.regionTools.style.maxHeight = `${Math.max(1,s.overlay.height-top-bottom)}px`;
     let w = Math.min(320,Math.max(1,s.overlay.width-left-right));
     let x = Math.max(left,Math.min(s.overlay.width-right-w,end.x+(end.width-w)/2));
@@ -2633,7 +2729,7 @@ export class FeedbackWidget extends HTMLElement {
     if (!visible) return;
     const shape=s.orbShape!, points:string[]=[];
     const cx=end.x+end.width/2, cy=end.y+end.height/2;
-    const halfX=end.width/2, halfY=end.height/2, corner=Math.min(12,halfX,halfY);
+    const halfX=end.width/2, halfY=end.height/2, corner=Math.min(2,halfX,halfY);
     for (let i=0;i<128;i++) {
       const theta=i*Math.PI*2/128, nx=Math.cos(theta), ny=Math.sin(theta);
       const r=shape.radius*liquidBoundary(theta,shape);
@@ -2661,11 +2757,12 @@ export class FeedbackWidget extends HTMLElement {
     if (target && typeof target.closest === 'function' && target.closest('.fb-region-tools, .fb-region-cancel')) {
       return; // 工具栏按钮不进入框选
     }
-    if (s.lassoFirst && !s.selReady && this.regionOverlay.classList.contains('is-lasso-arming')) return;
+    if (s.editor && !s.selReady && this.regionOverlay.classList.contains('is-lasso-arming')) return;
     this.finishSelectionEntrance(s);
+    if (s.editor) this.regionOverlay.classList.add('is-pointer-selection');
     s.pointerId = ev.pointerId;
     const pt = this.regionPoint(s, ev);
-    if (s.lassoFirst && !s.selReady) {
+    if (s.editor && !s.selReady) {
       this.stopBeam();
       s.dragging = { mode: 'lasso', startX: pt.x, startY: pt.y, startSel: { ...s.sel } };
       s.lassoPoints = [pt];
@@ -2755,7 +2852,7 @@ export class FeedbackWidget extends HTMLElement {
     this.stopBeam();
     this.finishSelectionEntrance(s);
     this.renderRegion();
-    this.regionUseBtn.disabled = this.regionAllBtn.disabled = true;
+    this.regionRedrawBtn.disabled = this.regionUseBtn.disabled = this.regionAllBtn.disabled = true;
     this.regionErrorEl.hidden = true;
     const selected = { ...s.sel };
     let blob = s.frozen.blob;
@@ -2772,7 +2869,7 @@ export class FeedbackWidget extends HTMLElement {
       } catch {
         if (!this.validRegion(s)) return;
         s.confirming = false;
-        this.regionUseBtn.disabled = this.regionAllBtn.disabled = false;
+        this.regionRedrawBtn.disabled = this.regionUseBtn.disabled = this.regionAllBtn.disabled = false;
         this.regionErrorEl.textContent = '裁剪未完成，可重试，或改用「截取整个窗口」。';
         this.regionErrorEl.hidden = false;
         return;
@@ -2782,7 +2879,7 @@ export class FeedbackWidget extends HTMLElement {
     if (!this.validRegion(s)) return;
     if (!this.captureImage() && this.draft.images.length >= this.maxImages) {
       s.confirming = false;
-      this.regionUseBtn.disabled = this.regionAllBtn.disabled = false;
+      this.regionRedrawBtn.disabled = this.regionUseBtn.disabled = this.regionAllBtn.disabled = false;
       this.regionErrorEl.textContent = `已达图片上限 ${this.maxImages} 张，请取消并先整理附件。`;
       this.regionErrorEl.hidden = false;
       return;
@@ -2951,7 +3048,8 @@ export class FeedbackWidget extends HTMLElement {
   private onRegionKeydown(ev: KeyboardEvent): void {
     const s = this.regionSession;
     if (!s) return;
-    if (s.lassoFirst && !s.selReady && s.phase === 'selection') {
+    this.regionOverlay.classList.remove('is-pointer-selection');
+    if (s.editor && !s.selReady && s.phase === 'selection') {
       if (ev.key === 'Escape') {
         ev.preventDefault();
         ev.stopPropagation();
@@ -3971,9 +4069,12 @@ export class FeedbackWidget extends HTMLElement {
     if (this.isDragging) this.lastLiquidVisual = { ...center, radius, dirX:shape.dirX, dirY:shape.dirY, deform:shape.deform, wobble:shape.wobble, gestureGlass: !!summoned };
     this.orbCanvas.hidden = false;
     this.hideOrbOutline();
-    if (this.orbLens) this.orbLens.draw(center,radius,shape,1,this.orbMaterialIsDark(),summoned ? {gestureGlass:true, entranceId:orbEntrances.indexOf(summoned.effect),
-      entranceProgress:t, entranceAxis:summoned.axis} : this.isDragging?undefined:{halfSize:{x:visual.halfX,y:visual.halfY},handleMix:visual.handleMix,mist:.74,idleMix:1});
-    else {
+    if (this.orbLens) {
+      const material = summoned
+        ? {gestureGlass:true, entranceId:orbEntrances.indexOf(summoned.effect), entranceProgress:t, entranceAxis:summoned.axis}
+        : this.isDragging ? {} : {halfSize:{x:visual.halfX,y:visual.halfY},handleMix:visual.handleMix,mist:.74,idleMix:1};
+      this.orbLens.draw(center,radius,shape,1,this.orbMaterialIsDark(),{...material,edgeReflection:this.orbReflectionEnabled});
+    } else {
       const forced=window.matchMedia?.('(forced-colors: active)').matches ?? false;
       const softIdle = !forced && !this.isDragging && !summoned;
       const lightIdle = softIdle && !this.orbMaterialIsDark();
@@ -4621,10 +4722,10 @@ export class FeedbackWidget extends HTMLElement {
     this.regionEntrance.setAttribute('aria-hidden','true');
     this.regionEntranceDim = document.createElementNS('http://www.w3.org/2000/svg','path');
     this.regionEntranceDim.setAttribute('fill-rule','evenodd');
-    this.regionEntranceDim.setAttribute('fill','#635d92');
+    this.regionEntranceDim.setAttribute('fill','var(--fb-selection-scrim)');
     this.regionEntranceEdge = document.createElementNS('http://www.w3.org/2000/svg','path');
     this.regionEntranceEdge.setAttribute('fill','none');
-    this.regionEntranceEdge.setAttribute('stroke','#ffffff70');
+    this.regionEntranceEdge.setAttribute('stroke','white');
     this.regionEntranceEdge.setAttribute('stroke-width','1');
     this.regionEntrance.append(this.regionEntranceDim,this.regionEntranceEdge);
     this.regionOverlay.setAttribute('role', 'dialog');
@@ -4650,6 +4751,11 @@ export class FeedbackWidget extends HTMLElement {
       this.regionFrame.append(handle);
     }
 
+    this.regionRedrawBtn = el('button', 'fb-region-btn fb-region-redraw', '重画');
+    this.regionRedrawBtn.type = 'button';
+    this.regionRedrawBtn.hidden = true;
+    this.regionRedrawBtn.prepend(selectionActionIcon('M9 5 4 10l5 5M5 10h8a6 6 0 0 1 6 6v2'));
+    this.regionRedrawBtn.addEventListener('click', () => this.redrawLasso());
     this.regionTools = el('div','fb-region-tools');
     this.regionToolbar = el('div', 'fb-region-toolbar');
     this.regionUseBtn = el('button', 'fb-region-btn fb-region-use', '使用此区域');
@@ -4659,7 +4765,7 @@ export class FeedbackWidget extends HTMLElement {
     this.regionUseBtn.setAttribute('aria-label', '使用当前选区作为反馈截图');
     this.regionAllBtn.setAttribute('aria-label', '使用整张画面作为反馈截图');
     this.regionCancelBtn.setAttribute('aria-label', '取消局部截图');
-    this.regionToolbar.append(this.regionAllBtn, this.regionUseBtn);
+    this.regionToolbar.append(this.regionRedrawBtn, this.regionAllBtn, this.regionUseBtn);
     this.regionTools.append(this.regionToolbar);
     this.safeInsetsProbe = el('div','fb-safe-insets');
     this.safeInsetsProbe.setAttribute('aria-hidden','true');
@@ -4679,9 +4785,17 @@ export class FeedbackWidget extends HTMLElement {
     this.lassoPath.classList.add('fb-lasso');
     this.lassoPath.setAttribute('fill','none');
     this.lassoLayer.append(this.lassoPath);
-    this.lassoHint = el('div','fb-lasso-hint','画个圈，只需圈出问题位置');
+    this.lassoHint = el('div','fb-lasso-hint','圈出问题位置');
+    const gesture = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    gesture.setAttribute('viewBox', '0 0 24 24');
+    gesture.setAttribute('aria-hidden', 'true');
+    const loop = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    loop.setAttribute('d', 'M3 17c3-4 8-12 12-12 5 0 3 7-3 9-4 2-7 1-7-1 0-3 5-3 8 1l2 3c2 3 4 3 6 0');
+    gesture.append(loop);
+    this.lassoHint.prepend(gesture);
     this.lassoHint.hidden = true;
     this.lassoHint.setAttribute('role','status');
+    this.regionBg.addEventListener('load', () => this.matchHintToScreenshot());
     this.flyingShot = el('img','fb-flying-shot');
     this.flyingShot.alt = '';
     this.flyingShot.setAttribute('aria-hidden','true');
@@ -4695,7 +4809,7 @@ export class FeedbackWidget extends HTMLElement {
     this.regionOverlay.addEventListener('pointerdown', (ev) => this.onRegionPointerDown(ev));
     this.regionOverlay.addEventListener('pointermove', (ev) => this.onRegionPointerMove(ev));
     this.regionOverlay.addEventListener('pointerup', (ev) => this.onRegionPointerEnd(ev));
-    this.regionOverlay.addEventListener('pointercancel', (ev) => this.onRegionPointerEnd(ev));
+    this.regionOverlay.addEventListener('pointercancel', (ev) => this.onRegionLostCapture(ev));
     this.regionOverlay.addEventListener('lostpointercapture', (ev) => this.onRegionLostCapture(ev));
 
     // 日志文本预览弹窗
@@ -5260,10 +5374,21 @@ export class FeedbackWidget extends HTMLElement {
     return this.canUseOrbLauncher() && this.surfaceSignature === this.displaySignature() && this.orbPointerId === null && !this.isDragging && this.phase !== 'submitting' && !this.polling;
   }
 
+  private get orbReflectionKey(): string {
+    return `feedback:orb-reflection:v1:${encodeURIComponent(this.appId ?? '')}`;
+  }
+
   private loadOrbIdlePreference(): void {
     const app = this.appId ?? '';
     if (this.orbIdlePreferenceApp === app) return;
     this.orbIdlePreferenceApp = app;
+    try {
+      this.orbReflectionEnabled = localStorage.getItem(this.orbReflectionKey) !== 'false';
+      this.orbReflectionSessionOnly = false;
+    } catch {
+      this.orbReflectionEnabled = true;
+      this.orbReflectionSessionOnly = true;
+    }
     this.orbIdleSessionOnly = false;
     // Synchronous reads/writes are ordered and cannot overwrite a newer user choice.
     try { this.savedOrbIdleStyle = parseOrbIdlePreference(localStorage.getItem(orbIdlePreferenceKey(app)), null); }
@@ -5388,6 +5513,25 @@ export class FeedbackWidget extends HTMLElement {
     label.append(select);
     group.append(label,this.entranceHint);
     this.syncEntranceSettings();
+    const reflection = el('label','fb-wake-option');
+    const input = this.orbReflectionInput = el('input');
+    input.type = 'checkbox';
+    input.name = 'orb-reflection';
+    const caption = el('span','fb-wake-option-text');
+    caption.append(el('span','fb-wake-option-title','边缘反射'), el('span','fb-footnote','在球体边缘显示倒影'));
+    reflection.append(input, caption);
+    this.orbReflectionHint = el('p','fb-footnote','仅本次生效');
+    this.orbReflectionHint.setAttribute('role','status');
+    group.append(reflection, this.orbReflectionHint);
+    input.addEventListener('change', () => {
+      this.orbReflectionEnabled = input.checked;
+      try {
+        localStorage.setItem(this.orbReflectionKey, String(input.checked));
+        this.orbReflectionSessionOnly = false;
+      } catch { this.orbReflectionSessionOnly = true; }
+      this.syncOrbIdleSettings();
+      this.drawLiquid();
+    });
     const cards = el('div','fb-orb-idle-options');
     // 0.8.2：第三种待机样式「隐藏」——0.8.5 起只隐藏待机（收起）状态，唤醒后完整球照常可用。
     for (const [style,title] of [['handle','小把手'],['edge','球体贴边'],['hidden','隐藏']] as const) {
@@ -5412,6 +5556,8 @@ export class FeedbackWidget extends HTMLElement {
   }
 
   private syncOrbIdleSettings(): void {
+    if (this.orbReflectionInput) this.orbReflectionInput.checked = this.orbReflectionEnabled;
+    if (this.orbReflectionHint) this.orbReflectionHint.hidden = !this.orbReflectionSessionOnly;
     if (!this.orbIdlePreferenceHint) return;
     this.orbIdlePreferenceHint.hidden = !this.orbIdleSessionOnly;
     for (const [style,input] of this.orbIdleInputs) input.checked = style === this.orbIdleStyle;

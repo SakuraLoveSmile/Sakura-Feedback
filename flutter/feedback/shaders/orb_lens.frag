@@ -24,6 +24,7 @@ uniform float uGestureGlass;
 uniform float uEntranceId;
 uniform float uEntranceProgress;
 uniform vec2 uEntranceAxis;
+uniform float uEdgeReflection;
 uniform sampler2D uBg;
 out vec4 fragColor;
 #include "orb_gesture_glass.glsl"
@@ -138,13 +139,13 @@ void main() {
     float caustic = gaussian((r-.84)/.095)*(.5+.5*sin(theta-.6));
     float shadow = gaussian((r-.973)/.018)*(1.0-light);
     glass *= 1.0-shadow*.19*(1.0-uIdleMix);
-    float whiteMix = (rim*(.28+.5*light)*uRimStrength+inner*.10*light+caustic*.12)*(1.0-uIdleMix);
+    float whiteMix = (rim*(.28+.5*light*uEdgeReflection)*uRimStrength+inner*.10*light*uEdgeReflection+caustic*.12)*(1.0-uIdleMix);
     glass = mix(glass,vec3(.99,.995,1.0),whiteMix);
     float haze = uMist*.045*uIdleMix*(1.0-uDark);
     glass = mix(glass,vec3(.965,.98,1.0),haze);
     float sheen = gaussian((r-.91)/.065)*pow(max(0.0,cos(surfaceAngle+2.25)),8.0)
                   *(.05+.04*uHandleMix)*uIdleMix*(1.0-.6*darkIdle);
-    glass = mix(glass,vec3(1.0),sheen);
+    glass = mix(glass,vec3(1.0),sheen*uEdgeReflection);
     // The reference's opaque framebuffer clamps highlights to display range.
     // Clamp before premultiplication so the tint cannot make RGB exceed alpha.
     glass = clamp(glass+vec3(.002,.003,.009)*(1.0-uDark*.5),vec3(0.0),vec3(1.0));
@@ -157,7 +158,7 @@ void main() {
                            +clearInner*shine*.025+sideReflection;
     float clearShadow = gaussian((r-.97)/.045)*(1.0-shine)*.12;
     clearGlass = mix(clearGlass*(1.0-clearShadow),vec3(132.0,137.0,153.0)/255.0,.016+.026*uHandleMix);
-    clearGlass = mix(clearGlass,vec3(217.0,222.0,234.0)/255.0,clearHighlight);
+    clearGlass = mix(clearGlass,vec3(217.0,222.0,234.0)/255.0,clearHighlight*uEdgeReflection);
     glass = mix(glass,clamp(clearGlass,vec3(0.0),vec3(1.0)),darkIdle);
     float lightIdle = uIdleMix*(1.0-uDark);
     float glowWidth = mix(mix(.065,.14,uIdleMix),4.5/mix(uRadius,uHalfSize.x,uHandleMix),lightIdle);

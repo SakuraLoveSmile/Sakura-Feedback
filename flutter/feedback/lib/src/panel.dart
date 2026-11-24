@@ -219,6 +219,9 @@ class FeedbackPanel extends StatefulWidget {
     this.entrance = FeedbackOrbEntrance.bead,
     this.onEntranceChanged,
     this.entranceSessionOnly = false,
+    this.orbReflectionEnabled = true,
+    this.onOrbReflectionChanged,
+    this.reflectionSessionOnly = false,
     this.onEffectiveApiBaseChange,
     this.onUnreadCountChange,
     this.visible,
@@ -260,6 +263,9 @@ class FeedbackPanel extends StatefulWidget {
   final FeedbackOrbEntrance entrance;
   final ValueChanged<FeedbackOrbEntrance>? onEntranceChanged;
   final bool entranceSessionOnly;
+  final bool orbReflectionEnabled;
+  final ValueChanged<bool>? onOrbReflectionChanged;
+  final bool reflectionSessionOnly;
 
   /// 请求关闭面板（关闭按钮触发）。
   final VoidCallback? onRequestClose;
@@ -3425,6 +3431,17 @@ class FeedbackPanelState extends State<FeedbackPanel>
             ),
             if (widget.entranceSessionOnly) Text('仅本次生效，偏好未保存', style: theme.textTheme.bodySmall),
             const SizedBox(height: 16),
+          ],
+          if (showOrbSettings && widget.onOrbReflectionChanged != null) ...<Widget>[
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('边缘反射'),
+              subtitle: const Text('在球体边缘显示倒影'),
+              value: widget.orbReflectionEnabled,
+              onChanged: widget.onOrbReflectionChanged,
+            ),
+            if (widget.reflectionSessionOnly)
+              Text('仅本次生效，偏好未保存', style: theme.textTheme.bodySmall),
           ],
           if (showOrbSettings && widget.onOrbIdleStyleChanged != null) ...<Widget>[
             const SizedBox(height: 4),

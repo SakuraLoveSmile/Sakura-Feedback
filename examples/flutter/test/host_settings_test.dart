@@ -1,11 +1,13 @@
 import 'package:feedback_example/main.dart';
 import 'package:feedback_widget/feedback_widget.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// 宿主托管（v0.11.0）的示例链路：宿主设置页改选 → 应用根 setState →
 /// FeedbackWidget 按新值重建，三项值与 hideSettings 都传到组件上。
 void main() {
+  setUp(() => FlutterSecureStorage.setMockInitialValues({}));
   FeedbackWidget widget(WidgetTester tester) =>
       tester.widget<FeedbackWidget>(find.byType(FeedbackWidget));
 
@@ -73,6 +75,16 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(widget(tester).launcherStyle, FeedbackLauncherStyle.orb);
+
+    expect(widget(tester).orbReflectionEnabled, isTrue);
+    await tester.ensureVisible(find.text('边缘反射'));
+    await tester.tap(find.text('边缘反射'));
+    await tester.pump();
+    expect(widget(tester).orbReflectionEnabled, isFalse);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pumpWidget(const FeedbackExampleApp());
+    await tester.pump();
+    expect(widget(tester).orbReflectionEnabled, isFalse);
 
     // 卸载整棵树并越过组件的定时兜底，避免残留 Timer。
     await tester.pumpWidget(const SizedBox.shrink());

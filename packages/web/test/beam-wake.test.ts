@@ -74,13 +74,19 @@ describe('beam wake', () => {
     const front = waves[1]!;
     const profile = () => front.style.getPropertyValue('--fb-wave-mask');
     const firstProfile = profile();
+    const dim = m.root.querySelector<HTMLElement>('.fb-region-dim')!;
+    expect(Number(dim.style.opacity)).toBe(0);
+    expect(dim.previousElementSibling).toBe(front.parentElement);
     vi.advanceTimersByTime(80);
     expect(profile()).not.toBe(firstProfile);
     expect(Number(front.style.opacity)).toBeGreaterThan(Number(waves[0]!.style.opacity));
     expect(Number(waves[0]!.style.opacity)).toBeGreaterThan(0);
     expect(m.root.querySelector('.fb-wake-spectrum')).toBeNull();
     expect(m.root.querySelector<HTMLElement>('.fb-lasso-hint')!.hidden).toBe(true);
-    vi.advanceTimersByTime(760);
+    vi.advanceTimersByTime(280);
+    expect(Number(dim.style.opacity)).toBe(0);
+    vi.advanceTimersByTime(480);
+    expect(Number(dim.style.opacity)).toBe(0);
     expect(frame(m).style.opacity).toBe('0');
     expect(m.root.querySelector<HTMLElement>('.fb-lasso-hint')!.hidden).toBe(false);
     expect(overlay(m).classList.contains('is-lasso-arming')).toBe(false);
@@ -149,9 +155,18 @@ describe('beam wake', () => {
     expect(frame(m).dataset.size).toBeDefined();
     expect(m.root.querySelector<HTMLElement>('.fb-lasso-hint')!.hidden).toBe(true);
     expect(m.root.querySelector('.fb-lasso')!.getAttribute('points')).toBe('');
+    const frozen = m.root.querySelector<HTMLImageElement>('.fb-region-bg')!.src;
+    const redraw = m.root.querySelector<HTMLButtonElement>('.fb-region-redraw')!;
+    expect(redraw.hidden).toBe(false);
+    redraw.click();
+    expect(m.root.querySelector<HTMLImageElement>('.fb-region-bg')!.src).toBe(frozen);
+    expect(target.classList.contains('is-lasso-pending')).toBe(true);
+    expect(frame(m).dataset.size).toBeUndefined();
+    expect(m.root.querySelector<HTMLElement>('.fb-lasso-hint')!.hidden).toBe(false);
+    expect(m.root.querySelector('.fb-ripple-wave')).toBeNull();
   });
 
-  it('lost pointer capture cancels an unfinished loop instead of committing it', async () => {
+  it.each(['lostpointercapture', 'pointercancel'])('%s restores the undrawn selection surface', async (event) => {
     const m = mountBeam();
     provider(m);
     vi.advanceTimersByTime(5000);
@@ -161,7 +176,15 @@ describe('beam wake', () => {
     const target = overlay(m);
     target.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, isPrimary: true, pointerId: 9, clientX: 100, clientY: 100 }));
     target.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, button: 0, isPrimary: true, pointerId: 9, clientX: 160, clientY: 140 }));
-    target.dispatchEvent(new PointerEvent('lostpointercapture', { bubbles: true, pointerId: 9 }));
+    target.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 9, clientX: 100, clientY: 180 }));
+    const dim = m.root.querySelector<HTMLElement>('.fb-region-dim')!;
+    const hint = m.root.querySelector<HTMLElement>('.fb-lasso-hint')!;
+    expect(Number(dim.style.opacity)).toBe(0);
+    expect(target.classList.contains('is-drawing')).toBe(true);
+    expect(hint.hidden).toBe(true);
+    target.dispatchEvent(new PointerEvent(event, { bubbles: true, pointerId: 9 }));
+    expect(target.classList.contains('is-drawing')).toBe(false);
+    expect(hint.hidden).toBe(false);
     await settle();
     expect(frame(m).dataset.size).toBeUndefined();
     expect(m.root.querySelector('.fb-lasso')!.getAttribute('points')).toBe('');

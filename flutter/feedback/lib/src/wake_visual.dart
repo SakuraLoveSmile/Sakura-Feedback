@@ -17,5 +17,6 @@ class FeedbackWakeVisualPreferences
   FeedbackWakeVisualPreferences({required super.appId, required super.store})
       : super(
             values: FeedbackWakeVisual.values,
+            encode: encodeWakeVisual,
             storageKey: wakeVisualStorageKey);
 }

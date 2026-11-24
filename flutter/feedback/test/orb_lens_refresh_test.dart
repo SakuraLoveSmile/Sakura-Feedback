@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:feedback_widget/feedback_widget.dart';
+import 'package:feedback_widget/src/capture_selection.dart';
 import 'package:feedback_widget/src/orb.dart';
 import 'package:feedback_widget/src/orb_idle.dart';
 import 'package:feedback_widget/src/test_env.dart';
@@ -121,6 +122,38 @@ void main() {
     }
     expect(debugOrbLensCaptureAttempts, 3);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('关闭边缘反射时持续更新同一玻璃球，选区过渡沿用边缘设置', (tester) async {
+    host.captureMode = FeedbackCaptureMode.viewport;
+    await host.preferences.write('feedback:orb-reflection:v1:${host.appId}', 'false');
+    await host.mount(tester);
+    await pumpUntil(tester, () => _shader.evaluate().isNotEmpty);
+    expect(_lens(tester).edgeReflection, isFalse);
+    final initialImage = _lens(tester).image;
+
+    host.orbReflectionEnabled = true;
+    host.rebuild();
+    await tester.pump();
+    expect(_lens(tester).edgeReflection, isTrue);
+    expect(_lens(tester).image, same(initialImage));
+    final pending = Completer<void>();
+    debugOrbLensCaptureBarrier = () => pending.future;
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(debugOrbLensCaptureAttempts, 2);
+    host.orbReflectionEnabled = false;
+    host.rebuild();
+    await tester.pump();
+    pending.complete();
+    await pumpUntil(tester, () => !identical(_lens(tester).image, initialImage));
+    expect(_lens(tester).edgeReflection, isFalse);
+    expect(debugOrbLensCaptureAttempts, 2);
+
+    await host.select(tester);
+    expect(find.text('确认'), findsOneWidget);
+    final overlay = tester.widget<CaptureSelectionOverlay>(find.byType(CaptureSelectionOverlay));
+    expect(overlay.orbShader, isNotNull);
+    expect(overlay.edgeReflection, isFalse);
   });
 
   for (final FeedbackOrbIdleStyle style in <FeedbackOrbIdleStyle>[

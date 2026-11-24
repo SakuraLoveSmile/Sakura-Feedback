@@ -2,6 +2,7 @@ import gestureGlass from '../../../flutter/feedback/shaders/orb_gesture_glass.gl
 import type { LiquidShape } from './orb-liquid';
 
 export interface OrbLensMaterial {
+  edgeReflection?: boolean;
   gestureGlass?: boolean;
   entranceId?: number;
   entranceProgress?: number;
@@ -20,6 +21,7 @@ uniform vec2 uImageSize, uOffset, uCenter, uDirection, uLocalSize, uHalfSize;
 uniform float uScale, uRadius, uMagnification, uRimStrength, uOpacity, uHasImage, uDrawScale, uDeform, uWobble, uDark, uHandleMix, uMist, uIdleMix, uGestureGlass;
 uniform float uEntranceId, uEntranceProgress;
 uniform vec2 uEntranceAxis;
+uniform float uEdgeReflection;
 ${gestureGlass}
 float sq(float x) { return x*x; }
 float safeUv(float point, float scale, float size) {
@@ -82,10 +84,10 @@ float glassWhiteMix(float r, float theta) {
   float rim=exp(-sq((r-rimPosition)/rimWidth));
   float inner=exp(-sq((r-.943)/.030));
   float caustic=exp(-sq((r-.84)/.095))*(.5+.5*sin(theta-.6));
-  return rim*(.28+.5*light)*uRimStrength+inner*.10*light+caustic*.12;
+  return rim*(.28+.5*light*uEdgeReflection)*uRimStrength+inner*.10*light*uEdgeReflection+caustic*.12;
 }
 float idleSheen(float r, float theta) {
-  return uIdleMix*exp(-sq((r-.91)/.065))*pow(max(0.,cos(theta+2.25)),8.)*(.05+.04*uHandleMix);
+  return uEdgeReflection*uIdleMix*exp(-sq((r-.91)/.065))*pow(max(0.,cos(theta+2.25)),8.)*(.05+.04*uHandleMix);
 }
 float clearIdleShine(float theta) {
   return pow(max(0.,cos(theta+2.3)),5.);
@@ -95,7 +97,7 @@ float clearIdleHighlight(float r, float theta) {
   float rim=exp(-sq((r-.985)/(.016+.30/uHalfSize.x)));
   float inner=exp(-sq((r-.90)/.06));
   float side=uHandleMix*exp(-sq((r*cos(theta)+.56)/.28))*.055;
-  return rim*(.015+shine*.16+uHandleMix*.055)+inner*shine*.025+side;
+  return uEdgeReflection*(rim*(.015+shine*.16+uHandleMix*.055)+inner*shine*.025+side);
 }
 float clearIdleShadow(float r, float theta) {
   return exp(-sq((r-.97)/.045))*(1.-clearIdleShine(theta))*.12;
@@ -278,6 +280,7 @@ export class OrbLens {
     gl.uniform1f(this.uniform('uMist'), material.mist ?? 0);
     gl.uniform1f(this.uniform('uIdleMix'), material.idleMix ?? 0);
     gl.uniform1f(this.uniform('uGestureGlass'), material.gestureGlass ? 1 : 0);
+    gl.uniform1f(this.uniform('uEdgeReflection'), material.edgeReflection === false ? 0 : 1);
     gl.uniform1f(this.uniform('uEntranceId'), material.entranceId ?? 0);
     gl.uniform1f(this.uniform('uEntranceProgress'), material.entranceProgress ?? 1);
     gl.uniform2f(this.uniform('uEntranceAxis'), material.entranceAxis?.x ?? .89, material.entranceAxis?.y ?? -.22);

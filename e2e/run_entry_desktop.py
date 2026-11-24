@@ -780,7 +780,7 @@ def scenario_alt_click(h: Harness) -> dict[str, Any]:
             h.results.check(
                 "4 进入圈选待命：.fb-lasso-hint 可见且文案一致",
                 lasso.get("hidden") is False
-                and (lasso.get("text") or "") == "画个圈，只需圈出问题位置"
+                and (lasso.get("text") or "") == "圈出问题位置"
                 and inside(lasso.get("box"), state["viewport"]),
                 {"lassoHint": lasso},
             )
@@ -1051,7 +1051,7 @@ def scenario_touch(h: Harness) -> dict[str, Any]:
             h.results.check(
                 "7 双指长按后进入圈选待命（.fb-lasso-hint 可见）",
                 (state2["lassoHint"] or {}).get("hidden") is False
-                and (state2["lassoHint"] or {}).get("text") == "画个圈，只需圈出问题位置",
+                and (state2["lassoHint"] or {}).get("text") == "圈出问题位置",
                 {"lassoHint": state2["lassoHint"]},
             )
             h.results.check(

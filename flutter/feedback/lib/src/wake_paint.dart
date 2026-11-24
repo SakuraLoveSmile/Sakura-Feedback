@@ -14,20 +14,15 @@ void paintWakeBands(
   List<Offset> origins,
   double radius, {
   required SweepGradient spectrum,
+  required SweepGradient highlights,
   required double edgeStrength,
   required double opacity,
 }) {
   if (opacity <= 0) return;
   final Rect viewport = Offset.zero & size;
   final Paint mask = Paint();
-  canvas.save();
-  canvas.clipRect(viewport, doAntiAlias: false);
-  canvas.saveLayer(
-      viewport,
-      Paint()
-        ..blendMode = BlendMode.plus
-        ..color = Colors.white.withValues(alpha: opacity));
-
+  final recorder = ui.PictureRecorder();
+  final maskCanvas = Canvas(recorder, viewport);
   for (final Offset center in origins) {
     mask.shader = ui.Gradient.radial(center, radius, const [
       Color(0x00FFFFFF),
@@ -50,11 +45,11 @@ void paintWakeBands(
       .95,
       1
     ]);
-    canvas.drawCircle(center, radius, mask);
+    maskCanvas.drawCircle(center, radius, mask);
   }
   if (edgeStrength > 0) {
-    canvas.save();
-    canvas.scale(size.width, size.height);
+    maskCanvas.save();
+    maskCanvas.scale(size.width, size.height);
     mask.shader = ui.Gradient.radial(const Offset(.5, .5), .70, [
       Colors.transparent,
       Colors.transparent,
@@ -66,15 +61,31 @@ void paintWakeBands(
       .74,
       1
     ]);
-    canvas.drawRect(const Rect.fromLTWH(0, 0, 1, 1), mask);
+    maskCanvas.drawRect(const Rect.fromLTWH(0, 0, 1, 1), mask);
+    maskCanvas.restore();
+  }
+
+  final shape = recorder.endRecording();
+
+  void tint(SweepGradient gradient, BlendMode blend) {
+    canvas.saveLayer(
+        viewport,
+        Paint()
+          ..blendMode = blend
+          ..color = Colors.white.withValues(alpha: opacity));
+    canvas.drawPicture(shape);
+    canvas.drawRect(
+        viewport.inflate(2),
+        Paint()
+          ..blendMode = BlendMode.srcIn
+          ..shader = gradient.createShader(viewport));
     canvas.restore();
   }
 
-  canvas.drawRect(
-      viewport.inflate(2),
-      Paint()
-        ..blendMode = BlendMode.srcIn
-        ..shader = spectrum.createShader(viewport));
+  canvas.save();
+  canvas.clipRect(viewport, doAntiAlias: false);
+  tint(spectrum, BlendMode.plus);
+  tint(highlights, BlendMode.darken);
   canvas.restore();
-  canvas.restore();
+  shape.dispose();
 }

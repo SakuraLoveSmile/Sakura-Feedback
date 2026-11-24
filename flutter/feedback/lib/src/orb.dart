@@ -461,6 +461,7 @@ List<double> orbLensUniformValues({
   double mist = 0,
   double idleMix = 0,
   bool gestureGlass = false,
+  bool edgeReflection = true,
   FeedbackOrbEntrance entrance = FeedbackOrbEntrance.bead,
   double entranceProgress = 1,
   Offset entranceAxis = const Offset(.89, -.22),
@@ -494,6 +495,7 @@ List<double> orbLensUniformValues({
       entranceProgress,
       entranceAxis.dx,
       entranceAxis.dy,
+      edgeReflection ? 1 : 0,
     ];
 
 /// Draws the unclipped liquid contour in a box with at least 1.6R padding.
@@ -514,6 +516,7 @@ class OrbLiquidLensPainter extends CustomPainter {
       this.handleMix = 0,
       this.mist = 0,
       this.gestureGlass = false,
+      this.edgeReflection = true,
       this.entrance = FeedbackOrbEntrance.bead,
       this.entranceProgress = 1,
       this.entranceAxis = const Offset(.89, -.22),
@@ -521,6 +524,7 @@ class OrbLiquidLensPainter extends CustomPainter {
   final ui.Image image;
   final ui.FragmentShader shader;
   final bool gestureGlass;
+  final bool edgeReflection;
   final FeedbackOrbEntrance entrance;
   final double entranceProgress;
   final Offset entranceAxis;
@@ -557,6 +561,7 @@ class OrbLiquidLensPainter extends CustomPainter {
         mist: mist,
         idleMix: idleMix,
         gestureGlass: gestureGlass,
+        edgeReflection: edgeReflection,
         entrance: entrance,
         entranceProgress: entranceProgress,
         entranceAxis: entranceAxis);

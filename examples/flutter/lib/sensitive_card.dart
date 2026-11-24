@@ -3,8 +3,7 @@ import 'package:flutter/material.dart';
 
 /// 敏感信息演示卡片：整块包在 [FeedbackCaptureMask] 里。
 ///
-/// 截图时该区域会被中性遮罩（#6E6E73）覆盖，用于验证宿主可以主动声明
-/// 敏感区域，而不是让用户自己记得遮挡。
+/// 截图时用所在页面的背景色完整覆盖卡片及其边距。
 class SensitiveCard extends StatelessWidget {
   const SensitiveCard({
     super.key,
@@ -24,10 +23,12 @@ class SensitiveCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     return FeedbackCaptureMask(
+      maskColor: theme.scaffoldBackgroundColor,
       child: Card(
         elevation: 0,
-        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+        color: theme.colorScheme.surfaceContainerHighest,
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Column(

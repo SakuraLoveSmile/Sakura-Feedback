@@ -14,11 +14,10 @@ uniform sampler2D frozen;
 uniform vec2 size;
 uniform vec2 origin;
 uniform float seconds;
-uniform float dim;
 uniform float radius;
-vec3 readWater(vec2 coord) { return texture2D(frozen, coord).rgb; }
+vec4 readWater(vec2 coord) { return texture2D(frozen, coord); }
 ${field}
-void main() { gl_FragColor = waterSurface(uv * size, size, origin, radius, seconds, dim); }`;
+void main() { gl_FragColor = waterSurface(uv * size, size, origin, radius, seconds); }`;
 
 export function createWaterSurface(image: HTMLImageElement, size: RegionViewport, origin: WakePoint) {
   const canvas = document.createElement('canvas');
@@ -54,19 +53,19 @@ export function createWaterSurface(image: HTMLImageElement, size: RegionViewport
     gl.enableVertexAttribArray(position);
     gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
     gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
     for (const key of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, key, gl.LINEAR);
     for (const key of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, key, gl.CLAMP_TO_EDGE);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
     if (gl.getError() !== gl.NO_ERROR) throw new Error('Frozen image upload failed');
     gl.uniform2f(gl.getUniformLocation(program, 'size'), size.width, size.height);
     gl.uniform2f(gl.getUniformLocation(program, 'origin'), origin.x, origin.y);
-    const time = gl.getUniformLocation(program, 'seconds'), dim = gl.getUniformLocation(program, 'dim');
+    const time = gl.getUniformLocation(program, 'seconds');
     const radius = gl.getUniformLocation(program, 'radius');
     gl.viewport(0, 0, canvas.width, canvas.height);
-    return { canvas, dispose, draw(seconds: number, opacity: number, crestRadius: number) {
+    return { canvas, dispose, draw(seconds: number, crestRadius: number) {
       if (gl.isContextLost()) return false;
       gl.uniform1f(time, seconds);
-      gl.uniform1f(dim, opacity);
       gl.uniform1f(radius, crestRadius);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
       return true;

@@ -1,5 +1,6 @@
 import 'dart:math' as math;
-import 'dart:ui' as ui show Image, FragmentShader;
+import 'dart:ui' as ui
+    show FragmentShader, Image, ImageByteFormat, PictureRecorder;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -13,6 +14,9 @@ import 'api_client.dart' show FeedbackCaptureRegion;
 
 /// 选区最小边长（逻辑像素）：拖动 / 缩放 / 重新框选都不得小于此值。
 const double kCaptureSelectionMinSize = 48;
+
+const _captureSurface = Color(0xFF242725);
+const _captureRim = Color(0x38FFFFFF);
 
 /// 初始选区边长（逻辑像素）；与手动调整的最小边长分开。
 const double kCaptureSelectionInitialSize = 144;
@@ -292,8 +296,10 @@ class CaptureSelectionOverlay extends StatefulWidget {
       required this.onCancel,
       this.busy = false,
       this.error,
+      this.onRedraw,
       this.orbCenter,
       this.orbShader,
+      this.edgeReflection = true,
       this.scale = 1,
       this.direction = const Offset(1, 0),
       this.deform = 0,
@@ -312,8 +318,10 @@ class CaptureSelectionOverlay extends StatefulWidget {
   final VoidCallback onCancel;
   final bool busy;
   final String? error;
+  final VoidCallback? onRedraw;
   final Offset? orbCenter;
   final ui.FragmentShader? orbShader;
+  final bool edgeReflection;
   final double scale;
   final Offset direction;
   final double deform;
@@ -344,9 +352,12 @@ class CaptureSelectionOverlayState extends State<CaptureSelectionOverlay>
   Rect get _sel => _selection!;
   bool get _water => widget.wakeVisual == FeedbackWakeVisual.ripple;
   late final AnimationController _beam = AnimationController(
-      vsync: this, duration: _water ? kWaterRippleDuration : kBeamAuroraDuration);
+      vsync: this,
+      duration: _water ? kWaterRippleDuration : kBeamAuroraDuration);
   double get _beamMillis => _beam.value * _beam.duration!.inMilliseconds;
-  bool get _armed => !widget.lassoFirst || _reduceMotion ||
+  bool get _armed =>
+      !widget.lassoFirst ||
+      _reduceMotion ||
       _beamMillis >= kBeamAuroraDuration.inMilliseconds;
   Rect? _framing;
   Offset? _frameStart;
@@ -356,12 +367,6 @@ class CaptureSelectionOverlayState extends State<CaptureSelectionOverlay>
   bool _started = false;
   Rect get selection => _sel;
   EdgeInsets get _safeInsets => widget.safeInsets;
-
-  /// 虹彩扫过前先压暗底图，银白水纹随扩散渐暗。
-  double get _beamDim => _reduceMotion
-      ? 1
-      : Curves.easeOut.transform((_beamMillis / (_water ? 432 : 158.4))
-          .clamp(0.0, 1.0));
 
   /// 波光从按压点向外扩散；快捷键唤醒没有落点时取视口中心。
   Offset get _beamOrigin => Offset(
@@ -384,9 +389,67 @@ class CaptureSelectionOverlayState extends State<CaptureSelectionOverlay>
   @override
   void initState() {
     super.initState();
+    _hintOnDark = _sampleHintBackground();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _frameFocus.requestFocus();
     });
+  }
+
+  // The host can display a light screenshot even when the system theme is dark.
+  // Only sample the masked strip where the instruction will appear.
+  late Future<bool?> _hintOnDark;
+
+  Future<bool?> _sampleHintBackground() async {
+    final image = widget.image;
+    final viewport = widget.viewport;
+    if (viewport.isEmpty) return null;
+    final width = math.min(120.0, viewport.width);
+    final center = Offset(
+        (viewport.width + _safeInsets.left - _safeInsets.right) / 2,
+        (viewport.height - _safeInsets.bottom - 20).clamp(0, viewport.height));
+    final scale =
+        Offset(image.width / viewport.width, image.height / viewport.height);
+    final strip = Rect.fromCenter(
+        center: Offset(center.dx * scale.dx, center.dy * scale.dy),
+        width: width * scale.dx,
+        height: 4 * scale.dy);
+    final recorder = ui.PictureRecorder();
+    Canvas(recorder).drawImageRect(
+        image,
+        strip,
+        const Rect.fromLTWH(0, 0, 9, 1),
+        Paint()..filterQuality = FilterQuality.low);
+    final picture = recorder.endRecording();
+    try {
+      final sample = await picture.toImage(9, 1);
+      try {
+        final bytes =
+            await sample.toByteData(format: ui.ImageByteFormat.rawRgba);
+        if (bytes == null) return null;
+        final lumas = List.generate(9, (i) {
+          final offset = 4 * i;
+          return .2126 * bytes.getUint8(offset) +
+              .7152 * bytes.getUint8(offset + 1) +
+              .0722 * bytes.getUint8(offset + 2);
+        })
+          ..sort();
+        return lumas[4] < 128;
+      } finally {
+        sample.dispose();
+      }
+    } finally {
+      picture.dispose();
+    }
+  }
+
+  @override
+  void didUpdateWidget(CaptureSelectionOverlay oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.image != oldWidget.image ||
+        widget.viewport != oldWidget.viewport ||
+        widget.safeInsets != oldWidget.safeInsets) {
+      _hintOnDark = _sampleHintBackground();
+    }
   }
 
   @override
@@ -464,8 +527,9 @@ class CaptureSelectionOverlayState extends State<CaptureSelectionOverlay>
     if (delta == null) return KeyEventResult.ignored;
     setState(() {
       _selection = HardwareKeyboard.instance.isShiftPressed
-          ? resizeCaptureSelection(_sel, CaptureHandleAnchor.bottomRight,
-              delta, widget.viewport, safeInsets: _safeInsets)
+          ? resizeCaptureSelection(
+              _sel, CaptureHandleAnchor.bottomRight, delta, widget.viewport,
+              safeInsets: _safeInsets)
           : moveCaptureSelection(_sel, delta, widget.viewport,
               safeInsets: _safeInsets);
     });
@@ -511,10 +575,7 @@ class CaptureSelectionOverlayState extends State<CaptureSelectionOverlay>
     final Rect bounds = Rect.fromLTRB(minLeft, minTop,
         math.max(minLeft, safe.right - 16), math.max(minTop, safe.bottom - 16));
     List<Rect> spaces = <Rect>[bounds];
-    for (final Rect obstacle in <Rect>[
-      _sel.inflate(hit / 2 + 4),
-      close
-    ]) {
+    for (final Rect obstacle in <Rect>[_sel.inflate(hit / 2 + 4), close]) {
       final List<Rect> next = <Rect>[];
       for (final Rect space in spaces) {
         if (!space.overlaps(obstacle)) {
@@ -597,73 +658,105 @@ class CaptureSelectionOverlayState extends State<CaptureSelectionOverlay>
         centered.clamp(space.left, space.right - w), space.top, w, h);
   }
 
-  Widget _buildTools(bool stacked) {
-    final ColorScheme scheme = Theme.of(context).colorScheme;
-    final ButtonStyle primaryStyle = FilledButton.styleFrom(
-        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-        minimumSize: const Size(0, 44),
-        fixedSize: const Size.fromHeight(44),
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-        backgroundColor: const Color(0xFF0071E3),
-        foregroundColor: Colors.white,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)));
-    final Widget primary = FilledButton(
-        key: const Key('feedback-capture-use-region'),
-        onPressed: widget.busy ? null : () => widget.onUseRegion(_sel),
-        style: primaryStyle,
-        child: Text(widget.busy ? '正在准备…' : '使用此区域',
-            maxLines: 1, overflow: TextOverflow.ellipsis));
-    final Widget whole = TextButton(
-        key: const Key('feedback-capture-whole-window'),
-        onPressed: widget.busy ? null : widget.onCaptureWhole,
+  void _redraw() {
+    if (widget.busy) return;
+    setState(() {
+      _selection = null;
+      _morphFrom = null;
+      _frameStart = null;
+      _framing = null;
+      _lasso.clear();
+    });
+    widget.onRedraw?.call();
+    _frameFocus.requestFocus();
+  }
+
+  static const _editorButtonSurface = Color(0xC4272727);
+
+  Widget _editorButton(
+      String label, IconData icon, String key, VoidCallback action,
+      {bool primary = false}) {
+    return TextButton.icon(
+        key: Key(key),
+        onPressed: widget.busy ? null : action,
         style: TextButton.styleFrom(
-            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-            minimumSize: const Size(0, 44),
-            fixedSize: const Size.fromHeight(44),
-            foregroundColor: scheme.onSurfaceVariant,
-            shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(10))),
-        child:
-            const Text('整个窗口', maxLines: 1, overflow: TextOverflow.ellipsis));
-    return Material(
-        key: const Key('feedback-capture-toolbar'),
-        color: scheme.surface,
-        elevation: 2,
-        shadowColor: Colors.black.withValues(alpha: .15),
-        shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
-            side: BorderSide(color: scheme.outlineVariant)),
+            minimumSize: const Size(44, 44),
+            padding: EdgeInsets.symmetric(horizontal: primary ? 18 : 10),
+            foregroundColor: primary ? const Color(0xFF202020) : Colors.white,
+            disabledForegroundColor: primary ? Colors.black45 : Colors.white54,
+            backgroundColor: primary ? Colors.white : _editorButtonSurface,
+            textStyle:
+                const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+        icon: Icon(icon, size: 19),
+        label: Text(label));
+  }
+
+  Widget _editorEdge({required Widget child, bool top = false}) {
+    return Positioned(
+        left: 0,
+        right: 0,
+        top: top ? 0 : null,
+        bottom: top ? null : 0,
         child: Padding(
-            padding: const EdgeInsets.all(8),
-            child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: <Widget>[
-                  if (stacked) ...<Widget>[
-                    whole,
-                    const SizedBox(height: 8),
-                    primary
-                  ] else
-                    Row(children: <Widget>[
-                      Expanded(child: whole),
-                      const SizedBox(width: 8),
-                      Expanded(child: primary)
-                    ]),
-                  if (widget.error != null)
-                    Padding(
-                        padding: const EdgeInsets.only(top: 8),
-                        child: Text(widget.error!,
-                            key: const Key('feedback-capture-error'),
-                            style:
-                                TextStyle(color: scheme.error, fontSize: 12))),
-                ])));
+            padding: EdgeInsets.fromLTRB(
+                12 + _safeInsets.left,
+                top ? 10 + _safeInsets.top : 0,
+                12 + _safeInsets.right,
+                top ? 0 : 10 + _safeInsets.bottom),
+            child: child));
+  }
+
+  Widget _editorActions() {
+    return Material(
+        key: const Key('feedback-capture-tools'),
+        type: MaterialType.transparency,
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          if (widget.error != null)
+            Material(
+                color: _editorButtonSurface,
+                borderRadius: BorderRadius.circular(8),
+                child: Padding(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    child: Text(widget.error!,
+                        key: const Key('feedback-capture-error'),
+                        style: const TextStyle(
+                            color: Colors.white, fontSize: 13)))),
+          LayoutBuilder(
+              builder: (context, constraints) => SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: ConstrainedBox(
+                      constraints:
+                          BoxConstraints(minWidth: constraints.maxWidth),
+                      child: Row(
+                          key: const Key('feedback-capture-toolbar'),
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Row(children: [
+                              _editorButton('重画', Icons.undo_rounded,
+                                  'feedback-capture-redraw', _redraw),
+                              const SizedBox(width: 6),
+                              _editorButton(
+                                  '整图',
+                                  Icons.fit_screen_outlined,
+                                  'feedback-capture-whole-window',
+                                  widget.onCaptureWhole),
+                            ]),
+                            _editorButton(
+                                widget.busy ? '正在准备…' : '确认',
+                                Icons.check_rounded,
+                                'feedback-capture-use-region',
+                                () => widget.onUseRegion(_sel),
+                                primary: true),
+                          ])))),
+        ]));
   }
 
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
       animation: Listenable.merge(<Listenable>[_entrance, _beam]),
       builder: (BuildContext context, Widget? child) {
-        if (_selection == null) return _buildLassoSurface(context);
+        if (_selection == null) return _buildLassoSurface();
         final double ms = _reduceMotion ? 550 : _entrance.value * 550;
         final double shape = orbSmoothstep(0, 400, ms);
         // The release begins at the captured visible shape. Its short rebound
@@ -681,22 +774,27 @@ class CaptureSelectionOverlayState extends State<CaptureSelectionOverlay>
             _framing ?? Rect.lerp(_morphFrom ?? initial, _sel, shape)!;
         final double hit = _coarse ? 44 : 30;
         final Rect safe = captureSelectionArea(widget.viewport, _safeInsets);
-        final double width = math.min(320, math.max(0, safe.width - 32));
-        final double textScale =
-            MediaQuery.textScalerOf(context).scale(12) / 12;
-        final bool stacked = width < 280 * math.max(1, textScale);
-        final double totalHeight = math.min(
-            math.max(0, safe.height - 32),
-            16 +
-                (stacked ? 96 : 44) +
-                (widget.error == null ? 0 : 44 * textScale));
         final Rect close = Rect.fromLTWH(
-            math.max(0, widget.viewport.width - 52),
+            math.max(0, widget.viewport.width - _safeInsets.right - 52),
             (8 + _safeInsets.top)
                 .clamp(0, math.max(0, widget.viewport.height - 44)),
             44,
             44);
-        final Rect tools = _controlsRect(width, totalHeight, hit, close);
+        final double upperGap = _sel.top - safe.top,
+            lowerGap = safe.bottom - _sel.bottom;
+        final double textScale =
+            MediaQuery.textScalerOf(context).scale(14) / 14;
+        final double actionsHeight = math.max(48, textScale * 24) +
+            (widget.error == null ? 0 : 48 * math.max(1, textScale));
+        final double edgeSpace = actionsHeight + 22 + hit / 2;
+        final bool toolsAtTop = lowerGap < edgeSpace && upperGap >= edgeSpace;
+        final Rect? floatingTools = math.max(upperGap, lowerGap) < edgeSpace
+            ? _controlsRect(
+                math.min(320, math.max(0, safe.width - 32)),
+                math.min(actionsHeight, math.max(0, safe.height - 32)),
+                hit,
+                close)
+            : null;
         final double toolbarOpacity = orbSmoothstep(350, 550, ms);
         return Semantics(
             container: true,
@@ -732,15 +830,20 @@ class CaptureSelectionOverlayState extends State<CaptureSelectionOverlay>
                                         _framing!.bottomRight,
                                         widget.viewport,
                                         safeInsets: _safeInsets);
-                                  }                                  _framing = null;
+                                  }
+                                  _framing = null;
                                 }),
                         onPanCancel: () => setState(() => _framing = null),
                         child: CustomPaint(
                             painter: _SelectionOverlayPainter(
                                 selection: rect,
-                                radius: widget.orbRadius +
-                                    (12 - widget.orbRadius) * shape,
-                                dim: .26 * orbSmoothstep(0, 350, ms),
+                                radius: !widget.lassoFirst && _morphFrom == null
+                                    ? widget.orbRadius +
+                                        (2 - widget.orbRadius) * shape
+                                    : 2,
+                                corners: shape,
+                                dim:
+                                    kBeamDimOpacity * orbSmoothstep(0, 350, ms),
                                 opacity: orbSmoothstep(50, 300, ms))),
                       ),
                       if (ms < 260 && _morphFrom == null)
@@ -762,7 +865,9 @@ class CaptureSelectionOverlayState extends State<CaptureSelectionOverlay>
                                             : OrbLiquidLensPainter(
                                                 image: widget.image,
                                                 shader: widget.orbShader!,
-                                                gestureGlass: widget.gestureGlass,
+                                                edgeReflection: widget.edgeReflection,
+                                                gestureGlass:
+                                                    widget.gestureGlass,
                                                 offset: initial.center -
                                                     Offset(
                                                         widget.orbRadius * 1.6,
@@ -786,12 +891,26 @@ class CaptureSelectionOverlayState extends State<CaptureSelectionOverlay>
                                   ? null
                                   : (DragUpdateDetails d) => setState(() {
                                         _selection = moveCaptureSelection(
-                                            _sel,
-                                            d.delta,
-                                            widget.viewport,
+                                            _sel, d.delta, widget.viewport,
                                             safeInsets: _safeInsets);
                                       }),
                               child: const SizedBox.expand())),
+                      Positioned.fill(
+                          child: IgnorePointer(
+                              ignoring: !_editable,
+                              child: Opacity(
+                                  opacity: toolbarOpacity,
+                                  child: Stack(children: [
+                                    if (floatingTools == null)
+                                      _editorEdge(
+                                          top: toolsAtTop,
+                                          child: _editorActions())
+                                    else
+                                      Positioned.fromRect(
+                                          rect: floatingTools,
+                                          child: SingleChildScrollView(
+                                              child: _editorActions())),
+                                  ])))),
                       if (_framing == null && _editable)
                         for (final CaptureHandleAnchor anchor
                             in const <CaptureHandleAnchor>[
@@ -802,61 +921,37 @@ class CaptureSelectionOverlayState extends State<CaptureSelectionOverlay>
                         ])
                           _buildHandle(anchor, hit, _sel),
                       Positioned.fromRect(
-                          rect: tools,
-                          child: IgnorePointer(
-                              ignoring: !_editable || toolbarOpacity == 0,
-                              child: Opacity(
-                                  opacity: toolbarOpacity,
-                                  child: SingleChildScrollView(
-                                      key: const Key('feedback-capture-tools'),
-                                      child: _buildTools(stacked ||
-                                          tools.width <
-                                              280 * math.max(1, textScale)))))),
-                      Positioned.fromRect(
-                          rect: close,
+                          rect: toolsAtTop
+                              ? close.shift(
+                                  Offset(0, safe.bottom - 8 - close.bottom))
+                              : close,
                           child: Opacity(
                               opacity: orbSmoothstep(120, 400, ms),
-                              child: SizedBox(
-                                  width: 44,
-                                  height: 44,
-                                  child: Material(
-                                      color:
-                                          Theme.of(context).colorScheme.surface,
-                                      shape: const CircleBorder(),
-                                      child: IconButton(
-                                          key: const Key(
-                                              'feedback-capture-cancel'),
-                                          tooltip: '取消截图选区',
-                                          onPressed: widget.onCancel,
-                                          icon: Icon(Icons.close,
-                                              color: Theme.of(context)
-                                                  .colorScheme
-                                                  .onSurface)))))),
+                              child: _buildClose())),
                     ]))));
       });
 
-  Widget _buildClose(BuildContext context) => SizedBox(
-      width: 44,
-      height: 44,
-      child: Material(
-          color: Theme.of(context).colorScheme.surface,
-          shape: const CircleBorder(),
-          child: IconButton(
-              key: const Key('feedback-capture-cancel'),
-              tooltip: '取消截图选区',
-              onPressed: widget.onCancel,
-              icon: Icon(Icons.close,
-                  color: Theme.of(context).colorScheme.onSurface))));
+  Widget _buildClose() => Material(
+      color: const Color(0xB3272727),
+      shape: const CircleBorder(side: BorderSide(color: _captureRim)),
+      child: IconButton(
+          key: const Key('feedback-capture-cancel'),
+          tooltip: '取消截图选区',
+          onPressed: widget.onCancel,
+          icon:
+              const Icon(Icons.close_rounded, size: 20, color: Colors.white)));
 
-  /// 光束唤醒的第一屏：冻结画面 + 压暗 + 波光 + 圈选提示（未产生选区）。
-  Widget _buildLassoSurface(BuildContext context) {
+  /// 在同一张冻结截图上等待用户首次画圈或重画。
+  Widget _buildLassoSurface() {
     final Rect close = Rect.fromLTWH(
-        math.max(0, widget.viewport.width - 52),
+        math.max(0, widget.viewport.width - _safeInsets.right - 52),
         (8 + _safeInsets.top)
             .clamp(0, math.max(0, widget.viewport.height - 44)),
         44,
         44);
     final bool armed = _armed;
+    final bool showWave =
+        widget.lassoFirst && !_reduceMotion && !_beam.isCompleted;
     return Semantics(
         container: true,
         label: '局部截图圈选：画一个圈圈出问题区域，回车使用整个窗口，Esc 取消',
@@ -866,72 +961,86 @@ class CaptureSelectionOverlayState extends State<CaptureSelectionOverlay>
                 onKeyEvent: _onKey,
                 child: Stack(fit: StackFit.expand, children: <Widget>[
                   RawImage(image: widget.image, fit: BoxFit.fill),
-                  ColoredBox(
-                      color: kBeamDimColor
-                          .withValues(alpha: kBeamDimOpacity * _beamDim)),
-                  if (!_reduceMotion && !_beam.isCompleted)
-                    Positioned.fill(
-                        child: IgnorePointer(
-                            child: CustomPaint(
-                                painter: widget.wakeVisual ==
-                                        FeedbackWakeVisual.aurora
-                                    ? BeamAuroraPainter(
-                                        fingertips: widget.wakeOrigins,
-                                        progress: _beam.value,
-                                        origin: _beamOrigin)
-                                    : WaterRipplePainter(
-                                        shader: _waterShader,
-                                        image: widget.image,
-                                        dimOpacity: kBeamDimOpacity * _beamDim,
-                                        progress: _beam.value,
-                                        origin: _beamOrigin)))),
-                  GestureDetector(
+                  if (showWave && _water)
+                    IgnorePointer(
+                        child: CustomPaint(
+                            painter: WaterRipplePainter(
+                                shader: _waterShader,
+                                image: widget.image,
+                                progress: _beam.value,
+                                origin: _beamOrigin))),
+                  if (showWave && !_water)
+                    IgnorePointer(
+                        child: CustomPaint(
+                            painter: BeamAuroraPainter(
+                                fingertips: widget.wakeOrigins,
+                                progress: _beam.value,
+                                origin: _beamOrigin))),
+                  Listener(
                       key: const Key('feedback-capture-lasso'),
-                      behavior: HitTestBehavior.opaque,
-                      onPanStart: !armed
-                          ? null
-                          : (DragStartDetails d) => setState(() {
-                                if (!_beam.isCompleted) _beam.value = 1;
-                                _lasso
-                                  ..clear()
-                                  ..add(d.localPosition);
-                              }),
-                      onPanUpdate: !armed
-                          ? null
-                          : (DragUpdateDetails d) {
-                              final Offset? last =
-                                  _lasso.isEmpty ? null : _lasso.last;
-                              if (last == null ||
-                                  (d.localPosition - last).distance >= 4) {
-                                setState(() => _lasso.add(d.localPosition));
-                              }
-                            },
-                      onPanEnd: !armed ? null : (_) => _commitLasso(),
-                      child: CustomPaint(
-                          painter: _LassoPainter(_lasso.toList()))),
-                  if (armed)
-                    Positioned(
-                        left: 16,
-                        right: 16,
-                        bottom: _safeInsets.bottom + 40,
+                      // An accepted Flutter pan can end on a system cancellation.
+                      // Discard its open path before the recognizer handles that event.
+                      onPointerCancel: (_) {
+                        if (_lasso.isNotEmpty) setState(_lasso.clear);
+                      },
+                      child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onPanStart: !armed
+                              ? null
+                              : (DragStartDetails d) => setState(() {
+                                    if (!_beam.isCompleted) _beam.value = 1;
+                                    _lasso
+                                      ..clear()
+                                      ..add(d.localPosition);
+                                  }),
+                          onPanUpdate: !armed
+                              ? null
+                              : (DragUpdateDetails d) {
+                                  if (_lasso.isNotEmpty &&
+                                      (d.localPosition - _lasso.last)
+                                              .distance >=
+                                          4) {
+                                    setState(() => _lasso.add(d.localPosition));
+                                  }
+                                },
+                          onPanEnd: !armed ? null : (_) => _commitLasso(),
+                          onPanCancel:
+                              !armed ? null : () => setState(_lasso.clear),
+                          child: CustomPaint(
+                              painter: _LassoPainter(_lasso.toList())))),
+                  if (armed && _lasso.isEmpty)
+                    _editorEdge(
                         child: IgnorePointer(
-                            child: Center(
-                                child: Material(
-                                    borderRadius: BorderRadius.circular(999),
-                                    color: const Color(0xDB292633),
-                                    child: const Padding(
-                                        padding: EdgeInsets.symmetric(
-                                            horizontal: 16, vertical: 10),
-                                        child: Text('画个圈，只需圈出问题位置',
-                                            style: TextStyle(
-                                                color: Colors.white,
-                                                fontSize: 13))))))),
-                  Positioned.fromRect(
-                      rect: close,
-                      child: Opacity(
-                          opacity: armed ? 1 : 0,
-                          child: _buildClose(context))),
+                            child: FutureBuilder<bool?>(
+                                future: _hintOnDark,
+                                builder: (context, snapshot) => _lassoHint(
+                                    snapshot.data ??
+                                        (Theme.of(context).brightness ==
+                                            Brightness.dark))))),
+                  if (armed && _lasso.isEmpty)
+                    Positioned.fromRect(rect: close, child: _buildClose()),
                 ]))));
+  }
+
+  Widget _lassoHint(bool dark) {
+    // Outline the glyphs so they stay legible over a mixed screenshot.
+    final ink = dark ? Colors.white : const Color(0xFF252528);
+    final edge = dark ? const Color(0xE6262628) : Colors.white;
+    final shadows = [
+      Shadow(color: edge, blurRadius: 1.5, offset: const Offset(0, .7)),
+      Shadow(color: edge, blurRadius: 1.5, offset: const Offset(0, -.7)),
+    ];
+    return Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+      Icon(Icons.gesture_rounded, size: 20, color: ink, shadows: shadows),
+      const SizedBox(width: 8),
+      Text('圈出问题位置',
+          style: TextStyle(
+              fontSize: 14,
+              color: ink,
+              shadows: shadows,
+              fontWeight: FontWeight.w600,
+              decoration: TextDecoration.none)),
+    ]);
   }
 
   void _commitLasso() {
@@ -972,29 +1081,7 @@ class CaptureSelectionOverlayState extends State<CaptureSelectionOverlay>
                       _selection = resizeCaptureSelection(
                           _sel, anchor, d.delta, widget.viewport,
                           safeInsets: _safeInsets);
-                    }),
-                child: Center(
-                    child: Container(
-                        width: 10,
-                        height: 10,
-                        decoration: BoxDecoration(
-                            border: Border(
-                                top: anchor.dy < 0
-                                    ? const BorderSide(
-                                        color: Colors.white, width: 2)
-                                    : BorderSide.none,
-                                bottom: anchor.dy > 0
-                                    ? const BorderSide(
-                                        color: Colors.white, width: 2)
-                                    : BorderSide.none,
-                                left: anchor.dx < 0
-                                    ? const BorderSide(
-                                        color: Colors.white, width: 2)
-                                    : BorderSide.none,
-                                right: anchor.dx > 0
-                                    ? const BorderSide(
-                                        color: Colors.white, width: 2)
-                                    : BorderSide.none)))))));
+                    }))));
   }
 }
 
@@ -1003,19 +1090,20 @@ class _LassoPainter extends CustomPainter {
   final List<Offset> points;
   @override
   void paint(Canvas canvas, Size size) {
-    if (points.length < 2) return;
-    final Path path = Path()..moveTo(points.first.dx, points.first.dy);
-    for (final Offset point in points.skip(1)) {
-      path.lineTo(point.dx, point.dy);
-    }
+    if (points.isEmpty) return;
+    final Path stroke = Path()..addPolygon(points, false);
+    final ink = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
+      ..color = _captureSurface.withValues(alpha: .8)
+      ..strokeWidth = 4;
+    canvas.drawPath(stroke, ink);
     canvas.drawPath(
-        path,
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 2
-          ..strokeCap = StrokeCap.round
-          ..strokeJoin = StrokeJoin.round
-          ..color = Colors.white.withValues(alpha: .78));
+        stroke,
+        ink
+          ..color = Colors.white
+          ..strokeWidth = 2);
   }
 
   @override
@@ -1026,10 +1114,12 @@ class _SelectionOverlayPainter extends CustomPainter {
   const _SelectionOverlayPainter(
       {required this.selection,
       required this.radius,
+      required this.corners,
       required this.dim,
       required this.opacity});
   final Rect selection;
   final double radius;
+  final double corners;
   final double dim;
   final double opacity;
   @override
@@ -1039,13 +1129,39 @@ class _SelectionOverlayPainter extends CustomPainter {
     canvas.drawPath(
         Path.combine(PathOperation.difference,
             Path()..addRect(Offset.zero & size), Path()..addRRect(shape)),
-        Paint()..color = const Color(0xFF635D92).withValues(alpha: dim));
+        Paint()..color = kBeamDimColor.withValues(alpha: dim));
     canvas.drawRRect(
         shape,
         Paint()
           ..style = PaintingStyle.stroke
           ..strokeWidth = 1
-          ..color = Colors.white.withValues(alpha: .44 * opacity));
+          ..color = Colors.white.withValues(alpha: .95 * opacity));
+    if (corners > 0) {
+      final path = Path();
+      final length = math.min(14.0, selection.shortestSide / 3) * corners;
+      for (final dx in [-1, 1]) {
+        for (final dy in [-1, 1]) {
+          final x = dx < 0 ? selection.left : selection.right;
+          final y = dy < 0 ? selection.top : selection.bottom;
+          path
+            ..moveTo(x - dx * length, y)
+            ..lineTo(x, y)
+            ..lineTo(x, y - dy * length);
+        }
+      }
+      final pen = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeJoin = StrokeJoin.round
+        ..strokeCap = StrokeCap.round
+        ..strokeWidth = 4
+        ..color = Colors.black.withValues(alpha: .40 * opacity);
+      canvas.drawPath(path, pen);
+      canvas.drawPath(
+          path,
+          pen
+            ..strokeWidth = 2.5
+            ..color = Colors.white.withValues(alpha: opacity));
+    }
   }
 
   @override

@@ -120,6 +120,21 @@ void main() {
     debugDisableOrbLensCapture = false;
   });
 
+  testWidgets('面板反射开关按应用保存，重复进入可读回', (tester) async {
+    await host.mount(tester);
+    await host.openSettings(tester);
+    final toggle = find.widgetWithText(SwitchListTile, '边缘反射');
+    expect(tester.widget<SwitchListTile>(toggle).value, isTrue);
+    await tester.ensureVisible(toggle);
+    await tester.tap(toggle);
+    await tester.pump();
+    expect(tester.widget<SwitchListTile>(toggle).value, isFalse);
+    expect(await host.preferences.read('feedback:orb-reflection:v1:${host.appId}'), 'false');
+    await host.closePanel(tester);
+    await host.openSettings(tester);
+    expect(tester.widget<SwitchListTile>(toggle).value, isFalse);
+  });
+
   testWidgets('宿主给出的 hidden 只隐藏待机态：完整球先显示，闲置后隐藏，面板仍可打开并改回', (tester) async {
     host.style = FeedbackOrbIdleStyle.hidden;
     await host.mount(tester);

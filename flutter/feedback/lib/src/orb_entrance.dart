@@ -23,5 +23,6 @@ class FeedbackOrbEntrancePreferences
   FeedbackOrbEntrancePreferences({required super.appId, required super.store})
       : super(
             values: FeedbackOrbEntrance.values,
+            encode: (effect) => effect.name,
             storageKey: orbEntranceStorageKey);
 }

@@ -513,7 +513,7 @@ describe('液态选区与真实附件的完整时间线', () => {
     expect(parseFloat(frame.style.width)).toBe(56);
     expect(frame.style.borderRadius).toBe('28px');
     clock.tick(200); expect(parseFloat(frame.style.width)).toBeCloseTo(100,5);
-    clock.tick(400); expect(parseFloat(frame.style.width)).toBe(144); expect(frame.style.borderRadius).toBe('12px');
+    clock.tick(400); expect(parseFloat(frame.style.width)).toBe(144); expect(frame.style.borderRadius).toBe('2px');
     clock.tick(550);
     expect(m.root.querySelector<HTMLElement>('.fb-region-tools')!.style.opacity).toBe('1');
     m.root.querySelector<HTMLButtonElement>('.fb-region-use')!.click(); await settled();
@@ -733,36 +733,40 @@ describe('草稿保全与重复开关',()=>{
     expect(x<r && x+width>l && y<b && y+height>t).toBe(false);
   });
 
-  it.each([{y:180,placement:'below'},{y:580,placement:'above'}])('R5工具卡优先$placement，使用主题与44px按钮且离视口至少16px',async({y,placement})=>{
+  it.each([{y:180,placement:'bottom'},{y:580,placement:'top'}])('拖球后按钮分别衬底并停靠在 $placement',async({y,placement})=>{
     const m=mount({'launcher-mode':'orb'}); installProvider(m); dragOrb(m); await settled();
     const overlay=regionOverlay(m),frame=m.root.querySelector<HTMLElement>('.fb-region-frame')!;
     pointer(overlay,'pointerdown',450,y); pointer(overlay,'pointermove',594,y+144); pointer(overlay,'pointerup',594,y+144);
-    const tools=m.root.querySelector<HTMLElement>('.fb-region-tools')!,css=getComputedStyle(tools);
-    expect(tools.dataset.placement).toBe(placement); expect(parseFloat(tools.style.width)).toBe(320);
-    expect(parseFloat(tools.style.left)).toBeGreaterThanOrEqual(16);
-    expect(parseFloat(tools.style.left)+parseFloat(tools.style.width)).toBeLessThanOrEqual(window.innerWidth-16);
-    const cardTop=parseFloat(tools.style.top),selectionTop=parseFloat(frame.style.top),selectionBottom=selectionTop+parseFloat(frame.style.height);
-    if(placement==='below') expect(cardTop).toBeGreaterThan(selectionBottom);
-    else expect(cardTop+62).toBeLessThan(selectionTop);
-    expect(css.padding).toBe('8px'); expect(css.borderRadius).toBe('16px');
-    expect(tools.querySelector('.fb-region-size')).toBeNull();
+    const tools=m.root.querySelector<HTMLElement>('.fb-region-tools')!;
+    expect(tools.dataset.placement).toBe(placement);
+    expect(overlay.classList.contains('tools-at-top')).toBe(placement==='top');
+    expect(getComputedStyle(tools).background).toContain('transparent');
     expect(frame.getAttribute('aria-description')).toBe('选区 56×56 px');
-    for(const cls of ['.fb-region-all','.fb-region-use']) expect(getComputedStyle(tools.querySelector(cls)!).minHeight).toBe('44px');
-    expect(tools.querySelector('.fb-region-all')!.textContent).toBe('整个窗口');
-    expect(tools.querySelector('.fb-region-use')!.textContent).toBe('使用此区域');
+    for(const [cls,label] of [['redraw','重画'],['all','整图'],['use','确认']]) {
+      const button=tools.querySelector<HTMLButtonElement>('.fb-region-'+cls)!;
+      expect(button.hidden).toBe(false);
+      expect(button.textContent).toBe(label);
+      expect(getComputedStyle(button).minHeight).toBe('44px');
+    }
   });
 
-  it('R5工具卡尊重非零安全区且不改变R4选区几何',async()=>{
+  it('灵感球选区保留初始尺寸，底部安全区空间不足时操作移至顶部',async()=>{
     const m=mount({'launcher-mode':'orb'}); installProvider(m);
     const probe=m.root.querySelector<HTMLElement>('.fb-safe-insets')!;
     Object.assign(probe.style,{paddingLeft:'32px',paddingRight:'40px',paddingTop:'48px',paddingBottom:'36px'});
     dragOrb(m,{x:990,y:730}); await settled();
     const tools=m.root.querySelector<HTMLElement>('.fb-region-tools')!,frame=m.root.querySelector<HTMLElement>('.fb-region-frame')!;
-    expect(parseFloat(tools.style.left)).toBeGreaterThanOrEqual(32);
-    expect(parseFloat(tools.style.left)+parseFloat(tools.style.width)).toBeLessThanOrEqual(984);
-    expect(parseFloat(tools.style.top)).toBeGreaterThanOrEqual(48);
-    expect(parseFloat(tools.style.top)+62).toBeLessThanOrEqual(732);
+    expect(tools.dataset.placement).toBe('top');
     expect(frame.dataset.size).toBe('144×144');
+    const frozen=m.root.querySelector<HTMLImageElement>('.fb-region-bg')!.src;
+    tools.querySelector<HTMLButtonElement>('.fb-region-redraw')!.click();
+    expect(m.root.querySelector<HTMLElement>('.fb-lasso-hint')!.hidden).toBe(false);
+    const overlay=regionOverlay(m);
+    pointer(overlay,'pointerdown',100,150); pointer(overlay,'pointermove',350,240); pointer(overlay,'pointerup',350,240);
+    expect(m.root.querySelector<HTMLElement>('.fb-lasso-hint')!.hidden).toBe(true);
+    expect(frame.dataset.size).not.toBe('144×144');
+    expect(m.root.querySelector<HTMLImageElement>('.fb-region-bg')!.src).toBe(frozen);
+    expect(m.root.querySelector<HTMLElement>('.fb-region-entrance')!.style.display).toBe('none');
   });
 
   it('320×120粗指针整屏选区的安全位置仍不遮角点和关闭，按钮保持可滚动到达',async()=>{

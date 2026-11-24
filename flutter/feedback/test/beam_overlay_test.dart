@@ -5,6 +5,7 @@ import 'package:feedback_widget/src/capture_selection.dart';
 import 'package:feedback_widget/src/wake_visual.dart';
 import 'package:feedback_widget/src/water_ripple.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -34,23 +35,25 @@ Future<void> _pumpOverlay(
   tester.view.physicalSize = const Size(400, 300);
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
-  await tester.pumpWidget(MaterialApp(
-    home: MediaQuery(
-      data: MediaQueryData(size: const Size(400, 300), disableAnimations: reduce),
-      child: CaptureSelectionOverlay(
-        image: image,
-        viewport: const Size(400, 300),
-        releasePoint: releasePoint,
-        wakeOrigins: wakeOrigins,
-        safeInsets: safeInsets,
-        lassoFirst: true,
-        wakeVisual: wakeVisual,
-        onUseRegion: onUseRegion ?? (_) {},
-        onCaptureWhole: onCaptureWhole ?? () {},
-        onCancel: onCancel ?? () {},
+  await tester.pumpWidget(RepaintBoundary(
+    key: const Key('lasso-test-surface'),
+    child: MaterialApp(
+      home: MediaQuery(
+        data: MediaQueryData(size: const Size(400, 300), disableAnimations: reduce),
+        child: CaptureSelectionOverlay(
+          image: image,
+          viewport: const Size(400, 300),
+          releasePoint: releasePoint,
+          wakeOrigins: wakeOrigins,
+          safeInsets: safeInsets,
+          lassoFirst: true,
+          wakeVisual: wakeVisual,
+          onUseRegion: onUseRegion ?? (_) {},
+          onCaptureWhole: onCaptureWhole ?? () {},
+          onCancel: onCancel ?? () {},
+        ),
       ),
-    ),
-  ));
+  )));
 }
 
 void main() {
@@ -61,7 +64,7 @@ void main() {
     await _pumpOverlay(tester, image: image, safeInsets: insets);
     expect(find.byKey(const Key('feedback-capture-lasso')), findsOneWidget);
     expect(find.byKey(const Key('feedback-capture-selection')), findsNothing);
-    expect(find.text('画个圈，只需圈出问题位置'), findsNothing);
+    expect(find.text('圈出问题位置'), findsNothing);
 
     await tester.pump(kBeamAuroraDuration * 0.4);
     final CustomPaint ripple = tester.widget<CustomPaint>(
@@ -72,16 +75,22 @@ void main() {
     expect(painter.origin, const Offset(100, 150));
     expect(painter.image, same(image));
 
-    await tester.pump(kBeamAuroraDuration * 0.7);
-    expect(find.text('画个圈，只需圈出问题位置'), findsOneWidget);
+    final dim = find.byWidgetPredicate((w) =>
+        w is ColoredBox && w.color.withValues(alpha: 1) == kBeamDimColor);
+    expect(dim, findsNothing);
+    await tester.pump(const Duration(milliseconds: 272)); // 560 ms
+    expect(dim, findsNothing);
+    await tester.pump(const Duration(milliseconds: 160));
+    expect(dim, findsNothing);
+    expect(find.text('圈出问题位置'), findsOneWidget);
     final water = find.byWidgetPredicate((Widget w) =>
         w is CustomPaint && w.painter is WaterRipplePainter);
     expect(water, findsOneWidget);
-    final Rect hint = tester.getRect(find.text('画个圈，只需圈出问题位置'));
+    final Rect hint = tester.getRect(find.text('圈出问题位置'));
     final double windowHeight =
         tester.view.physicalSize.height / tester.view.devicePixelRatio;
     expect(hint.top, greaterThanOrEqualTo(0));
-    expect(hint.bottom, lessThanOrEqualTo(windowHeight - insets.bottom - 40));
+    expect(hint.bottom, lessThanOrEqualTo(windowHeight - insets.bottom - 10));
 
     final Finder lasso = find.byKey(const Key('feedback-capture-lasso'));
     final TestGesture gesture =
@@ -99,10 +108,79 @@ void main() {
     await gesture.up();
     await tester.pump();
     expect(find.byKey(const Key('feedback-capture-selection')), findsOneWidget);
-    expect(find.text('画个圈，只需圈出问题位置'), findsNothing);
+    expect(find.text('圈出问题位置'), findsNothing);
     await tester.pump(const Duration(milliseconds: 600));
-    expect(find.text('使用此区域'), findsOneWidget);
+    expect(find.text('确认'), findsOneWidget);
     expect(find.byKey(const Key('feedback-capture-cancel')), findsOneWidget);
+    await tester.tap(find.text('重画'));
+    await tester.pump();
+    expect(find.text('圈出问题位置'), findsOneWidget);
+    expect(find.byKey(const Key('feedback-capture-selection')), findsNothing);
+    expect(water, findsNothing);
+    expect(tester.widget<RawImage>(find.byType(RawImage)).image, same(image));
+  });
+
+  for (final nearBottom in [false, true]) {
+    testWidgets('committed toolbar preserves the scrim between buttons (nearBottom=$nearBottom)',
+        (tester) async {
+      await _pumpOverlay(tester, image: await _image(tester), reduce: true);
+      final y = nearBottom ? 218.0 : 58.0;
+      final stroke = await tester.startGesture(Offset(80, y));
+      for (final point in [Offset(115, y), Offset(245, y + 30), Offset(120, y + 50)]) {
+        await stroke.moveTo(point);
+        await tester.pump();
+      }
+      await stroke.up();
+      await tester.pumpAndSettle();
+
+      final confirm = tester.getRect(find.byKey(const Key('feedback-capture-use-region')));
+      expect(confirm.center.dy < 150, nearBottom);
+      final whole = tester.getRect(find.byKey(const Key('feedback-capture-whole-window')));
+      final gapX = ((whole.right + confirm.left) / 2).floor();
+      expect(gapX, greaterThan(whole.right));
+      final boundary = tester.renderObject<RenderRepaintBoundary>(find.byKey(const Key('lasso-test-surface')));
+      await tester.runAsync(() async {
+        final frame = await boundary.toImage();
+        try {
+          final bytes = (await frame.toByteData(format: ui.ImageByteFormat.rawRgba))!;
+          int rgbaAt(int x, int y) => bytes.getUint32(4 * (frame.width * y + x));
+          final outside = rgbaAt(2, 150);
+          expect(rgbaAt(2, nearBottom ? 1 : 298), outside);
+          expect(rgbaAt(gapX, confirm.center.dy.floor()), outside);
+        } finally {
+          frame.dispose();
+        }
+      });
+    });
+  }
+
+  testWidgets('the drawn loop reveals original pixels and cancel restores the hint',
+      (WidgetTester tester) async {
+    await _pumpOverlay(tester, image: await _image(tester), reduce: true);
+    final gesture = await tester.startGesture(const Offset(40, 50));
+    for (final point in const [Offset(80, 50), Offset(240, 50), Offset(240, 170), Offset(80, 170)]) {
+      await gesture.moveTo(point);
+      await tester.pump();
+    }
+    expect(find.text('圈出问题位置'), findsNothing);
+    expect(find.byKey(const Key('feedback-capture-cancel')), findsNothing);
+    final boundary = tester.renderObject<RenderRepaintBoundary>(find.byKey(const Key('lasso-test-surface')));
+    await tester.runAsync(() async {
+      final frame = await boundary.toImage();
+      try {
+        final bytes = (await frame.toByteData(format: ui.ImageByteFormat.rawRgba))!;
+        int pixel(int x, int y) => bytes.getUint32(4 * (frame.width * y + x));
+        expect(pixel(160, 110), 0x9e9e9eff); // Original Colors.grey.
+        expect(pixel(290, 110), 0x9e9e9eff);
+        expect(pixel(160, 50), isNot(0x9e9e9eff)); // Visible stroke over the original.
+      } finally {
+        frame.dispose();
+      }
+    });
+    await gesture.cancel();
+    await tester.pump();
+    expect(find.text('圈出问题位置'), findsOneWidget);
+    expect(find.byKey(const Key('feedback-capture-selection')), findsNothing);
   });
 
   testWidgets('aurora keeps both fingertips and the selection midpoint',
@@ -122,13 +200,56 @@ void main() {
         w is CustomPaint && w.painter is WaterRipplePainter), findsNothing);
   });
 
+  testWidgets('aurora colors light and dark pixels and leaves the idle hint background clear',
+      (WidgetTester tester) async {
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    canvas.drawColor(Colors.black, BlendMode.src);
+    canvas.drawRect(const Rect.fromLTWH(200, 0, 200, 300), Paint()..color = Colors.white);
+    final picture = recorder.endRecording();
+    final image = picture.toImageSync(400, 300);
+    picture.dispose();
+    addTearDown(image.dispose);
+    await _pumpOverlay(tester, image: image, wakeVisual: FeedbackWakeVisual.aurora,
+        releasePoint: const Offset(.5, .5));
+    final boundary = tester.renderObject<RenderRepaintBoundary>(
+        find.byKey(const Key('lasso-test-surface')));
+    await tester.pump(kBeamAuroraDuration * .35);
+    await tester.runAsync(() async {
+      final frame = await boundary.toImage();
+      try {
+        final pixels = (await frame.toByteData(format: ui.ImageByteFormat.rawRgba))!;
+        final left = (150 * 400 + 68) * 4;
+        final right = (150 * 400 + 332) * 4;
+        expect(pixels.getUint8(left + 2) - pixels.getUint8(left), greaterThan(20));
+        expect(pixels.getUint8(right) - pixels.getUint8(right + 2), greaterThan(30));
+      } finally {
+        frame.dispose();
+      }
+    });
+    await tester.pumpAndSettle();
+    expect(find.text('圈出问题位置'), findsOneWidget);
+    await tester.runAsync(() async {
+      final frame = await boundary.toImage();
+      try {
+        final pixels = (await frame.toByteData(format: ui.ImageByteFormat.rawRgba))!;
+        for (final y in [251, 280, 299]) {
+          expect(pixels.getUint32((y * 400 + 12) * 4), 0x000000ff);
+          expect(pixels.getUint32((y * 400 + 388) * 4), 0xffffffff);
+        }
+      } finally {
+        frame.dispose();
+      }
+    });
+  });
+
   testWidgets('reduced motion arms immediately; Escape cancels the surface',
       (WidgetTester tester) async {
     final ui.Image image = await _image(tester);
     bool cancelled = false;
     await _pumpOverlay(tester,
         image: image, reduce: true, onCancel: () => cancelled = true);
-    expect(find.text('画个圈，只需圈出问题位置'), findsOneWidget);
+    expect(find.text('圈出问题位置'), findsOneWidget);
     expect(find.byKey(const Key('feedback-capture-selection')), findsNothing);
     await tester.sendKeyEvent(LogicalKeyboardKey.escape);
     await tester.pump();
