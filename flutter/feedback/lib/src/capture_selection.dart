@@ -365,6 +365,7 @@ class CaptureSelectionOverlayState extends State<CaptureSelectionOverlay>
   late final AnimationController _entrance = AnimationController(
       vsync: this, duration: const Duration(milliseconds: 550));
   bool _started = false;
+  bool _guideDismissed = false;
   Rect get selection => _sel;
   EdgeInsets get _safeInsets => widget.safeInsets;
 
@@ -472,6 +473,7 @@ class CaptureSelectionOverlayState extends State<CaptureSelectionOverlay>
       }
     }
     if (_reduceMotion) {
+      _guideDismissed = true;
       if (widget.lassoFirst) _beam.value = 1;
       _entrance.value = 1;
     } else if (!_started) {
@@ -978,6 +980,11 @@ class CaptureSelectionOverlayState extends State<CaptureSelectionOverlay>
                                 origin: _beamOrigin))),
                   Listener(
                       key: const Key('feedback-capture-lasso'),
+                      onPointerDown: (_) {
+                        if (widget.lassoFirst && !_guideDismissed) {
+                          setState(() => _guideDismissed = true);
+                        }
+                      },
                       // An accepted Flutter pan can end on a system cancellation.
                       // Discard its open path before the recognizer handles that event.
                       onPointerCancel: (_) {
@@ -1008,6 +1015,19 @@ class CaptureSelectionOverlayState extends State<CaptureSelectionOverlay>
                               !armed ? null : () => setState(_lasso.clear),
                           child: CustomPaint(
                               painter: _LassoPainter(_lasso.toList())))),
+                  if (widget.lassoFirst && _beam.isCompleted && !_guideDismissed)
+                    Positioned.fromRect(
+                        rect: Rect.fromCenter(center: _beamOrigin, width: 112, height: 80),
+                        child: IgnorePointer(
+                            child: TweenAnimationBuilder<double>(
+                                key: const Key('feedback-lasso-guide'),
+                                duration: const Duration(milliseconds: 1120),
+                                tween: Tween(begin: 0, end: 1),
+                                onEnd: () => setState(() => _guideDismissed = true),
+                                builder: (_, t, __) => Opacity(
+                                    opacity: 1 - const Interval(.82, 1, curve: Curves.easeOut).transform(t),
+                                    child: RepaintBoundary(
+                                        child: CustomPaint(painter: _LassoGuidePainter(t))))))),
                   if (armed && _lasso.isEmpty)
                     _editorEdge(
                         child: IgnorePointer(
@@ -1083,6 +1103,57 @@ class CaptureSelectionOverlayState extends State<CaptureSelectionOverlay>
                           safeInsets: _safeInsets);
                     }))));
   }
+}
+
+class _LassoGuidePainter extends CustomPainter {
+  const _LassoGuidePainter(this.progress);
+  final double progress;
+
+  // Coordinates are relative to the gesture midpoint. The last curve crosses
+  // the first stroke and turns inward as the fingertip lifts.
+  static final _loop = (Path()
+        ..moveTo(23, -22)
+        ..cubicTo(5, -31, -26, -22, -41, -5)
+        ..cubicTo(-58, 16, -41, 31, -16, 29)
+        ..cubicTo(12, 29, 43, 12, 47, -7)
+        ..cubicTo(50, -26, 28, -31, 10, -24)
+        ..cubicTo(4, -22, 0, -19, -4, -16))
+      .computeMetrics().first;
+  static final _ink = const LinearGradient(
+      begin: Alignment.bottomLeft, end: Alignment.topRight,
+      colors: [Color(0xFF338F87), Color(0xFF73CBB3), Color(0xFFB7F2D8)])
+      .createShader(const Rect.fromLTRB(-43, -28, 44, 29));
+  static const _travel = Interval(.04, .74, curve: Cubic(.32, 0, .22, 1));
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.translate(size.width / 2, size.height / 2);
+    final length = _loop.length * _travel.transform(progress);
+    final trail = _loop.extractPath(0, length);
+    final pen = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeWidth = 3.8
+      ..color = const Color(0x94245C58);
+    canvas.drawPath(trail, pen);
+    canvas.drawPath(trail, pen
+      ..strokeWidth = 2.5
+      ..color = Colors.white
+      ..shader = _ink);
+
+    final touch = const Interval(0, .06).transform(progress) *
+        (1 - const Interval(.67, .80).transform(progress));
+    if (touch <= 0) return;
+    final tip = _loop.getTangentForOffset(length)!.position;
+    final light = Paint()..color = const Color(0xFF86E6C9).withValues(alpha: .3 * touch);
+    canvas.drawCircle(tip, 5 * touch, light);
+    canvas.drawCircle(tip, 2.55 * touch, light..color = const Color(0xFF458E82));
+    canvas.drawCircle(tip, 1.85 * touch, light..color = const Color(0xFFF0FFF9));
+  }
+
+  @override
+  bool shouldRepaint(_LassoGuidePainter oldDelegate) =>
+      oldDelegate.progress != progress;
 }
 
 class _LassoPainter extends CustomPainter {

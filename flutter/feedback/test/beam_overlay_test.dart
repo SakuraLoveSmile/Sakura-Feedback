@@ -57,6 +57,44 @@ Future<void> _pumpOverlay(
 }
 
 void main() {
+  final guide = find.byKey(const Key('feedback-lasso-guide'));
+  for (final visual in FeedbackWakeVisual.values) {
+    testWidgets('$visual draws one small guide around the wake point after the wave', (tester) async {
+      await _pumpOverlay(tester, image: await _image(tester), wakeVisual: visual,
+          releasePoint: const Offset(.20, .70));
+      final wake = visual == FeedbackWakeVisual.ripple ? kWaterRippleDuration : kBeamAuroraDuration;
+      await tester.pump(wake - const Duration(milliseconds: 1));
+      expect(guide, findsNothing);
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(tester.getCenter(guide), const Offset(80, 210));
+      expect(tester.getSize(guide), const Size(112, 80));
+      await tester.pumpAndSettle();
+      expect(guide, findsNothing);
+      expect(find.text('圈出问题位置'), findsOneWidget);
+      expect(find.byKey(const Key('feedback-capture-selection')), findsNothing);
+    });
+  }
+
+  testWidgets('touch immediately dismisses the guide and the same drag makes the selection', (tester) async {
+    await _pumpOverlay(tester, image: await _image(tester), wakeVisual: FeedbackWakeVisual.aurora);
+    await tester.pump(kBeamAuroraDuration);
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(guide, findsOneWidget);
+    final gesture = await tester.startGesture(const Offset(60, 60));
+    await tester.pump();
+    expect(guide, findsNothing);
+    for (final pt in const [Offset(115, 60), Offset(165, 100), Offset(80, 140)]) {
+      await gesture.moveTo(pt);
+      await tester.pump();
+    }
+    await gesture.up();
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('重画'));
+    await tester.pump();
+    expect(guide, findsNothing);
+    expect(find.text('圈出问题位置'), findsOneWidget);
+  });
+
   testWidgets('ripple refracts the frozen image, then a loop becomes a frame',
       (WidgetTester tester) async {
     final ui.Image image = await _image(tester);
@@ -114,6 +152,7 @@ void main() {
     expect(find.byKey(const Key('feedback-capture-cancel')), findsOneWidget);
     await tester.tap(find.text('重画'));
     await tester.pump();
+    expect(guide, findsNothing);
     expect(find.text('圈出问题位置'), findsOneWidget);
     expect(find.byKey(const Key('feedback-capture-selection')), findsNothing);
     expect(water, findsNothing);
@@ -249,6 +288,7 @@ void main() {
     bool cancelled = false;
     await _pumpOverlay(tester,
         image: image, reduce: true, onCancel: () => cancelled = true);
+    expect(guide, findsNothing);
     expect(find.text('圈出问题位置'), findsOneWidget);
     expect(find.byKey(const Key('feedback-capture-selection')), findsNothing);
     await tester.sendKeyEvent(LogicalKeyboardKey.escape);

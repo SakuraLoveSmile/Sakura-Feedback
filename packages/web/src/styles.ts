@@ -2425,6 +2425,35 @@ export const STYLES = /* css */ `
 .fb-beam > canvas { display:block; width:100%; height:100%; }
 .fb-beam > div { position:absolute; inset:0; -webkit-mask-image:var(--fb-wave-mask); mask-image:var(--fb-wave-mask); }
 .fb-lasso-layer { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+.fb-lasso-guide {
+  display:none; fill:none; stroke-linecap:round; stroke-dasharray:1 1;
+  --fb-guide-time:1120ms;
+  --fb-guide-travel:fb-guide-travel var(--fb-guide-time) cubic-bezier(.32,0,.22,1) both;
+}
+.fb-lasso-guide.is-playing { display:block; animation:fb-guide-fade var(--fb-guide-time) ease-out both; }
+.fb-lasso-guide.is-playing :is(.fb-guide-edge, .fb-guide-ink) { animation:var(--fb-guide-travel); }
+.fb-guide-edge { stroke:#245c58; stroke-opacity:.58; stroke-width:3.8; }
+.fb-guide-ink { stroke:url(#fb-lasso-guide-ink) #73cbb3; stroke-width:2.5; }
+.fb-guide-halo, .fb-guide-tip {
+  --fb-guide-from:0; --fb-guide-to:-.999; stroke-dasharray:.001 2;
+}
+.fb-lasso-guide.is-playing :is(.fb-guide-halo, .fb-guide-tip) {
+  animation:var(--fb-guide-travel), fb-guide-lift var(--fb-guide-time) linear both;
+}
+.fb-guide-halo { stroke:#86e6c9; stroke-width:10; stroke-opacity:.3; }
+.fb-guide-tip { stroke:#f0fff9; stroke-width:3.8; filter:drop-shadow(0 0 .9px #458e82); }
+@keyframes fb-guide-travel {
+  0%, 4% { stroke-dashoffset:var(--fb-guide-from,1); }
+  74%, 100% { stroke-dashoffset:var(--fb-guide-to,0); }
+}
+@keyframes fb-guide-fade {
+  0%, 100% { opacity:0; }
+  6%, 82% { opacity:1; }
+}
+@keyframes fb-guide-lift {
+  0%, 80%, 100% { opacity:0; }
+  6%, 67% { opacity:1; }
+}
 .fb-lasso { stroke:white; stroke-width:2; filter:drop-shadow(0 0 1.4px #171717); stroke-linecap:round; stroke-linejoin:round; }
 .fb-lasso-hint {
   position:absolute; inset:auto 0 0; z-index:2; display:flex; align-items:center; justify-content:center; gap:8px;
@@ -2443,7 +2472,7 @@ export const STYLES = /* css */ `
   position:fixed; width:1px; height:1px; margin:-1px; padding:0; overflow:hidden;
   clip-path:inset(50%); white-space:nowrap; border:0;
 }
-@media (prefers-reduced-motion: reduce) { .fb-beam { display:none; } }
+@media (prefers-reduced-motion: reduce) { .fb-beam, .fb-lasso-guide.is-playing { display:none; } }
 .fb-region-frame {
   position: absolute; box-sizing: border-box; border: 1px solid var(--fb-selection-mint);
   border-radius: 12px; cursor: move;

@@ -28,6 +28,7 @@ function hold(): void {
 }
 const overlay = (m: Mounted) => m.root.querySelector<HTMLElement>('.fb-region-overlay')!;
 const frame = (m: Mounted) => m.root.querySelector<HTMLElement>('.fb-region-frame')!;
+const guide = (m: Mounted) => m.root.querySelector<SVGGElement>('.fb-lasso-guide.is-playing');
 function wakeOrigin(m: Mounted): number[] {
   return m.root.querySelector<HTMLElement>('.fb-beam')!.style
     .getPropertyValue('--fb-wake-origin').trim().split(/\s+/).map(value => Number.parseFloat(value));
@@ -58,6 +59,46 @@ afterEach(() => {
 });
 
 describe('beam wake', () => {
+  it.each([['ripple', 2000], ['aurora', 720]] as const)('%s draws one guide at the wake point only after the wave ends', async (visual, duration) => {
+    localStorage.setItem(`feedback:wake-visual:v1:${encodeURIComponent(APP_ID)}`, visual);
+    const m = mountBeam();
+    provider(m);
+    hold();
+    await settle();
+    vi.advanceTimersByTime(duration - 40);
+    expect(guide(m)).toBeNull();
+    vi.advanceTimersByTime(80);
+    const ring = guide(m)!;
+    expect(ring.getAttribute('transform')).toBe('translate(140 200)');
+    const ink = ring.querySelector('.fb-guide-ink')!;
+    const tip = ring.querySelector('.fb-guide-tip')!;
+    expect(ink.getAttribute('d')).toMatch(/^M.+C/);
+    expect(tip.getAttribute('d')).toBe(ink.getAttribute('d'));
+    tip.dispatchEvent(new Event('animationend', { bubbles: true }));
+    expect(guide(m)).toBe(ring);
+    ring.dispatchEvent(new Event('animationend'));
+    expect(guide(m)).toBeNull();
+    expect(frame(m).dataset.size).toBeUndefined();
+    expect(m.root.querySelector('.fb-lasso')!.getAttribute('points')).toBe('');
+  });
+
+  it('skips the guide when reduced motion is enabled or the user touches during wake', async () => {
+    const m = mountBeam();
+    provider(m);
+    hold();
+    await settle();
+    overlay(m).dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, isPrimary: true }));
+    vi.advanceTimersByTime(2100);
+    expect(guide(m)).toBeNull();
+    m.root.querySelector<HTMLButtonElement>('.fb-region-cancel')!.click();
+    vi.stubGlobal('matchMedia', (media: string) => ({ matches: media.includes('prefers-reduced-motion'), media }));
+    m.root.querySelector<HTMLButtonElement>('.fb-beam-a11y')!.click();
+    await settle();
+    expect(m.root.querySelector<HTMLElement>('.fb-lasso-hint')!.hidden).toBe(false);
+    vi.advanceTimersByTime(2100);
+    expect(guide(m)).toBeNull();
+  });
+
   it('two-finger hold arms a frozen lasso surface with the default water ripple and no selection frame', async () => {
     const m = mountBeam();
     const capture = provider(m);
@@ -137,16 +178,18 @@ describe('beam wake', () => {
     expect(ripple.checked).toBe(false);
   });
 
-  it('drawing a loop expands the bbox into a selection frame and hides the hint', async () => {
+  it.each([760, 2100])('drawing at %ims takes over the same pointer and makes a selection frame', async (elapsed) => {
     const m = mountBeam();
     provider(m);
     vi.advanceTimersByTime(5000);
     hold();
     await settle();
-    vi.advanceTimersByTime(760);
+    vi.advanceTimersByTime(elapsed);
+    expect(guide(m) !== null).toBe(elapsed >= 2000);
     const target = overlay(m);
     target.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, isPrimary: true, pointerId: 7, clientX: 100, clientY: 100 }));
     expect(m.root.querySelector('.fb-ripple-wave')).toBeNull();
+    expect(guide(m)).toBeNull();
     for (const [x, y] of [[140, 110], [180, 150], [150, 190], [100, 150]]) {
       target.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, button: 0, isPrimary: true, pointerId: 7, clientX: x, clientY: y }));
     }
@@ -162,6 +205,7 @@ describe('beam wake', () => {
     expect(m.root.querySelector<HTMLImageElement>('.fb-region-bg')!.src).toBe(frozen);
     expect(target.classList.contains('is-lasso-pending')).toBe(true);
     expect(frame(m).dataset.size).toBeUndefined();
+    expect(guide(m)).toBeNull();
     expect(m.root.querySelector<HTMLElement>('.fb-lasso-hint')!.hidden).toBe(false);
     expect(m.root.querySelector('.fb-ripple-wave')).toBeNull();
   });

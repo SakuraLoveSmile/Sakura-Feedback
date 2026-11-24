@@ -334,6 +334,7 @@ interface RegionSession {
   /** 光束和灵感球可在同一张冻结截图上重画。 */
   editor: boolean;
   selReady: boolean;
+  guideDismissed: boolean;
   lassoPoints: { x: number; y: number }[] | null;
 }
 
@@ -455,6 +456,38 @@ function el<K extends keyof HTMLElementTagNameMap>(
   if (cls) node.className = cls;
   if (text !== undefined) node.textContent = text;
   return node;
+}
+
+function createLassoGuide(): SVGGElement {
+  const ns = 'http://www.w3.org/2000/svg';
+  const guide = document.createElementNS(ns, 'g');
+  guide.classList.add('fb-lasso-guide');
+  const ink = document.createElementNS(ns, 'linearGradient');
+  ink.id = 'fb-lasso-guide-ink';
+  ink.setAttribute('x1', '0%');
+  ink.setAttribute('y1', '100%');
+  ink.setAttribute('x2', '100%');
+  ink.setAttribute('y2', '0%');
+  ['#338f87', '#73cbb3', '#b7f2d8'].forEach((color, index) => {
+    const stop = document.createElementNS(ns, 'stop');
+    stop.setAttribute('offset', String(index / 2));
+    stop.setAttribute('stop-color', color);
+    ink.append(stop);
+  });
+  guide.append(ink);
+  // One open stroke, including the small inward flick after the crossover.
+  const curve = 'M23 -22 C5 -31 -26 -22 -41 -5 C-58 16 -41 31 -16 29 C12 29 43 12 47 -7 C50 -26 28 -31 10 -24 C4 -22 0 -19 -4 -16';
+  for (const part of ['edge', 'ink', 'halo', 'tip']) {
+    const path = document.createElementNS(ns, 'path');
+    path.setAttribute('d', curve);
+    path.setAttribute('pathLength', '1');
+    path.classList.add(`fb-guide-${part}`);
+    guide.append(path);
+  }
+  guide.addEventListener('animationend', ev => {
+    if (ev.target === guide) guide.classList.remove('is-playing');
+  });
+  return guide;
 }
 
 function selectionActionIcon(d: string): SVGSVGElement {
@@ -950,6 +983,7 @@ export class FeedbackWidget extends HTMLElement {
   private beamLayer!: HTMLDivElement;
   private lassoLayer!: SVGSVGElement;
   private lassoPath!: SVGPolylineElement;
+  private lassoGuide!: SVGGElement;
   private lassoHint!: HTMLDivElement;
   private releaseWakePaint?: () => void;
   private beamFrame: number | null = null;
@@ -2411,6 +2445,7 @@ export class FeedbackWidget extends HTMLElement {
       dragging: null,
       editor: !preset,
       selReady: !!preset || !lassoFirst,
+      guideDismissed: false,
       lassoPoints: null,
     };
     this.regionSession = session;
@@ -2480,6 +2515,10 @@ export class FeedbackWidget extends HTMLElement {
       }
       if (elapsed >= duration) {
         this.stopBeam();
+        if (!s.guideDismissed && !this.prefersReducedMotion()) {
+          this.lassoGuide.setAttribute('transform', `translate(${point.x * s.overlay.width} ${point.y * s.overlay.height})`);
+          this.lassoGuide.classList.add('is-playing');
+        }
         return;
       }
       paint.draw(Math.max(0, elapsed / duration));
@@ -2489,6 +2528,7 @@ export class FeedbackWidget extends HTMLElement {
   }
 
   private stopBeam(): void {
+    this.lassoGuide.classList.remove('is-playing');
     if (this.beamFrame !== null) window.cancelAnimationFrame(this.beamFrame);
     this.beamFrame = null;
     this.releaseWakePaint?.();
@@ -2757,6 +2797,7 @@ export class FeedbackWidget extends HTMLElement {
     if (target && typeof target.closest === 'function' && target.closest('.fb-region-tools, .fb-region-cancel')) {
       return; // 工具栏按钮不进入框选
     }
+    s.guideDismissed = true;
     if (s.editor && !s.selReady && this.regionOverlay.classList.contains('is-lasso-arming')) return;
     this.finishSelectionEntrance(s);
     if (s.editor) this.regionOverlay.classList.add('is-pointer-selection');
@@ -3867,6 +3908,10 @@ export class FeedbackWidget extends HTMLElement {
       if (this.orbIdleMorph && this.prefersReducedMotion()) { const target=this.orbIdleMorph.to; this.clearOrbIdleMorph(); this.orbIdleVisual=target; }
       this.drawLiquid();
       const s = this.regionSession;
+      if (s && this.prefersReducedMotion()) {
+        s.guideDismissed = true;
+        this.lassoGuide.classList.remove('is-playing');
+      }
       if (s?.phase === 'selection') { this.finishSelectionEntrance(s); this.renderRegion(); }
     };
     window.addEventListener('resize',resize);
@@ -4784,7 +4829,8 @@ export class FeedbackWidget extends HTMLElement {
     this.lassoPath = document.createElementNS('http://www.w3.org/2000/svg','polyline');
     this.lassoPath.classList.add('fb-lasso');
     this.lassoPath.setAttribute('fill','none');
-    this.lassoLayer.append(this.lassoPath);
+    this.lassoGuide = createLassoGuide();
+    this.lassoLayer.append(this.lassoPath, this.lassoGuide);
     this.lassoHint = el('div','fb-lasso-hint','圈出问题位置');
     const gesture = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     gesture.setAttribute('viewBox', '0 0 24 24');
