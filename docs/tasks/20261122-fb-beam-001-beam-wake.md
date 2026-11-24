@@ -282,3 +282,6 @@
 ## 2026-11-24 稳定版 v0.17.0
 
 - 用户在放大版真机体验后授权发布最新版。将 Web 与 Flutter 的触点手绘示例合入 `main`，按稳定版流程发布 `v0.17.0`。
+- [v0.17.0 正式版](https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/tag/v0.17.0) 已公开并标记 Latest。主分支与签名标签包含手绘圈选提交 `d2278674`，标签指向发布提交 `9b8ddcdeac85b105587bd1052bbe758d8a8a130e`。[主分支 CI](https://github.com/SakuraLoveSmile/Sakura-Feedback/actions/runs/45358837272) 和[稳定发布流水线](https://github.com/SakuraLoveSmile/Sakura-Feedback/actions/runs/45359451373)均通过。
+- 已下载并核验全部 7 个产物。Web 的 ESM 与 UMD 都包含放大版手绘轨迹，包版本、更新说明、两份 ZIP、SHA-256 和来源提交均符合本次标签。GHCR 标签的摘要与稳定清单一致，为 `sha256:a88ddfcdd494b9717883266766bed990ff1fc3f6c7c6f77b608579ed13493015`，对应 linux/amd64 和数据库 schema 15。
+- 已移除该任务的临时工作树和已合入的本地分支。Android 体验工程改为引用主仓，截图夹具已校验归档至本机 `Feedback水波纹/圈选示例动画/v0.17.0工作树留存/`。本次交付为正式版本分发。
