@@ -256,3 +256,6 @@
 ## 2026-11-24 稳定版 v0.16.0
 
 - 用户确认本轮体验并授权发布。发布范围为本轮水波纹、浅色波光、新版圈选与灵感球边缘反射，目标为 `main` 和正式标签 `v0.16.0`。
+- 已验收并发布。[v0.16.0 正式版](https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/tag/v0.16.0) 已成为 Latest。主分支与签名标签包含功能提交 `f841b52a`，发布提交为 `abc22328ac02a47a4e8e40c7c454e6687c8c7e7a`。主分支 CI 和[正式发布流水线](https://github.com/SakuraLoveSmile/Sakura-Feedback/actions/runs/45345761943)均通过，包括三档 Flutter 安全存储兼容测试。
+- 已下载全部 7 个资产，核对更新说明、Web 安装包版本、两份 ZIP、SHA-256、来源提交及稳定清单。GHCR 的 `v0.16.0` 镜像与清单一致，为 `sha256:84ad67f20789336dd4b58b0198f481b566ade6df34ba0333aa810e34d4282b53`，平台为 linux/amd64，数据库版本为 15。本次交付为版本发布，线上服务和各宿主的实际升级独立进行。
+- 已移除本轮临时工作树和已合入的本地分支。Android 预览工程已改为引用主工作区，截图夹具和 macOS Debug 构建已归档至本机 `Documents/Codex/2026-11-24/Feedback水波纹/v0.16.0工作树留存/`。
