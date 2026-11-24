@@ -187,23 +187,23 @@ Shadow DOM 查询节点或覆盖内部样式）；`test/` 下的测试辅助文�
 
 ### 2.1 Web：通过构建出的 npm tarball 安装（打包器宿主推荐）
 
-包名 `@feedback/web`，当前版本 `0.16.0`，因此 tarball 文件名为 **`feedback-web-0.16.0.tgz`**（版本变了文件名跟着变）。
+包名 `@feedback/web`，当前版本 `0.17.0`，因此 tarball 文件名为 **`feedback-web-0.17.0.tgz`**（版本变了文件名跟着变）。
 
 优先安装正式 Release 的固定产物（保留锁文件）；不要把工作区源码或 `main` 当成稳定版本：
 
 ```bash
-pnpm add https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/download/v0.16.0/feedback-web-0.16.0.tgz
+pnpm add https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/download/v0.17.0/feedback-web-0.17.0.tgz
 ```
 
-完整 Web dist、SHA256 与服务端镜像清单均在 [v0.16.0 Release](https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/tag/v0.16.0)。
-需要自行构建时，先检出 `v0.16.0`，再执行：
+完整 Web dist、SHA256 与服务端镜像清单均在 [v0.17.0 Release](https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/tag/v0.17.0)。
+需要自行构建时，先检出 `v0.17.0`，再执行：
 
 ```bash
 # ① 在仓库根构建组件包
 pnpm install
 pnpm --filter @feedback/web build
 
-# ② 打成 tarball（真实产物：/tmp/fbpack/feedback-web-0.16.0.tgz）
+# ② 打成 tarball（真实产物：/tmp/fbpack/feedback-web-0.17.0.tgz）
 mkdir -p /tmp/fbpack
 pnpm --filter @feedback/web pack --pack-destination /tmp/fbpack
 ```
@@ -212,8 +212,8 @@ tarball 内含 `dist/` 全部产物（含 ESM 懒加载分块）、`package.json
 
 ```bash
 # ③ 在你的宿主项目里安装这个 tgz
-pnpm add /tmp/fbpack/feedback-web-0.16.0.tgz
-# 等价写法：npm install /tmp/fbpack/feedback-web-0.16.0.tgz
+pnpm add /tmp/fbpack/feedback-web-0.17.0.tgz
+# 等价写法：npm install /tmp/fbpack/feedback-web-0.17.0.tgz
 ```
 
 ```ts
@@ -279,7 +279,7 @@ dependencies:
   feedback_widget:
     git:
       url: https://github.com/SakuraLoveSmile/Sakura-Feedback.git
-      ref: v0.16.0                    # 或该标签对应的完整 commit SHA
+      ref: v0.17.0                    # 或该标签对应的完整 commit SHA
       path: flutter/feedback        # 包在仓库的子目录里
 ```
 

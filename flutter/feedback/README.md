@@ -37,7 +37,7 @@ web、android、ios、windows、macos、linux（平台差异经条件导入隔�
 
 ## 从 0.10.0 升级与宿主托管（0.14.0 起为接入要求）
 
-在宿主 `pubspec.yaml` 的 `feedback_widget.git` 下使用 `ref: v0.16.0` 和
+在宿主 `pubspec.yaml` 的 `feedback_widget.git` 下使用 `ref: v0.17.0` 和
 `path: flutter/feedback`，执行 `flutter pub get`。省略新参数时，默认入口、动效与按应用保存的偏好沿用 0.10.0。
 
 **0.14.0 起，宿主必须自己接管反馈外观设置**：入口样式（贴边标签 / 灵感球）、灵感球待机样式、
