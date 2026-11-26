@@ -2421,7 +2421,13 @@ class _FeedbackWidgetState extends State<FeedbackWidget>
             ? constraints.maxHeight
             : MediaQuery.of(context).size.height;
         _observeViewport(Size(width, height));
-        final bool wide = width >= kFeedbackWideBreakpoint;
+        // 手机横屏优先使用整块视口，避免继续挤在 440px 抽屉中。
+        // 使用原始视口判断方向，键盘压缩高度不会把竖屏误判为横屏。
+        final Size viewport = MediaQuery.sizeOf(context);
+        final bool phoneLandscape = width >= 640 &&
+            viewport.width > viewport.height &&
+            viewport.shortestSide < 600;
+        final bool wide = width >= kFeedbackWideBreakpoint && !phoneLandscape;
         // 冻结视觉规格（与 Web 端 `min(440px, 100vw−32px)` /
         // `min(720px, 100dvh−32px)` 一致）：
         // 宽屏抽屉宽 min(440, 视口宽−32)、高 min(720, 视口高−32)，

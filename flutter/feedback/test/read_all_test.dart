@@ -95,11 +95,15 @@ void main() {
       'markedMessages': 2,
     });
 
-    // 窄屏（390）验证工具栏加入「一键已读」后不溢出，Tab 也不再显示数字角标。
+    // 同时模拟屏幕方向和面板尺寸，匹配 Android 真机的逻辑视口。
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(361, 794);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
     await pumpPanel(tester,
         server: server,
         tokenStore: RecordingTokenStore('valid-token'),
-        surface: const Size(390, 720));
+        surface: const Size(361, 794));
     await tester.pumpAndSettle();
     await _openHistory(tester);
     expect(find.byType(Badge), findsNothing,
@@ -108,6 +112,23 @@ void main() {
     expect(find.text('未读'), findsOneWidget);
     expect(find.text('一键已读'), findsOneWidget);
     expect(_readAllButton(tester).onPressed, isNotNull);
+
+    final headerAction = tester.getRect(_readAllFinder);
+    final tabs = tester.getRect(find.byKey(const Key('tab-history')));
+    expect(headerAction.bottom, lessThanOrEqualTo(tabs.top));
+    final scroll = find.ancestor(
+        of: find.byKey(const Key('feedback-filter-all')),
+        matching: find.byType(SingleChildScrollView)).first;
+    final viewport = tester.getRect(scroll);
+    for (final status in [
+      'all', 'open', 'waiting_user', 'waiting_admin', 'resolved'
+    ]) {
+      final chip = find.byKey(Key('feedback-filter-$status'));
+      final box = tester.getRect(chip);
+      expect(box.left, greaterThanOrEqualTo(viewport.left));
+      expect(box.right, lessThanOrEqualTo(viewport.right));
+      expect(chip.hitTestable(), findsOneWidget);
+    }
 
     await tester.tap(_readAllFinder);
     await tester.pump();

@@ -220,19 +220,32 @@ void main() {
     expect(tester.getRect(thumb).overlaps(visible()), isTrue);
     expect(tester.getRect(thumb).bottom, greaterThan(visible().bottom));
     expect(panel.captureThumbnailRect, isNull);
-    // Expanding the existing inline login form gives a real layout where the
-    // capture slot can scroll completely above the viewport as well.
+    // Expanded logs provide real content below the capture slot so it can
+    // scroll completely above the viewport without relying on inline login.
+    final Finder expandLogs = find.byKey(const Key('feedback-logs-expand'));
+    await tester.ensureVisible(expandLogs);
+    await tester.tap(expandLogs);
+    await tester.pumpAndSettle();
+    await tester.binding.setSurfaceSize(const Size(360, 260));
+    await tester.pump();
+    position.jumpTo(position.maxScrollExtent);
+    await tester.pump();
+    expect(tester.getRect(thumb).bottom, lessThanOrEqualTo(visible().top));
+    expect(panel.captureThumbnailRect, isNull);
+
+    // The dedicated login step unmounts the slot, but keeps the attachment.
     await tester.enterText(find.byKey(const Key('feedback-input')), '保留截图');
     await tester.pump();
     await tester.tap(find.byKey(const Key('feedback-submit')));
     await tester.pump();
     expect(find.byKey(const Key('feedback-login-form')), findsOneWidget);
-    await tester.binding.setSurfaceSize(const Size(360, 260));
-    await tester.pump();
-    position.jumpTo(position.maxScrollExtent);
-    await tester.pump();
-    expect(tester.getRect(thumb).overlaps(visible()), isFalse);
+    expect(thumb, findsNothing);
     expect(panel.captureThumbnailRect, isNull);
+    expect(panel.hasScreenshot, isTrue);
+    await tester.tap(find.byKey(const Key('feedback-login-cancel')));
+    await tester.pump();
+    expect(thumb, findsOneWidget);
+    expect(panel.hasScreenshot, isTrue);
     expect(tester.takeException(), isNull);
   });
 

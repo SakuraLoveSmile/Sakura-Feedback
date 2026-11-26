@@ -167,6 +167,11 @@ void main() {
 
     expect(find.byKey(const Key('feedback-login-error')), findsOneWidget);
     expect(find.text('用户名或密码错误'), findsOneWidget);
+    // 独立登录步骤中仍可重试；返回编辑后，原有草稿必须完整保留。
+    expect(find.byKey(const Key('feedback-login-username')).hitTestable(),
+        findsOneWidget);
+    await tester.tap(find.byKey(const Key('feedback-login-cancel')));
+    await tester.pumpAndSettle();
     expect(find.byKey(input), findsOneWidget);
     expect(tester.widget<TextField>(find.byKey(input)).controller!.text, '草稿不丢');
     expect(await store.read(), isNull);

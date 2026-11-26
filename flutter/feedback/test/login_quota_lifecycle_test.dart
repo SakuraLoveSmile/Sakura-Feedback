@@ -40,6 +40,42 @@ void main() {
   }
 
   group('T1-A 登录操作失效', () {
+    testWidgets('退出提交登录再点「我的反馈」：登录后显示记录且不发送草稿', (tester) async {
+      final store = RecordingTokenStore();
+      server.respond('POST /api/auth/login', <String, Object?>{
+        'ok': true,
+        'token': 'history-login-token',
+        'user': userJson(),
+        'quota': quotaJson(),
+      });
+      server.respond('GET /api/auth/session', sessionJson(quotaJson()));
+
+      await pumpPanel(tester, server: server, tokenStore: store, visible: true);
+      server.respond('GET /api/feedback/mine', {
+        'items': <Object>[], 'page': 1, 'limit': 20, 'total': 0, 'unreadTotal': 0,
+      });
+      await openLoginForm(tester, '查看历史时不能自动发送');
+      await tester.tap(find.byKey(const Key('tab-compose')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('tab-history')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(loginUser).hitTestable(), findsOneWidget);
+      expect(find.descendant(of: find.byKey(loginSubmit),
+          matching: find.text('登录')), findsOneWidget);
+      await fillCredentials(tester);
+      await tester.pumpAndSettle();
+
+      expect(store.value, 'history-login-token');
+      expect(server.count('GET /api/feedback/mine'), 1);
+      expect(find.text('暂无反馈记录'), findsOneWidget);
+      expect(server.count('POST /api/feedback'), 0);
+      await tester.tap(find.byKey(const Key('tab-compose')));
+      await tester.pumpAndSettle();
+      expect(tester.widget<TextField>(find.byKey(input)).controller!.text,
+          '查看历史时不能自动发送');
+      await teardownPanel(tester);
+    });
+
     testWidgets('登录期间关闭面板：迟到的登录结果不写令牌、不自动提交，草稿放弃', (tester) async {
       final store = RecordingTokenStore();
       final login = Completer<http.Response>();
@@ -352,6 +388,8 @@ void main() {
       await tester.tap(find.byKey(submit)); // 回到需要登录态
       await tester.pump();
       expect(find.byKey(loginUser), findsOneWidget);
+      await tester.tap(find.byKey(const Key('feedback-login-cancel')));
+      await tester.pump();
       expect(
         tester.widget<TextField>(find.byKey(input)).controller!.text,
         '过期草稿保留',
@@ -594,16 +632,18 @@ void main() {
       expect(find.text('无法保存登录状态，请检查应用的安全存储配置'), findsOneWidget);
       expect(find.textContaining('网络异常'), findsNothing);
       expect(find.byKey(loginUser), findsOneWidget); // 仍在登录表单
-      expect(
-        tester.widget<TextField>(find.byKey(input)).controller!.text,
-        '存储失败草稿',
-      ); // 草稿保留
       expect(find.byKey(loginPassword).evaluate().isNotEmpty, isTrue);
       expect(
         tester.widget<TextField>(find.byKey(loginPassword)).controller!.text,
         '',
       ); // 密码清空
       expect(server.count('POST /api/feedback'), 0); // 不自动提交
+      await tester.tap(find.byKey(const Key('feedback-login-cancel')));
+      await tester.pump();
+      expect(
+        tester.widget<TextField>(find.byKey(input)).controller!.text,
+        '存储失败草稿',
+      ); // 返回编辑后检查草稿保留
       await teardownPanel(tester);
     });
   });

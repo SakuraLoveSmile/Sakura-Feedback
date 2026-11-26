@@ -505,7 +505,6 @@ class FeedbackPanelState extends State<FeedbackPanel>
   /// 面板是否持有任意图片附件（只读）。
   bool get hasImages => _images.isNotEmpty;
 
-
   /// 面板里是否有用户亲手写 / 加的内容：正文、手动添加（或编辑过）的图片、
   /// 手动添加的日志。自动截图与自动采集的日志不算——它们每次呼出都会产生，
   /// 让「打开看一眼再关闭」也弹确认没有意义。
@@ -562,9 +561,8 @@ class FeedbackPanelState extends State<FeedbackPanel>
   /// 不改写草稿、不清除已有截图与图片。
   void showComposeNotice(String message) {
     if (!mounted) return;
+    _switchTab(_PanelTab.compose);
     setState(() {
-      _panelTab = _PanelTab.compose;
-      _selectedDialogueId = null;
       _stage = FeedbackStage.compose;
       _composeError = message;
     });
@@ -689,9 +687,6 @@ class FeedbackPanelState extends State<FeedbackPanel>
   bool _signedIn = false;
   bool _busy = false; // 提交中 / 登录中
   FeedbackStage _stage = FeedbackStage.compose;
-
-  /// 面板内登录表单是否展开（点击「登录并提交」展开，不打开任何窗口）。
-  bool _showLoginForm = false;
 
   /// 登录成功后是否自动提交（点击「登录并提交」触发）。
   bool _submitAfterLogin = false;
@@ -972,7 +967,6 @@ class FeedbackPanelState extends State<FeedbackPanel>
     _busy = false;
     _loginInFlight = false;
     _stage = FeedbackStage.compose;
-    _showLoginForm = false;
     _submitAfterLogin = false;
     _loginError = null;
     _user = null;
@@ -1125,7 +1119,6 @@ class FeedbackPanelState extends State<FeedbackPanel>
     _composeError = null;
     _failedNotice = null;
     _waitingNotice = null;
-    _showLoginForm = false;
     _submitAfterLogin = false;
     _loginError = null;
     _captureHandoffActive = false;
@@ -1145,8 +1138,19 @@ class FeedbackPanelState extends State<FeedbackPanel>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       for (final FocusNode node in _managedFocusNodes) {
-        final BuildContext? ctx = node.context;
-        if (node.hasFocus && ctx != null) {
+        if (!node.hasFocus) continue;
+        // 保持整个输入框（含标签和边框）可见，避免只滚动内部文字而裁掉顶部。
+        BuildContext? fieldContext = node.context;
+        fieldContext?.visitAncestorElements((Element element) {
+          if (element.widget is TextField) {
+            fieldContext = element;
+            return false;
+          }
+          return true;
+        });
+        final BuildContext? ctx = fieldContext;
+        if (ctx != null) {
+          double alignment = 0.08;
           final RenderObject? field = ctx.findRenderObject();
           final RenderObject? viewport =
               field == null ? null : RenderAbstractViewport.maybeOf(field);
@@ -1157,10 +1161,19 @@ class FeedbackPanelState extends State<FeedbackPanel>
             final Rect rect = field.localToGlobal(Offset.zero) & field.size;
             final Rect visible =
                 viewport.localToGlobal(Offset.zero) & viewport.size;
-            // Do not start a scroll activity (which temporarily ignores field
-            // taps) when the focused field is already visible after handoff.
-            if (visible.contains(rect.topLeft) &&
-                visible.contains(rect.bottomRight)) {
+            final loginField = node == _usernameFocus || node == _passwordFocus;
+            // An outlined login field paints its floating label above the box.
+            final double labelRoom = loginField
+                ? MediaQuery.textScalerOf(ctx).scale(8)
+                : 0;
+            final double spare = visible.height - rect.height;
+            if (loginField && spare > 0) {
+              alignment = (labelRoom / spare).clamp(alignment, 1.0);
+            }
+            // Avoid starting an activity (which temporarily ignores taps)
+            // when the field and its label are already in view.
+            if (rect.top - labelRoom >= visible.top &&
+                rect.bottom <= visible.bottom) {
               break;
             }
           }
@@ -1168,7 +1181,7 @@ class FeedbackPanelState extends State<FeedbackPanel>
             ctx,
             duration: const Duration(milliseconds: 160),
             curve: Curves.easeOut,
-            alignment: 0.08,
+            alignment: alignment,
           );
           break;
         }
@@ -1223,6 +1236,7 @@ class FeedbackPanelState extends State<FeedbackPanel>
       _authReady = true;
     });
     if (_signedIn) {
+      if (_panelTab == _PanelTab.history) unawaited(_loadHistoryList());
       unawaited(_refreshQuota());
       _startSummaryPolling();
       unawaited(_fetchSummary());
@@ -1275,11 +1289,10 @@ class FeedbackPanelState extends State<FeedbackPanel>
   void _focusFirstField() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || _captureHandoffActive || widget.visible == false) return;
-      if (_signedIn && _stage == FeedbackStage.compose) {
-        _draftFocus.requestFocus();
-      } else if (!_signedIn && _showLoginForm) {
-        _usernameFocus.requestFocus();
-      } else if (!_signedIn) {
+      if (_settingsOpen || _selectedDialogueId != null) return;
+      if (_panelTab == _PanelTab.history) {
+        if (!_signedIn) _usernameFocus.requestFocus();
+      } else if (!_signedIn || _stage == FeedbackStage.compose) {
         _draftFocus.requestFocus();
       }
     });
@@ -1338,7 +1351,6 @@ class FeedbackPanelState extends State<FeedbackPanel>
       _busy = false;
       _user = null;
       _quota = null;
-      _showLoginForm = false;
       _submitAfterLogin = false;
       _loginError = null;
     });
@@ -1483,27 +1495,6 @@ class FeedbackPanelState extends State<FeedbackPanel>
     _scheduleQuotaRefresh();
   }
 
-  /// 展开面板内账号密码表单（不打开新窗口）。
-  void _openLoginForm({required bool thenSubmit}) {
-    if (_busy) return;
-    setState(() {
-      _showLoginForm = true;
-      _submitAfterLogin = thenSubmit;
-      _loginError = null;
-    });
-    _focusFirstField();
-  }
-
-  void _cancelLoginForm() {
-    // 取消登录：使在途登录失效（迟到结果不得写令牌 / 更新界面 / 自动提交）。
-    _invalidateLogin();
-    setState(() {
-      _showLoginForm = false;
-      _submitAfterLogin = false;
-      _loginError = null;
-    });
-  }
-
   /// 提交登录表单：成功后（可选）自动提交一次。
   ///
   /// 令牌写入**之前**先校验操作有效性；写入完成后再次校验——
@@ -1551,7 +1542,7 @@ class FeedbackPanelState extends State<FeedbackPanel>
       setState(() {
         _busy = false;
         _signedIn = true;
-        _showLoginForm = false;
+        if (thenSubmit) _panelTab = _PanelTab.compose;
         _submitAfterLogin = false;
         _loginError = null;
         _user = result.user;
@@ -1564,9 +1555,10 @@ class FeedbackPanelState extends State<FeedbackPanel>
       _startSummaryPolling();
       unawaited(_fetchSummary());
       unawaited(_refreshCapabilities());
-      _focusFirstField();
-      if (thenSubmit && _draft.text.trim().isNotEmpty) {
-        await _submit(); // 登录成功后只提交一次
+      if (thenSubmit) {
+        await _submit();
+      } else {
+        unawaited(_loadHistoryList());
       }
     } on ApiException catch (e) {
       if (!_loginStillValid(seq)) return; // 失效登录的错误不得覆盖新登录
@@ -2043,21 +2035,33 @@ class FeedbackPanelState extends State<FeedbackPanel>
     });
   }
 
-  void _switchTab(_PanelTab tab) {
+  void _switchTab(_PanelTab tab, {bool submitAfterLogin = false}) {
     if (_panelTab == tab && _selectedDialogueId == null) return;
+    if (!_signedIn && _panelTab == _PanelTab.history) {
+      _invalidateLogin();
+      _usernameFocus.unfocus();
+      _passwordFocus.unfocus();
+    }
+    if (tab == _PanelTab.history) _draftFocus.unfocus();
     _saveReplyDraft();
     ++_dialogueVisit;
     ++_dialogueRequest;
     _replyFocus.unfocus();
     setState(() {
       _panelTab = tab;
+      _submitAfterLogin = submitAfterLogin;
+      _loginError = null;
       _selectedDialogueId = null;
       _dialogueData = null;
       _dialogueError = null;
     });
     _cancelDialogueTimer();
-    if (tab == _PanelTab.history && _signedIn) {
-      unawaited(_loadHistoryList());
+    if (tab == _PanelTab.history) {
+      if (_signedIn) {
+        unawaited(_loadHistoryList());
+      } else {
+        _focusFirstField();
+      }
     }
     _startSummaryPolling();
   }
@@ -3043,132 +3047,170 @@ class FeedbackPanelState extends State<FeedbackPanel>
       color: Theme.of(context).colorScheme.surface,
       child: SafeArea(
         child: LayoutBuilder(builder: (context, constraints) {
+          final Size viewport = MediaQuery.sizeOf(context);
+          final bool compactLandscape = constraints.maxWidth >= 640 &&
+              viewport.width > viewport.height &&
+              viewport.shortestSide < 600;
+          final bool portraitHistory = viewport.width < 600 &&
+              viewport.width < viewport.height &&
+              _serverPrefsReady && _authReady && _signedIn &&
+              !_settingsOpen && _panelTab == _PanelTab.history &&
+              _selectedDialogueId == null &&
+              (_myFeedbacks.isNotEmpty || (!_historyLoading && _historyError == null));
           // A landscape keyboard can leave only 130px. Let the composer
           // header scroll with its content, keeping the submit bar fixed and
           // a full 44px login action reachable in the remaining viewport.
-          final bool scrollHeader = constraints.maxHeight < 320 &&
-              (_settingsOpen ||
-                  (_serverPrefsReady &&
-                      _authReady &&
-                      _selectedDialogueId == null &&
-                      _panelTab == _PanelTab.compose &&
-                      (!_signedIn ||
-                          (!_busy &&
-                              (_stage == FeedbackStage.compose ||
-                                  _stage == FeedbackStage.notSent)))));
+          final bool scrollHeader =
+              constraints.maxHeight < (compactLandscape ? 200 : 320) &&
+                  (_settingsOpen ||
+                      (_serverPrefsReady &&
+                          _authReady &&
+                          _selectedDialogueId == null &&
+                          (!_signedIn ||
+                              (_panelTab == _PanelTab.compose && !_busy &&
+                                  (_stage == FeedbackStage.compose ||
+                                      _stage == FeedbackStage.notSent)))));
           return Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: <Widget>[
-                if (!scrollHeader) _buildHeader(context),
+                if (!scrollHeader)
+                  _buildHeader(context,
+                      compactLandscape: compactLandscape,
+                      portraitHistory: portraitHistory),
                 Expanded(
                     key: const Key('feedback-panel-body'),
-                    child: _buildBody(context, scrollHeader: scrollHeader)),
+                    child: _buildBody(context,
+                        portraitHistory: portraitHistory,
+                        scrollHeader: scrollHeader,
+                        compactLandscape: compactLandscape)),
               ]);
         }),
       ),
     );
   }
 
-  Widget _buildHeader(BuildContext context, {bool inset = true}) {
+  Widget _buildHeader(BuildContext context,
+      {bool inset = true, bool compactLandscape = false, bool portraitHistory = false}) {
     final ColorScheme scheme = Theme.of(context).colorScheme;
     final bool detail = _selectedDialogueId != null;
     final String secondary = <String>[
       if (widget.config.appVersion != null) 'v${widget.config.appVersion}',
       if (widget.config.pageLabel != null) widget.config.pageLabel!,
     ].join(' · ');
+    final Widget title = Row(children: <Widget>[
+      if (detail)
+        IconButton(
+            key: const Key('feedback-dialogue-back'),
+            tooltip: '返回反馈列表',
+            onPressed: _closeDialogue,
+            icon: const Icon(Icons.arrow_back, size: 20)),
+      if (!detail)
+        Icon(Icons.chat_bubble_outline_rounded,
+            size: 19, color: scheme.primary),
+      const SizedBox(width: 8),
+      Expanded(
+          child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+            Text(detail ? '反馈详情' : '记录体验',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style:
+                    const TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+            if (secondary.isNotEmpty && !detail)
+              Text(secondary,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style:
+                      TextStyle(fontSize: 11, color: scheme.onSurfaceVariant)),
+          ])),
+    ]);
+    final List<Widget> actions = <Widget>[
+      IconButton(
+          key: const Key('feedback-settings'),
+          tooltip: '设置',
+          style: IconButton.styleFrom(
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+          constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
+          iconSize: 20,
+          onPressed: _settingsOpen ? null : _openSettings,
+          icon: const Icon(Icons.settings_outlined)),
+      IconButton(
+          key: const Key('feedback-close'),
+          tooltip: '关闭',
+          style: IconButton.styleFrom(
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+          constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
+          iconSize: 20,
+          onPressed: widget.onRequestClose,
+          icon: const Icon(Icons.close)),
+    ];
+    final Widget tabs = DecoratedBox(
+        decoration: BoxDecoration(
+            color: scheme.surfaceContainerHighest,
+            borderRadius: BorderRadius.circular(12)),
+        child: Row(children: <Widget>[
+          for (final _PanelTab tab in _PanelTab.values)
+            Expanded(
+                child: TextButton(
+                    key: Key(tab == _PanelTab.compose
+                        ? 'tab-compose'
+                        : 'tab-history'),
+                    style: TextButton.styleFrom(
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        minimumSize: const Size(0, 44),
+                        backgroundColor: _panelTab == tab
+                            ? scheme.surface
+                            : Colors.transparent,
+                        foregroundColor: _panelTab == tab
+                            ? scheme.primary
+                            : scheme.onSurfaceVariant,
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(10)),
+                        textStyle: const TextStyle(
+                            fontSize: 14, fontWeight: FontWeight.w600)),
+                    onPressed: () => _switchTab(tab),
+                    child: Text(tab == _PanelTab.compose ? '新建反馈' : '我的反馈'))),
+        ]));
     return Padding(
         padding: EdgeInsets.fromLTRB(inset ? 16 : 0, 8, inset ? 16 : 0, 8),
-        child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: <Widget>[
-              Row(children: <Widget>[
-                if (detail)
-                  IconButton(
-                      key: const Key('feedback-dialogue-back'),
-                      tooltip: '返回反馈列表',
-                      onPressed: _closeDialogue,
-                      icon: const Icon(Icons.arrow_back, size: 20)),
-                if (!detail)
-                  Icon(Icons.chat_bubble_outline_rounded,
-                      size: 19, color: scheme.primary),
+        child: compactLandscape && !detail
+            ? Row(children: <Widget>[
+                Expanded(child: title),
+                const SizedBox(width: 16),
+                Expanded(flex: 2, child: tabs),
                 const SizedBox(width: 8),
-                Expanded(
-                    child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: <Widget>[
-                      Text(detail ? '反馈详情' : '记录体验',
-                          style: const TextStyle(
-                              fontSize: 18, fontWeight: FontWeight.w600)),
-                      if (secondary.isNotEmpty && !detail)
-                        Text(secondary,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                                fontSize: 11, color: scheme.onSurfaceVariant)),
-                    ])),
-                IconButton(
-                    key: const Key('feedback-settings'),
-                    tooltip: '设置',
-                    style: IconButton.styleFrom(
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap),
-                    constraints:
-                        const BoxConstraints(minWidth: 44, minHeight: 44),
-                    iconSize: 20,
-                    onPressed: _settingsOpen ? null : _openSettings,
-                    icon: const Icon(Icons.settings_outlined)),
-                IconButton(
-                    key: const Key('feedback-close'),
-                    tooltip: '关闭',
-                    style: IconButton.styleFrom(
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap),
-                    constraints:
-                        const BoxConstraints(minWidth: 44, minHeight: 44),
-                    iconSize: 20,
-                    onPressed: widget.onRequestClose,
-                    icon: const Icon(Icons.close)),
-              ]),
-              if (!detail) ...<Widget>[
-                const SizedBox(height: 8),
-                DecoratedBox(
-                    decoration: BoxDecoration(
-                        color: scheme.surfaceContainerHighest,
-                        borderRadius: BorderRadius.circular(12)),
-                    child: Row(children: <Widget>[
-                      for (final _PanelTab tab in _PanelTab.values)
-                        Expanded(
-                            child: TextButton(
-                                key: Key(tab == _PanelTab.compose
-                                    ? 'tab-compose'
-                                    : 'tab-history'),
-                                style: TextButton.styleFrom(
-                                    tapTargetSize:
-                                        MaterialTapTargetSize.shrinkWrap,
-                                    minimumSize: const Size(0, 44),
-                                    backgroundColor: _panelTab == tab
-                                        ? scheme.surface
-                                        : Colors.transparent,
-                                    foregroundColor: _panelTab == tab
-                                        ? scheme.primary
-                                        : scheme.onSurfaceVariant,
-                                    shape: RoundedRectangleBorder(
-                                        borderRadius:
-                                            BorderRadius.circular(10)),
-                                    textStyle: const TextStyle(
-                                        fontSize: 14,
-                                        fontWeight: FontWeight.w600)),
-                                onPressed: () => _switchTab(tab),
-                                child: Text(tab == _PanelTab.compose
-                                    ? '新建反馈'
-                                    : '我的反馈'))),
-                    ])),
-              ],
-            ]));
+                ...actions,
+              ])
+            : Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
+                    Row(children: <Widget>[
+                      Expanded(child: title),
+                      if (portraitHistory) _buildHistoryReadAllButton(),
+                      ...actions,
+                    ]),
+                    if (!detail) ...<Widget>[
+                      const SizedBox(height: 8),
+                      if (portraitHistory)
+                        Row(children: <Widget>[
+                          Expanded(child: tabs),
+                          const SizedBox(width: 8),
+                          _buildHistoryRefreshButton(),
+                        ])
+                      else
+                        tabs,
+                    ],
+                  ]));
   }
 
-  Widget _buildBody(BuildContext context, {bool scrollHeader = false}) {
+  Widget _buildBody(BuildContext context,
+      {bool scrollHeader = false, bool compactLandscape = false, bool portraitHistory = false}) {
     // T6：设置视图独立于登录态（未登录也可进入）。
     if (_settingsOpen) {
-      return _buildSettingsView(context, scrollHeader: scrollHeader);
+      return _buildSettingsView(context,
+          scrollHeader: scrollHeader, compactLandscape: compactLandscape);
     }
     // T6：覆盖偏好加载完成 + 会话恢复完成前不渲染可操作内容，
     // 保证不启动任何依赖服务器的请求。
@@ -3179,11 +3221,14 @@ class FeedbackPanelState extends State<FeedbackPanel>
       return _buildDialogueView(context);
     }
     if (_panelTab == _PanelTab.history) {
-      return _buildHistoryView(context);
+      return _signedIn
+          ? _buildHistoryView(context, actionsInHeader: portraitHistory)
+          : _buildLoginView(context,
+              scrollHeader: scrollHeader, compactLandscape: compactLandscape);
     }
-    // 未登录也可继续编辑：登录表单在撰写视图底部按需展开（不打开任何窗口）。
     if (!_signedIn) {
-      return _buildComposeView(context, scrollHeader: scrollHeader);
+      return _buildComposeView(context,
+          scrollHeader: scrollHeader, compactLandscape: compactLandscape);
     }
     if (_busy &&
         (_stage == FeedbackStage.compose || _stage == FeedbackStage.notSent)) {
@@ -3200,7 +3245,8 @@ class FeedbackPanelState extends State<FeedbackPanel>
       case FeedbackStage.notSent:
         // Class A（未送达）与常规撰写共用撰写视图：草稿留在输入框内可继续
         // 编辑，提交按钮即"同 key 同字节"重试（快照变化则自动换新 key）。
-        return _buildComposeView(context, scrollHeader: scrollHeader);
+        return _buildComposeView(context,
+            scrollHeader: scrollHeader, compactLandscape: compactLandscape);
       case FeedbackStage.accepted:
         // T4：等待管理员配置/确认/归档时明确说明等待什么，并提供手动刷新；
         // 等待不是失败，也不是「正在处理」，因此不轮询。
@@ -3331,7 +3377,8 @@ class FeedbackPanelState extends State<FeedbackPanel>
 
   /// T6：服务器设置视图——地址输入 / 保存 / 恢复默认 / 当前有效地址 /
   /// 连通性提示；覆盖仅保存于本机，不回写宿主默认配置。
-  Widget _buildSettingsView(BuildContext context, {bool scrollHeader = false}) {
+  Widget _buildSettingsView(BuildContext context,
+      {bool scrollHeader = false, bool compactLandscape = false}) {
     final ThemeData theme = Theme.of(context);
     final showLauncherSettings = !widget.hideSettings && _allowsLauncherStyle;
     final showOrbSettings =
@@ -3342,8 +3389,11 @@ class FeedbackPanelState extends State<FeedbackPanel>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
-          if (scrollHeader) _buildHeader(context, inset: false),
-          if (showLauncherSettings && widget.onLauncherStyleChanged != null) ...<Widget>[
+          if (scrollHeader)
+            _buildHeader(context,
+                inset: false, compactLandscape: compactLandscape),
+          if (showLauncherSettings &&
+              widget.onLauncherStyleChanged != null) ...<Widget>[
             Text('入口样式', style: theme.textTheme.titleSmall),
             const SizedBox(height: 4),
             Text('用下方选好的手势唤醒。光束直接进入圈选；灵感球从手指之间浮现，点一下反馈，拖到问题处松手选区。',
@@ -3758,64 +3808,145 @@ class FeedbackPanelState extends State<FeedbackPanel>
     );
   }
 
-  /// 面板内登录表单：在撰写视图底部按需展开（Web 与原生共用，不打开任何窗口）。
-  Widget _buildInlineLoginForm(BuildContext context) {
+  /// 面板内登录步骤：横屏字段并排，操作固定在底部；返回时恢复反馈草稿。
+  Widget _buildLoginView(
+    BuildContext context, {
+    bool scrollHeader = false,
+    bool compactLandscape = false,
+  }) {
     final ThemeData theme = Theme.of(context);
-    return Container(
-      key: const Key('feedback-login-form'),
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: <Widget>[
-          Text('登录后即可提交（账号由管理员分发）', style: theme.textTheme.bodySmall),
-          const SizedBox(height: 8),
-          TextField(
-            key: const Key('feedback-login-username'),
-            controller: _username,
-            focusNode: _usernameFocus,
-            enabled: !_busy,
-            autofillHints: const <String>[AutofillHints.username],
-            // T9：账号「下一步」进入密码框（焦点顺序由树序保证）。
-            textInputAction: TextInputAction.next,
-            decoration: const InputDecoration(
-              labelText: '用户名',
-              border: OutlineInputBorder(),
-              isDense: true,
+    final bool shortLandscape = compactLandscape && scrollHeader;
+    // 横屏输入法展开后，把有限的高度留给完整的字段和标签。
+    final fieldScrollPadding = EdgeInsets.all(shortLandscape ? 4 : 20);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        Expanded(
+          child: SingleChildScrollView(
+            key: const Key('feedback-login-scroll'),
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: <Widget>[
+                if (scrollHeader)
+                  _buildHeader(
+                    context,
+                    inset: false,
+                    compactLandscape: compactLandscape,
+                  ),
+                Center(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 600),
+                    child: Column(
+                      key: const Key('feedback-login-form'),
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: <Widget>[
+                        Text(
+                          _submitAfterLogin ? '登录后提交反馈' : '登录反馈账号',
+                          style: theme.textTheme.titleMedium,
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          _submitAfterLogin
+                              ? '草稿和附件已保留，登录成功后自动提交。账号由管理员分发。'
+                              : '账号由管理员分发，登录后可查看反馈进展和回复。',
+                          style: theme.textTheme.bodySmall,
+                        ),
+                        const SizedBox(height: 16),
+                        Flex(
+                          direction: compactLandscape
+                              ? Axis.horizontal
+                              : Axis.vertical,
+                          crossAxisAlignment: compactLandscape
+                              ? CrossAxisAlignment.start
+                              : CrossAxisAlignment.stretch,
+                          children: <Widget>[
+                            Flexible(
+                              flex: compactLandscape ? 1 : 0,
+                              child: TextField(
+                                key: const Key('feedback-login-username'),
+                                controller: _username,
+                                focusNode: _usernameFocus,
+                                enabled: !_busy,
+                                scrollPadding: fieldScrollPadding,
+                                autofillHints: const <String>[
+                                  AutofillHints.username,
+                                ],
+                                // T9：账号「下一步」进入密码框（焦点顺序由树序保证）。
+                                textInputAction: TextInputAction.next,
+                                decoration: const InputDecoration(
+                                  labelText: '用户名',
+                                  border: OutlineInputBorder(),
+                                  isDense: true,
+                                ),
+                              ),
+                            ),
+                            SizedBox(
+                              width: compactLandscape ? 16 : 0,
+                              height: compactLandscape ? 0 : 12,
+                            ),
+                            Flexible(
+                              flex: compactLandscape ? 1 : 0,
+                              child: TextField(
+                                key: const Key('feedback-login-password'),
+                                controller: _password,
+                                focusNode: _passwordFocus,
+                                enabled: !_busy,
+                                scrollPadding: fieldScrollPadding,
+                                obscureText: true,
+                                autofillHints: const <String>[
+                                  AutofillHints.password,
+                                ],
+                                // T9：密码「完成」沿用登录流程。
+                                textInputAction: TextInputAction.done,
+                                onSubmitted: (_) => _login(),
+                                decoration: const InputDecoration(
+                                  labelText: '密码',
+                                  border: OutlineInputBorder(),
+                                  isDense: true,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        if (_loginError != null) ...<Widget>[
+                          const SizedBox(height: 8),
+                          Text(
+                            _loginError!,
+                            key: const Key('feedback-login-error'),
+                            style: TextStyle(
+                              color: theme.colorScheme.error,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
-          const SizedBox(height: 8),
-          TextField(
-            key: const Key('feedback-login-password'),
-            controller: _password,
-            focusNode: _passwordFocus,
-            enabled: !_busy,
-            obscureText: true,
-            autofillHints: const <String>[AutofillHints.password],
-            // T9：密码「完成」沿用登录流程。
-            textInputAction: TextInputAction.done,
-            onSubmitted: (_) => _login(),
-            decoration: const InputDecoration(
-              labelText: '密码',
-              border: OutlineInputBorder(),
-              isDense: true,
+        ),
+        Container(
+          decoration: BoxDecoration(
+            border: Border(
+              top: BorderSide(color: theme.colorScheme.outlineVariant),
             ),
           ),
-          if (_loginError != null) ...<Widget>[
-            const SizedBox(height: 8),
-            Text(
-              _loginError!,
-              key: const Key('feedback-login-error'),
-              style: TextStyle(color: theme.colorScheme.error, fontSize: 12),
-            ),
-          ],
-          const SizedBox(height: 8),
-          Row(
+          padding: shortLandscape
+              ? const EdgeInsets.symmetric(horizontal: 16, vertical: 2)
+              : const EdgeInsets.fromLTRB(16, 8, 16, 12),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.end,
             children: <Widget>[
+              // 登录中仍可返回；取消使在途登录及自动提交意图失效。
+              TextButton(
+                key: const Key('feedback-login-cancel'),
+                onPressed: () => _switchTab(_PanelTab.compose),
+                child: Text(_submitAfterLogin || hasDraft ? '返回编辑' : '新建反馈'),
+              ),
+              const SizedBox(width: 12),
               FilledButton(
                 key: const Key('feedback-login-submit'),
                 onPressed: _busy ? null : _login,
@@ -3824,27 +3955,20 @@ class FeedbackPanelState extends State<FeedbackPanel>
                         dimension: 18,
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
-                    : const Text('登录并提交'),
-              ),
-              const SizedBox(width: 8),
-              // 「取消」在登录进行中保持可用：用户必须能中止一次挂起的登录，
-              // 中止会递增登录序号使该次登录的迟到结果失效（T1-A）。
-              TextButton(
-                key: const Key('feedback-login-cancel'),
-                onPressed: _cancelLoginForm,
-                child: const Text('取消'),
+                    : Text(_submitAfterLogin ? '登录并提交' : '登录'),
               ),
             ],
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 
   /// 撰写视图（T2.7 组件顺序）：标题与页签（Header）→ 反馈描述 →
   /// 图片证据 → 可折叠日志 → **固定提交区**。技术信息（日志详情）与
   /// 账户信息（额度/用户名）弱化展示。
-  Widget _buildComposeView(BuildContext context, {bool scrollHeader = false}) {
+  Widget _buildComposeView(BuildContext context,
+      {bool scrollHeader = false, bool compactLandscape = false}) {
     final ThemeData theme = Theme.of(context);
     final int runes = _draft.text.runes.length;
     final bool nearLimit = runes >= kFeedbackMaxTextRunes;
@@ -3853,98 +3977,144 @@ class FeedbackPanelState extends State<FeedbackPanel>
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
           Expanded(child: LayoutBuilder(builder: (context, constraints) {
-            final double inputHeight =
-                (constraints.maxHeight * .42).clamp(132, 200);
+            final double inputHeight = compactLandscape
+                ? (constraints.maxHeight - 74).clamp(88, 200)
+                : (constraints.maxHeight * .42).clamp(132, 200);
             return SingleChildScrollView(
                 key: const Key('feedback-compose-scroll'),
                 padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
                 child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: <Widget>[
-                      if (scrollHeader) _buildHeader(context, inset: false),
-                      if (_composeError != null) ...<Widget>[
-                        Container(
-                          key: const Key('feedback-compose-error'),
-                          margin: const EdgeInsets.only(bottom: 12),
-                          padding: const EdgeInsets.all(10),
-                          decoration: BoxDecoration(
-                            color: theme.colorScheme.errorContainer,
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Row(
-                            children: <Widget>[
-                              Icon(Icons.warning_amber_rounded,
-                                  size: 18,
-                                  color: theme.colorScheme.onErrorContainer),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: Text(
-                                  _composeError!,
-                                  style: TextStyle(
-                                      color:
-                                          theme.colorScheme.onErrorContainer),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                      const Text('哪里不顺手，或者有什么新想法？',
-                          style: TextStyle(fontSize: 14)),
-                      const SizedBox(height: 8),
-                      SizedBox(
-                          height: inputHeight,
-                          child: TextField(
-                              key: const Key('feedback-input'),
-                              controller: _draft,
-                              focusNode: _draftFocus,
-                              expands: true,
-                              maxLines: null,
-                              textAlignVertical: TextAlignVertical.top,
-                              keyboardType: TextInputType.multiline,
-                              inputFormatters: <TextInputFormatter>[
-                                const _RuneLimitFormatter(kFeedbackMaxTextRunes)
+                      if (scrollHeader)
+                        _buildHeader(context,
+                            inset: false, compactLandscape: compactLandscape),
+                      Flex(
+                        key: const Key('feedback-compose-columns'),
+                        direction:
+                            compactLandscape ? Axis.horizontal : Axis.vertical,
+                        // 横屏让描述靠右，左侧附件也为常见的悬浮键盘留出空间。
+                        // 只改变排列方向，编辑器子树不搬家，旋转时保留焦点与选区。
+                        textDirection: compactLandscape
+                            ? TextDirection.rtl
+                            : Directionality.of(context),
+                        crossAxisAlignment: compactLandscape
+                            ? CrossAxisAlignment.start
+                            : CrossAxisAlignment.stretch,
+                        children: <Widget>[
+                          Flexible(
+                            flex: compactLandscape ? 3 : 0,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: <Widget>[
+                                if (_composeError != null) ...<Widget>[
+                                  Container(
+                                    key: const Key('feedback-compose-error'),
+                                    margin: const EdgeInsets.only(bottom: 12),
+                                    padding: const EdgeInsets.all(10),
+                                    decoration: BoxDecoration(
+                                      color: theme.colorScheme.errorContainer,
+                                      borderRadius: BorderRadius.circular(8),
+                                    ),
+                                    child: Row(
+                                      children: <Widget>[
+                                        Icon(Icons.warning_amber_rounded,
+                                            size: 18,
+                                            color: theme
+                                                .colorScheme.onErrorContainer),
+                                        const SizedBox(width: 8),
+                                        Expanded(
+                                          child: Text(
+                                            _composeError!,
+                                            style: TextStyle(
+                                                color: theme.colorScheme
+                                                    .onErrorContainer),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                                const Text('哪里不顺手，或者有什么新想法？',
+                                    style: TextStyle(fontSize: 14)),
+                                const SizedBox(height: 8),
+                                SizedBox(
+                                    height: inputHeight,
+                                    child: TextField(
+                                        key: const Key('feedback-input'),
+                                        controller: _draft,
+                                        focusNode: _draftFocus,
+                                        expands: true,
+                                        maxLines: null,
+                                        textAlignVertical:
+                                            TextAlignVertical.top,
+                                        keyboardType: TextInputType.multiline,
+                                        inputFormatters: <TextInputFormatter>[
+                                          const _RuneLimitFormatter(
+                                              kFeedbackMaxTextRunes)
+                                        ],
+                                        decoration: InputDecoration(
+                                            hintText: '刚才哪里不顺手？你希望它怎样改进？',
+                                            filled: true,
+                                            fillColor:
+                                                scheme.surfaceContainerLow,
+                                            contentPadding:
+                                                const EdgeInsets.all(14),
+                                            border: OutlineInputBorder(
+                                                borderRadius:
+                                                    BorderRadius.circular(14)),
+                                            enabledBorder: OutlineInputBorder(
+                                                borderRadius:
+                                                    BorderRadius.circular(14),
+                                                borderSide: BorderSide(
+                                                    color:
+                                                        scheme.outlineVariant)),
+                                            focusedBorder: OutlineInputBorder(
+                                                borderRadius:
+                                                    BorderRadius.circular(14),
+                                                borderSide: BorderSide(
+                                                    color: scheme.primary,
+                                                    width: 1.5))))),
+                                Align(
+                                    alignment: Alignment.centerRight,
+                                    child: Padding(
+                                        padding: const EdgeInsets.only(
+                                            top: 4, bottom: 8),
+                                        child: Text(
+                                            '$runes / $kFeedbackMaxTextRunes',
+                                            key: const Key('feedback-counter'),
+                                            style: TextStyle(
+                                                fontSize: 11,
+                                                color: nearLimit
+                                                    ? scheme.error
+                                                    : scheme
+                                                        .onSurfaceVariant)))),
                               ],
-                              decoration: InputDecoration(
-                                  hintText: '刚才哪里不顺手？你希望它怎样改进？',
-                                  filled: true,
-                                  fillColor: scheme.surfaceContainerLow,
-                                  contentPadding: const EdgeInsets.all(14),
-                                  border: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(14)),
-                                  enabledBorder: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(14),
-                                      borderSide: BorderSide(
-                                          color: scheme.outlineVariant)),
-                                  focusedBorder: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(14),
-                                      borderSide: BorderSide(
-                                          color: scheme.primary,
-                                          width: 1.5))))),
-                      Align(
-                          alignment: Alignment.centerRight,
-                          child: Padding(
-                              padding: const EdgeInsets.only(top: 4, bottom: 8),
-                              child: Text('$runes / $kFeedbackMaxTextRunes',
-                                  key: const Key('feedback-counter'),
-                                  style: TextStyle(
-                                      fontSize: 11,
-                                      color: nearLimit
-                                          ? scheme.error
-                                          : scheme.onSurfaceVariant)))),
-                      _buildImagesArea(context),
-                      const SizedBox(height: 4),
-                      _buildLogsArea(context),
-                      const SizedBox(height: 8),
-                      if (!_signedIn && _showLoginForm)
-                        _buildInlineLoginForm(context),
-                      if (_signedIn && _quotaBlocked)
-                        Padding(
-                            padding: const EdgeInsets.only(bottom: 8),
-                            child: Text('今日提交次数已用完，额度刷新后可继续提交',
-                                key: const Key('feedback-quota-blocked'),
-                                style: theme.textTheme.bodySmall
-                                    ?.copyWith(color: scheme.error))),
+                            ),
+                          ),
+                          SizedBox(width: compactLandscape ? 24 : 0),
+                          Flexible(
+                            flex: compactLandscape ? 2 : 0,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: <Widget>[
+                                _buildImagesArea(context),
+                                const SizedBox(height: 4),
+                                _buildLogsArea(context),
+                                const SizedBox(height: 8),
+                                if (_signedIn && _quotaBlocked)
+                                  Padding(
+                                      padding: const EdgeInsets.only(bottom: 8),
+                                      child: Text('今日提交次数已用完，额度刷新后可继续提交',
+                                          key: const Key(
+                                              'feedback-quota-blocked'),
+                                          style: theme.textTheme.bodySmall
+                                              ?.copyWith(color: scheme.error))),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
                     ]));
           })),
           _buildSubmitBar(context, runes: runes, nearLimit: nearLimit),
@@ -3986,11 +4156,11 @@ class FeedbackPanelState extends State<FeedbackPanel>
             const Spacer(),
           FilledButton.icon(
             key: const Key('feedback-submit'),
-            // 未登录：点击在当前面板展开登录表单（成功后自动提交一次）。
+            // 未登录：进入当前面板的登录步骤（成功后自动提交一次）。
             onPressed: _signedIn
                 ? (_canSubmit ? _submit : null)
                 : (_draftValid && !_busy
-                    ? () => _openLoginForm(thenSubmit: true)
+                    ? () => _switchTab(_PanelTab.history, submitAfterLogin: true)
                     : null),
             icon: Icon(
               _signedIn ? Icons.send_outlined : Icons.login,
@@ -4674,51 +4844,41 @@ class FeedbackPanelState extends State<FeedbackPanel>
 
   // ---------------------------------------------------------------- 历史与工单详情视图
 
-  Widget _buildHistoryView(BuildContext context) {
-    if (!_signedIn) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: <Widget>[
-              Icon(Icons.lock_outline,
-                  size: 48, color: Theme.of(context).colorScheme.outline),
-              const SizedBox(height: 16),
-              Text(
-                '查看反馈历史需要登录',
-                style: Theme.of(context).textTheme.titleSmall,
-              ),
-              const SizedBox(height: 8),
-              const Text(
-                '登录后可查看您提交的全部反馈及管理团队的回复',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.grey, fontSize: 13),
-              ),
-              const SizedBox(height: 20),
-              FilledButton(
-                key: const Key('history-login-btn'),
-                onPressed: () {
-                  setState(() {
-                    _panelTab = _PanelTab.compose;
-                    _showLoginForm = true;
-                  });
-                },
-                child: const Text('前往登录'),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
+  Widget _buildHistoryReadAllButton() =>
+    TextButton.icon(
+      key: const Key('feedback-history-read-all'),
+      onPressed: _unreadCount == 0 || _readAllBusy ? null : _markAllRead,
+      style: TextButton.styleFrom(
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          minimumSize: const Size(0, 44),
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          textStyle:
+              const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+      icon: _readAllBusy
+          ? const SizedBox.square(
+              dimension: 14,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : const Icon(Icons.mark_email_read_outlined, size: 18),
+      label: const Text('一键已读'),
+    );
 
+  Widget _buildHistoryRefreshButton() =>
+    IconButton(
+      key: const Key('feedback-history-refresh'),
+      tooltip: '刷新我的反馈',
+      onPressed: _historyLoading ? null : _loadHistoryList,
+      icon: const Icon(Icons.refresh),
+    );
+
+  Widget _buildHistoryView(BuildContext context, {required bool actionsInHeader}) {
     if (_historyLoading && _myFeedbacks.isEmpty) {
       return const Center(child: CircularProgressIndicator());
     }
 
     if (_historyError != null && _myFeedbacks.isEmpty) {
       return Center(
-        child: Padding(
+        child: SingleChildScrollView(
           padding: const EdgeInsets.all(24),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -4756,126 +4916,125 @@ class FeedbackPanelState extends State<FeedbackPanel>
         ? 1
         : ((_historyTotal + _historyLimit - 1) ~/ _historyLimit);
 
-    final Widget listBody;
-    if (_myFeedbacks.isEmpty && !_historyLoading) {
-      listBody = Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            Icon(Icons.inbox_outlined,
-                size: 48, color: Theme.of(context).colorScheme.outline),
-            const SizedBox(height: 12),
-            Text(
-              _historyFilter == null ? '暂无反馈记录' : '该状态下暂无反馈',
-              style: const TextStyle(color: Colors.grey),
+    final bool empty = _myFeedbacks.isEmpty && !_historyLoading;
+    final Widget content = empty
+        ? SliverFillRemaining(
+            hasScrollBody: false,
+            child: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  Icon(Icons.inbox_outlined,
+                      size: 48, color: Theme.of(context).colorScheme.outline),
+                  const SizedBox(height: 12),
+                  Text(
+                    _historyFilter == null ? '暂无反馈记录' : '该状态下暂无反馈',
+                    style: const TextStyle(color: Colors.grey),
+                  ),
+                  const SizedBox(height: 16),
+                  FilledButton.tonal(
+                    onPressed: () => _switchTab(_PanelTab.compose),
+                    child: const Text('新建一条反馈'),
+                  ),
+                ],
+              ),
             ),
-            const SizedBox(height: 16),
-            FilledButton.tonal(
-              onPressed: () => _switchTab(_PanelTab.compose),
-              child: const Text('新建一条反馈'),
+          )
+        : SliverPadding(
+            padding: const EdgeInsets.all(16),
+            sliver: SliverList.separated(
+              itemCount: _myFeedbacks.length,
+              separatorBuilder: (_, __) => const SizedBox(height: 16),
+              itemBuilder: (context, index) =>
+                  _buildHistoryItem(context, _myFeedbacks[index]),
             ),
-          ],
-        ),
-      );
-    } else {
-      listBody = RefreshIndicator(
-        onRefresh: () => _loadHistoryList(),
-        child: ListView.separated(
-          padding: const EdgeInsets.all(16),
-          itemCount: _myFeedbacks.length,
-          separatorBuilder: (_, __) => const SizedBox(height: 16),
-          itemBuilder: (BuildContext context, int index) {
-            final UserFeedbackListItem item = _myFeedbacks[index];
-            return _buildHistoryItem(context, item);
-          },
-        ),
-      );
-    }
-
-    return Column(
-      children: <Widget>[
+          );
+    final controls = <Widget>[
+      if (actionsInHeader)
+        filterRow
+      else
         Row(children: <Widget>[
           Expanded(child: filterRow),
-          // F2：一键已读。无未读或请求进行中时禁用，避免无效请求与重复点击。
-          TextButton.icon(
-            key: const Key('feedback-history-read-all'),
-            onPressed: _unreadCount == 0 || _readAllBusy ? null : _markAllRead,
-            style: TextButton.styleFrom(
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                minimumSize: const Size(0, 44),
-                padding: const EdgeInsets.symmetric(horizontal: 8),
-                textStyle:
-                    const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
-            icon: _readAllBusy
-                ? const SizedBox.square(
+          _buildHistoryReadAllButton(),
+          _buildHistoryRefreshButton(),
+        ]),
+      // F2：一键已读失败提示——独立行内文本，不覆盖历史列表/工具栏。
+      if (_readAllError != null)
+        Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+            child: Text(_readAllError!,
+                key: const Key('feedback-history-read-all-error'),
+                style: TextStyle(
+                    fontSize: 12,
+                    color: Theme.of(context).colorScheme.error))),
+      if (_historyError != null)
+        Padding(
+            padding: const EdgeInsets.all(8), child: Text(_historyError!)),
+    ];
+    final pagination = <Widget>[
+      if (_historyTotal > _historyLimit || _historyPage > 1)
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: <Widget>[
+              IconButton(
+                key: const Key('feedback-history-prev'),
+                tooltip: '上一页',
+                icon: const Icon(Icons.chevron_left),
+                onPressed: _historyPage > 1 && !_historyLoading
+                    ? () => _loadHistoryPage(-1)
+                    : null,
+              ),
+              Flexible(
+                  child: Text(
+                '第 $_historyPage / $maxPage 页（共 $_historyTotal 条）',
+                key: const Key('feedback-history-pageinfo'),
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.bodySmall,
+              )),
+              IconButton(
+                key: const Key('feedback-history-next'),
+                tooltip: '下一页',
+                icon: const Icon(Icons.chevron_right),
+                onPressed: _historyPage < maxPage && !_historyLoading
+                    ? () => _loadHistoryPage(1)
+                    : null,
+              ),
+              if (_historyLoading)
+                const Padding(
+                  padding: EdgeInsets.only(left: 8),
+                  child: SizedBox.square(
                     dimension: 14,
                     child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.mark_email_read_outlined, size: 18),
-            label: const Text('一键已读'),
-          ),
-          IconButton(
-            key: const Key('feedback-history-refresh'),
-            tooltip: '刷新我的反馈',
-            onPressed: _historyLoading ? null : _loadHistoryList,
-            icon: const Icon(Icons.refresh),
-          ),
-        ]),
-        // F2：一键已读失败提示——独立行内文本，不覆盖历史列表/工具栏。
-        if (_readAllError != null)
-          Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
-              child: Text(_readAllError!,
-                  key: const Key('feedback-history-read-all-error'),
-                  style: TextStyle(
-                      fontSize: 12,
-                      color: Theme.of(context).colorScheme.error))),
-        if (_historyError != null)
-          Padding(
-              padding: const EdgeInsets.all(8), child: Text(_historyError!)),
-        Expanded(child: listBody),
-        if (_historyTotal > _historyLimit || _historyPage > 1)
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: <Widget>[
-                IconButton(
-                  key: const Key('feedback-history-prev'),
-                  tooltip: '上一页',
-                  icon: const Icon(Icons.chevron_left),
-                  onPressed: _historyPage > 1 && !_historyLoading
-                      ? () => _loadHistoryPage(-1)
-                      : null,
-                ),
-                Flexible(
-                    child: Text(
-                  '第 $_historyPage / $maxPage 页（共 $_historyTotal 条）',
-                  key: const Key('feedback-history-pageinfo'),
-                  textAlign: TextAlign.center,
-                  style: Theme.of(context).textTheme.bodySmall,
-                )),
-                IconButton(
-                  key: const Key('feedback-history-next'),
-                  tooltip: '下一页',
-                  icon: const Icon(Icons.chevron_right),
-                  onPressed: _historyPage < maxPage && !_historyLoading
-                      ? () => _loadHistoryPage(1)
-                      : null,
-                ),
-                if (_historyLoading)
-                  const Padding(
-                    padding: EdgeInsets.only(left: 8),
-                    child: SizedBox.square(
-                      dimension: 14,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    ),
                   ),
-              ],
-            ),
+                ),
+            ],
           ),
-      ],
-    );
+        ),
+    ];
+
+    return LayoutBuilder(builder: (context, constraints) {
+      // While the landscape keyboard is closing, the toolbar, a list row and
+      // pagination may not fit together. Let them share the same scroll view.
+      final scrollControls = constraints.maxHeight < kMinInteractiveDimension * 3;
+      final scrollView = CustomScrollView(slivers: [
+        if (scrollControls)
+          for (final control in controls) SliverToBoxAdapter(child: control),
+        content,
+        if (scrollControls)
+          for (final footer in pagination) SliverToBoxAdapter(child: footer),
+      ]);
+      return Column(children: [
+        if (!scrollControls) ...controls,
+        Expanded(
+          child: empty
+              ? scrollView
+              : RefreshIndicator(onRefresh: () => _loadHistoryList(), child: scrollView),
+        ),
+        if (!scrollControls) ...pagination,
+      ]);
+    });
   }
 
   Widget _buildFilterChip(IssueStatus? status, String label) {
@@ -5074,11 +5233,39 @@ class FeedbackPanelState extends State<FeedbackPanel>
             controller: _dialogueScroll,
             padding: const EdgeInsets.all(16),
             children: <Widget>[
-              Text(
-                  dialogue.title?.isNotEmpty == true ? dialogue.title! : '反馈详情',
-                  key: const Key('feedback-dialogue-title'),
-                  style: const TextStyle(
-                      fontSize: 15, fontWeight: FontWeight.w600)),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.baseline,
+                textBaseline: TextBaseline.alphabetic,
+                children: <Widget>[
+                  Flexible(
+                    child: Text(
+                      dialogue.title?.isNotEmpty == true
+                          ? dialogue.title!
+                          : '反馈详情',
+                      key: const Key('feedback-dialogue-title'),
+                      style: const TextStyle(
+                          fontSize: 15, fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Container(
+                    key: const Key('feedback-dialogue-status'),
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: dialogueStatusColors.background,
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: Text(
+                      dialogue.issueStatus.label,
+                      style: TextStyle(
+                        color: dialogueStatusColors.foreground,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
               const SizedBox(height: 6),
               SelectableText('#${dialogue.feedbackId}',
                   key: const Key('feedback-dialogue-id'),
@@ -5088,20 +5275,6 @@ class FeedbackPanelState extends State<FeedbackPanel>
                   '提交于 ${_formatTime(dialogue.createdAt)} · 最近更新 ${_formatTime(dialogue.lastActivityAt)}',
                   style: Theme.of(context).textTheme.bodySmall),
               const SizedBox(height: 8),
-              // F3：与历史列表共用同一固定色板，同一状态在列表与详情里同色。
-              Container(
-                key: const Key('feedback-dialogue-status'),
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                decoration: BoxDecoration(
-                    color: dialogueStatusColors.background,
-                    borderRadius: BorderRadius.circular(8)),
-                child: Text(dialogue.issueStatus.label,
-                    style: TextStyle(
-                        color: dialogueStatusColors.foreground,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600)),
-              ),
-              const SizedBox(height: 4),
               Text(_nextStep(dialogue.issueStatus),
                   key: const Key('feedback-next-step'),
                   style: Theme.of(context).textTheme.bodyMedium),

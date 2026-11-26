@@ -200,6 +200,18 @@ void main() {
     expect(fullTitle.data, _title);
     expect(fullTitle.maxLines, isNull);
     expect(fullTitle.overflow, isNot(TextOverflow.ellipsis));
+    final titleBox =
+        tester.getRect(find.byKey(const Key('feedback-dialogue-title')));
+    final statusBox =
+        tester.getRect(find.byKey(const Key('feedback-dialogue-status')));
+    expect(statusBox.left - titleBox.right, inInclusiveRange(0, 12),
+        reason: '胶囊紧跟反馈标题');
+    expect(statusBox.center.dy - titleBox.top, inInclusiveRange(0, statusBox.height),
+        reason: '长标题换行时，状态仍与首行对齐');
+    expect(titleBox.height, greaterThan(statusBox.height),
+        reason: '完整长标题应可换行');
+    expect(statusBox.right, lessThanOrEqualTo(
+        tester.getRect(find.byKey(const Key('feedback-dialogue-list'))).right));
     await teardownPanel(tester);
   });
 

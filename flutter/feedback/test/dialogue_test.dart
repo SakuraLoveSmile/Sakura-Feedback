@@ -4,7 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'panel_harness.dart';
 
 void main() {
-  testWidgets('未登录点击「我的反馈」显示登录引导，点击「前往登录」切回登录表单', (tester) async {
+  testWidgets('未登录点击「我的反馈」立即可填写账号密码', (tester) async {
     final PanelServer server = PanelServer();
     server.respond('GET /api/auth/session', {'authenticated': false}, 401);
 
@@ -16,16 +16,11 @@ void main() {
     await tester.tap(find.byKey(const Key('tab-history')));
     await tester.pumpAndSettle();
 
-    expect(find.text('查看反馈历史需要登录'), findsOneWidget);
-    expect(find.byKey(const Key('history-login-btn')), findsOneWidget);
+    expect(find.byKey(const Key('feedback-login-username')).hitTestable(), findsOneWidget);
+    expect(find.byKey(const Key('feedback-login-password')).hitTestable(), findsOneWidget);
 
-    // 点击前往登录
-    await tester.tap(find.byKey(const Key('history-login-btn')));
-    await tester.pumpAndSettle();
-
-    // 验证切换到了登录表单
-    expect(find.byKey(const Key('feedback-login-username')), findsOneWidget);
-    expect(find.byKey(const Key('feedback-login-password')), findsOneWidget);
+    expect(find.text('登录'), findsOneWidget);
+    expect(server.count('GET /api/feedback/mine'), 0);
 
     await teardownPanel(tester);
   });

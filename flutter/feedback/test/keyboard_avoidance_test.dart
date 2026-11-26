@@ -312,6 +312,152 @@ void main() {
     await teardownPanel(tester);
   });
 
+  testWidgets('手机横屏铺满宽度，单行导航与描述附件并列，旋转保留编辑状态', (tester) async {
+    final FeedbackController controller =
+        await pumpHost(tester, surface: const Size(794, 361));
+    final FeedbackPanelState panel = await openPanel(tester, controller);
+    final Uint8List png = base64Decode(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==');
+    panel.setScreenshot(png, const FeedbackCaptureInfo(capturedAt: 't'));
+    await tester.enterText(find.byKey(input), '旋转时保留的草稿');
+    await tester.pumpAndSettle();
+    final EditableTextState editing = tester.state(find.descendant(
+        of: find.byKey(input), matching: find.byType(EditableText)));
+
+    expect(panelRect(tester), const Rect.fromLTWH(0, 0, 794, 361));
+    final Rect tabs = tester.getRect(find.byKey(const Key('tab-compose')));
+    final Rect close = tester.getRect(find.byKey(const Key('feedback-close')));
+    expect(tabs.center.dy, close.center.dy);
+    final Rect field = tester.getRect(find.byKey(input));
+    final Rect thumbnail =
+        tester.getRect(find.byKey(const Key('feedback-screenshot-thumb')));
+    expect(thumbnail.right, lessThan(field.left));
+    expect(thumbnail.top, lessThan(field.bottom));
+    expect(find.byKey(const Key('feedback-screenshot-thumb')).hitTestable(),
+        findsOneWidget);
+
+    setKeyboard(tester, 190);
+    await tester.pumpAndSettle();
+    expect(tester.getRect(find.byKey(submit)).bottom, lessThanOrEqualTo(171));
+    expect(panel.draftFocused, isTrue);
+    setSurface(tester, const Size(361, 794));
+    setKeyboard(tester, 0);
+    await tester.pumpAndSettle();
+    expect(
+        tester.state(find.descendant(
+            of: find.byKey(input), matching: find.byType(EditableText))),
+        same(editing));
+    expect(panel.draftFocused, isTrue);
+    expect(tester.widget<TextField>(find.byKey(input)).controller!.text,
+        '旋转时保留的草稿');
+    expect(panel.screenshotBytes, orderedEquals(png));
+    expect(server.count('POST /api/feedback'), 0);
+    expect(tester.takeException(), isNull);
+    await teardownPanel(tester);
+  });
+
+  testWidgets('横屏登录立即显示两个字段和操作，键盘与旋转保留登录及反馈草稿', (tester) async {
+    final FeedbackController controller = await pumpHost(tester,
+        surface: const Size(794, 361), token: null);
+    final FeedbackPanelState panel = await openPanel(tester, controller);
+    final Uint8List png = base64Decode(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==');
+    panel.setScreenshot(png, const FeedbackCaptureInfo(capturedAt: 't'));
+    await tester.enterText(find.byKey(input), '登录返回后继续修改');
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(submit));
+    await tester.pumpAndSettle();
+
+    void expectLoginVisible() {
+      final Rect bounds = panelRect(tester);
+      for (final Key key in <Key>[
+        loginUsername, loginPassword, loginSubmit,
+        const Key('feedback-login-cancel'),
+      ]) {
+        final Finder target = find.byKey(key);
+        expect(target.hitTestable(), findsOneWidget,
+            reason: '$key 点击登录后无需滚动即可操作');
+        final Rect rect = tester.getRect(target);
+        expect(rect.top, greaterThanOrEqualTo(bounds.top));
+        expect(rect.bottom, lessThanOrEqualTo(bounds.bottom));
+      }
+    }
+
+    expectLoginVisible();
+    await tester.enterText(find.byKey(loginUsername), 'layout-test');
+    await tester.enterText(find.byKey(loginPassword), 'local-layout');
+    final EditableTextState editing = tester.state(find.descendant(
+        of: find.byKey(loginPassword), matching: find.byType(EditableText)));
+    setKeyboard(tester, 231); // 横屏仅剩 130px，字段与固定操作仍直接可见。
+    await tester.pumpAndSettle();
+    expectLoginVisible();
+    expect(panel.passwordFocused, isTrue);
+    setSurface(tester, const Size(361, 794));
+    setKeyboard(tester, 300);
+    await tester.pumpAndSettle();
+    expect(tester.state(find.descendant(
+        of: find.byKey(loginPassword), matching: find.byType(EditableText))),
+        same(editing));
+    expect(panel.passwordFocused, isTrue);
+    expect(tester.widget<TextField>(find.byKey(loginUsername)).controller!.text,
+        'layout-test');
+    expect(tester.widget<TextField>(find.byKey(loginPassword)).controller!.text,
+        'local-layout');
+
+    await tester.tap(find.byKey(const Key('feedback-login-cancel')));
+    await tester.pumpAndSettle();
+    expect(tester.widget<TextField>(find.byKey(input)).controller!.text,
+        '登录返回后继续修改');
+    expect(panel.screenshotBytes, orderedEquals(png));
+    expect(server.count('POST /api/auth/login'), 0);
+    expect(server.count('POST /api/feedback'), 0);
+    expect(tester.takeException(), isNull);
+    await teardownPanel(tester);
+  });
+
+  testWidgets('我的反馈横屏直接登录，键盘收起前后可显示历史', (tester) async {
+    server.respond('POST /api/auth/login', {'ok': true, 'token': 'layout'});
+    server.respond('GET /api/feedback/mine', {
+      'items': <Object>[], 'total': 0, 'page': 1, 'limit': 20, 'unreadTotal': 0,
+    });
+    final controller = await pumpHost(tester,
+        surface: const Size(794, 361), token: null);
+    await openPanel(tester, controller);
+    await tester.tap(find.byKey(const Key('tab-history')));
+    await tester.pumpAndSettle();
+    setKeyboard(tester, 251); // 横屏状态栏与系统键盘仅留约 110 逻辑像素。
+    await tester.pumpAndSettle();
+    for (final key in [loginUsername, loginPassword, loginSubmit]) {
+      expect(find.byKey(key).hitTestable(), findsOneWidget);
+    }
+    await tester.enterText(find.byKey(loginUsername), 'layout-test');
+    await tester.enterText(find.byKey(loginPassword), 'local-test');
+    await tester.tap(find.byKey(loginSubmit));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    setKeyboard(tester, 0);
+    await tester.pumpAndSettle();
+    expect(find.text('暂无反馈记录').hitTestable(), findsOneWidget);
+    expect(server.count('POST /api/feedback'), 0);
+    await teardownPanel(tester);
+  });
+
+  testWidgets('横屏断点与放大字体：导航和登录操作不溢出', (tester) async {
+    final FeedbackController controller = await pumpHost(tester,
+        surface: const Size(640, 360),
+        textScaler: const TextScaler.linear(1.5), token: null);
+    await openPanel(tester, controller);
+    await tester.enterText(find.byKey(input), '放大字体横屏反馈');
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(submit));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.byKey(loginSubmit));
+    await tester.pumpAndSettle();
+    expect(find.byKey(loginSubmit).hitTestable(), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await teardownPanel(tester);
+  });
+
   testWidgets('横屏 + 高键盘：小屏下登录按钮可滚达', (tester) async {
     final FeedbackController controller = await pumpHost(tester,
         surface: const Size(720, 390), token: null);
