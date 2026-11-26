@@ -83,3 +83,8 @@
 ## 发布 v0.18.0（2026-11-26）
 
 用户确认目前的界面并授权正式发布。版本包含上述 Flutter 手机横屏、登录、历史列表和详情显示改动。按项目稳定渠道发布 Git 标签、GitHub Release 及配套分发产物。示例和设备 Mock 仅用于验证。
+
+- 已发布为 [v0.18.0 正式版](https://github.com/SakuraLoveSmile/Sakura-Feedback/releases/tag/v0.18.0)，GitHub latest 指向此标签。标签提交 `c423e7c0163eeec61952f2837629043194c041bc`，已合入 `main`。
+- 本地组件 728 项、示例 40 项测试与两处分析通过。[发布流水线](https://github.com/SakuraLoveSmile/Sakura-Feedback/actions/runs/45763485743) 全部 11 个 job 通过，包含 Flutter 安全存储 9.2.2、10.3.1、11.0.0 三档检查。
+- 重新下载全部七份 Release 资产，核对 SHA256、源码提交、版本说明和稳定清单。GHCR 的 `v0.18.0` 与 `latest` 均指向 `sha256:f57918f158e3c3fa6607eb235c525c2956719073f9e32c5c4427948e8db33dff`，含 linux/amd64。
+- 本次工作树已正常移除。独立预览宿主改为引用已合入的主工作区，原本机浏览器预览可访问。发布证据与忽略文件恢复归档保存在本次设备证据的 `outputs/release-v0.18.0/` 目录。其他宿主可按接入说明自行升级。
